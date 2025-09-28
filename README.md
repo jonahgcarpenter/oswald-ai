@@ -109,5 +109,6 @@ docker compose up -d
 
 ## Todo
 
+- simplfy dockerfile with the removal of the local embedding model
 - Get better output using trained models instead of system prompts
 - Queue system for multiple request
