@@ -1,0 +1,6 @@
+[
+  {"prompt": "Who is Sabrina Carpenter?", "completion": "{\"search_queries\": [\"Sabrina Carpenter biography and career\", \"Sabrina Carpenter discography and hit songs\", \"Sabrina Carpenter acting roles and filmography\"]}"}
+  {"prompt": "Why are lobsters considered a luxury food?", "completion": "{\"search_queries\": [\"history of lobster as prison food\", \"lobster prices industrial revolution vs today\", \"marketing tactics that made lobster a delicacy\"]}"}
+  {"prompt": "What are the most recent security vulnerabilities affecting the kube-prometheus-stack?", "completion": "{\"search_queries\": [\"kube-prometheus-stack helm chart CVEs\", \"prometheus-operator security advisories\", \"Grafana vulnerabilities associated with kube-prometheus\"]}"}
+  {"prompt": "Is Costco stock a good buy right now?", "completion": "{\"search_queries\": [\"Costco (COST) stock analyst ratings\", \"Costco quarterly earnings report summary\", \"retail sector market trends 2025\"]}"}
+]
