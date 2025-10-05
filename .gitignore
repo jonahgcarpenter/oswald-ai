@@ -6,13 +6,7 @@ __pycache__/
 *.gguf
 
 # Model Training
-# training/
-# # Include these specific files
-# !training/fine_tuning.py
-# !training/requirements.txt
-
-training/*unsloth_*
-training/gguf_model/
-training/llama.cpp/
-training/outputs/
-training/data.json
+training/*
+# Include these specific files
+!training/fine_tuning.py
+!training/requirements.txt
