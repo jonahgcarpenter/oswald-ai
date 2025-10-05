@@ -27,9 +27,10 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 
 
+# TODO: Remeber to edit per dataset
 # Formatting the prompt for training
 def format_prompt(example):
-    return f"### Input: {example['text']}\n### Output: {json.dumps(example['label'])}<|endoftext|>"
+    return f"### Input: {example['text']}\n### Output: {json.dumps(example['search_queries'])}<|endoftext|>"
 
 
 formatted_data = [format_prompt(item) for item in file]
