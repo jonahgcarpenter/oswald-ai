@@ -1,8 +1,10 @@
 from unsloth import FastLanguageModel  # isort: skip
 import json
+import sys
 
 import torch
 from datasets import Dataset
+from interactive_test import interactive_test
 from transformers import TrainingArguments
 from trl import SFTTrainer
 
@@ -97,26 +99,12 @@ model, tokenizer = FastLanguageModel.from_pretrained(
     load_in_4bit=False,  # No need for 4-bit loading here
 )
 
-# Test the new model
-# TODO: Edit into a input driven prompt test
-messages = [
-    {"role": "user", "content": "Who won the superbowl in 2025?"},
-]
+should_save = interactive_test(model, tokenizer)
 
-inputs = tokenizer.apply_chat_template(
-    messages,
-    tokenize=True,
-    add_generation_prompt=True,
-    return_tensors="pt",
-).to("cuda")
-
-# Generate response
-outputs = model.generate(input_ids=inputs, max_new_tokens=64, use_cache=True)
-response = tokenizer.batch_decode(outputs)
-print(response[0])
-
-# Save the model
-model.save_pretrained_gguf(
-    "gguf_model", tokenizer, quantization_method="q4_k_m", maximum_memory_usage=0.4
-)
-print("GGUF model saved successfully.")
+if should_save:
+    model.save_pretrained_gguf(
+        "gguf_model", tokenizer, quantization_method="q4_k_m", maximum_memory_usage=0.4
+    )
+    print("\nGGUF model saved successfully.")
+else:
+    sys.exit()

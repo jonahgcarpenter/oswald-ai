@@ -9,4 +9,5 @@ __pycache__/
 training/*
 # Include these specific files
 !training/fine_tuning.py
+!training/interactive_test.py
 !training/requirements.txt
