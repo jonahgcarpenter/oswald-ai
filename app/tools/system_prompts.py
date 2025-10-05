@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
@@ -25,33 +24,6 @@ Your analysis must be objective and based only on the provided text. You will de
 
 Your entire response must be ONLY the summary text itself and must be strictly limited to under 80 words. Do not include introductions, explanations, or any meta-commentary about these instructions.
 """
-
-
-# --- Search Query Generation ---
-def get_search_query_generator_prompt(user_prompt: str) -> str:
-    """
-    Returns the system prompt for the search query generator.
-    """
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    return (
-        "You are a search query generation AI. Your sole purpose is to transform a user's question into a list of 2-3 clever, insightful search queries. "
-        "Your entire response must be a single, valid JSON object containing one key: 'search_queries'. Do not output any other text, explanation, or markdown formatting.\n\n"
-        "<example>\n"
-        "  <user_prompt>Why are lobsters considered a luxury food?</user_prompt>\n"
-        "  <json_output>\n"
-        "    {\n"
-        '      "search_queries": [\n'
-        '        "history of lobster as prison food",\n'
-        '        "lobster prices industrial revolution vs today",\n'
-        '        "marketing tactics that made lobster a delicacy"\n'
-        "      ]\n"
-        "    }\n"
-        "  </json_output>\n"
-        "</example>\n\n"
-        f"<current_date>{current_date}</current_date>\n"
-        "Now, analyze the following user prompt and provide ONLY the JSON output.\n"
-        f"<user_prompt_to_analyze>{user_prompt}</user_prompt_to_analyze>"
-    )
 
 
 # --- Final Answer Synthesis ---

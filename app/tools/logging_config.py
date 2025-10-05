@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 
 from dotenv import load_dotenv
 from rich.logging import RichHandler
@@ -15,7 +14,6 @@ def setup_logging():
     log_level = getattr(logging, log_level_str, logging.INFO)
 
     # --- HANDLER SETUP ---
-    # We use a single RichHandler that supports console markup for colors.
     handler = RichHandler(
         rich_tracebacks=True,
         markup=True,  # This is the key to enabling color tags like [bold red]

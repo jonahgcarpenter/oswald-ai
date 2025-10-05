@@ -4,7 +4,6 @@ import os
 from urllib.parse import quote_plus
 
 import requests
-from tools.system_prompts import get_search_query_generator_prompt
 
 # --- Logging Setup ---
 log = logging.getLogger(__name__)
@@ -14,44 +13,41 @@ SEARXNG_URL = os.getenv("SEARXNG_URL")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
 
 
-def _extract_json_from_string(text: str) -> str:
+def _extract_json_list_from_string(text: str) -> str:
     """
-    Finds and extracts the first valid JSON object from a string.
+    Finds and extracts the first valid JSON list from a string.
     """
-    start_index = text.find("{")
-    end_index = text.rfind("}")
+    start_index = text.find("[")
+    end_index = text.rfind("]")
 
     if start_index != -1 and end_index != -1 and end_index > start_index:
         return text[start_index : end_index + 1]
 
-    log.warning(f"Could not find a valid JSON object in the model's response: {text}")
-    return "{}"
+    log.warning(f"Could not find a valid JSON list in the model's response: {text}")
+    return "[]"
 
 
-def _generate_search_queries(prompt: str, model: str) -> list[str]:
+def _generate_search_queries(prompt: str) -> list[str]:
     """
-    Uses an LLM to generate effective search queries.
+    Uses a fine-tuned LLM to generate effective search queries.
     """
     if not OLLAMA_HOST:
         log.error("OLLAMA_HOST_URL is not set. Falling back to direct search.")
         return [prompt]
 
-    system_prompt = get_search_query_generator_prompt(user_prompt=prompt)
-    full_prompt = f'{system_prompt}\n\nUser Prompt: "{prompt}"'
-    log.debug(f"Full prompt for search query generation:\n{full_prompt}")
-    clean_json_str = "{}"
+    full_prompt = f"### Input: {prompt}\n### Output:"
+    clean_json_list_str = "[]"
 
     try:
         log.info(f"Generating search queries for prompt: '{prompt}'")
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": model,
+                "model": "search_query_generation:latest",
                 "prompt": full_prompt,
                 "stream": False,
-                "format": "json",
                 "keep_alive": "5m",
-                "options": {"temperature": 0.0},
+                "options": {"temperature": 0.0, "stop": ["<|endoftext|>", "###"]},
             },
             timeout=60,
         )
@@ -59,10 +55,11 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
 
         ollama_envelope = response.json()
         log.debug(f"Raw Ollama search query response: {ollama_envelope}")
-        response_json_str = ollama_envelope.get("response", "{}")
-        clean_json_str = _extract_json_from_string(response_json_str)
-        inner_data = json.loads(clean_json_str)
-        search_queries = inner_data.get("search_queries", [])
+
+        response_str = ollama_envelope.get("response", "[]")
+        clean_json_list_str = _extract_json_list_from_string(response_str)
+        # The entire response is the list, so we parse it directly
+        search_queries = json.loads(clean_json_list_str)
 
         if not isinstance(search_queries, list):
             log.warning(
@@ -81,7 +78,9 @@ def _generate_search_queries(prompt: str, model: str) -> list[str]:
         log.error(f"Error contacting Ollama to generate search queries: {e}")
         return [prompt]
     except json.JSONDecodeError:
-        log.error(f"Failed to decode JSON from Ollama response: {clean_json_str}")
+        log.error(
+            f"Failed to decode JSON list from Ollama response: {clean_json_list_str}"
+        )
         return [prompt]
     except Exception as e:
         log.error(f"Unexpected error during query generation: {e}", exc_info=True)
@@ -99,7 +98,6 @@ def query_searxng(query: str, max_results: int = 3) -> str:
     encoded_query = quote_plus(query)
     search_url = f"{SEARXNG_URL}/search?q={encoded_query}&format=json"
     log.info(f"Querying SearXNG for: '{query}'")
-    # This is the corrected line - it now logs the relevant URL
     log.debug(f"Executing search URL: {search_url}")
 
     try:
@@ -126,11 +124,11 @@ def query_searxng(query: str, max_results: int = 3) -> str:
         return ""
 
 
-def think_and_search(prompt: str, model: str) -> tuple[str | None, list[str]]:
+def think_and_search(prompt: str) -> tuple[str | None, list[str]]:
     """
     Orchestrates the intelligent search process.
     """
-    search_queries = _generate_search_queries(prompt, model)
+    search_queries = _generate_search_queries(prompt)
     if not search_queries:
         return None, search_queries
 

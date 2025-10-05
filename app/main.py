@@ -3,7 +3,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 
 from tools.logging_config import setup_logging
 

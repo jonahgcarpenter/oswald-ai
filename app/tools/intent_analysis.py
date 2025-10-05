@@ -21,7 +21,7 @@ def _extract_json_from_string(text: str) -> str:
     return "{}"
 
 
-def decide_if_search_is_needed(prompt: str, model: str) -> bool:
+def decide_if_search_is_needed(prompt: str) -> bool:
     """
     Uses a fine-tuned LLM to determine if the user's prompt requires a web search.
     This corresponds to the "Intent Analysis" step in the flowchart.
@@ -30,16 +30,14 @@ def decide_if_search_is_needed(prompt: str, model: str) -> bool:
         log.error("OLLAMA_HOST_URL is not set. Defaulting to performing a search.")
         return True
 
-    fine_tuned_model = "intent_analysis:latest"
     clean_json_str = "{}"
 
     try:
         log.info(f"Performing intent analysis for prompt: '{prompt}'")
-        log.debug(f"Sending prompt to intent model '{fine_tuned_model}'.")
         response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
             json={
-                "model": fine_tuned_model,
+                "model": "intent_analysis:latest",
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",

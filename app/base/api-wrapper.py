@@ -181,13 +181,13 @@ async def generate_prompt(
 
         # --- INTENT ANALYSIS ---
         search_needed = intent_analysis.decide_if_search_is_needed(
-            prompt=sanitized_prompt, model=data.model
+            prompt=sanitized_prompt
         )
         search_context, search_queries = None, None
         if search_needed:
             log.info("Search is needed. Starting intelligent search process.")
             search_context, search_queries = search.think_and_search(
-                prompt=sanitized_prompt, model=data.model
+                prompt=sanitized_prompt
             )
         else:
             log.info("Search not needed. Generating a conversational response.")
