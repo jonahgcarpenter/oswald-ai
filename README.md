@@ -109,6 +109,7 @@ docker compose up -d
 
 ## Todo
 
+- add a like or dislike system, to make it easier to collect data for fine tuning
 - combine intent analysis and search query models. when not worth searching simply return an empty array
 - simplfy dockerfile with the removal of the local embedding model
 - Get better output using trained models instead of system prompts
