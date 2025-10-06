@@ -109,6 +109,7 @@ docker compose up -d
 
 ## Todo
 
+- combine intent analysis and search query models. when not worth searching simply return an empty array
 - simplfy dockerfile with the removal of the local embedding model
 - Get better output using trained models instead of system prompts
 - Queue system for multiple request
