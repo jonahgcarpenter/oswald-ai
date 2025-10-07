@@ -16,13 +16,11 @@ The bot follows a structured, multi-step process to decide when to search the we
 graph TD
     subgraph Main Request Thread
         A[User Mentions Bot] --> B[Fetch User Profile for Current Turn];
-        B --> C{Intent Analysis};
-        C --> |Search Not Needed| D[Generate Conversational Response];
-        C --> |Search Needed| E[Plan & Generate Search Queries];
-        E --> F[Execute Search via SearXNG];
-        F --> G[Synthesize Answer from Search Results];
+        B --> E[Plan & Generate Search Queries];
+        E --> |No Queries Generated| G[Synthesize Final Answer];
+        E --> |Queries Generated| F[Execute Search via SearXNG];
+        F --> G;
         G --> H[Format & Send Discord Message];
-        D --> H;
     end
 
     subgraph Background Task - Memory Evolution
@@ -111,7 +109,6 @@ docker compose up -d
 
 - rate limiting per user
 - add a like or dislike system, to make it easier to collect data for fine tuning
-- combine intent analysis and search query models. when not worth searching simply return an empty array
 - simplfy dockerfile with the removal of the local embedding model
 - Get better output using trained models instead of system prompts
 - Queue system for multiple request
