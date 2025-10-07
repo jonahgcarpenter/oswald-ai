@@ -54,7 +54,8 @@ def _generate_search_queries(prompt: str) -> list[str]:
         response.raise_for_status()
 
         ollama_envelope = response.json()
-        log.debug(f"Raw Ollama search query response: {ollama_envelope}")
+        response_content = ollama_envelope.get("response", "N/A")
+        log.debug(f"Ollama query generation | Response: {response_content}")
 
         response_str = ollama_envelope.get("response", "[]")
         clean_json_list_str = _extract_json_list_from_string(response_str)

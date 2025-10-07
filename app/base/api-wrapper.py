@@ -19,7 +19,7 @@ load_dotenv()
 import requests
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from tools import intent_analysis, search, vector_db
+from tools import search, vector_db
 from tools.system_prompts import (
     get_final_answer_prompt,
     get_user_profile_generator_prompt,
@@ -179,18 +179,19 @@ async def generate_prompt(
             if not target_user_profile:
                 log.warning(f"No profile found for target user '{data.target_user}'.")
 
-        # --- INTENT ANALYSIS ---
-        search_needed = intent_analysis.decide_if_search_is_needed(
+        # --- SEARCH ORCHESTRATION ---
+        # The search.think_and_search() function now handles the decision of whether to search.
+        # If the query generation model returns an empty list `[]`, it will return
+        # (None, []) which indicates no search was needed.
+        log.info("Generating search queries and performing search if necessary.")
+        search_context, search_queries = search.think_and_search(
             prompt=sanitized_prompt
         )
-        search_context, search_queries = None, None
-        if search_needed:
-            log.info("Search is needed. Starting intelligent search process.")
-            search_context, search_queries = search.think_and_search(
-                prompt=sanitized_prompt
-            )
+
+        if search_queries:
+            log.info(f"Search was performed using queries: {search_queries}")
         else:
-            log.info("Search not needed. Generating a conversational response.")
+            log.info("Search was not necessary for this prompt.")
 
         # --- GENERATE FINAL RESPONSE ---
         final_prompt = get_final_answer_prompt(
