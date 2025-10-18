@@ -107,8 +107,6 @@ docker compose up -d
 
 ## Todo
 
-- rate limiting per user
-- add a like or dislike system, to make it easier to collect data for fine tuning
-- simplfy dockerfile with the removal of the local embedding model
-- Get better output using trained models instead of system prompts
-- Queue system for multiple request
+- Simplfy dockerfile
+- Dockerhub -> GHCR
+- Investigate LangChain and LlamaIndex
