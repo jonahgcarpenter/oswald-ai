@@ -1,4 +1,4 @@
-# Joney Bot
+# Oswald-AI
 
 ## About This Project
 
@@ -54,7 +54,7 @@ You can run this bot either by building it directly from the source code with Py
 **1. Clone the Repo**
 
 ```bash
-git clone https://github.com/jonahgcarpenter/joney-bot.git && cd joney-bot
+git clone https://github.com/jonahgcarpenter/oswald-ai.git && cd oswald-ai
 ```
 
 **2. Create your .env**
