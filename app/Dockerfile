@@ -28,7 +28,6 @@ COPY ./main.py ./
 
 RUN chown -R oswald-ai:oswald-ai /home/oswald-ai /opt/venv
 
-# Set the user to the non-root user
 USER oswald-ai
 
 ENV PATH="/opt/venv/bin:$PATH"
