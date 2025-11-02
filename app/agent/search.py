@@ -49,7 +49,11 @@ async def search_searxng(query: str) -> str:
                 log.warning(f"No results found for query: {query}")
                 return "No search results found."
 
-            return "\n\n".join(snippets)
+            compiled_results = "\n\n".join(snippets)
+            log.debug(
+                f"Returning {len(snippets)} search results for query '{query}':\n{compiled_results}"
+            )
+            return compiled_results
 
         except httpx.HTTPStatusError as e:
             log.error(f"SearXNG search failed (HTTP Error): {e}")
