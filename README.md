@@ -47,62 +47,53 @@ Before running the application, you will need the following services available:
 
 ## Installation
 
-You can run this bot either by building it directly from the source code with Python or by using the provided Docker Compose file for a containerized setup.
-
-### Option 1: Build from Source
-
-**1. Clone the Repo**
+### Docker Compose:
 
 ```bash
-git clone https://github.com/jonahgcarpenter/oswald-ai.git && cd oswald-ai
+services:
+  oswald-ai:
+    container_name: oswald-ai
+    image: ghcr.io/jonahgcarpenter/oswald-ai/oswald-ai:latest
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
+      - SEARXNG_URL=${SEARXNG_URL}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_SCHEMA=${DB_SCHEMA}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - CONTEXT_SUMMARY_COUNT=${CONTEXT_SUMMARY_COUNT}
 ```
 
-**2. Create your .env**
+### Env Example:
 
 ```bash
-cp .env.example .env
-```
+# Make a dedicated Discord App for this bot
+# https://discord.com/developers/applications
+DISCORD_TOKEN=your-discordbot-api-token
 
-**3. Navigate to the App Directory**
+# Ollama
+OLLAMA_HOST_URL=http://your-ollama-api-url:11434
+OLLAMA_EMBEDDING_MODEL=nomic-embed-text:v1.5
 
-```bash
-cd app
-```
+# Searxng
+# Web seach tool
+SEARXNG_URL=http://your-searxng-url:8888
 
-**4. Create & Activate VENV**
+# Postgres DB
+# To save each prompt and search query executed
+DB_HOST=ip
+DB_PORT=5432
+DB_NAME=db_name
+DB_USER=user
+DB_PASSWORD=password
+DB_SCHEMA=schema
 
-```bash
-python -m venv venv
-```
-
-```bash
-source venv/bin/activate
-```
-
-**5. Install Dependancies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**6. Run the Server**
-
-```bash
-python main.py
-```
-
-### Option 2: Docker Compose
-
-**1. Create your .env**
-
-```bash
-cp .env.example .env
-```
-
-**2. Run the Server**
-
-```bash
-docker compose up -d
+LOG_LEVEL=DEBUG # Can be set to either INFO or DEBUG
+CONTEXT_SUMMARY_COUNT=10 # Number of previous chats to be send as user_context
 ```
 
 ## Todo
