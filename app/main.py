@@ -1,7 +1,10 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from agent.agent import OllamaService
+from agent.endpoints import router as agent_router
+from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from utils.db_connect import engine, get_db_session, get_db_status
 from utils.logger import LOGGING_CONFIG, get_logger
@@ -17,6 +20,8 @@ async def lifespan(app: FastAPI):
     - On shutdown: Disposes of the database engine's connection pool.
     """
     log.info("FastAPI app starting up...")
+    app.state.ollama_service = OllamaService()
+    log.info("OllamaService loaded.")
     yield
     log.info("FastAPI app shutting down...")
     await engine.dispose()
@@ -28,17 +33,28 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def read_root_health_check(
+    request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
     """
     Root endpoint health check.
     """
-    status_report = await get_db_status(db)
+    ollama_service: OllamaService = request.app.state.ollama_service
 
-    if status_report["status"] == "ok":
-        return status_report
+    db_status_task = get_db_status(db)
+    ollama_status_task = ollama_service.check_health()
+
+    db_report, ollama_report = await asyncio.gather(db_status_task, ollama_status_task)
+
+    combined_report = {"database": db_report, "ollama": ollama_report}
+
+    if db_report["status"] == "ok" and ollama_report["status"] == "ok":
+        return combined_report
     else:
-        raise HTTPException(status_code=503, detail=status_report)
+        raise HTTPException(status_code=503, detail=combined_report)
+
+
+app.include_router(agent_router, prefix="/agent")
 
 
 if __name__ == "__main__":
