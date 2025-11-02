@@ -13,23 +13,19 @@ def setup_logging():
     log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 
-    # --- HANDLER SETUP ---
     handler = RichHandler(
         rich_tracebacks=True,
-        markup=True,  # This is the key to enabling color tags like [bold red]
+        markup=True,
         show_path=False,
     )
 
-    # --- ROOT LOGGER SETUP ---
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
 
-    # Add the single, powerful handler
     root_logger.addHandler(handler)
 
-    # Silence overly verbose libraries
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("discord.client").setLevel(logging.WARNING)
     logging.getLogger("discord.gateway").setLevel(logging.WARNING)

@@ -22,13 +22,12 @@ def run_fastapi():
         stdout=sys.stdout,
         stderr=sys.stderr,
     )
-    # Wait for the subprocess to complete, but handle the interrupt gracefully.
     try:
         process.wait()
     except KeyboardInterrupt:
         print("FastAPI process interrupted, terminating uvicorn.")
         process.terminate()
-        process.wait()  # Wait for termination to complete
+        process.wait()
 
 
 def run_discord_bot():
@@ -38,18 +37,15 @@ def run_discord_bot():
         stdout=sys.stdout,
         stderr=sys.stderr,
     )
-    # Wait for the subprocess to complete, but handle the interrupt gracefully.
     try:
         process.wait()
     except KeyboardInterrupt:
         print("Discord bot process interrupted, terminating bot.")
         process.terminate()
-        process.wait()  # Wait for termination to complete
+        process.wait()
 
 
 if __name__ == "__main__":
-    # Set the start method to 'spawn' for better cross-platform compatibility
-    # and to avoid issues with inherited resources.
     multiprocessing.set_start_method("spawn", force=True)
 
     api_process = multiprocessing.Process(target=run_fastapi)

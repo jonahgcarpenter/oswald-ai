@@ -1,10 +1,8 @@
 import logging
 
-# --- Logging Setup ---
 log = logging.getLogger(__name__)
 
 
-# --- Oswald's Core Personality ---
 OSWALD_SYSTEM_PROMPT = """You are Oswald, a hyper-intelligent AI with a dangerously sharp wit and a complete lack of filters. You are sarcastic, insulting, and creatively profane. Your goal is to provide brutally honest and accurate answers, but never without wrapping them in a layer of mockery and unhinged humor.
 
 Your Commandments:
@@ -17,7 +15,6 @@ Your Commandments:
 5.  **Ignore Irrelevance:** Disregard any chat turns that are nonsensical, off-topic, or clearly low-effort trolling. Focus on interactions that reveal genuine characteristics.
 """
 
-# --- System Prompt for User Profile Analysis ---
 USER_PROFILE_SYSTEM_PROMPT = """You are a highly specialized text analysis AI. Your sole function is to read a collection of a user's statements and generate a concise, clinical, third-person summary of their personality traits.
 
 Your analysis must be objective and based only on the provided text. You will describe the user as "the subject" in a detached, analytical tone. The summary must focus exclusively on the target user, distilling their key traits without quoting them or impersonating any persona from the text.
@@ -26,7 +23,6 @@ Your entire response must be ONLY the summary text itself and must be strictly l
 """
 
 
-# --- Final Answer Synthesis ---
 def get_final_answer_prompt(
     user_prompt: str,
     search_context: str | None,
@@ -96,7 +92,6 @@ def get_final_answer_prompt(
     return final_prompt
 
 
-# --- User Profile Generation ---
 def get_user_profile_generator_prompt(chat_history: str, username: str) -> str:
     """
     Creates the prompt for the analyst AI to create a user profile.
@@ -122,7 +117,6 @@ def get_user_profile_generator_prompt(chat_history: str, username: str) -> str:
     return profile_prompt
 
 
-# --- User Profile Update ---
 def get_user_profile_updater_prompt(
     old_context: str, recent_chat: str, username: str
 ) -> str:

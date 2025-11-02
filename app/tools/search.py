@@ -5,10 +5,8 @@ from urllib.parse import quote_plus
 
 import requests
 
-# --- Logging Setup ---
 log = logging.getLogger(__name__)
 
-# --- Configuration ---
 SEARXNG_URL = os.getenv("SEARXNG_URL")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
 
@@ -59,7 +57,6 @@ def _generate_search_queries(prompt: str) -> list[str]:
 
         response_str = ollama_envelope.get("response", "[]")
         clean_json_list_str = _extract_json_list_from_string(response_str)
-        # The entire response is the list, so we parse it directly
         search_queries = json.loads(clean_json_list_str)
 
         if not isinstance(search_queries, list):

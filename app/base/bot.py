@@ -16,7 +16,6 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-# --- Configuration ---
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 API_BASE_URL = "http://localhost:8000"
@@ -25,17 +24,14 @@ API_HEALTH_URL = f"{API_BASE_URL}/health"
 API_CONTEXT_URL = f"{API_BASE_URL}/context"
 
 
-# --- Logging Setup ---
 log = logging.getLogger(__name__)
 
 
-# Silence noisy discord.py logs
 logging.getLogger("discord").setLevel(logging.WARNING)
 logging.getLogger("discord.client").setLevel(logging.WARNING)
 logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 
 
-# --- Bot Setup ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -46,11 +42,10 @@ async def on_ready():
     """Fires when connected to Discord, then checks for backend readiness."""
     logging.info(f"Connected to Discord as {bot.user}. Waiting for backend API...")
 
-    max_retries = 12  # Try for up to 60 seconds (12 * 5s)
+    max_retries = 12
     async with aiohttp.ClientSession() as session:
         for attempt in range(max_retries):
             try:
-                # Check the health of the API wrapper using aiohttp
                 async with session.get(API_HEALTH_URL, timeout=3) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -59,13 +54,10 @@ async def on_ready():
                             logging.info(f"Bot is ready! Logged in as {bot.user}")
                             return
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
-                # This is expected if the API isn't running yet, so we just wait
                 pass
             except aiohttp.ClientError as e:
-                # Log other errors (like timeouts) but continue to retry
                 logging.warning(f"API health check failed: {e}")
 
-            # Wait before retrying
             await asyncio.sleep(5)
 
     logging.critical(
@@ -79,7 +71,6 @@ async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    # Ignore any message containing @everyone or @here
     if (
         message.mention_everyone
         or "@everyone" in message.content
@@ -87,9 +78,7 @@ async def on_message(message: discord.Message):
     ):
         return
 
-    # Check if the bot was specifically mentioned
     if bot.user in message.mentions:
-        # --- Clean the prompt by removing the bot's mention ---
         mention_standard = f"<@{bot.user.id}>"
         mention_nickname = f"<@!{bot.user.id}>"
         prompt = (
@@ -100,17 +89,14 @@ async def on_message(message: discord.Message):
 
         username = str(message.author)
 
-        # --- Handle empty prompts after cleaning ---
         if not prompt:
             await message.reply("What the fuck do you want idiot?")
             return
 
-        # --- Handle !context command ---
         if prompt == "!context":
             log.info(f"User '{username}' requested their context.")
             async with message.channel.typing():
                 try:
-                    # URL-encode the username to handle special characters like '#'
                     encoded_username = quote(username)
                     async with aiohttp.ClientSession() as session:
                         async with session.get(
@@ -138,13 +124,11 @@ async def on_message(message: discord.Message):
                     )
             return
 
-        # --- Identify if another single user was mentioned ---
         target_user_name = None
         other_mentions = [m for m in message.mentions if m.id != bot.user.id]
         if len(other_mentions) == 1:
             target_user_name = str(other_mentions[0])
 
-        # --- Resolve all remaining mentions to display names for the API ---
         if message.mentions:
             for member in message.mentions:
                 if member.id != bot.user.id:
@@ -166,7 +150,6 @@ async def on_message(message: discord.Message):
                             "response", "Sorry, I received an empty response."
                         )
 
-                # Split and send the response if it exceeds Discord's character limit
                 if len(model_response) > 2000:
                     logging.warning("Response > 2000 chars, splitting.")
                     for i in range(0, len(model_response), 1990):

@@ -3,11 +3,9 @@ import os
 import re
 import sys
 
-# --- Path Setup ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-# Import and run logging config before anything else
 from tools.logging_config import setup_logging
 
 setup_logging()
@@ -26,20 +24,16 @@ from tools.system_prompts import (
     get_user_profile_updater_prompt,
 )
 
-# --- Logging Setup ---
 log = logging.getLogger(__name__)
 
 
-# --- Configuration ---
 OLLAMA_HOST = os.getenv("OLLAMA_HOST_URL")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
 CONTEXT_SUMMARY_COUNT = int(os.getenv("CONTEXT_SUMMARY_COUNT", 10))
 
-# --- Initialize App ---
 app = FastAPI()
 
 
-# --- Pydantic Model for Input Validation ---
 class PromptRequest(BaseModel):
     prompt: str
     username: str
@@ -47,7 +41,6 @@ class PromptRequest(BaseModel):
     target_user: str | None = None
 
 
-# --- Input Sanitization Function ---
 def sanitize_input(prompt: str) -> str:
     """A simple sanitizer to remove potentially harmful characters."""
     sanitized = re.sub(r"[^a-zA-Z0-9\s.,!?-]", "", prompt)
@@ -69,7 +62,6 @@ def get_ollama_embedding(text_to_embed: str, model: str) -> list[float]:
         raise
 
 
-# --- Background Task for Saving and Profiling ---
 def process_and_save_background(
     username: str,
     prompt: str,
@@ -81,12 +73,10 @@ def process_and_save_background(
     Saves chat, then generates or updates the user profile based on context.
     """
     try:
-        # Save the current interaction
         log.debug(f"Saving current chat for '{username}'.")
         log.debug(
             f"Generating embeddings with Ollama model '{OLLAMA_EMBEDDING_MODEL}'."
         )
-        # Call the new function to get embeddings from Ollama
         prompt_embedding = get_ollama_embedding(prompt, OLLAMA_EMBEDDING_MODEL)
         response_embedding = get_ollama_embedding(response, OLLAMA_EMBEDDING_MODEL)
 
@@ -99,13 +89,11 @@ def process_and_save_background(
             search_queries,
         )
 
-        # Check for existing user context/profile
         log.debug(f"Checking for existing profile for '{username}'.")
         existing_profile = vector_db.get_user_context(username)
         profile_prompt = None
 
         if not existing_profile:
-            # --- CASE 1: No existing profile. Create one from the last 10 chats. ---
             log.info(f"No profile found for '{username}'. Generating a new one.")
             chat_history = vector_db.get_recent_chats(username, CONTEXT_SUMMARY_COUNT)
             if chat_history:
@@ -118,7 +106,6 @@ def process_and_save_background(
                 )
                 return
         else:
-            # --- CASE 2: Profile exists. Update it with the single most recent chat. ---
             log.info(f"Existing profile found for '{username}'. Updating it.")
             most_recent_chat = vector_db.get_single_most_recent_chat(username)
             if most_recent_chat:
@@ -131,7 +118,6 @@ def process_and_save_background(
                 )
                 return
 
-        # Generate the new/updated profile
         log.info(f"Generating new/updated user profile for '{username}'.")
         profile_response = requests.post(
             f"{OLLAMA_HOST}/api/generate",
@@ -141,7 +127,6 @@ def process_and_save_background(
         profile_response.raise_for_status()
         new_profile = profile_response.json().get("response", "").strip()
 
-        # Save the new profile
         if new_profile:
             vector_db.update_user_profile(username, new_profile)
         else:
@@ -153,7 +138,6 @@ def process_and_save_background(
         log.info(f"[bold red]ENDING INTERACTION with {username}[/bold red]")
 
 
-# --- API Endpoint ---
 @app.post("/generate")
 async def generate_prompt(
     request: Request, data: PromptRequest, background_tasks: BackgroundTasks
@@ -170,7 +154,6 @@ async def generate_prompt(
         )
 
     try:
-        # --- GET USER CONTEXTS ---
         user_context = vector_db.get_user_context(data.username)
         target_user_profile = None
         if data.target_user:
@@ -179,10 +162,6 @@ async def generate_prompt(
             if not target_user_profile:
                 log.warning(f"No profile found for target user '{data.target_user}'.")
 
-        # --- SEARCH ORCHESTRATION ---
-        # The search.think_and_search() function now handles the decision of whether to search.
-        # If the query generation model returns an empty list `[]`, it will return
-        # (None, []) which indicates no search was needed.
         log.info("Generating search queries and performing search if necessary.")
         search_context, search_queries = search.think_and_search(
             prompt=sanitized_prompt
@@ -193,7 +172,6 @@ async def generate_prompt(
         else:
             log.info("Search was not necessary for this prompt.")
 
-        # --- GENERATE FINAL RESPONSE ---
         final_prompt = get_final_answer_prompt(
             sanitized_prompt,
             search_context,
@@ -209,7 +187,6 @@ async def generate_prompt(
         response.raise_for_status()
         model_response = response.json().get("response", "No response from model.")
 
-        # --- KICK OFF BACKGROUND TASK ---
         background_tasks.add_task(
             process_and_save_background,
             data.username,

@@ -36,7 +36,6 @@ def setup_database():
             schema_name = os.getenv("DB_SCHEMA")
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema_name};")
 
-            # Create chat_logs table
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.chat_logs (
@@ -52,7 +51,6 @@ def setup_database():
             """
             )
 
-            # Create users table for context
             cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.users (
@@ -65,7 +63,6 @@ def setup_database():
             """
             )
 
-            # Create a trigger to automatically update the updated_at timestamp
             cur.execute(
                 f"""
                 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -143,7 +140,6 @@ def get_recent_chats(username: str, limit: int) -> str:
                 """,
                 (username, limit),
             )
-            # Fetch just the prompts and reverse for chronological order
             results = reversed(cur.fetchall())
             for row in results:
                 user_prompts.append(row[0])
@@ -153,7 +149,6 @@ def get_recent_chats(username: str, limit: int) -> str:
         if conn:
             conn.close()
 
-    # Join prompts into a single block of text for analysis
     return "\n".join(user_prompts)
 
 
@@ -177,7 +172,6 @@ def get_single_most_recent_chat(username: str) -> str | None:
             )
             result = cur.fetchone()
             if result:
-                # Return only the prompt text
                 return result[0]
     except Exception as e:
         log.error(f"Error retrieving most recent chat for user '{username}': {e}")
@@ -200,7 +194,6 @@ def update_user_profile(username: str, profile: str):
             log.info(f"Updating profile for user '{username}'.")
             log.debug(f"New profile for '{username}': {profile}")
 
-            # Use INSERT ... ON CONFLICT to create a new user or update an existing one
             cur.execute(
                 f"""
                 INSERT INTO {schema_name}.users (username, context)
