@@ -1,6 +1,5 @@
 import os
 
-from dotenv import load_dotenv
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -9,8 +8,6 @@ from sqlalchemy.sql import text
 from .logger import get_logger
 
 log = get_logger(__name__)
-
-load_dotenv()
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")

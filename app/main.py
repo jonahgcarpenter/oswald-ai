@@ -1,6 +1,10 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import uvicorn
 from agent.agent import OllamaService
 from agent.endpoints import router as agent_router
