@@ -4,7 +4,7 @@ import signal
 import subprocess
 import sys
 
-from tools.logging_config import setup_logging
+from base.logging_config import setup_logging
 
 
 def run_fastapi():

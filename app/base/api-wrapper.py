@@ -6,7 +6,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from tools.logging_config import setup_logging
+from base.logging_config import setup_logging
 
 setup_logging()
 
