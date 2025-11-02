@@ -13,6 +13,8 @@ RUN . /opt/venv/bin/activate && pip install --no-cache-dir -r requirements.txt
 
 FROM python:3.13-slim-bookworm
 
+LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
+
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
