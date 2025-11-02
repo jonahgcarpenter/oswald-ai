@@ -4,6 +4,9 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from utils.db_connect import engine, get_db_session, get_db_status
+from utils.logger import LOGGING_CONFIG, get_logger
+
+log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -13,13 +16,11 @@ async def lifespan(app: FastAPI):
     - On startup: Prints a message.
     - On shutdown: Disposes of the database engine's connection pool.
     """
-    print("INFO:     FastAPI app starting up...")
-
+    log.info("FastAPI app starting up...")
     yield
-
-    print("INFO:     FastAPI app shutting down...")
+    log.info("FastAPI app shutting down...")
     await engine.dispose()
-    print("INFO:     Database engine disposed.")
+    log.info("Database engine disposed.")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -45,8 +46,5 @@ if __name__ == "__main__":
     Starts the Uvicorn server.
     """
     uvicorn.run(
-        "main:app",
-        host="127.0.0.1",
-        port=8000,
-        reload=True,
+        "main:app", host="127.0.0.1", port=8000, reload=True, log_config=LOGGING_CONFIG
     )

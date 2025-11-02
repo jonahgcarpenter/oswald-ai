@@ -3,6 +3,7 @@ annotated-types==0.7.0
 anyio==4.11.0
 asyncpg==0.30.0
 click==8.3.0
+colorlog==6.10.1
 fastapi==0.120.4
 greenlet==3.2.4
 h11==0.16.0

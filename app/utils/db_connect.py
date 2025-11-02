@@ -6,6 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import text
 
+from .logger import get_logger
+
+log = get_logger(__name__)
+
 load_dotenv()
 
 DB_USER = os.getenv("DB_USER")
@@ -16,7 +20,7 @@ DB_NAME = os.getenv("DB_NAME")
 DB_SCHEMA = os.getenv("DB_SCHEMA")
 
 if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, DB_SCHEMA]):
-    print("ERROR: One or more database environment variables are not set.")
+    log.error("One or more database environment variables are not set.")
     exit(1)
 
 DATABASE_URL = (
@@ -82,11 +86,11 @@ async def get_db_status(session: AsyncSession) -> dict:
             }
 
     except OperationalError as e:
-        print(f"ERROR: Health check query failed (OperationalError): {e}")
+        log.error(f"Health check query failed (OperationalError): {e}")
         return {"status": "error", "database": "disconnected", "error_message": str(e)}
 
     except Exception as e:
-        print(f"ERROR: An internal error occurred: {e}")
+        log.error(f"An internal error occurred: {e}", exc_info=True)
         return {
             "status": "error",
             "database": "internal_server_error",
