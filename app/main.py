@@ -10,6 +10,7 @@ from agent.agent import OllamaService
 from agent.endpoints import router as agent_router
 from fastapi import Depends, FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from utils.create_tables import create_db_and_tables
 from utils.db_connect import engine, get_db_session, get_db_status
 from utils.logger import LOGGING_CONFIG, get_logger
 
@@ -20,10 +21,16 @@ log = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """
     Manages the application's lifespan events.
-    - On startup: Prints a message.
+    - On startup: Prints a message, creates DB tables, loads ollama service
     - On shutdown: Disposes of the database engine's connection pool.
     """
     log.info("FastAPI app starting up...")
+    try:
+        log.info("Initializing database tables...")
+        await create_db_and_tables(engine)
+        log.info("Database tables initialized successfully.")
+    except Exception as e:
+        log.error(f"Failed to initialize database tables: {e}", exc_info=True)
     app.state.ollama_service = OllamaService()
     log.info("OllamaService loaded.")
     yield

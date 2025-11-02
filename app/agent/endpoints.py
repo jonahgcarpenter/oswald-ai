@@ -9,8 +9,9 @@ log = get_logger(__name__)
 router = APIRouter()
 
 
-class AgentQuestion(BaseModel):
+class AgentRequest(BaseModel):
     question: str
+    user_id: str
 
 
 async def get_ollama_service(request: Request) -> OllamaService:
@@ -23,7 +24,7 @@ async def get_ollama_service(request: Request) -> OllamaService:
 
 @router.post("/generate")
 async def ask_agent(
-    request: AgentQuestion,
+    request: AgentRequest,
     ollama: OllamaService = Depends(get_ollama_service),
 ):
     """
@@ -37,6 +38,8 @@ async def ask_agent(
 
     log.info(f"Received question for agent: {request.question}")
 
-    response = await ollama.ask_question(request.question)
+    response = await ollama.ask_question(
+        question=request.question, user_id=request.user_id
+    )
 
-    return {"question": request.question, "answer": response}
+    return {"answer": response}

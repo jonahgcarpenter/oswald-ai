@@ -1,4 +1,5 @@
 import os
+from typing import TypedDict
 
 import httpx
 from langchain.agents import create_agent
@@ -6,10 +7,21 @@ from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
 from utils.logger import get_logger
 
+from .memory import MemoryService, save_to_user_memory, search_user_memory
 from .search import search_searxng
 from .system_prompts import OSWALD_SYSTEM_PROMPT
 
 log = get_logger(__name__)
+
+
+class AgentContext(TypedDict):
+    """
+    Defines the structure of the context object
+    passed to the agent's tools at runtime.
+    """
+
+    user_id: str
+    memory_service: MemoryService
 
 
 class OllamaService:
@@ -29,12 +41,15 @@ class OllamaService:
 
             self.llm = ChatOllama(base_url=self.base_url, model=self.model)
 
-            self.tools = [search_searxng]
+            self.memory_service = MemoryService()
+
+            self.tools = [search_searxng, save_to_user_memory, search_user_memory]
 
             self.agent = create_agent(
                 self.llm,
                 tools=self.tools,
                 system_prompt=OSWALD_SYSTEM_PROMPT,
+                context_schema=AgentContext,
             )
 
             log.info(f"OllamaService initialized successfully with model: {self.model}")
@@ -43,15 +58,17 @@ class OllamaService:
             log.error(f"Failed to initialize OllamaService: {e}", exc_info=True)
             raise
 
-    async def ask_question(self, question: str) -> str:
+    async def ask_question(self, question: str, user_id: str) -> str:
         """
         Asks a question to the LLM agent and returns the response.
         """
-        log.debug(f"Asking agent: {question}")
+        log.debug(f"Asking agent (User: {user_id}): {question}")
         try:
+            context = {"user_id": user_id, "memory_service": self.memory_service}
+
             input_data = {"messages": [HumanMessage(content=question)]}
 
-            response_data = await self.agent.ainvoke(input_data)
+            response_data = await self.agent.ainvoke(input_data, context=context)
 
             final_messages = response_data.get("messages", [])
             if final_messages:

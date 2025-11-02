@@ -27,7 +27,7 @@ DATABASE_URL = (
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    connect_args={"server_settings": {"search_path": DB_SCHEMA}},
+    connect_args={"server_settings": {"search_path": f"{DB_SCHEMA},public"}},
 )
 
 AsyncSessionLocal = async_sessionmaker(
