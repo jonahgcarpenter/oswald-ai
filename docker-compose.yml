@@ -1,7 +1,7 @@
 services:
   joney-bot:
     container_name: joney-bot
-    image: jonahgcarpenter/joney-bot:latest
+    image: ghcr.io/jonahgcarpenter/oswald-ai/oswald-ai:latest
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
