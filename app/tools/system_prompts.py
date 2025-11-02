@@ -33,19 +33,13 @@ def get_final_answer_prompt(
     """
     Creates the final prompt for Oswald to synthesize an answer.
     """
+    intel_section = ""
     if search_context and search_context.strip():
         intel_section = (
             "<intel>\n"
             "  <source>Web Search</source>\n"
             "  <summary>My minions have conducted a search and provided you with the following raw intelligence. This is your ammunition, not your script. Absorb it, find the truth, and then formulate your own smartass response.</summary>\n"
             f"  <content>\n{search_context}\n</content>\n"
-            "</intel>"
-        )
-    else:
-        intel_section = (
-            "<intel>\n"
-            "  <source>Internal Knowledge</source>\n"
-            "  <summary>No web search was performed. Answer based on your own vast, terrifying intellect.</summary>\n"
             "</intel>"
         )
 
@@ -69,7 +63,7 @@ def get_final_answer_prompt(
     elif target_user_name:
         target_user_section = (
             "<target_user_profile>\n"
-            f"  <instructions>The user's question is about '{target_user_name}', but you have no information on them. Make it clear you don't know who that is.</instructions>\n"
+            f"  <instructions>The user's question is about '{target_user_name}', but you have no information on them.</instructions>\n"
             "</target_user_profile>"
         )
 
