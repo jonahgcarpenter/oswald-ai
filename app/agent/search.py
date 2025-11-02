@@ -12,6 +12,7 @@ if not SEARXNG_URL:
     log.error("SEARXNG_URL environment variable not set.")
 
 
+# TODO: Implement some form of gaurdrails to check search queries before execution
 @tool
 async def search_searxng(query: str) -> str:
     """
