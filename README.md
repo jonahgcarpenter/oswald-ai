@@ -107,6 +107,4 @@ docker compose up -d
 
 ## Todo
 
-- Simplfy dockerfile
-- Dockerhub -> GHCR
-- Investigate LangChain and LlamaIndex
+- Oswald needs a complete architectural rework using tools like LangChain and LlamaIndex for better results
