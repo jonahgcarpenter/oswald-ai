@@ -8,17 +8,14 @@ from interactive_test import interactive_test
 from transformers import TrainingArguments
 from trl import SFTTrainer
 
-# Import Dataset
 file = json.load(open("data.json", "r"))
 print(file[1])
 
-# Load the base model
 model_name = "unsloth/Phi-3-mini-4k-instruct-bnb-4bit"
 
-max_seq_length = 2048  # Choose sequence length
-dtype = None  # Auto detection
+max_seq_length = 2048
+dtype = None
 
-# Load model and tokenizer
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=model_name,
     max_seq_length=max_seq_length,
@@ -37,10 +34,9 @@ formatted_data = [format_prompt(item) for item in file]
 dataset = Dataset.from_dict({"text": formatted_data})
 print(dataset[0]["text"])
 
-# Add LoRA adapters
 model = FastLanguageModel.get_peft_model(
     model,
-    r=64,  # LoRA rank - higher = more capacity, more memory
+    r=64,
     target_modules=[
         "q_proj",
         "k_proj",
@@ -50,16 +46,15 @@ model = FastLanguageModel.get_peft_model(
         "up_proj",
         "down_proj",
     ],
-    lora_alpha=128,  # LoRA scaling factor (usually 2x rank)
-    lora_dropout=0,  # Supports any, but = 0 is optimized
-    bias="none",  # Supports any, but = "none" is optimized
-    use_gradient_checkpointing="unsloth",  # Unsloth's optimized version
+    lora_alpha=128,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
     random_state=3407,
-    use_rslora=False,  # Rank stabilized LoRA
-    loftq_config=None,  # LoftQ
+    use_rslora=False,
+    loftq_config=None,
 )
 
-# Training arguments optimized for Unsloth
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
@@ -69,7 +64,7 @@ trainer = SFTTrainer(
     dataset_num_proc=2,
     args=TrainingArguments(
         per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,  # Effective batch size = 8
+        gradient_accumulation_steps=4,
         warmup_steps=10,
         num_train_epochs=3,
         learning_rate=2e-4,
@@ -84,20 +79,19 @@ trainer = SFTTrainer(
         save_strategy="epoch",
         save_total_limit=2,
         dataloader_pin_memory=False,
-        report_to="none",  # Disable Weights & Biases logging
+        report_to="none",
     ),
 )
 
-# Train the model
 trainer_stats = trainer.train()
 
 merged_model_path = "merged_16bit_model"
 model.save_pretrained_merged(merged_model_path, tokenizer, save_method="merged_16bit")
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=merged_model_path,  # Load our saved model
+    model_name=merged_model_path,
     dtype=dtype,
-    load_in_4bit=False,  # No need for 4-bit loading here
+    load_in_4bit=False,
 )
 
 should_save = interactive_test(model, tokenizer)
