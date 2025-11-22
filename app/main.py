@@ -9,6 +9,8 @@ import uvicorn
 from agent.agent import OllamaService
 from agent.endpoints import router as agent_router
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from utils.create_tables import create_db_and_tables
 from utils.db_connect import engine, get_db_session, get_db_status
@@ -41,8 +43,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/")
+async def serve_test_ui():
+    """
+    Serves the HTML page at ./views/ui.html
+    """
+    return FileResponse("views/ui.html")
+
+
+@app.get("/health")
 async def read_root_health_check(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
