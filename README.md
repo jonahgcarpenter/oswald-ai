@@ -1,55 +1,40 @@
 # Oswald-AI
 
-## About This Project
+<div align="center">
 
-This project is my first dive into the world of AI, created as a fun way for me to learn and explore.
+**A persistent, cross-platform digital manservant.**
 
-The idea was to build a simple, interactive AI chatbot for Discord. There are no complex commands to remember—just mention the bot's user (`@Bot Name`) with your question or prompt, and it will do its best to provide a helpful, interesting, or just plain fun response.
+Oswald is a personal AI project designed to occupy the space between a classic British butler and a hyper-advanced neural network.
 
-With the new addition of user based context, the command (`@Bot Name !context`) will simply return the context for the user
+![Oswald Preview](https://y.yarn.co/eb976dbd-fa42-4e1a-bb55-d3adac9785cf_text.gif) ![Oswald Preview](https://media.tenor.com/EifGeTRyvxoAAAAM/alfred-alfred-batman.gif)
+
+</div>
+
+Built on a "write once, serve everywhere" philosophy, Oswald acts as the connective tissue for my digital ecosystem. He seamlessly transitions between environments—managing homelab infrastructure via terminal, controlling smart home devices through IoT integrations, and facilitating social interactions within Discord communities.
+
+Unlike stateless assistants, Oswald is architected with memory and context-awareness. He doesn't just respond to prompts; he remembers them. By building unique memory profiles for every user, he learns routines, adapts to conversational quirks, and recalls preferences across sessions. The result is a unified assistant that manages my digital life with efficiency and a touch of dry wit, ensuring the environment is exactly to my liking—often before I even ask.
+
+## Integrations
+
+- **Discord** There are no complex commands to remember—just mention the bot's user (`@Bot Name`) with your question or prompt.
 
 ## How It Works
 
-The bot follows a structured, multi-step process to decide when to search the web and how to synthesize information into a helpful answer. The core logic is visualized below:
-
-```mermaid
-graph TD
-    subgraph Main Request Thread
-        A[User Mentions Bot] --> B[Fetch User Profile for Current Turn];
-        B --> E[Plan & Generate Search Queries];
-        E --> |No Queries Generated| G[Synthesize Final Answer];
-        E --> |Queries Generated| F[Execute Search via SearXNG];
-        F --> G;
-        G --> H[Format & Send Discord Message];
-    end
-
-    subgraph Background Task - Memory Evolution
-        I[Save Current Chat to DB] --> J{Profile Exists?};
-        J --> |No| K[Fetch Recent Chats - Last 10];
-        K --> L[Generate New User Profile];
-        J --> |Yes| M[Fetch Old Profile & Most Recent Chat];
-        M --> N[Update Existing Profile];
-        L --> O[Save Profile to DB];
-        N --> O;
-        O --> P[End];
-    end
-
-    H --> I;
-```
+<img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/e5c227a4-7fa7-43ac-a799-994051944bba" />
 
 ## Prerequisites
 
 Before running the application, you will need the following services available:
 
-- **PostgreSQL w/ PGVector:** Used for persistent data storage, for now this is simply coversation history
+- **PostgreSQL w/ PGVector:** Used as a vector database, along with saving chat history for monitoring
 - **SearXNG:** A running instance is required to act as the search engine tool for the bot.
-- **Ollama:** Required to serve the local Large Language Model (LLM) that powers the bot's intelligence.
+- **Ollama:** Required to serve the local Large Language Model
 
 ## Installation
 
 ### Docker Compose:
 
-```bash
+```
 services:
   oswald-ai:
     container_name: oswald-ai
@@ -70,7 +55,7 @@ services:
 
 ### Env Example:
 
-```bash
+```
 # Make a dedicated Discord App for this bot
 # https://discord.com/developers/applications
 DISCORD_TOKEN=your-discordbot-api-token
