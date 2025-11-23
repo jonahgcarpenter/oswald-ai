@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import text
@@ -54,8 +54,6 @@ class UserMemory(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     last_accessed_at = Column(DateTime, default=datetime.utcnow)
-
-    memory_metadata = Column(JSONB)
 
     user = relationship("User", back_populates="memories")
 

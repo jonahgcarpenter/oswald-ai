@@ -46,7 +46,7 @@ class MemoryService:
     Handles adding and retrieving vector memories for users.
     """
 
-    async def add_memory(self, user_id: str, text: str, metadata: dict = None):
+    async def add_memory(self, user_id: str, text: str):
         """
         Adds a new memory for a specific user.
         """
@@ -74,7 +74,6 @@ class MemoryService:
                     user_id=user.id,
                     content=text,
                     embedding=embedding,
-                    memory_metadata=metadata,
                 )
                 session.add(new_memory)
                 await session.commit()
