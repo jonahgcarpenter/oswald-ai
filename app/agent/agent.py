@@ -30,7 +30,6 @@ class OllamaService:
     """
 
     def __init__(self):
-        log.info("Initializing OllamaService...")
         try:
             self.base_url = os.getenv("OLLAMA_BASE_URL")
             self.model = os.getenv("OLLAMA_BASE_MODEL")
@@ -51,8 +50,6 @@ class OllamaService:
                 system_prompt=OSWALD_SYSTEM_PROMPT,
                 context_schema=AgentContext,
             )
-
-            log.info(f"OllamaService initialized successfully with model: {self.model}")
 
         except Exception as e:
             log.error(f"Failed to initialize OllamaService: {e}", exc_info=True)

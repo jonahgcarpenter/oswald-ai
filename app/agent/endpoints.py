@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from utils.logger import get_logger
+from utils.logger import get_logger, user_context
 
 from .agent import OllamaService
 
@@ -15,10 +15,6 @@ class AgentRequest(BaseModel):
 
 
 async def get_ollama_service(request: Request) -> OllamaService:
-    """
-    A dependency that retrieves the singleton OllamaService
-    instance from the app's state.
-    """
     return request.app.state.ollama_service
 
 
@@ -30,16 +26,21 @@ async def ask_agent(
     """
     Receives a question and passes it to the OllamaService.
     """
-    if not ollama:
-        log.error("OllamaService not available.")
-        raise HTTPException(
-            status_code=500, detail="Ollama service is not initialized."
+    token = user_context.set(request.user_id)
+
+    try:
+        if not ollama:
+            log.error("OllamaService not available.")
+            raise HTTPException(
+                status_code=500, detail="Ollama service is not initialized."
+            )
+
+        log.info(f"Received question for agent: {request.question}")
+
+        response = await ollama.ask_question(
+            question=request.question, user_id=request.user_id
         )
 
-    log.info(f"Received question for agent: {request.question}")
-
-    response = await ollama.ask_question(
-        question=request.question, user_id=request.user_id
-    )
-
-    return {"answer": response}
+        return {"answer": response}
+    finally:
+        user_context.reset(token)

@@ -1,4 +1,5 @@
 import asyncio
+import logging.config
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -16,6 +17,8 @@ from utils.create_tables import create_db_and_tables
 from utils.db_connect import engine, get_db_session, get_db_status
 from utils.logger import LOGGING_CONFIG, get_logger
 
+logging.config.dictConfig(LOGGING_CONFIG)
+
 log = get_logger(__name__)
 
 
@@ -23,8 +26,6 @@ log = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """
     Manages the application's lifespan events.
-    - On startup: Prints a message, creates DB tables, loads ollama service
-    - On shutdown: Disposes of the database engine's connection pool.
     """
     log.info("FastAPI app starting up...")
     try:
@@ -54,9 +55,6 @@ app.add_middleware(
 
 @app.get("/")
 async def serve_test_ui():
-    """
-    Serves the HTML page at ./views/ui.html
-    """
     return FileResponse("views/ui.html")
 
 
@@ -65,9 +63,6 @@ async def read_root_health_check(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ):
-    """
-    Root endpoint health check.
-    """
     ollama_service: OllamaService = request.app.state.ollama_service
 
     db_status_task = get_db_status(db)
@@ -87,9 +82,6 @@ app.include_router(agent_router, prefix="/agent")
 
 
 if __name__ == "__main__":
-    """
-    Starts the Uvicorn server.
-    """
     uvicorn.run(
         "main:app", host="127.0.0.1", port=8000, reload=True, log_config=LOGGING_CONFIG
     )
