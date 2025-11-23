@@ -16,9 +16,7 @@ if not SEARXNG_URL:
 @tool
 async def search_searxng(query: str) -> str:
     """
-    Searches the web using a private SearXNG instance.
-    Use this tool for recent events, facts, or information
-    you do not have in your internal knowledge.
+    Queries the web for real-time information, recent events, or specific facts not contained in your internal knowledge base.
     """
     if not SEARXNG_URL:
         return "Search is not configured; SEARXNG_URL is not set."

@@ -144,16 +144,7 @@ class MemoryService:
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Commit a specific detail about the user to long-term storage.
-
-    WHEN TO USE:
-    - Personal preferences (music, code style, food).
-    - Life details (relationships, job, location).
-    - Psychological traits (fears, motivations, history).
-
-    RULES:
-    - It is useful to save both the fact AND the 'why' (the emotional context).
-    - Always rewrite the memory as a clear, third-person fact.
+    Persists a specific detail about the user in third person (e.g., preferences, personal history, or traits) to long-term storage.
     """
     log.debug("Using save_to_user_memory tool")
     try:
@@ -175,15 +166,7 @@ async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> st
 @tool
 async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
     """
-    Retrieve past details about the user to personalize a response.
-
-    WHEN TO USE:
-    - Recalling facts mentioned in previous conversations.
-    - Checking for established preferences before making a suggestion.
-    - Answering questions the user asks about themselves.
-
-    RULES:
-    - Use the returned information to tailor your personality, references, and advice specifically to THIS user's history.
+    Retrieves information from the user's long-term memory to personalize responses or recall past context.
     """
     log.debug("Using search_user_memory tool")
     try:
