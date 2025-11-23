@@ -120,7 +120,7 @@ class OllamaService:
         """
         async with httpx.AsyncClient(base_url=self.base_url, timeout=5.0) as client:
             try:
-                response = await client.get("/")
+                response = await client.get("/health")
 
                 response.raise_for_status()
 
