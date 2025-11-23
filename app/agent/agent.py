@@ -3,7 +3,7 @@ from typing import TypedDict
 
 import httpx
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_ollama import ChatOllama
 from utils.logger import get_logger
 
@@ -63,24 +63,55 @@ class OllamaService:
         Asks a question to the LLM agent and returns the response.
         """
         log.debug(f"Asking agent (User: {user_id}): {question}")
-        try:
-            context = {"user_id": user_id, "memory_service": self.memory_service}
 
-            input_data = {"messages": [HumanMessage(content=question)]}
+        current_messages = [HumanMessage(content=question)]
+        MAX_RETRIES = 3
 
-            response_data = await self.agent.ainvoke(input_data, context=context)
+        for attempt in range(MAX_RETRIES):
+            try:
+                context = {"user_id": user_id, "memory_service": self.memory_service}
+                input_data = {"messages": current_messages}
 
-            final_messages = response_data.get("messages", [])
-            if final_messages:
+                response_data = await self.agent.ainvoke(input_data, context=context)
+
+                final_messages = response_data.get("messages", [])
+                if not final_messages:
+                    return "I'm not sure how to respond to that."
+
                 response_text = final_messages[-1].content
-            else:
-                response_text = "I'm not sure how to respond to that."
 
-            log.debug(f"Received response: {response_text[:50]}...")
-            return response_text
-        except Exception as e:
-            log.error(f"Error during agent invocation: {e}", exc_info=True)
-            return "Sorry, I encountered an error while processing your request."
+                if (
+                    response_text.strip().startswith('{"type":"function"')
+                    or '"function":' in response_text
+                ):
+                    log.warning(
+                        f"Attempt {attempt + 1}/{MAX_RETRIES}: Model leaked raw tool call. Retrying..."
+                    )
+
+                    current_messages.append(AIMessage(content=response_text))
+
+                    correction_msg = (
+                        "SYSTEM ERROR: You outputted the raw tool call JSON as text instead of executing it. "
+                        "Do not print JSON. EXECUTE the tool function internally and return the natural language result."
+                    )
+                    current_messages.append(HumanMessage(content=correction_msg))
+
+                    continue
+
+                log.debug(f"Received response: {response_text[:50]}...")
+                return response_text
+
+            except Exception as e:
+                log.error(
+                    f"Error during agent invocation (Attempt {attempt + 1}): {e}",
+                    exc_info=True,
+                )
+                if attempt == MAX_RETRIES - 1:
+                    return (
+                        "Sorry, I encountered an error while processing your request."
+                    )
+
+        return "I'm having trouble connecting to my tools right now. Please try again."
 
     async def check_health(self) -> dict:
         """

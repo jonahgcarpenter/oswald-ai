@@ -144,9 +144,12 @@ class MemoryService:
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Saves a specific piece of information, fact, or user preference
-    to your long-term memory. Use this when the user explicitly
-    asks you to remember something.
+    Saves a persistent fact about the USER (e.g., name, hobbies, preferences).
+
+    RULES:
+    1. NEVER use this tool to save definitions, general knowledge, or your own answers.
+    2. ONLY use this when the user explicitly tells you a fact about themselves.
+    3. Reword the content to be a clear, third-person statement.
     """
     log.debug("Using save_to_user_memory tool")
     try:
