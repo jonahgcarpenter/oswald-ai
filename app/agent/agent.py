@@ -83,6 +83,7 @@ class OllamaService:
                 if (
                     response_text.strip().startswith('{"type":"function"')
                     or '"function":' in response_text
+                    or ('"name":' in response_text and '"parameters":' in response_text)
                 ):
                     log.warning(
                         f"Attempt {attempt + 1}/{MAX_RETRIES}: Model leaked raw tool call. Retrying..."

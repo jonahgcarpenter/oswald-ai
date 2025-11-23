@@ -112,14 +112,20 @@ class MemoryService:
                     return []
 
                 stmt = (
-                    select(UserMemory)
+                    select(
+                        UserMemory,
+                        UserMemory.embedding.l2_distance(query_vector).label(
+                            "distance"
+                        ),
+                    )
                     .where(UserMemory.user_id == user_id)
-                    .order_by(UserMemory.embedding.l2_distance(query_vector))
+                    .order_by("distance")
                     .limit(k)
                 )
 
                 result = await session.execute(stmt)
-                memories = result.scalars().all()
+                rows = result.all()
+                memories = [row[0] for row in rows if row[1] < 0.6]
 
                 if not memories:
                     log.debug(f"No memories found for user {user_id}")
@@ -176,7 +182,11 @@ async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
         results = await memory_service.search_memories(user_id, query)
 
         if not results:
-            return "No relevant information found in memory."
+            return (
+                "No relevant information found in memory. "
+                "SYSTEM ADVICE: If the user just shared a new fact or preference, "
+                "you MUST now call 'save_to_user_memory' to store it."
+            )
 
         return "Found the following relevant information:\n" + "\n".join(results)
     except KeyError:
