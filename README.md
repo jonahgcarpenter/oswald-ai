@@ -50,7 +50,6 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_SCHEMA=${DB_SCHEMA}
       - LOG_LEVEL=${LOG_LEVEL}
-      - CONTEXT_SUMMARY_COUNT=${CONTEXT_SUMMARY_COUNT}
 ```
 
 ### Env Example:
@@ -78,9 +77,11 @@ DB_PASSWORD=password
 DB_SCHEMA=schema
 
 LOG_LEVEL=DEBUG # Can be set to either INFO or DEBUG
-CONTEXT_SUMMARY_COUNT=10 # Number of previous chats to be send as user_context
 ```
 
 ## Todo
 
-- Oswald needs a complete architectural rework using tools like LangChain and LlamaIndex for better results
+- Readd Discord integration
+- Save each query/response along with any search queries used
+- Config file that loads the vars
+- Conditionally initialize DB tables
