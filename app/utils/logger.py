@@ -58,7 +58,27 @@ LOGGING_CONFIG = {
             "propagate": False,
         },
         "sqlalchemy.engine": {
-            "level": "INFO",
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "httpcore": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "httpcore.http11": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "httpcore.connection": {
+            "level": "WARNING",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+        "httpx": {
+            "level": "WARNING",
             "handlers": ["console"],
             "propagate": False,
         },
