@@ -2,8 +2,6 @@ import os
 from datetime import datetime
 
 import httpx
-from langchain.tools import ToolRuntime
-from langchain_core.tools import tool
 from sqlalchemy.future import select
 from utils.config import settings
 from utils.create_tables import User, UserMemory
@@ -136,56 +134,3 @@ class MemoryService:
                     exc_info=True,
                 )
                 return []
-
-
-# TODO: Move tools into a consoladated file
-@tool
-async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
-    """
-    Persists a specific detail about the user in third person (e.g., preferences, personal history, or traits) to long-term storage.
-    """
-    log.debug("Using save_to_user_memory tool")
-    try:
-        user_id = runtime.context["user_id"]
-        memory_service = runtime.context["memory_service"]
-
-        await memory_service.add_memory(user_id, text_to_remember)
-        return f"Successfully saved: '{text_to_remember}' to memory."
-    except KeyError:
-        log.error(
-            "Tool 'save_to_user_memory' called without user_id or memory_service in context."
-        )
-        return "Memory tool is not configured."
-    except Exception as e:
-        log.error(f"Error in save_to_user_memory: {e}", exc_info=True)
-        return "An error occurred while saving to memory."
-
-
-@tool
-async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
-    """
-    Retrieves information from the user's long-term memory to personalize responses or recall past context.
-    """
-    log.debug("Using search_user_memory tool")
-    try:
-        user_id = runtime.context["user_id"]
-        memory_service = runtime.context["memory_service"]
-
-        results = await memory_service.search_memories(user_id, query)
-
-        if not results:
-            return (
-                "No relevant information found in memory. "
-                "SYSTEM ADVICE: If the user just shared a new fact or preference, "
-                "you MUST now call 'save_to_user_memory' to store it."
-            )
-
-        return "Found the following relevant information:\n" + "\n".join(results)
-    except KeyError:
-        log.error(
-            "Tool 'search_user_memory' called without user_id or memory_service in context."
-        )
-        return "Memory tool is not configured."
-    except Exception as e:
-        log.error(f"Error in search_user_memory: {e}", exc_info=True)
-        return "An error occurred while searching memory."

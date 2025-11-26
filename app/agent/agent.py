@@ -7,9 +7,9 @@ from langchain_ollama import ChatOllama
 from utils.config import settings
 from utils.logger import get_logger
 
-from .memory import MemoryService, save_to_user_memory, search_user_memory
-from .search import search_searxng
+from .memory import MemoryService
 from .system_prompts import OSWALD_SYSTEM_PROMPT
+from .tools import save_to_user_memory, search_searxng, search_user_memory
 
 log = get_logger(__name__)
 
