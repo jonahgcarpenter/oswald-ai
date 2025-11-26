@@ -66,7 +66,7 @@ class OllamaService:
         """
         Asks a question to the LLM agent and returns the response.
         """
-        log.debug(f"Asking agent (User: {user_id}): {question}")
+        log.debug(f"Asking agent: {question}")
 
         current_messages = [HumanMessage(content=question)]
         MAX_RETRIES = 3
@@ -124,7 +124,7 @@ class OllamaService:
                         )
                         session.add(chat_log)
                         await session.commit()
-                        log.debug(f"Saved chat log for user {user_id}")
+                        log.debug(f"Saved chat log for user")
                 except Exception as db_e:
                     log.error(f"Failed to save chat log: {db_e}", exc_info=True)
 

@@ -40,7 +40,7 @@ class MemoryService:
         """
         Adds a new memory for a specific user.
         """
-        log.info(f"Adding memory for user: {user_id}")
+        log.info(f"Adding memory for user")
 
         embedding = await _get_ollama_embedding(text)
         if not embedding:
@@ -67,11 +67,11 @@ class MemoryService:
                 )
                 session.add(new_memory)
                 await session.commit()
-                log.info(f"Successfully added memory for user: {user_id}")
+                log.info(f"Successfully added memory for user")
 
             except Exception as e:
                 log.error(
-                    f"Database error while adding memory for {user_id}: {e}",
+                    f"Database error while adding memory for: {e}",
                     exc_info=True,
                 )
 
@@ -81,9 +81,7 @@ class MemoryService:
         """
         Finds the 'k' most relevant memories for a specific user.
         """
-        log.debug(
-            f"Searching memory for user {user_id} with query: {query_text[:30]}..."
-        )
+        log.debug(f"Searching memory for user with query: {query_text[:30]}...")
 
         query_vector = await _get_ollama_embedding(query_text)
         if not query_vector:
@@ -95,9 +93,7 @@ class MemoryService:
                 user_stmt = select(User).where(User.id == user_id)
                 user_result = await session.execute(user_stmt)
                 if not user_result.scalar_one_or_none():
-                    log.debug(
-                        f"No user found with id {user_id}, cannot search memories."
-                    )
+                    log.debug(f"No user found with this id, cannot search memories.")
                     return []
 
                 stmt = (
@@ -117,10 +113,10 @@ class MemoryService:
                 memories = [row[0] for row in rows if row[1] < 0.6]
 
                 if not memories:
-                    log.debug(f"No memories found for user {user_id}")
+                    log.debug(f"No memories found for user")
                     return []
 
-                log.info(f"Found {len(memories)} relevant memories for user {user_id}")
+                log.info(f"Found {len(memories)} relevant memories for user")
 
                 for mem in memories:
                     mem.last_accessed_at = datetime.utcnow()
@@ -130,7 +126,7 @@ class MemoryService:
 
             except Exception as e:
                 log.error(
-                    f"Database error while searching memory for {user_id}: {e}",
+                    f"Database error while searching memory for user: {e}",
                     exc_info=True,
                 )
                 return []

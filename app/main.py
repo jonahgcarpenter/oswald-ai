@@ -29,7 +29,6 @@ async def lifespan(app: FastAPI):
     """
     log.info("FastAPI app starting up...")
     try:
-        log.info("Initializing database tables...")
         await create_db_and_tables(engine)
         log.info("Database tables initialized successfully.")
     except Exception as e:
