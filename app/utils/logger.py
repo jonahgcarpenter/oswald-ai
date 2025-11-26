@@ -2,11 +2,9 @@ import contextvars
 import logging
 import os
 
-from dotenv import load_dotenv
+from .config import settings
 
-load_dotenv()
-
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = settings.LOG_LEVEL.upper()
 
 user_context = contextvars.ContextVar("user_id", default=None)
 

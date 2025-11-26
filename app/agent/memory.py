@@ -5,29 +5,21 @@ import httpx
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 from sqlalchemy.future import select
+from utils.config import settings
 from utils.create_tables import User, UserMemory
 from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL")
-
-if not OLLAMA_BASE_URL:
-    log.error("OLLAMA_BASE_URL environment variable not set.")
-if not OLLAMA_EMBEDDING_MODEL:
-    log.error("OLLAMA_EMBEDDING_MODEL environment variable not set.")
+OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
+OLLAMA_EMBEDDING_MODEL = settings.OLLAMA_EMBEDDING_MODEL
 
 
 async def _get_ollama_embedding(text_to_embed: str) -> list[float]:
     """
     Generates an embedding for a given text using the Ollama API.
     """
-    if not OLLAMA_BASE_URL or not OLLAMA_EMBEDDING_MODEL:
-        log.error("Ollama embedding service is not configured.")
-        return []
-
     try:
         async with httpx.AsyncClient(base_url=OLLAMA_BASE_URL, timeout=60.0) as client:
             response = await client.post(
@@ -146,6 +138,7 @@ class MemoryService:
                 return []
 
 
+# TODO: Move tools into a consoladated file
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """

@@ -1,10 +1,10 @@
-import os
 from typing import TypedDict
 
 import httpx
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_ollama import ChatOllama
+from utils.config import settings
 from utils.logger import get_logger
 
 from .memory import MemoryService, save_to_user_memory, search_user_memory
@@ -31,12 +31,8 @@ class OllamaService:
 
     def __init__(self):
         try:
-            self.base_url = os.getenv("OLLAMA_BASE_URL")
-            self.model = os.getenv("OLLAMA_BASE_MODEL")
-
-            if not self.base_url or not self.model:
-                log.error("OLLAMA_BASE_URL or OLLAMA_BASE_MODEL env variables not set.")
-                raise ValueError("Ollama URL or Model not set")
+            self.base_url = settings.OLLAMA_BASE_URL
+            self.model = settings.OLLAMA_BASE_MODEL
 
             self.llm = ChatOllama(base_url=self.base_url, model=self.model)
 

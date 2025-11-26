@@ -24,11 +24,11 @@ class Settings(BaseSettings):
 
     SEARXNG_URL: str = "http://localhost:8888"
 
-    DATABASE_URL: str = (
-        "postgresql://oswald_ai:password@localhost:5432/oswald_ai?search_path=oswald_ai"
-    )
+    DATABASE_URL: str = "postgresql://oswald_ai:password@localhost:5432/oswald_ai"
 
-    LOGGING_LEVEL: str = "INFO"
+    DATABASE_SCHEMA: str = "oswald_ai"
+
+    LOG_LEVEL: str = "INFO"
 
 
 try:

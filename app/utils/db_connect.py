@@ -1,33 +1,25 @@
-import os
-
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.sql import text
 
+from .config import settings
 from .logger import get_logger
 
 log = get_logger(__name__)
 
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_NAME = os.getenv("DB_NAME")
-DB_SCHEMA = os.getenv("DB_SCHEMA")
+DB_SCHEMA = settings.DATABASE_SCHEMA
 
-if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, DB_SCHEMA]):
-    log.error("One or more database environment variables are not set.")
-    exit(1)
-
-DATABASE_URL = (
-    f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-)
+_database_url = settings.DATABASE_URL
+if _database_url.startswith("postgresql://"):
+    _database_url = _database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif _database_url.startswith("postgres://"):
+    _database_url = _database_url.replace("postgres://", "postgresql+asyncpg://", 1)
 
 engine = create_async_engine(
-    DATABASE_URL,
+    _database_url,
     echo=False,
-    connect_args={"server_settings": {"search_path": f"{DB_SCHEMA},public"}},
+    connect_args={"server_settings": {"search_path": DB_SCHEMA}},
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -44,7 +36,6 @@ class Base(DeclarativeBase):
 async def get_db_session() -> AsyncSession:
     """
     FastAPI dependency that provides a database session.
-    It yields a session and handles closing it.
     """
     async with AsyncSessionLocal() as session:
         try:

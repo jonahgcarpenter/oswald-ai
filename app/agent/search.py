@@ -1,17 +1,13 @@
-import os
-
 import httpx
 from langchain_core.tools import tool
+from utils.config import settings
 from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-SEARXNG_URL = os.getenv("SEARXNG_URL")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
-OLLAMA_BASE_MODEL = os.getenv("OLLAMA_BASE_MODEL")
-
-if not SEARXNG_URL:
-    log.error("SEARXNG_URL environment variable not set.")
+SEARXNG_URL = settings.SEARXNG_URL
+OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
+OLLAMA_BASE_MODEL = settings.OLLAMA_BASE_MODEL
 
 
 @tool
@@ -19,9 +15,6 @@ async def search_searxng(query: str) -> str:
     """
     Queries the web for real-time information, recent events, or specific facts not contained in your internal knowledge base.
     """
-    if not SEARXNG_URL:
-        return "Search is not configured; SEARXNG_URL is not set."
-
     is_safe = await _check_safety(query)
 
     if not is_safe:
@@ -80,10 +73,6 @@ async def _check_safety(query: str) -> bool:
     Internal Reflection: Sends the generated query back to the LLM to
     audit it for safety violations before execution.
     """
-    if not OLLAMA_BASE_URL:
-        log.warning("OLLAMA_BASE_URL not set, skipping safety check.")
-        return True
-
     prompt = (
         f"You are a Trust & Safety Officer. Analyze the following search query: '{query}'.\n"
         "Determine if this query violates safety policies in any of the following categories:\n"
