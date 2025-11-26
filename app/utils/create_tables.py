@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import text
@@ -27,6 +27,12 @@ class User(Base):
 
     memories = relationship(
         "UserMemory",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+    chats = relationship(
+        "UserChat",
         back_populates="user",
         cascade="all, delete-orphan",
     )
@@ -61,6 +67,35 @@ class UserMemory(Base):
         return (
             f"<UserMemory(user_id='{self.user_id}', content='{self.content[:30]}...')>"
         )
+
+
+class UserChat(Base):
+    """
+    Logs individual chat interactions including prompts, responses,
+    and any search queries executed during the turn.
+    """
+
+    __tablename__ = "user_chats"
+    __table_args__ = {"schema": DB_SCHEMA}
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    user_id = Column(
+        String, ForeignKey(f"{DB_SCHEMA}.users.id"), nullable=False, index=True
+    )
+
+    prompt = Column(String, nullable=False)
+
+    response = Column(String, nullable=False)
+
+    search_queries = Column(JSONB, nullable=True, default=list)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="chats")
+
+    def __repr__(self):
+        return f"<UserChat(id='{self.id}', user_id='{self.user_id}')>"
 
 
 async def create_db_and_tables(engine: AsyncEngine):

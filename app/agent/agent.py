@@ -5,6 +5,8 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_ollama import ChatOllama
 from utils.config import settings
+from utils.create_tables import UserChat
+from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 from .memory import MemoryService
@@ -100,6 +102,31 @@ class OllamaService:
                     current_messages.append(HumanMessage(content=correction_msg))
 
                     continue
+
+                search_queries = []
+                for message in final_messages:
+                    if isinstance(message, AIMessage) and hasattr(
+                        message, "tool_calls"
+                    ):
+                        for tool_call in message.tool_calls:
+                            if tool_call.get("name") == "search_searxng":
+                                query_arg = tool_call.get("args", {}).get("query")
+                                if query_arg:
+                                    search_queries.append(query_arg)
+
+                try:
+                    async with AsyncSessionLocal() as session:
+                        chat_log = UserChat(
+                            user_id=user_id,
+                            prompt=question,
+                            response=response_text,
+                            search_queries=search_queries,
+                        )
+                        session.add(chat_log)
+                        await session.commit()
+                        log.debug(f"Saved chat log for user {user_id}")
+                except Exception as db_e:
+                    log.error(f"Failed to save chat log: {db_e}", exc_info=True)
 
                 log.debug(f"Received response: {response_text[:50]}...")
                 return response_text

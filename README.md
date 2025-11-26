@@ -55,5 +55,4 @@ services:
 ## Todo
 
 - Readd Discord integration
-- Save each query/response along with any search queries used
 - Conditionally initialize DB tables
