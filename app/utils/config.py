@@ -14,7 +14,7 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    DISCORD_TOKEN: str
+    DISCORD_TOKEN: str = ""
 
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 

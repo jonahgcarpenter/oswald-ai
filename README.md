@@ -41,47 +41,17 @@ services:
     image: ghcr.io/jonahgcarpenter/oswald-ai/oswald-ai:latest
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - OLLAMA_HOST_URL=${OLLAMA_HOST_URL}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - OLLAMA_BASE_MODEL=${OLLAMA_BASE_MODEL}
+      - OLLAMA_EMBEDDING_MODEL=${OLLAMA_EMBEDDING_MODEL}
       - SEARXNG_URL=${SEARXNG_URL}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_SCHEMA=${DB_SCHEMA}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_SCHEMA=${DATABASE_SCHEMA}
       - LOG_LEVEL=${LOG_LEVEL}
-```
-
-### Env Example:
-
-```
-# Make a dedicated Discord App for this bot
-# https://discord.com/developers/applications
-DISCORD_TOKEN=your-discordbot-api-token
-
-# Ollama
-OLLAMA_HOST_URL=http://your-ollama-api-url:11434
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text:v1.5
-
-# Searxng
-# Web seach tool
-SEARXNG_URL=http://your-searxng-url:8888
-
-# Postgres DB
-# To save each prompt and search query executed
-DB_HOST=ip
-DB_PORT=5432
-DB_NAME=db_name
-DB_USER=user
-DB_PASSWORD=password
-DB_SCHEMA=schema
-
-LOG_LEVEL=DEBUG # Can be set to either INFO or DEBUG
 ```
 
 ## Todo
 
 - Readd Discord integration
 - Save each query/response along with any search queries used
-- Config file that loads the vars
 - Conditionally initialize DB tables
