@@ -2,7 +2,7 @@ from typing import TypedDict
 
 import httpx
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from sqlalchemy.future import select
 from utils.config import settings
@@ -104,16 +104,30 @@ class OllamaService:
 
                     continue
 
-                search_queries = []
+                pending_searches = {}
                 for message in final_messages:
                     if isinstance(message, AIMessage) and hasattr(
                         message, "tool_calls"
                     ):
                         for tool_call in message.tool_calls:
                             if tool_call.get("name") == "search_searxng":
-                                query_arg = tool_call.get("args", {}).get("query")
-                                if query_arg:
-                                    search_queries.append(query_arg)
+                                call_id = tool_call.get("id")
+                                query = tool_call.get("args", {}).get("query")
+                                if call_id and query:
+                                    pending_searches[call_id] = query
+
+                safe_queries = []
+                unsafe_queries = []
+
+                for message in final_messages:
+                    if isinstance(message, ToolMessage):
+                        if message.tool_call_id in pending_searches:
+                            query_text = pending_searches[message.tool_call_id]
+
+                            if "BLOCKED by safety guardrails" in message.content:
+                                unsafe_queries.append(query_text)
+                            else:
+                                safe_queries.append(query_text)
 
                 try:
                     async with AsyncSessionLocal() as session:
@@ -133,7 +147,8 @@ class OllamaService:
                             user_id=user_id,
                             prompt=question,
                             response=response_text,
-                            search_queries=search_queries,
+                            safe_search_queries=safe_queries,
+                            unsafe_search_queries=unsafe_queries,
                         )
                         session.add(chat_log)
                         await session.commit()

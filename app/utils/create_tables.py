@@ -88,7 +88,8 @@ class UserChat(Base):
 
     response = Column(String, nullable=False)
 
-    search_queries = Column(JSONB, nullable=True, default=list)
+    safe_search_queries = Column(JSONB, nullable=True, default=list)
+    unsafe_search_queries = Column(JSONB, nullable=True, default=list)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
