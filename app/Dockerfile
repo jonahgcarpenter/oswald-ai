@@ -24,7 +24,10 @@ WORKDIR /home/oswald-ai/app
 
 COPY --from=builder /opt/venv /opt/venv
 
-COPY ./app ./app
+COPY ./agent ./agent
+COPY ./integrations ./integrations
+COPY ./utils ./utils
+COPY ./views ./views
 COPY ./main.py ./
 
 RUN chown -R oswald-ai:oswald-ai /home/oswald-ai /opt/venv
