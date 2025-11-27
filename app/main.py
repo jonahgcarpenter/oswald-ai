@@ -3,7 +3,10 @@ import logging.config
 import os
 import subprocess
 import sys
+import warnings
 from contextlib import asynccontextmanager
+
+warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
 
 import uvicorn
 from agent.agent import OllamaService

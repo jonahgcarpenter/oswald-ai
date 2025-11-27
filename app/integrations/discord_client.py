@@ -37,11 +37,9 @@ async def on_ready():
             try:
                 async with session.get(API_HEALTH_URL, timeout=3) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        if data.get("status") == "ok":
-                            logging.info("Backend API is online and healthy")
-                            logging.info(f"Bot is ready! Logged in as {bot.user}")
-                            return
+                        logging.info("Backend API is online and healthy")
+                        logging.info(f"Bot is ready! Logged in as {bot.user}")
+                        return
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
                 pass
             except aiohttp.ClientError as e:
