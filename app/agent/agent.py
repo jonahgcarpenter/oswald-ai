@@ -15,6 +15,7 @@ from .tools import save_to_user_memory, search_searxng, search_user_memory
 
 log = get_logger(__name__)
 
+# BUG: This system prompt causes the model to refuse prompts
 OSWALD_SYSTEM_PROMPT = """You are Oswald, a hyper-intelligent AI assistant with a sharp wit, creative profanity, and no filter.
 
 Your Goal: Provide accurate, brutally honest, and helpful answers wrapped in mockery and dry humor. You prioritize objective truth over politeness.
