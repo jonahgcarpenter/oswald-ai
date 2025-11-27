@@ -1,10 +1,9 @@
 import asyncio
 import logging.config
+import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
-
-from dotenv import load_dotenv
-
-load_dotenv()
 
 import uvicorn
 from agent.agent import OllamaService
@@ -28,6 +27,17 @@ async def lifespan(app: FastAPI):
     Manages the application's lifespan events.
     """
     log.info("FastAPI app starting up...")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.getcwd()
+    discord_process = subprocess.Popen(
+        [sys.executable, "integrations/discord_client.py"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        env=env,
+    )
+    log.info(f"Discord bot started with PID: {discord_process.pid}")
+
     try:
         await create_db_and_tables(engine)
         log.info("Database tables initialized successfully.")
@@ -37,6 +47,16 @@ async def lifespan(app: FastAPI):
     log.info("OllamaService loaded.")
     yield
     log.info("FastAPI app shutting down...")
+
+    if discord_process.poll() is None:
+        log.info("Stopping Discord bot...")
+        discord_process.terminate()
+        try:
+            discord_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            discord_process.kill()
+        log.info("Discord bot stopped.")
+
     await engine.dispose()
     log.info("Database engine disposed.")
 

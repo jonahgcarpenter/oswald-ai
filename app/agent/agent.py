@@ -4,8 +4,9 @@ import httpx
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_ollama import ChatOllama
+from sqlalchemy.future import select
 from utils.config import settings
-from utils.create_tables import UserChat
+from utils.create_tables import User, UserChat
 from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
@@ -116,6 +117,18 @@ class OllamaService:
 
                 try:
                     async with AsyncSessionLocal() as session:
+                        user_stmt = select(User).where(User.id == user_id)
+                        result = await session.execute(user_stmt)
+                        user = result.scalar_one_or_none()
+
+                        if not user:
+                            log.info(
+                                f"User {user_id} not found, creating new user record."
+                            )
+                            user = User(id=user_id)
+                            session.add(user)
+                            await session.flush()
+
                         chat_log = UserChat(
                             user_id=user_id,
                             prompt=question,
@@ -124,7 +137,7 @@ class OllamaService:
                         )
                         session.add(chat_log)
                         await session.commit()
-                        log.debug(f"Saved chat log for user")
+                        log.debug(f"Saved chat log for user {user_id}")
                 except Exception as db_e:
                     log.error(f"Failed to save chat log: {db_e}", exc_info=True)
 
@@ -149,7 +162,7 @@ class OllamaService:
         """
         async with httpx.AsyncClient(base_url=self.base_url, timeout=5.0) as client:
             try:
-                response = await client.get("/health")
+                response = await client.get("/")
 
                 response.raise_for_status()
 

@@ -87,7 +87,7 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             try:
-                payload = {"question": prompt, "user_id": str(message.author.id)}
+                payload = {"question": prompt, "user_id": str(message.author.name)}
 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(

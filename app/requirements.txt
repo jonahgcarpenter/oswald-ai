@@ -6,11 +6,13 @@ annotated-types==0.7.0
 anyio==4.11.0
 asyncpg==0.30.0
 attrs==25.4.0
+audioop-lts==0.2.2
 certifi==2025.10.5
 charset-normalizer==3.4.4
 click==8.3.0
 colorlog==6.10.1
 dataclasses-json==0.6.7
+discord.py==2.6.4
 fastapi==0.120.4
 frozenlist==1.8.0
 greenlet==3.2.4
