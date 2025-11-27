@@ -54,5 +54,6 @@ services:
 
 ## Todo
 
-- Conditionally initialize DB tables
 - No censorship, but decline web searches when necessary
+- Better use of tool calling
+- Fix saving useless memories
