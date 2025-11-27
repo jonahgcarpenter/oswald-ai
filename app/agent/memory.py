@@ -67,7 +67,7 @@ class MemoryService:
                 )
                 session.add(new_memory)
                 await session.commit()
-                log.info(f"Successfully added memory for user")
+                log.info(f"Successfully added memory for user: '{text}'")
 
             except Exception as e:
                 log.error(
