@@ -57,3 +57,5 @@ services:
 - No censorship, but decline web searches when necessary
 - Better use of tool calling
 - Fix saving useless memories
+- Replies
+- Images
