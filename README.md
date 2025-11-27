@@ -54,5 +54,5 @@ services:
 
 ## Todo
 
-- Readd Discord integration
 - Conditionally initialize DB tables
+- No censorship, but decline web searches when necessary
