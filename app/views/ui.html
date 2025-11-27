@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Oswald AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+      body {
+        background-color: #000000;
+        color: #e5e7eb;
+      }
+      ::-webkit-scrollbar {
+        display: none;
+      }
+      html,
+      body {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+      }
+
+      body {
+        background-color: #000000;
+        color: #e5e7eb;
+      }
+      .markdown-body pre {
+        background: #111827;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        overflow-x: auto;
+        border: 1px solid #374151;
+        margin-top: 0.5rem;
+        margin-bottom: 0.5rem;
+      }
+      .markdown-body code {
+        color: #e879f9;
+        font-family: monospace;
+      }
+      .markdown-body p {
+        margin-bottom: 0.5rem;
+      }
+      .markdown-body p:last-child {
+        margin-bottom: 0;
+      }
+      .markdown-body a {
+        color: #c084fc;
+        text-decoration: underline;
+      }
+      .markdown-body ul {
+        list-style-type: disc;
+        padding-left: 1.5rem;
+        margin-bottom: 0.5rem;
+      }
+      .markdown-body ol {
+        list-style-type: decimal;
+        padding-left: 1.5rem;
+        margin-bottom: 0.5rem;
+      }
+    </style>
+  </head>
+  <body
+    class="h-screen flex flex-col font-sans antialiased bg-black selection:bg-fuchsia-500 selection:text-white"
+  >
+    <header
+      class="bg-black border-b border-gray-800 p-4 flex justify-between items-center shadow-[0_4px_20px_-5px_rgba(126,34,206,0.2)] relative z-10"
+    >
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2">
+          <h1 class="text-xl font-bold text-white tracking-tight">
+            Oswald
+            <span
+              class="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-fuchsia-500"
+              >AI</span
+            >
+          </h1>
+        </div>
+
+        <a
+          href="https://github.com/jonahgcarpenter/oswald-ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-gray-500 hover:text-white transition-colors"
+          title="View on GitHub"
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            class="w-6 h-6"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+              clip-rule="evenodd"
+            />
+          </svg>
+        </a>
+      </div>
+
+      <div
+        class="flex items-center gap-2 bg-gray-900 p-2 rounded-lg border border-gray-800 focus-within:border-purple-500 transition-colors"
+      >
+        <label class="text-xs text-gray-500 uppercase font-bold tracking-wider"
+          >User ID:</label
+        >
+        <input
+          type="text"
+          id="userId"
+          value="test_user_123"
+          class="bg-transparent border-none text-sm text-fuchsia-400 focus:outline-none w-32 font-mono placeholder-gray-700"
+          placeholder="Enter UUID..."
+        />
+      </div>
+    </header>
+
+    <main
+      id="chat-container"
+      class="flex-1 overflow-y-auto p-4 space-y-6 max-w-4xl mx-auto w-full"
+    >
+      <div class="flex gap-4 animate-[fadeIn_0.3s_ease-out]">
+        <div
+          class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-600 to-indigo-700 flex-shrink-0 flex items-center justify-center text-xs font-bold text-white shadow-lg shadow-purple-500/20 border border-white/10"
+        >
+          AI
+        </div>
+        <div class="text-gray-300 py-1 leading-relaxed">
+          <p>Oswald reporting for duty, Sir!</p>
+        </div>
+      </div>
+    </main>
+
+    <footer class="bg-black border-t border-gray-800 p-4 pb-6">
+      <div class="max-w-4xl mx-auto relative">
+        <form id="chat-form" class="flex gap-3">
+          <input
+            type="text"
+            id="user-input"
+            class="flex-1 bg-gray-900 text-gray-100 border border-gray-700 rounded-xl px-4 py-3 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 transition-all placeholder-gray-600"
+            placeholder="Type a message..."
+            autocomplete="off"
+          />
+          <button
+            type="submit"
+            class="bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white px-6 py-2 rounded-xl font-bold shadow-lg shadow-purple-900/30 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transform active:scale-95"
+            id="send-btn"
+          >
+            <span>Send</span>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-4 w-4"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M13 5l7 7-7 7M5 5l7 7-7 7"
+              />
+            </svg>
+          </button>
+        </form>
+        <div
+          id="status-indicator"
+          class="absolute -top-10 left-0 flex items-center gap-2 text-xs text-fuchsia-400 hidden"
+        >
+          <span
+            class="w-2 h-2 bg-fuchsia-500 rounded-full animate-bounce"
+          ></span>
+          Processing...
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      const chatContainer = document.getElementById("chat-container");
+      const chatForm = document.getElementById("chat-form");
+      const userInput = document.getElementById("user-input");
+      const sendBtn = document.getElementById("send-btn");
+      const userIdInput = document.getElementById("userId");
+      const statusIndicator = document.getElementById("status-indicator");
+
+      const appendMessage = (role, text) => {
+        const div = document.createElement("div");
+        div.className = `flex gap-4 ${role === "user" ? "flex-row-reverse" : ""} animate-[fadeIn_0.3s_ease-out]`;
+
+        const avatarClass =
+          role === "user"
+            ? "bg-gradient-to-br from-fuchsia-600 to-pink-600 shadow-fuchsia-500/20"
+            : "bg-gradient-to-br from-purple-600 to-indigo-700 shadow-purple-500/20";
+
+        const avatarLabel = role === "user" ? "ME" : "AI";
+
+        let contentClass = "";
+
+        if (role === "user") {
+          contentClass =
+            "bg-gray-800 border border-gray-700 text-gray-200 rounded-2xl rounded-tr-none p-4 shadow-md";
+        } else {
+          contentClass = "text-gray-300 markdown-body py-1";
+        }
+
+        const content = role === "user" ? text : marked.parse(text);
+
+        div.innerHTML = `
+                <div class="w-8 h-8 rounded-full ${avatarClass} flex-shrink-0 flex items-center justify-center text-xs font-bold text-white shadow-lg border border-white/10">${avatarLabel}</div>
+                <div class="${contentClass} max-w-3xl overflow-hidden leading-relaxed">
+                    ${role === "user" ? `<p>${content}</p>` : content}
+                </div>
+            `;
+
+        chatContainer.appendChild(div);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      };
+
+      const style = document.createElement("style");
+      style.innerHTML = `
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+        `;
+      document.head.appendChild(style);
+
+      chatForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const question = userInput.value.trim();
+        const userId = userIdInput.value.trim();
+
+        if (!question) return;
+
+        appendMessage("user", question);
+        userInput.value = "";
+        userInput.disabled = true;
+        sendBtn.disabled = true;
+        statusIndicator.classList.remove("hidden");
+
+        try {
+          const response = await fetch("http://127.0.0.1:8000/agent/generate", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              question: question,
+              user_id: userId,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Server Error: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          appendMessage("agent", data.answer || "No response received.");
+        } catch (error) {
+          console.error(error);
+          appendMessage(
+            "agent",
+            `**Error:** Could not connect to agent.\n\n\`${error.message}\``,
+          );
+        } finally {
+          userInput.disabled = false;
+          sendBtn.disabled = false;
+          userInput.focus();
+          statusIndicator.classList.add("hidden");
+        }
+      });
+    </script>
+  </body>
+</html>

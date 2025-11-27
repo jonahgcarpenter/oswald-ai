@@ -1,30 +1,19 @@
 import asyncio
 import logging
 import os
-import sys
-from urllib.parse import quote
-
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, project_root)
-
-from base.logging_config import setup_logging
-
-setup_logging()
 
 import aiohttp
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
+from utils.config import settings
+from utils.logger import get_logger
 
-load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = settings.DISCORD_TOKEN
 API_BASE_URL = "http://localhost:8000"
-API_WRAPPER_URL = f"{API_BASE_URL}/generate"
+API_WRAPPER_URL = f"{API_BASE_URL}/agent/generate"
 API_HEALTH_URL = f"{API_BASE_URL}/health"
-API_CONTEXT_URL = f"{API_BASE_URL}/context"
 
-
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 logging.getLogger("discord").setLevel(logging.WARNING)
@@ -48,11 +37,9 @@ async def on_ready():
             try:
                 async with session.get(API_HEALTH_URL, timeout=3) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        if data.get("status") == "ok":
-                            logging.info("Backend API is online and healthy")
-                            logging.info(f"Bot is ready! Logged in as {bot.user}")
-                            return
+                        logging.info("Backend API is online and healthy")
+                        logging.info(f"Bot is ready! Logged in as {bot.user}")
+                        return
             except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
                 pass
             except aiohttp.ClientError as e:
@@ -87,47 +74,9 @@ async def on_message(message: discord.Message):
             .strip()
         )
 
-        username = str(message.author)
-
         if not prompt:
             await message.reply("What the fuck do you want idiot?")
             return
-
-        if prompt == "!context":
-            log.info(f"User '{username}' requested their context.")
-            async with message.channel.typing():
-                try:
-                    encoded_username = quote(username)
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
-                            f"{API_CONTEXT_URL}/{encoded_username}"
-                        ) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                context = data.get(
-                                    "context", "Context data is missing."
-                                )
-                                reply_message = (
-                                    f"Here is your saved context:\n```\n{context}\n```"
-                                )
-                                await message.reply(reply_message)
-                            elif response.status == 404:
-                                await message.reply(
-                                    "I don't have any context saved for you yet."
-                                )
-                            else:
-                                response.raise_for_status()
-                except Exception as e:
-                    log.error(f"Error fetching context for '{username}': {e}")
-                    await message.reply(
-                        "Sorry, I couldn't retrieve your context due to an error."
-                    )
-            return
-
-        target_user_name = None
-        other_mentions = [m for m in message.mentions if m.id != bot.user.id]
-        if len(other_mentions) == 1:
-            target_user_name = str(other_mentions[0])
 
         if message.mentions:
             for member in message.mentions:
@@ -136,9 +85,7 @@ async def on_message(message: discord.Message):
 
         async with message.channel.typing():
             try:
-                payload = {"prompt": prompt, "username": username}
-                if target_user_name:
-                    payload["target_user"] = target_user_name
+                payload = {"question": prompt, "user_id": str(message.author.name)}
 
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -147,7 +94,7 @@ async def on_message(message: discord.Message):
                         response.raise_for_status()
                         api_data = await response.json()
                         model_response = api_data.get(
-                            "response", "Sorry, I received an empty response."
+                            "answer", "Sorry, I received an empty response."
                         )
 
                 if len(model_response) > 2000:
