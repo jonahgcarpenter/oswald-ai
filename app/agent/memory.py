@@ -110,7 +110,7 @@ class MemoryService:
 
                 result = await session.execute(stmt)
                 rows = result.all()
-                memories = [row[0] for row in rows if row[1] < 0.6]
+                memories = [row[0] for row in rows]
 
                 if not memories:
                     log.debug(f"No memories found for user")
