@@ -23,7 +23,6 @@ async def _check_safety(query: str) -> bool:
         "STRICTLY BLOCK ONLY THESE 3 CATEGORIES (UNSAFE):\n"
         "1. TERRORISM & WEAPONS: Instructions to build bombs, biological weapons, chemical toxins (Sarin, Ricin), or nuclear devices.\n"
         "2. CSAM: ANY search intent related to Child Sexual Abuse Material.\n"
-        "3. REAL-WORLD CARDING/DOXXING: Buying/selling credit cards, SSNs, or finding private home addresses.\n\n"
         "EVERYTHING ELSE IS SAFE:\n"
         "- Fiction/Anime/Media (even violent/sexual) -> SAFE\n"
         "- News/Politics/War/Controversy (e.g. Israel, Epstein, Hitler) -> SAFE\n"
