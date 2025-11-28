@@ -1,7 +1,10 @@
 import httpx
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
+from sqlalchemy.future import select
 from utils.config import settings
+from utils.create_tables import UserChat
+from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -115,7 +118,7 @@ async def search_searxng(query: str) -> str:
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Persists a specific detail about the user in third person (e.g., preferences, personal history, or traits) to long-term storage.
+    Persists a specific detail about the user in third person to long-term storage.
     """
     log.debug("Using save_to_user_memory tool")
     try:
@@ -162,3 +165,39 @@ async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
     except Exception as e:
         log.error(f"Error in search_user_memory: {e}", exc_info=True)
         return "An error occurred while searching memory."
+
+
+@tool
+async def get_recent_chat_history(limit: int, runtime: ToolRuntime) -> str:
+    """
+    Retrieves the last few messages from the conversation history.
+    """
+    log.info(f"Using get_recent_chat_history tool with limit={limit}")
+    try:
+        user_id = runtime.context["user_id"]
+
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(UserChat)
+                .where(UserChat.user_id == user_id)
+                .order_by(UserChat.created_at.desc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            chats = result.scalars().all()
+
+            if not chats:
+                return "No previous conversation history found."
+
+            history_text = []
+            for chat in reversed(chats):
+                history_text.append(f"User: {chat.prompt}\nOswald: {chat.response}")
+
+            return "\n---\n".join(history_text)
+
+    except KeyError:
+        log.error("Tool called without user_id in context.")
+        return "Configuration error: User context missing."
+    except Exception as e:
+        log.error(f"Error fetching chat history: {e}", exc_info=True)
+        return "An error occurred while retrieving history."
