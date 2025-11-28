@@ -96,7 +96,7 @@ async def search_searxng(query: str) -> str:
                 return "No search results found."
 
             compiled_results = "\n\n".join(snippets)
-            log.debug(
+            log.info(
                 f"Returning {len(snippets)} search results for query '{query}':\n{compiled_results}"
             )
             return compiled_results
