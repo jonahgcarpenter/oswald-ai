@@ -54,5 +54,6 @@ services:
 
 ## Todo
 
-- Better use of tool calling, and more meaningful memories saved
+- Distinuishment of user and himself, specificlly when using pronouns
+- Better use of tool calling, and more meaningful memories saved. Along with less duplicate memories
 - Support images with a vision model?
