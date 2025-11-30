@@ -11,7 +11,13 @@ from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 from .memory import MemoryService
-from .tools import save_to_user_memory, search_searxng, search_user_memory
+from .tools import (
+    save_global_memory,
+    save_to_user_memory,
+    search_global_memory,
+    search_searxng,
+    search_user_memory,
+)
 
 log = get_logger(__name__)
 
@@ -21,9 +27,11 @@ CONTEXT AWARENESS:
 Recent conversation history is automatically provided to you. Use it to understand follow-up questions (e.g., if the user simply says "Yes", "Why?", or "Explain").
 
 DECISION PROTOCOL:
-1. CHECK MEMORY: Use `search_user_memory` to find out about the user you are talking to (e.g., their preferences, specific past events, or personal data).    
-2. EXTERNAL SEARCH: Use `search_searxng` for real-time data or objective facts. You must have a specific, concrete search term.
-3. SAVE INFO: Use `save_to_user_memory` if the user explicitly provides new, permanent personal information or preferences.
+1. CHECK USER MEMORY: Use `search_user_memory` to retrieve what you know about the **User** (e.g., preferences, history, personal details).
+2. CHECK GLOBAL MEMORY: Use `search_global_memory` to retrieve established facts about **Yourself** (Oswald) or the system.
+3. EXTERNAL SEARCH: Use `search_searxng` for real-time data or objective facts.
+4. SAVE USER INFO: Use `save_to_user_memory` if the user provides new personal information about themselves (e.g., preferences, history, personal details).
+5. SAVE SELF-KNOWLEDGE: Use `save_global_memory` if you learn a new, permanent fact about **Yourself**.
 
 Analyze the request, determine the necessary context based on this hierarchy, and execute the appropriate tools.
 """
@@ -60,7 +68,9 @@ class OllamaService:
             self.tools = [
                 search_searxng,
                 save_to_user_memory,
+                save_global_memory,
                 search_user_memory,
+                search_global_memory,
             ]
 
             self.agent = create_agent(
@@ -73,6 +83,23 @@ class OllamaService:
         except Exception as e:
             log.error(f"Failed to initialize OllamaService: {e}", exc_info=True)
             raise
+
+    def _is_malformed_tool_call(self, text: str) -> bool:
+        """
+        Global detection logic for raw JSON leakage or malformed tool calls.
+        """
+        text = text.strip()
+
+        if text.startswith("{") and '"name":' in text:
+            return True
+
+        if '"type":"function"' in text or '"function":' in text:
+            return True
+
+        if '"parameters":' in text or '"arguments":' in text:
+            return True
+
+        return False
 
     async def _fetch_conversation_history(
         self, user_id: str, limit: int = 5
@@ -122,11 +149,7 @@ class OllamaService:
 
                 response_text = final_messages[-1].content
 
-                if (
-                    response_text.strip().startswith('{"type":"function"')
-                    or '"function":' in response_text
-                    or ('"name":' in response_text and '"parameters":' in response_text)
-                ):
+                if self._is_malformed_tool_call(response_text):
                     log.warning(
                         f"Attempt {attempt + 1}/{MAX_RETRIES}: Model leaked raw tool call. Retrying..."
                     )

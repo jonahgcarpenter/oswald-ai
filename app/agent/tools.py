@@ -1,10 +1,7 @@
 import httpx
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
-from sqlalchemy.future import select
 from utils.config import settings
-from utils.create_tables import UserChat
-from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -116,9 +113,27 @@ async def search_searxng(query: str) -> str:
 
 
 @tool
+async def save_global_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
+    """
+    Persists a universal fact about YOURSELF (Oswald) or the system.
+    This information is global and will be accessible to ALL users.
+    Global memories must be OBJECTIVE FACTS. Do NOT save opinions, insults, or subjective user feedback here unless it is from your Creator.
+    """
+    log.debug("Using save_global_memory tool")
+    try:
+        memory_service = runtime.context["memory_service"]
+        await memory_service.add_memory("OSWALD_CORE", text_to_remember)
+        return f"Successfully saved to Global Memory: '{text_to_remember}'"
+    except Exception as e:
+        log.error(f"Error in save_global_memory: {e}", exc_info=True)
+        return "An error occurred while saving to global memory."
+
+
+@tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Stores information about the user you are talking to for long-term storage.
+    Stores information about the USER (preferences, history, personal details) for long-term storage.
+    Do NOT use this for facts about Oswald.
     """
     log.debug("Using save_to_user_memory tool")
     try:
@@ -138,9 +153,28 @@ async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> st
 
 
 @tool
+async def search_global_memory(query: str, runtime: ToolRuntime) -> str:
+    """
+    Retrieves facts about OSWALD (yourself), your creation, your capabilities, or the system.
+    """
+    log.debug("Using search_global_memory tool")
+    try:
+        memory_service = runtime.context["memory_service"]
+        results = await memory_service.search_memories("OSWALD_CORE", query)
+
+        if not results:
+            return "No relevant global information found."
+
+        return "Found the following GLOBAL facts about Oswald:\n" + "\n".join(results)
+    except Exception as e:
+        log.error(f"Error in search_global_memory: {e}", exc_info=True)
+        return "An error occurred while searching global memory."
+
+
+@tool
 async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
     """
-    Retrieves what you know about the user you are talking to (e.g., preferences, personal history).
+    Retrieves facts about the USER (preferences, history, personal details).
     """
     log.debug("Using search_user_memory tool")
     try:
@@ -156,7 +190,9 @@ async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
                 "you MUST now call 'save_to_user_memory' to store it."
             )
 
-        return "Found the following relevant information:\n" + "\n".join(results)
+        return "Found the following relevant information about the USER:\n" + "\n".join(
+            results
+        )
     except KeyError:
         log.error(
             "Tool 'search_user_memory' called without user_id or memory_service in context."

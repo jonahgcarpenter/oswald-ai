@@ -1,4 +1,3 @@
-import os
 from datetime import datetime
 
 import httpx
@@ -40,7 +39,7 @@ class MemoryService:
         """
         Adds a new memory for a specific user.
         """
-        log.info(f"Adding memory for user")
+        log.info(f"Attempting to add memory for target: {user_id}")
 
         embedding = await _get_ollama_embedding(text)
         if not embedding:
@@ -54,7 +53,9 @@ class MemoryService:
                 user = user_result.scalar_one_or_none()
 
                 if not user:
-                    log.info(f"User {user_id} not found, creating new user.")
+                    log.info(
+                        f"Target user {user_id} not found, creating new user record."
+                    )
                     user = User(id=user_id)
                     session.add(user)
                     await session.commit()
@@ -67,11 +68,11 @@ class MemoryService:
                 )
                 session.add(new_memory)
                 await session.commit()
-                log.info(f"Successfully added memory for user: '{text}'")
+                log.info(f"Successfully added memory for target {user_id}: '{text}'")
 
             except Exception as e:
                 log.error(
-                    f"Database error while adding memory for: {e}",
+                    f"Database error while adding memory for {user_id}: {e}",
                     exc_info=True,
                 )
 
@@ -79,9 +80,11 @@ class MemoryService:
         self, user_id: str, query_text: str, k: int = 5
     ) -> list[str]:
         """
-        Finds the 'k' most relevant memories for a specific user.
+        Finds the 'k' most relevant memories for a specific target ID (User or OSWALD_CORE).
         """
-        log.debug(f"Searching memory for user with query: {query_text[:30]}...")
+        log.debug(
+            f"Searching memory for target {user_id} with query: {query_text[:30]}..."
+        )
 
         query_vector = await _get_ollama_embedding(query_text)
         if not query_vector:
@@ -93,7 +96,9 @@ class MemoryService:
                 user_stmt = select(User).where(User.id == user_id)
                 user_result = await session.execute(user_stmt)
                 if not user_result.scalar_one_or_none():
-                    log.debug(f"No user found with this id, cannot search memories.")
+                    log.debug(
+                        f"No user found with id {user_id}, cannot search memories."
+                    )
                     return []
 
                 stmt = (
@@ -113,10 +118,10 @@ class MemoryService:
                 memories = [row[0] for row in rows]
 
                 if not memories:
-                    log.debug(f"No memories found for user")
+                    log.debug(f"No memories found for {user_id}")
                     return []
 
-                log.info(f"Found {len(memories)} relevant memories for user")
+                log.info(f"Found {len(memories)} relevant memories for {user_id}")
 
                 for mem in memories:
                     mem.last_accessed_at = datetime.utcnow()
