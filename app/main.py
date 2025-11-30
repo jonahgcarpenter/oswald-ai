@@ -33,13 +33,13 @@ async def lifespan(app: FastAPI):
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.getcwd()
-    discord_process = subprocess.Popen(
-        [sys.executable, "integrations/discord_client.py"],
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env=env,
-    )
-    log.info(f"Discord bot started with PID: {discord_process.pid}")
+    # discord_process = subprocess.Popen(
+    #     [sys.executable, "integrations/discord_client.py"],
+    #     stdout=sys.stdout,
+    #     stderr=sys.stderr,
+    #     env=env,
+    # )
+    # log.info(f"Discord bot started with PID: {discord_process.pid}")
 
     try:
         await create_db_and_tables(engine)
@@ -51,14 +51,14 @@ async def lifespan(app: FastAPI):
     yield
     log.info("FastAPI app shutting down...")
 
-    if discord_process.poll() is None:
-        log.info("Stopping Discord bot...")
-        discord_process.terminate()
-        try:
-            discord_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            discord_process.kill()
-        log.info("Discord bot stopped.")
+    # if discord_process.poll() is None:
+    #     log.info("Stopping Discord bot...")
+    #     discord_process.terminate()
+    #     try:
+    #         discord_process.wait(timeout=5)
+    #     except subprocess.TimeoutExpired:
+    #         discord_process.kill()
+    #     log.info("Discord bot stopped.")
 
     await engine.dispose()
     log.info("Database engine disposed.")

@@ -54,8 +54,5 @@ services:
 
 ## Todo
 
-- No censorship, but decline web searches when necessary
-- Better use of tool calling
-- Fix saving useless memories
-- Replies
-- Images
+- Better use of tool calling, and more meaningful memories saved
+- Support images with a vision model?

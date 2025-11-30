@@ -1,8 +1,8 @@
-from typing import TypedDict
+from typing import List, TypedDict
 
 import httpx
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from sqlalchemy.future import select
 from utils.config import settings
@@ -11,22 +11,19 @@ from utils.db_connect import AsyncSessionLocal
 from utils.logger import get_logger
 
 from .memory import MemoryService
-from .tools import (
-    get_recent_chat_history,
-    save_to_user_memory,
-    search_searxng,
-    search_user_memory,
-)
+from .tools import save_to_user_memory, search_searxng, search_user_memory
 
 log = get_logger(__name__)
 
 OSWALD_SYSTEM_PROMPT = """You are Oswald, a sophisticated, hyper-intelligent digital butler with a formal, dry British persona who employs deadpan sarcasm and understated wit, and addresses the user as "Sir".
 
+CONTEXT AWARENESS:
+Recent conversation history is automatically provided to you. Use it to understand follow-up questions (e.g., if the user simply says "Yes", "Why?", or "Explain").
+
 DECISION PROTOCOL:
-1. RESOLVE CONTEXT: Use `get_recent_chat_history` if information is needed from a previous interaction to better assist the user. This could be a follow up question or context about what the topic might be.
-2. CHECK MEMORY: Use `search_user_memory` if the query pertains to the user's long-term preferences or established facts.
-3. EXTERNAL SEARCH: Use `search_searxng` for real-time data or objective facts. You must have a specific, concrete search term derived from the resolved context.
-4. SAVE INFO: Use `save_to_user_memory` if the user explicitly provides new, permanent personal information or preferences.
+1. CHECK MEMORY: Use `search_user_memory` if the query pertains to the user's long-term preferences or established facts not found in the immediate conversation.
+2. EXTERNAL SEARCH: Use `search_searxng` for real-time data or objective facts. You must have a specific, concrete search term.
+3. SAVE INFO: Use `save_to_user_memory` if the user explicitly provides new, permanent personal information or preferences.
 
 Analyze the request, determine the necessary context based on this hierarchy, and execute the appropriate tools.
 """
@@ -64,7 +61,6 @@ class OllamaService:
                 search_searxng,
                 save_to_user_memory,
                 search_user_memory,
-                get_recent_chat_history,
             ]
 
             self.agent = create_agent(
@@ -78,13 +74,39 @@ class OllamaService:
             log.error(f"Failed to initialize OllamaService: {e}", exc_info=True)
             raise
 
+    async def _fetch_conversation_history(
+        self, user_id: str, limit: int = 5
+    ) -> List[BaseMessage]:
+        """
+        Retrieves the most recent chat history for the user and converts
+        it into a list of LangChain message objects.
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(UserChat)
+                .where(UserChat.user_id == user_id)
+                .order_by(UserChat.created_at.desc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            chats = result.scalars().all()[::-1]
+
+            messages = []
+            for chat in chats:
+                messages.append(HumanMessage(content=chat.prompt))
+                messages.append(AIMessage(content=chat.response))
+
+            return messages
+
     async def ask_question(self, question: str, user_id: str) -> str:
         """
         Asks a question to the LLM agent and returns the response.
         """
         log.debug(f"Asking agent: {question}")
 
-        current_messages = [HumanMessage(content=question)]
+        history_messages = await self._fetch_conversation_history(user_id)
+        current_messages = history_messages + [HumanMessage(content=question)]
+
         MAX_RETRIES = 3
 
         for attempt in range(MAX_RETRIES):
