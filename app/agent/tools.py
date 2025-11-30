@@ -118,7 +118,7 @@ async def search_searxng(query: str) -> str:
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Persists a specific detail about the user in third person to long-term storage.
+    Stores information about the user you are talking to for long-term storage.
     """
     log.debug("Using save_to_user_memory tool")
     try:
@@ -140,7 +140,7 @@ async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> st
 @tool
 async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
     """
-    Retrieves information from the user's long-term memory to personalize responses or recall past context.
+    Retrieves what you know about the user you are talking to (e.g., preferences, personal history).
     """
     log.debug("Using search_user_memory tool")
     try:
