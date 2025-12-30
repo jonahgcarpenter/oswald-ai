@@ -32,7 +32,7 @@ Before running the application, you will need the following services available:
 
 ## Installation
 
-All default variables can be found [here](https://github.com/jonahgcarpenter/oswald-ai/blob/refactor/app/utils/config.py)
+All default variables can be found [here](https://github.com/jonahgcarpenter/oswald-ai/blob/master/app/utils/config.py)
 
 ### Docker Compose:
 
