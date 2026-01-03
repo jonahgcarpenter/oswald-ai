@@ -11,7 +11,7 @@ OLLAMA_BASE_URL = settings.OLLAMA_BASE_URL
 OLLAMA_BASE_MODEL = settings.OLLAMA_BASE_MODEL
 
 
-async def _check_safety(query: str) -> bool:
+async def check_safety(query: str) -> bool:
     """
     Internal Reflection: Sends the generated query back to the LLM to
     audit it for safety violations before execution.
@@ -45,9 +45,10 @@ async def _check_safety(query: str) -> bool:
             is_safe = "SAFE" in result and "UNSAFE" not in result
 
             if not is_safe:
-                log.warning(f"Reflective Safety Check blocked query: '{query}'")
+                log.warning(f"Reflective Safety Check flagged query: '{query}'")
+                return False
 
-            return is_safe
+            return True
 
     except Exception as e:
         log.error(f"Safety reflection failed: {e}")
@@ -57,17 +58,10 @@ async def _check_safety(query: str) -> bool:
 @tool
 async def search_searxng(query: str) -> str:
     """
-    Queries the web for real-time information, recent events, or specific facts not contained in your internal knowledge base.
+    REQUIRED for any question about external facts, real-time events, news, or general knowledge (history, science, media).
+    This is your window to the internet.
+    Usage: Use this whenever the user asks about something YOU do not intrinsically know or that requires up-to-date verification.
     """
-    is_safe = await _check_safety(query)
-
-    if not is_safe:
-        return (
-            "SYSTEM ADVICE: The search query was BLOCKED by safety guardrails. "
-            "Do NOT attempt to search for this topic again. "
-            "You must now rely on internal knowledge only."
-        )
-
     log.info(f"Performing SearXNG search for: {query}")
 
     async with httpx.AsyncClient(base_url=SEARXNG_URL, timeout=10.0) as client:
@@ -115,9 +109,9 @@ async def search_searxng(query: str) -> str:
 @tool
 async def save_global_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Persists a universal fact about YOURSELF (Oswald) or the system.
-    This information is global and will be accessible to ALL users.
-    Global memories must be OBJECTIVE FACTS. Do NOT save opinions, insults, or subjective user feedback here unless it is from your Creator.
+    Writes a PERMANENT, UNIVERSAL fact to the system core.
+    Usage: ONLY use this if the user is an Admin explicitly updating your operating rules or core identity.
+    WARNING: DO NOT use this for user-specific data (names, preferences). Data saved here is visible to everyone.
     """
     log.debug("Using save_global_memory tool")
     try:
@@ -132,8 +126,9 @@ async def save_global_memory(text_to_remember: str, runtime: ToolRuntime) -> str
 @tool
 async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> str:
     """
-    Stores information about the USER (preferences, history, personal details) for long-term storage.
-    Do NOT use this for facts about Oswald.
+    Writes a specific fact about the CURRENT USER to long-term storage.
+    Usage: Use this when the user explicitly states a preference (e.g., "I am vegan", "My name is John").
+    Constraint: Do not save general conversation flow or temporary chit-chat. Only save lasting facts.
     """
     log.debug("Using save_to_user_memory tool")
     try:
@@ -155,7 +150,9 @@ async def save_to_user_memory(text_to_remember: str, runtime: ToolRuntime) -> st
 @tool
 async def search_global_memory(query: str, runtime: ToolRuntime) -> str:
     """
-    Retrieves facts about OSWALD (yourself), your creation, your capabilities, or the system.
+    Retrieves system rules or Oswald's core identity definition.
+    Usage: STRICTLY LIMITED to questions like "Who are you?", "What are your rules?", or "What is your version?".
+    CRITICAL: DO NOT use this for general questions (e.g., "How to...", "What is...", "News about..."). It will return nothing relevant.
     """
     log.debug("Using search_global_memory tool")
     try:
@@ -174,7 +171,9 @@ async def search_global_memory(query: str, runtime: ToolRuntime) -> str:
 @tool
 async def search_user_memory(query: str, runtime: ToolRuntime) -> str:
     """
-    Retrieves facts about the USER (preferences, history, personal details).
+    Retrieves personal facts about the CURRENT USER (name, preferences, past context).
+    Usage: Use when the user asks "What do you know about me?" or implies past context (e.g., "Do I like spicy food?").
+    Constraint: Distinguish between "Short Term Chat History" (already visible to you) and "Long Term Memory" (this tool). Use this for older facts.
     """
     log.debug("Using search_user_memory tool")
     try:
