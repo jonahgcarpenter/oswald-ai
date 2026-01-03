@@ -241,8 +241,7 @@ class OllamaService:
                             user_id=user_id,
                             prompt=question,
                             response=response_text,
-                            safe_search_queries=safe_queries,
-                            unsafe_search_queries=unsafe_queries,
+                            search_queries=safe_queries,
                         )
                         session.add(chat_log)
                         await session.commit()
