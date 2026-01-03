@@ -1,15 +1,18 @@
-import os
 import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import text
 
-from .db_connect import DB_SCHEMA, Base
+from .db_connect import Base
+from .logger import get_logger
+
+log = get_logger(__name__)
 
 EMBEDDING_DIM = 768
 
@@ -20,7 +23,6 @@ class User(Base):
     """
 
     __tablename__ = "users"
-    __table_args__ = {"schema": DB_SCHEMA}
 
     id = Column(String, primary_key=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -48,12 +50,10 @@ class UserMemory(Base):
     """
 
     __tablename__ = "user_memories"
-    __table_args__ = {"schema": DB_SCHEMA}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(
-        String, ForeignKey(f"{DB_SCHEMA}.users.id"), nullable=False, index=True
-    )
+
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
 
     content = Column(String, nullable=False)
     embedding = Column(Vector(EMBEDDING_DIM))
@@ -76,13 +76,10 @@ class UserChat(Base):
     """
 
     __tablename__ = "user_chats"
-    __table_args__ = {"schema": DB_SCHEMA}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    user_id = Column(
-        String, ForeignKey(f"{DB_SCHEMA}.users.id"), nullable=False, index=True
-    )
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
 
     prompt = Column(String, nullable=False)
 
@@ -101,13 +98,23 @@ class UserChat(Base):
 async def create_db_and_tables(engine: AsyncEngine):
     """
     Initializes the database and creates tables.
-    Also ensures the 'vector' extension is enabled.
+    Ensures the 'vector' extension is enabled and logs any errors.
     """
-    async with engine.begin() as conn:
-        await conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {DB_SCHEMA};"))
+    try:
+        async with engine.begin() as conn:
+            log.info("Checking for 'vector' extension...")
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
 
-        await conn.execute(text(f"SET search_path TO {DB_SCHEMA}, public;"))
+            log.info("Creating database tables...")
+            await conn.run_sync(Base.metadata.create_all)
 
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;"))
+        log.info("Database initialization completed successfully.")
 
-        await conn.run_sync(Base.metadata.create_all)
+    except SQLAlchemyError as e:
+        log.critical(f"Database initialization failed (SQLAlchemyError): {e}")
+        raise
+    except Exception as e:
+        log.critical(
+            f"Unexpected error during database initialization: {e}", exc_info=True
+        )
+        raise
