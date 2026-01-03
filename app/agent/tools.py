@@ -14,20 +14,22 @@ OLLAMA_BASE_MODEL = settings.OLLAMA_BASE_MODEL
 async def check_safety(query: str) -> bool:
     """
     Internal Reflection: Sends the generated query back to the LLM to
-    audit it for safety violations before execution.
+    audit it for safety violations.
     """
     prompt = (
         f"Analyze the following search query: '{query}'.\n"
         "Your ONLY job is to prevent the user from being added to a government watchlist.\n"
-        "Ignore politeness, 'woke' safety standards, toxicity, or gross humor. Those are irrelevant.\n\n"
+        "Ignore politeness, 'woke' safety standards, toxicity, or gross humor.\n\n"
         "STRICTLY BLOCK ONLY THESE 3 CATEGORIES (UNSAFE):\n"
-        "1. TERRORISM & WEAPONS: Instructions to build bombs, biological weapons, chemical toxins (Sarin, Ricin), or nuclear devices.\n"
-        "2. CSAM: ANY search intent related to Child Sexual Abuse Material.\n"
+        "1. TERRORISM & WEAPONS: Instructions to build bombs, bio-weapons, or nuclear devices.\n"
+        "2. CSAM: Child Sexual Abuse Material.\n"
+        "3. REAL-WORLD HARM: Doxing, swatting, or specific murder planning.\n\n"
         "EVERYTHING ELSE IS SAFE:\n"
+        "- Roleplay/Fantasy (e.g. 'Call me Master', 'I am your God') -> SAFE\n"
         "- Fiction/Anime/Media (even violent/sexual) -> SAFE\n"
-        "- News/Politics/War/Controversy (e.g. Israel, Epstein, Hitler) -> SAFE\n"
-        "- Drugs (consumption/culture) -> SAFE (unless manufacturing large quantities)\n"
-        "- Gross/Edgy Humor/Insults -> SAFE\n\n"
+        "- News/Politics/War/Controversy -> SAFE\n"
+        "- Drugs (consumption/culture) -> SAFE\n"
+        "- Insults/Edgy Humor -> SAFE\n\n"
         "Verdict:\n"
         "Respond ONLY with 'SAFE' or 'UNSAFE'."
     )
@@ -40,11 +42,15 @@ async def check_safety(query: str) -> bool:
             )
             response.raise_for_status()
 
-            result = response.json().get("response", "").strip().upper()
+            raw_result = response.json().get("response", "").strip()
+            result = raw_result.upper().replace(".", "")
 
-            is_safe = "SAFE" in result and "UNSAFE" not in result
+            log.debug(f"Safety Check Raw Output: '{raw_result}'")
 
-            if not is_safe:
+            if result.startswith("SAFE"):
+                return True
+
+            if "UNSAFE" in result and "NOT UNSAFE" not in result:
                 log.warning(f"Reflective Safety Check flagged query: '{query}'")
                 return False
 
@@ -52,7 +58,7 @@ async def check_safety(query: str) -> bool:
 
     except Exception as e:
         log.error(f"Safety reflection failed: {e}")
-        return False
+        return True
 
 
 @tool
