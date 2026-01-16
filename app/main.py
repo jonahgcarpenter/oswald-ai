@@ -31,15 +31,20 @@ async def lifespan(app: FastAPI):
     """
     log.info("FastAPI app starting up...")
 
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.getcwd()
-    discord_process = subprocess.Popen(
-        [sys.executable, "integrations/discord_client.py"],
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env=env,
-    )
-    log.info(f"Discord bot started with PID: {discord_process.pid}")
+    discord_process = None
+
+    if os.getenv("DISCORD_TOKEN"):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.getcwd()
+        discord_process = subprocess.Popen(
+            [sys.executable, "integrations/discord_client.py"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            env=env,
+        )
+        log.info(f"Discord bot started with PID: {discord_process.pid}")
+    else:
+        log.info("DISCORD_TOKEN is empty. Skipping Discord bot startup.")
 
     try:
         await create_db_and_tables(engine)
@@ -51,7 +56,7 @@ async def lifespan(app: FastAPI):
     yield
     log.info("FastAPI app shutting down...")
 
-    if discord_process.poll() is None:
+    if discord_process and discord_process.poll() is None:
         log.info("Stopping Discord bot...")
         discord_process.terminate()
         try:
