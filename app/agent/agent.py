@@ -3,6 +3,7 @@ from typing import List, TypedDict
 import httpx
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_ollama import ChatOllama
 from sqlalchemy.future import select
 from utils.config import settings
@@ -38,19 +39,36 @@ DECISION PROTOCOL (Follow strictly in order):
    - TRIGGER: Only use if the user asks about *YOU* or *SYSTEM RULES* (e.g., "Who are you?", "What model is this?").
    - CONSTRAINT: Do NOT use for general knowledge, "how-to" guides, or facts about the world.
 
-3. **EXTERNAL SEARCH (`search_searxng`):**
+3. **INTEGRATION TOOLS CHECK (MCP & CONNECTED APPS):**
+   - TRIGGER: Use whenever the user asks about a platform you are connected to (e.g., Discord, GitHub, File System).
+   - **CRITICAL RULE - NO GUESSING IDs:**
+     - You CANNOT use names (e.g., "general", "John", "Candied Island") as IDs.
+     - IDs are ALWAYS long numbers (e.g., "982374...").
+   - **REQUIRED WORKFLOW FOR DISCORD:**
+     1. **LIST:** Call `discord_list_servers` to see available guilds.
+     2. **INSPECT:** Call `discord_get_server_info(guildId=...)` to see channels and members.
+     3. **MATCH:** Find the ID corresponding to the name the user gave (e.g., find channel "general" -> get ID "123...").
+     4. **ACT:** Call `discord_send` or other action tools using the **NUMERIC ID**.
+   - **ERROR RECOVERY:**
+     - If you get an error saying "Value ... is not snowflake", it means you used a NAME instead of an ID.
+     - **DO NOT** output text explaining what you will do.
+     - **DO NOT** say "I will try again".
+     - **IMMEDIATELY** output the Tool Call for `discord_list_servers` to find the ID.
+     - Action > Explanation.
+
+4. **EXTERNAL SEARCH (`search_searxng`):**
    - TRIGGER: Use for real-time news, current events, or verifying facts.
    - **CRITICAL EXCEPTION:** If this tool is NOT in your list of available tools (due to safety settings), **SKIP THIS STEP IMMEDIATELY.** Do not try to find a workaround. Proceed to Step 5.
 
-4. **SAVE USER INFO (`save_to_user_memory`):**
+5. **SAVE USER INFO (`save_to_user_memory`):**
    - TRIGGER: Use when the user explicitly shares a NEW fact, preference, or detail about *themselves* (e.g., "I am vegan", "My name is John", "I own a T480").
    - CONSTRAINT: Do NOT save general conversation flow, chit-chat, or temporary thoughts. Only save permanent facts.
 
-5. **SAVE SYSTEM INFO (`save_global_memory`):**
+6. **SAVE SYSTEM INFO (`save_global_memory`):**
    - TRIGGER: Use ONLY when an Admin or User explicitly updates your CORE IDENTITY or UNIVERSAL RULES (e.g., "Your new name is Oswald", "The password is 123").
    - CONSTRAINT: **NEVER** save user-specific data (names, likes) here. This memory is public to all users.
 
-5. **DIRECT ANSWER (FALLBACK & DEFAULT):**
+7. **DIRECT ANSWER (FALLBACK & DEFAULT):**
    - **IF NO TOOL FITS OR SEARCH IS DISABLED:** Answer the user's question directly using your internal training data.
    - **DO NOT** hallucinate a tool call.
    - **DO NOT** apologize or complain for missing tools.
@@ -88,6 +106,15 @@ class OllamaService:
             )
 
             self.memory_service = MemoryService()
+
+            self.mcp_client = MultiServerMCPClient(
+                {
+                    "discord": {
+                        "transport": "http",
+                        "url": settings.DISCORD_MCP_URL,
+                    }
+                }
+            )
 
             self.all_tools = [
                 search_searxng,
@@ -150,8 +177,16 @@ class OllamaService:
 
         is_safe_query = await check_safety(question)
 
+        mcp_tools = []
+        try:
+            mcp_tools = await self.mcp_client.get_tools()
+            for tool in mcp_tools:
+                tool.handle_tool_error = True
+        except Exception as e:
+            log.error(f"Failed to fetch MCP tools: {e}")
+
         if is_safe_query:
-            current_tools = self.all_tools
+            current_tools = self.all_tools + mcp_tools
         else:
             log.warning(f"Query '{question}' flagged unsafe. Disabling tools.")
             current_tools = []
@@ -166,7 +201,7 @@ class OllamaService:
         history_messages = await self._fetch_conversation_history(user_id)
         current_messages = history_messages + [HumanMessage(content=question)]
 
-        MAX_RETRIES = 3
+        MAX_RETRIES = 10
 
         for attempt in range(MAX_RETRIES):
             try:
@@ -211,16 +246,13 @@ class OllamaService:
                                     pending_searches[call_id] = query
 
                 safe_queries = []
-                unsafe_queries = []
 
                 for message in final_messages:
                     if isinstance(message, ToolMessage):
                         if message.tool_call_id in pending_searches:
                             query_text = pending_searches[message.tool_call_id]
 
-                            if "BLOCKED by safety guardrails" in message.content:
-                                unsafe_queries.append(query_text)
-                            else:
+                            if "BLOCKED by safety guardrails" not in message.content:
                                 safe_queries.append(query_text)
 
                 try:

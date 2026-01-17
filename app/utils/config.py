@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     DISCORD_TOKEN: str = ""
 
+    DISCORD_MCP_URL: str = "http://localhost:8080/mcp"
+
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 
     OLLAMA_BASE_MODEL: str = "artifish/llama3.2-uncensored:latest"
