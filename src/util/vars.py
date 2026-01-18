@@ -14,23 +14,15 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    DISCORD_TOKEN: str = ""
+    # NOTE: General
+    API_VERSION: str = "v2"
 
-    DISCORD_MCP_URL: str = "http://localhost:8080/mcp"
+    # NOTE: MCP
+    DISCORD_TOKEN: str
 
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-
-    OLLAMA_BASE_MODEL: str = "artifish/llama3.2-uncensored:latest"
-
-    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text:v1.5"
-
-    SEARXNG_URL: str = "http://localhost:8888"
-
-    DATABASE_URL: str = "postgresql://oswald_ai:password@localhost:5432/oswald_ai"
-
-    DATABASE_SCHEMA: str = "oswald_ai"
-
-    LOG_LEVEL: str = "INFO"
+    # NOTE: Ollama
+    OLLAMA_URL: str
+    OLLAMA_AGENT_MODEL: str
 
 
 try:

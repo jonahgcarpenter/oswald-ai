@@ -1,0 +1,2 @@
+# TODO:
+# Oswalds memory logic

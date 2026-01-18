@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "discord": {
+      "command": "python",
+      "args": ["mcp/discord_server.py"],
+      "env": {}
+    }
+  }
+}

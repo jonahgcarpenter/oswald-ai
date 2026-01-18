@@ -1,13 +1,3 @@
 venv/
 __pycache__/
 .env
-
-# Models
-*.gguf
-
-# Model Training
-training/*
-# Include these specific files
-!training/fine_tuning.py
-!training/interactive_test.py
-!training/requirements.txt

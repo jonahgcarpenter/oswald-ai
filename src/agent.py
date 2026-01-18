@@ -1,0 +1,290 @@
+import json
+import operator
+from typing import Annotated, List, TypedDict
+
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_ollama import ChatOllama
+from langgraph.graph import END, START, StateGraph
+
+from src.mcp_client import get_mcp_tools
+from src.util.vars import settings
+
+
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], operator.add]
+    retry_count: int
+    errors: List[str]
+
+
+def extract_json_from_text(text: str):
+    """
+    Robustly extracts JSON tool calls by counting braces.
+    Fixes the regex issue where nested JSON arguments would break parsing.
+    """
+    results = []
+    cursor = 0
+    text_len = len(text)
+
+    while cursor < text_len:
+        start = text.find("{", cursor)
+        if start == -1:
+            break
+
+        count = 1
+        end = start + 1
+        in_string = False
+        escape = False
+
+        while end < text_len and count > 0:
+            char = text[end]
+
+            if char == '"' and not escape:
+                in_string = not in_string
+            elif char == "\\" and not escape:
+                escape = True
+                end += 1
+                continue
+            elif not in_string:
+                if char == "{":
+                    count += 1
+                elif char == "}":
+                    count -= 1
+
+            escape = False
+            end += 1
+
+        if count == 0:
+            json_str = text[start:end]
+            try:
+                if '"name":' in json_str:
+                    data = json.loads(json_str)
+                    if "arguments" in data:
+                        data["parameters"] = data.pop("arguments")
+                    results.append(data)
+            except json.JSONDecodeError:
+                pass
+            cursor = end
+        else:
+            cursor = start + 1
+
+    return results
+
+
+async def call_model(state: AgentState):
+    llm = ChatOllama(
+        base_url=settings.OLLAMA_URL, model=settings.OLLAMA_AGENT_MODEL, temperature=0.0
+    )
+
+    tools = await get_mcp_tools()
+    llm_with_tools = llm.bind_tools(tools)
+
+    system_prompt = (
+        "You are an autonomous agent interacting with a Discord MCP server.\n"
+        "AVAILABLE TOOLS:\n"
+        "- 'discord_list_guilds': Lists all servers the bot is in. RUN THIS FIRST to get a Guild ID.\n"
+        "- 'discord_list_channels': Returns the REAL list of channels (Names & IDs) for a specific Guild ID.\n"
+        "- 'discord_read_messages': Reads messages from a specific Channel ID.\n"
+        "- 'discord_lookup_user': Resolves a User ID (e.g., <@123...>) to a real Username/Display Name.\n\n"
+        "RULES:\n"
+        "1. DISCOVERY FIRST: If you do not know the 'guild_id', run 'discord_list_guilds'. Do not guess.\n"
+        "2. To find a channel ID, you MUST run 'discord_list_channels' using the Guild ID you just found.\n"
+        "3. IDENTITY RESOLUTION: If message content contains User IDs (e.g., '<@255...>' or '255...'), "
+        "you MUST run 'discord_lookup_user' on them immediately.\n"
+        "4. STEP-BY-STEP: Run one tool, wait for the result, then decide the next step.\n"
+        "5. STOP CONDITION: If you have the messages AND the resolved usernames, "
+        "output the summary immediately. Do not loop.\n"
+        "6. Do not output a sequence of JSONs. Output ONE action."
+    )
+
+    current_messages = [SystemMessage(content=system_prompt)] + state["messages"]
+
+    if state.get("errors") and len(state["errors"]) > 0:
+        last_error = state["errors"][-1]
+        mutation_prompt = (
+            f"SYSTEM_OVERRIDE: Your previous attempt failed.\n"
+            f"Error: {last_error}\n"
+            "INSTRUCTION: Review the error. If you need an ID, look at the existing Tool Results in the chat history instead of guessing."
+        )
+        current_messages.append(HumanMessage(content=mutation_prompt))
+
+    response = await llm_with_tools.ainvoke(current_messages)
+
+    return {"messages": [response]}
+
+
+async def repair_hallucination(state: AgentState):
+    """
+    Intervention Node:
+    - If valid JSON: converts to AIMessage with tool_calls.
+    - If invalid/placeholders: returns HumanMessage with error details.
+    """
+    last_message = state["messages"][-1]
+    content = last_message.content or ""
+
+    extracted_data = extract_json_from_text(content)
+    real_tools = await get_mcp_tools()
+    valid_tool_names = {t.name for t in real_tools}
+
+    if not extracted_data:
+        return {
+            "errors": ["Failed to parse JSON"],
+            "messages": [
+                HumanMessage(
+                    content="SYSTEM ERROR: You wrote text instead of running the tool. Use the Tool Interface (JSON)."
+                )
+            ],
+        }
+
+    tool_calls = []
+    errors = []
+
+    for i, data in enumerate(extracted_data):
+        name = data.get("name")
+        args = data.get("parameters", {})
+
+        if name not in valid_tool_names:
+            errors.append(
+                f"Tool '{name}' does not exist. Did you mean 'discord_get_server_info'?"
+            )
+            continue
+
+        arg_str = str(args)
+        if "channel_id" in arg_str.lower() or "general" in arg_str.lower():
+            if any(
+                isinstance(v, str)
+                and ("<" in v or "id" in v.lower() or "general" in v.lower())
+                and not v.isdigit()
+                for v in args.values()
+            ):
+                errors.append(
+                    f"Argument contains a placeholder ('{arg_str}'). STOP. "
+                    f"Check the output of 'discord_get_server_info' in the chat history. "
+                    f"Find the NUMERIC ID (e.g., 99887766) corresponding to the channel name and use that."
+                )
+                continue
+
+        tool_calls.append(
+            {"name": name, "args": args, "id": f"repair_{i}_{len(state['messages'])}"}
+        )
+
+    if not tool_calls and errors:
+        return {
+            "errors": errors,
+            "messages": [HumanMessage(content=f"SYSTEM ERROR: {'; '.join(errors)}")],
+        }
+
+    fixed_message = AIMessage(content="", tool_calls=tool_calls)
+    return {"messages": [fixed_message]}
+
+
+async def call_tools(state: AgentState):
+    """
+    Executes tools. Safe against non-AIMessages now via routing.
+    """
+    tools = await get_mcp_tools()
+    tool_map = {t.name: t for t in tools}
+
+    last_message = state["messages"][-1]
+
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+        return {"errors": ["Invalid message routed to tools"]}
+
+    tool_calls = last_message.tool_calls
+    results = []
+    errors = []
+
+    for tool_call in tool_calls:
+        try:
+            tool_name = tool_call["name"]
+            if tool_name not in tool_map:
+                raise ValueError(f"Tool '{tool_name}' does not exist.")
+
+            tool = tool_map[tool_name]
+            output = await tool.ainvoke(tool_call["args"])
+
+            results.append(
+                ToolMessage(
+                    tool_call_id=tool_call["id"], name=tool_name, content=str(output)
+                )
+            )
+        except Exception as e:
+            error_msg = f"Error executing {tool_call['name']}: {str(e)}"
+            errors.append(error_msg)
+            results.append(
+                ToolMessage(
+                    tool_call_id=tool_call["id"],
+                    name=tool_call["name"],
+                    content=error_msg,
+                    status="error",
+                )
+            )
+
+    return {
+        "messages": results,
+        "errors": errors,
+        "retry_count": state.get("retry_count", 0) + (1 if errors else 0),
+    }
+
+
+def should_continue(state: AgentState):
+    """Main routing from Agent"""
+    last_message = state["messages"][-1]
+
+    if last_message.tool_calls:
+        return "tools"
+
+    content = last_message.content or ""
+    if '{"name":' in content or '"arguments":' in content:
+        return "repair"
+
+    return END
+
+
+def route_after_repair(state: AgentState):
+    """
+    Decides where to go after Repair Node runs.
+    """
+    last_message = state["messages"][-1]
+
+    if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        return "tools"
+
+    return "agent"
+
+
+def check_for_success(state: AgentState):
+    MAX_RETRIES = 3
+    if len(state.get("errors", [])) > 0:
+        if state["retry_count"] < MAX_RETRIES:
+            return "agent"
+        return END
+
+    return "agent"
+
+
+async def build_graph():
+    workflow = StateGraph(AgentState)
+
+    workflow.add_node("agent", call_model)
+    workflow.add_node("repair", repair_hallucination)
+    workflow.add_node("tools", call_tools)
+
+    workflow.add_edge(START, "agent")
+
+    workflow.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", "repair": "repair", END: END}
+    )
+
+    workflow.add_conditional_edges(
+        "repair", route_after_repair, {"tools": "tools", "agent": "agent"}
+    )
+
+    workflow.add_conditional_edges("tools", check_for_success, ["agent", END])
+
+    return workflow.compile()
