@@ -2,7 +2,6 @@ import asyncio
 import os
 
 import discord
-
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("discord")
@@ -124,6 +123,62 @@ async def discord_lookup_user(user_id: str) -> str:
         return f"Error: User with ID {clean_id} not found."
     except Exception as e:
         return f"Error looking up user: {str(e)}"
+
+
+@mcp.tool()
+async def discord_send_message(channel_id: str, content: str) -> str:
+    """
+    Send a message to a specific channel.
+    Requires a valid channel_id (use discord_list_channels first).
+    """
+    await start_discord()
+    try:
+        channel = client.get_channel(int(channel_id))
+        if not channel:
+            return f"Error: Channel {channel_id} not found or bot lacks access."
+
+        sent_msg = await channel.send(content)
+        return f"Message sent successfully! (ID: {sent_msg.id})"
+    except Exception as e:
+        return f"Error sending message: {str(e)}"
+
+
+@mcp.tool()
+async def discord_list_users(guild_id: str, query: str = None) -> str:
+    """
+    List or search for users in a guild by name/display name.
+    Use this to find a User ID when you only know the name (e.g. 'Jonah').
+    """
+    await start_discord()
+    try:
+        guild = client.get_guild(int(guild_id))
+        if not guild:
+            return f"Error: Guild {guild_id} not found."
+
+        matches = []
+        search_term = query.lower() if query else ""
+
+        for m in guild.members:
+            if (
+                (not search_term)
+                or (search_term in m.name.lower())
+                or (m.global_name and search_term in m.global_name.lower())
+                or (m.display_name and search_term in m.display_name.lower())
+            ):
+
+                matches.append(
+                    f"Name: {m.name} | Display: {m.display_name} | ID: {m.id} | Bot: {m.bot}"
+                )
+
+        if not matches:
+            return f"No users found matching '{query}'."
+
+        return "\n".join(matches[:20]) + (
+            f"\n...and {len(matches)-20} more." if len(matches) > 20 else ""
+        )
+
+    except Exception as e:
+        return f"Error listing users: {str(e)}"
 
 
 if __name__ == "__main__":

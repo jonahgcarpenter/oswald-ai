@@ -11,7 +11,6 @@ from langchain_core.messages import (
 )
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
-
 from src.mcp_client import get_mcp_tools
 from src.util.vars import settings
 
@@ -89,17 +88,22 @@ async def call_model(state: AgentState):
         "AVAILABLE TOOLS:\n"
         "- 'discord_list_guilds': Lists all servers the bot is in. RUN THIS FIRST to get a Guild ID.\n"
         "- 'discord_list_channels': Returns the REAL list of channels (Names & IDs) for a specific Guild ID.\n"
+        "- 'discord_list_users': Search for members in a Guild by name. Use this to find a User ID.\n"
         "- 'discord_read_messages': Reads messages from a specific Channel ID.\n"
+        "- 'discord_send_message': Sends a message to a specific Channel ID.\n"
         "- 'discord_lookup_user': Resolves a User ID (e.g., <@123...>) to a real Username/Display Name.\n\n"
         "RULES:\n"
         "1. DISCOVERY FIRST: If you do not know the 'guild_id', run 'discord_list_guilds'. Do not guess.\n"
         "2. To find a channel ID, you MUST run 'discord_list_channels' using the Guild ID you just found.\n"
-        "3. IDENTITY RESOLUTION: If message content contains User IDs (e.g., '<@255...>' or '255...'), "
+        "3. FINDING USERS: If you need to mention a user (e.g. '@Jonah') but don't have their ID, run 'discord_list_users' to find it.\n"
+        "4. MENTION SYNTAX: To mention/ping a user, you MUST use the format '<@USER_ID>' in your message content. Example: 'Hello <@12345>'. Do not just write their name.\n"
+        "5. IDENTITY RESOLUTION: If reading messages involves User IDs (e.g., '<@255...>'), "
         "you MUST run 'discord_lookup_user' on them immediately.\n"
-        "4. STEP-BY-STEP: Run one tool, wait for the result, then decide the next step.\n"
-        "5. STOP CONDITION: If you have the messages AND the resolved usernames, "
-        "output the summary immediately. Do not loop.\n"
-        "6. Do not output a sequence of JSONs. Output ONE action."
+        "6. STEP-BY-STEP: Run one tool, wait for the result, then decide the next step.\n"
+        "7. VERIFICATION: Ensure you have confirmed the Channel ID via 'discord_list_channels' at least once in this conversation before sending. Do not guess IDs.\n"
+        "8. STOP CONDITION: If you have completed the user's request (e.g., summarized messages OR successfully sent a message), "
+        "stop and confirm the action to the user. Do not loop.\n"
+        "9. Do not output a sequence of JSONs. Output ONE action."
     )
 
     current_messages = [SystemMessage(content=system_prompt)] + state["messages"]
@@ -260,6 +264,17 @@ def route_after_repair(state: AgentState):
 
 def check_for_success(state: AgentState):
     MAX_RETRIES = 3
+
+    if state["messages"]:
+        last_message = state["messages"][-1]
+
+        if (
+            isinstance(last_message, ToolMessage)
+            and last_message.name == "discord_send_message"
+        ):
+            if "Error" not in str(last_message.content):
+                return END
+
     if len(state.get("errors", [])) > 0:
         if state["retry_count"] < MAX_RETRIES:
             return "agent"
