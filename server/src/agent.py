@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     retry_count: int
     errors: List[str]
+    user_id: str
 
 
 def extract_json_from_text(text: str):
@@ -93,8 +94,11 @@ async def call_model(state: AgentState):
 
     now = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
+    current_user = state.get("user_id")
+
     system_prompt = (
         f"You are an autonomous agent. Current Time: {now}\n"
+        f"CURRENT USER ID: {current_user}\n"
         "AVAILABLE TOOLS:\n"
         f"{tool_list_str}\n\n"
         "THOUGHT PROTOCOL:\n"
@@ -110,12 +114,6 @@ async def call_model(state: AgentState):
         "3. CHECK ARGUMENTS: Do not output placeholders (e.g. '<channel_id>'). You must find the actual data.\n"
         "4. STOP CONDITION: If you have completed the request or cannot proceed, stop. Do not loop.\n"
     )
-
-    print("\n" + "=" * 40)
-    print("🤖 SYSTEM PROMPT GENERATED:")
-    print("=" * 40)
-    print(system_prompt)
-    print("=" * 40 + "\n")
 
     current_messages = [SystemMessage(content=system_prompt)] + state["messages"]
 

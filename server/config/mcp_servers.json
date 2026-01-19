@@ -9,6 +9,11 @@
       "command": "python",
       "args": ["mcp/search_server.py"],
       "env": {}
+    },
+    "memory": {
+      "command": "python",
+      "args": ["mcp/memory_server.py"],
+      "env": {}
     }
   }
 }

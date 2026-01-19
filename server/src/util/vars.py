@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # NOTE: General
     API_VERSION: str = "v2"
+    DATABASE_URL: str
 
     # NOTE: MCP
     DISCORD_TOKEN: str
@@ -23,6 +24,7 @@ class Settings(BaseSettings):
     # NOTE: Ollama
     OLLAMA_URL: str
     OLLAMA_AGENT_MODEL: str
+    OLLAMA_EMBEDDING_MODEL: str
 
 
 try:

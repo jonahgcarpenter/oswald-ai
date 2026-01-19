@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import Input from "../components/chat/input";
 import { useChat } from "../hooks/useChat";
 
+const CURRENT_USER_ID = "Jonah";
+
 export default function Home() {
   const { messages, sendMessage, isLoading } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -10,6 +12,10 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const handleSendMessage = (text: string) => {
+    sendMessage(text, CURRENT_USER_ID);
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex-grow flex flex-col overflow-y-auto px-4 py-4 space-y-6 scrollbar-none">
@@ -17,7 +23,7 @@ export default function Home() {
           <div className="flex flex-grow flex-col items-center justify-center text-neutral-500">
             <img src="/oswald-logo.png" alt="Oswald" className="w-16 h-16" />
 
-            <p>Welcome back Sir!</p>
+            <p>Welcome back, {CURRENT_USER_ID}!</p>
           </div>
         )}
 
@@ -72,7 +78,7 @@ export default function Home() {
       </div>
 
       <div className="w-full pt-2">
-        <Input onSendMessage={sendMessage} isLoading={isLoading} />
+        <Input onSendMessage={handleSendMessage} isLoading={isLoading} />
       </div>
     </div>
   );

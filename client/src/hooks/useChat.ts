@@ -12,7 +12,7 @@ export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  const sendMessage = useCallback(async (prompt: string) => {
+  const sendMessage = useCallback(async (prompt: string, userId: string) => {
     if (!prompt.trim()) return;
 
     const userMsgId = Date.now().toString();
@@ -30,7 +30,10 @@ export function useChat() {
       const response = await fetch("/api/v2/chat/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({
+          user_id: userId,
+          prompt,
+        }),
       });
 
       if (!response.body) throw new Error("No response body");

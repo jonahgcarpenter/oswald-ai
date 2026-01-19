@@ -1,10 +1,10 @@
 import contextlib
 import json
 import os
+from asyncio.streams import start_unix_server
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
-
 from src.util.vars import settings
 
 _EXIT_STACK = None
@@ -38,6 +38,22 @@ async def initialize_mcp_client():
         current_args = server_definitions["discord"].get("args", [])
         if current_args and not os.path.isabs(current_args[0]):
             server_definitions["discord"]["args"][0] = os.path.abspath(current_args[0])
+
+    if "memory" in server_definitions:
+        if "env" not in server_definitions["memory"]:
+            server_definitions["memory"]["env"] = {}
+
+        server_definitions["memory"]["env"].update(
+            {
+                "DATABASE_URL": settings.DATABASE_URL,
+                "OLLAMA_URL": settings.OLLAMA_URL,
+                "OLLAMA_EMBEDDING_MODEL": settings.OLLAMA_EMBEDDING_MODEL,
+            }
+        )
+
+        current_args = server_definitions["memory"].get("args", [])
+        if current_args and not os.path.isabs(current_args[0]):
+            server_definitions["memory"]["args"][0] = os.path.abspath(current_args[0])
 
     for name, config in server_definitions.items():
         if "command" in config and "transport" not in config:

@@ -4,7 +4,6 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
-
 from src.agent import build_graph
 
 router = APIRouter()
@@ -12,6 +11,7 @@ router = APIRouter()
 
 class ChatRequest(BaseModel):
     prompt: str
+    user_id: str
 
 
 @router.post("/send")
@@ -21,6 +21,7 @@ async def send_message(request: ChatRequest):
         "messages": [HumanMessage(content=request.prompt)],
         "retry_count": 0,
         "errors": [],
+        "user_id": request.user_id,
     }
 
     async def event_generator():
