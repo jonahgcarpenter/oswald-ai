@@ -12,8 +12,8 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleSendMessage = (text: string) => {
-    sendMessage(text, CURRENT_USER_ID);
+  const handleSendMessage = (text: string, images?: string[]) => {
+    sendMessage(text, CURRENT_USER_ID, images);
   };
 
   return (
@@ -41,6 +41,19 @@ export default function Home() {
                   : "bg-transparent text-neutral-200"
               }`}
             >
+              {msg.images && msg.images.length > 0 && (
+                <div className="mb-3 flex flex-wrap gap-2">
+                  {msg.images.map((img, idx) => (
+                    <img
+                      key={idx}
+                      src={img}
+                      alt="User uploaded content"
+                      className="max-w-full h-auto rounded-lg border border-neutral-700 max-h-[300px]"
+                    />
+                  ))}
+                </div>
+              )}
+
               {msg.role === "assistant" && msg.logs.length > 0 && (
                 <details className="scrollbar-none group mb-2 border border-neutral-800 bg-neutral-900/50 rounded-lg overflow-hidden">
                   <summary className="cursor-pointer px-3 py-2 text-xs font-mono text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800/50 transition-colors flex items-center gap-2 select-none">

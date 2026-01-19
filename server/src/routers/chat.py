@@ -1,4 +1,5 @@
 import json
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -12,13 +13,23 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     prompt: str
     user_id: str
+    images: Optional[List[str]] = None
 
 
 @router.post("/send")
 async def send_message(request: ChatRequest):
     app = await build_graph()
+
+    if request.images:
+        content: List[Dict[str, Any]] = [{"type": "text", "text": request.prompt}]
+        for img_data in request.images:
+            content.append({"type": "image_url", "image_url": {"url": img_data}})
+        message = HumanMessage(content=content)
+    else:
+        message = HumanMessage(content=request.prompt)
+
     initial_state = {
-        "messages": [HumanMessage(content=request.prompt)],
+        "messages": [message],
         "retry_count": 0,
         "errors": [],
         "user_id": request.user_id,
