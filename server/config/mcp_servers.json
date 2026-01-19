@@ -4,6 +4,11 @@
       "command": "python",
       "args": ["mcp/discord_server.py"],
       "env": {}
+    },
+    "search": {
+      "command": "python",
+      "args": ["mcp/search_server.py"],
+      "env": {}
     }
   }
 }
