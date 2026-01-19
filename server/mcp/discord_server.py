@@ -29,8 +29,7 @@ async def start_discord():
 @mcp.tool()
 async def discord_list_guilds() -> str:
     """
-    List all servers (Guilds) the bot is currently connected to.
-    Use this FIRST to find the 'guild_id' required for other tools.
+    Lists all connected servers with their IDs. Run this first to find a 'guild_id'.
     """
     await start_discord()
 
@@ -47,8 +46,7 @@ async def discord_list_guilds() -> str:
 @mcp.tool()
 async def discord_list_channels(guild_id: str) -> str:
     """
-    List all text channels (Name & ID) in a guild.
-    Use this to find the numeric ID for a channel like 'general'.
+    Lists text channels (Name & ID) in a specific guild. Use this to find a numeric 'channel_id'.
     """
     await start_discord()
     try:
@@ -67,7 +65,9 @@ async def discord_list_channels(guild_id: str) -> str:
 
 @mcp.tool()
 async def discord_read_messages(channel_id: str, limit: int = 5) -> str:
-    """Read the last N messages from a channel."""
+    """
+    Retrieves the last N text messages from a specific channel ID.
+    """
     await start_discord()
     try:
         channel = client.get_channel(int(channel_id))
@@ -85,7 +85,9 @@ async def discord_read_messages(channel_id: str, limit: int = 5) -> str:
 
 @mcp.tool()
 async def discord_get_server_info(guild_id: str) -> str:
-    """Get basic server info."""
+    """
+    Returns metadata (member count, ID, name) for a specific Guild ID.
+    """
     await start_discord()
     try:
         guild = client.get_guild(int(guild_id))
@@ -99,8 +101,7 @@ async def discord_get_server_info(guild_id: str) -> str:
 @mcp.tool()
 async def discord_lookup_user(user_id: str) -> str:
     """
-    Lookup a user by their ID to get their real username and display name.
-    Accepts raw IDs (e.g. "255088415479955457") or mentions (e.g. "<@255088415479955457>").
+    Resolves a User ID or mention string (e.g. <@123>) to a real username and details.
     """
     await start_discord()
 
@@ -128,8 +129,7 @@ async def discord_lookup_user(user_id: str) -> str:
 @mcp.tool()
 async def discord_send_message(channel_id: str, content: str) -> str:
     """
-    Send a message to a specific channel.
-    Requires a valid channel_id (use discord_list_channels first).
+    Sends a text message to a specific Channel ID.
     """
     await start_discord()
     try:
@@ -146,8 +146,7 @@ async def discord_send_message(channel_id: str, content: str) -> str:
 @mcp.tool()
 async def discord_list_users(guild_id: str, query: str = None) -> str:
     """
-    List or search for users in a guild by name/display name.
-    Use this to find a User ID when you only know the name (e.g. 'Jonah').
+    Search guild members by name or display name to find their User ID.
     """
     await start_discord()
     try:

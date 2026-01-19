@@ -12,7 +12,8 @@ mcp = FastMCP("web_search")
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> str:
     """
-    Search the web for current information using the new DDGS library.
+    Performs a web search to retrieve up-to-date information, news, or technical docs.
+    Use this to fill knowledge gaps or when the user asks for current events.
     """
     logger.info(f"Received search query: {query}")
     try:

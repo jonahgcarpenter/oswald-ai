@@ -84,32 +84,38 @@ async def call_model(state: AgentState):
     tools = await get_mcp_tools()
     llm_with_tools = llm.bind_tools(tools)
 
+    tool_docs = []
+    for tool in tools:
+        desc = tool.description or "No description provided."
+        tool_docs.append(f"- '{tool.name}': {desc}")
+
+    tool_list_str = "\n".join(tool_docs)
+
     now = datetime.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
     system_prompt = (
         f"You are an autonomous agent. Current Time: {now}\n"
         "AVAILABLE TOOLS:\n"
-        "- 'discord_list_guilds': Lists all servers the bot is in.\n"
-        "- 'discord_list_channels': Returns the REAL list of channels (Names & IDs).\n"
-        "- 'discord_list_users': Search for members in a Guild by name.\n"
-        "- 'discord_read_messages': Reads messages from a specific Channel ID.\n"
-        "- 'discord_send_message': Sends a message to a specific Channel ID.\n"
-        "- 'discord_lookup_user': Resolves a User ID to a real name.\n"
-        "- 'discord_send_message': Sends a message to a specific Channel ID.\n"
-        "- 'web_search': Search the internet for up-to-date info, news, or technical documentation.\n\n"
+        f"{tool_list_str}\n\n"
         "THOUGHT PROTOCOL:\n"
         "You MUST start every response with a <think> block. Inside, you must answer:\n"
-        "1. Observation: What did the last tool return? (e.g. 'Search failed', 'Found channel ID')\n"
-        "2. Analysis: Does this answer the user's request completely?\n"
-        "3. Plan: What is the exact next step? (e.g. 'I need to search again', 'I can now send the message')\n"
+        "1. Observation: What did the last tool return? (e.g. 'Error: ID not found', 'Search results received')\n"
+        "2. Analysis: Does this answer the user's request, or is information missing?\n"
+        "3. Plan: What is the exact next step? (e.g. 'I need to find the ID first', 'I can now execute the final action')\n"
         "4. Constraint Check: Am I repeating myself? If so, STOP.\n"
-        "Example: <think>The search for 'Caleb' returned no results. I should try searching for 'Caleb Williams stats' instead.</think>\n\n"
+        "Example: <think>The last tool failed because I used a name instead of an ID. I need to use a 'list' tool to find the correct numeric ID first.</think>\n\n"
         "RULES:\n"
-        "1. KNOWLEDGE GAP: Use 'web_search' for news. For current date, use System Prompt.\n"
-        "2. DISCOVERY FIRST: If you do not know the 'guild_id', run 'discord_list_guilds'.\n"
-        "3. FINDING USERS: If you need to mention a user but don't have their ID, run 'discord_list_users'.\n"
-        "4. STOP CONDITION: If you have completed the request, stop. Do not loop.\n"
+        "1. DISCOVERY FIRST: Never guess IDs. If a tool requires an ID (e.g., guild_id, channel_id) and you don't have it, use a listing/search tool to find it first.\n"
+        "2. KNOWLEDGE GAP: If the user asks for current news or documentation, use 'web_search'.\n"
+        "3. CHECK ARGUMENTS: Do not output placeholders (e.g. '<channel_id>'). You must find the actual data.\n"
+        "4. STOP CONDITION: If you have completed the request or cannot proceed, stop. Do not loop.\n"
     )
+
+    print("\n" + "=" * 40)
+    print("🤖 SYSTEM PROMPT GENERATED:")
+    print("=" * 40)
+    print(system_prompt)
+    print("=" * 40 + "\n")
 
     current_messages = [SystemMessage(content=system_prompt)] + state["messages"]
 
