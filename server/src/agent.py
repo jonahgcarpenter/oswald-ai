@@ -126,7 +126,11 @@ async def call_model(state: AgentState):
         )
         current_messages.append(HumanMessage(content=mutation_prompt))
 
+    print(f"\n[AGENT] Calling model with {len(current_messages)} messages.")
     response = await llm_with_tools.ainvoke(current_messages)
+    print(f"\n[AGENT] Raw Model Response:\n{response.content}")
+    if response.tool_calls:
+        print(f"[AGENT] Detected Tool Calls: {response.tool_calls}")
 
     return {"messages": [response]}
 
@@ -138,6 +142,7 @@ async def repair_hallucination(state: AgentState):
     - If invalid/placeholders: returns HumanMessage with error details.
     """
     last_message = state["messages"][-1]
+    print(f"[REPAIR] Investigating content for repair: {last_message.content[:100]}...")
     content = last_message.content or ""
 
     extracted_data = extract_json_from_text(content)
@@ -186,6 +191,11 @@ async def repair_hallucination(state: AgentState):
             {"name": name, "args": args, "id": f"repair_{i}_{len(state['messages'])}"}
         )
 
+    if errors:
+        print(f"[REPAIR] Identified {len(errors)} issues: {errors}")
+    if tool_calls:
+        print(f"[REPAIR] Successfully extracted {len(tool_calls)} tool calls.")
+
     if not tool_calls and errors:
         return {
             "errors": errors,
@@ -214,12 +224,17 @@ async def call_tools(state: AgentState):
 
     for tool_call in tool_calls:
         try:
+            print(
+                f"[TOOLS] Executing '{tool_call['name']}' with args: {tool_call['args']}"
+            )
             tool_name = tool_call["name"]
             if tool_name not in tool_map:
                 raise ValueError(f"Tool '{tool_name}' does not exist.")
 
             tool = tool_map[tool_name]
             output = await tool.ainvoke(tool_call["args"])
+
+            print(f"[TOOLS] Result from '{tool_call['name']}': {str(output)[:200]}")
 
             results.append(
                 ToolMessage(
@@ -228,6 +243,7 @@ async def call_tools(state: AgentState):
             )
         except Exception as e:
             error_msg = f"Error executing {tool_call['name']}: {str(e)}"
+            print(f"[TOOLS] {error_msg}")
             errors.append(error_msg)
             results.append(
                 ToolMessage(
@@ -250,12 +266,15 @@ def should_continue(state: AgentState):
     last_message = state["messages"][-1]
 
     if last_message.tool_calls:
+        print("[ROUTER] Routing to 'tools'")
         return "tools"
 
     content = last_message.content or ""
     if '{"name":' in content or '"arguments":' in content:
+        print("[ROUTER] Routing to 'repair' (hallucinated JSON detected)")
         return "repair"
 
+    print("[ROUTER] Routing to END")
     return END
 
 
