@@ -1,18 +1,6 @@
 # Oswald-AI
 
-<div align="center">
-
-**A persistent, cross-platform digital manservant.**
-
-Oswald is a personal AI project designed to occupy the space between a classic British butler and a hyper-advanced neural network.
-
-![Oswald Preview](https://y.yarn.co/eb976dbd-fa42-4e1a-bb55-d3adac9785cf_text.gif) ![Oswald Preview](https://media.tenor.com/EifGeTRyvxoAAAAM/alfred-alfred-batman.gif)
-
-</div>
-
-Built on a "write once, serve everywhere" philosophy, Oswald acts as the connective tissue for my digital ecosystem. He seamlessly transitions between environments—managing homelab infrastructure via terminal, controlling smart home devices through IoT integrations, and facilitating social interactions within Discord communities.
-
-Unlike stateless assistants, Oswald is architected with memory and context-awareness. He doesn't just respond to prompts; he remembers them. By building unique memory profiles for every user, he learns routines, adapts to conversational quirks, and recalls preferences across sessions. The result is a unified assistant that manages my digital life with efficiency and a touch of dry wit, ensuring the environment is exactly to my liking—often before I even ask.
+Oswald is a high-performance, uncensored, and fully self-hosted AI agent designed to act as the central nervous system for a modern smart home. Built on the principle of total local sovereignty, Oswald operates entirely within your private infrastructure—no telemetry, no external filters, and no corporate guardrails.
 
 ## Integrations
 
