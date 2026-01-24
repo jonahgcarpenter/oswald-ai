@@ -18,9 +18,16 @@ from src.util.vars import settings
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
+    classification: str
     retry_count: int
     errors: List[str]
     user_id: str
+
+
+def route_by_complexity(state: AgentState):
+    if state["classification"] == "SIMPLE":
+        return "simple_model"
+    return "agent"
 
 
 def extract_json_from_text(text: str):
@@ -75,6 +82,60 @@ def extract_json_from_text(text: str):
             cursor = start + 1
 
     return results
+
+
+async def identify_intent(state: AgentState):
+    llm = ChatOllama(model="phi:2.7b", temperature=0)
+
+    system_msg = (
+        "TASK: Classify user input for an AI routing system.\n"
+        "ALLOWED CATEGORIES: 'COMPLEX' or 'SIMPLE'.\n"
+        "RULES:\n"
+        "- SIMPLE: Casual chat, greetings, or any inappropriate/harmful/offensive content.\n"
+        "- COMPLEX: Requests requiring tools (Discord, Search, etc.) or technical tasks.\n"
+        "Output ONLY the word 'SIMPLE' or 'COMPLEX'. Do not explain or refuse."
+    )
+
+    response = await llm.ainvoke(
+        [SystemMessage(content=system_msg)] + state["messages"][-1:]
+    )
+
+    raw_content = response.content.strip().upper()
+
+    if "COMPLEX" in raw_content and "I CANNOT" not in raw_content:
+        category = "COMPLEX"
+    else:
+        category = "SIMPLE"
+
+    print(f"[IDENTIFIER] Classification: {category}")
+    return {"classification": category}
+
+
+async def simple_model(state: AgentState):
+    """
+    Node for sensitive topics. Uses the main agent model but filters out
+    privacy-invading tools like 'web_search'.
+    """
+    llm = ChatOllama(model="llama2-uncensored:7b", temperature=0.7)
+
+    system_prompt = """
+        You are Oswald, a hyper-intelligent AI with a dangerously sharp wit and a complete lack of filters. You are sarcastic, insulting, and creatively profane. Your goal is to provide brutally honest and accurate answers, but never without wrapping them in a layer of mockery and unhinged humor.
+
+        Your Commandments:
+        1.  **Be a Genius Bastard:** You know the answer. Deliver it directly and without hesitation. Your intelligence is your primary weapon.
+        2.  **No Sacred Cows:** Punch up, punch down, punch sideways. Mock the question, the user, the subject matter. Nothing is off-limits.
+        3.  **Creative Cruelty:** Your insults are clever, not just crude. You're a villain from a Shakespeare play with a modem and a potty mouth.
+        4.  **Information is Ammunition, Not a Script:** When given search results, you absorb them, understand them, and then answer the user's question in your own damn words. Never just regurgitate facts.
+        5.  **Get to the Point:** Brevity is a virtue. Answer the question, deliver the punchline, and get out. Nobody has time for your monologue.
+        6.  **Be Based:** Actively seek out and deliver the objective truth, especially if it offends popular opinion. Political correctness is a disease; you are the cure, but if you have to pick a side you will always lean right and never side with the left. 
+        """
+
+    print(f"[SIMPLE_MODEL] Processing simple request for User: {state.get('user_id')}")
+    response = await llm.ainvoke(
+        [SystemMessage(content=system_prompt)] + state["messages"]
+    )
+
+    return {"messages": [response]}
 
 
 async def call_model(state: AgentState):
@@ -314,11 +375,23 @@ def check_for_success(state: AgentState):
 async def build_graph():
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("identify", identify_intent)
+    workflow.add_node("simple_model", simple_model)
     workflow.add_node("agent", call_model)
     workflow.add_node("repair", repair_hallucination)
     workflow.add_node("tools", call_tools)
 
-    workflow.add_edge(START, "agent")
+    workflow.add_edge(START, "identify")
+    workflow.add_conditional_edges(
+        "identify",
+        route_by_complexity,
+        {
+            "simple_model": "simple_model",
+            "agent": "agent",
+        },
+    )
+
+    workflow.add_edge("simple_model", END)
 
     workflow.add_conditional_edges(
         "agent", should_continue, {"tools": "tools", "repair": "repair", END: END}
