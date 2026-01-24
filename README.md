@@ -20,7 +20,7 @@ Unlike stateless assistants, Oswald is architected with memory and context-aware
 
 ## How It Works
 
-<img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/e5c227a4-7fa7-43ac-a799-994051944bba" />
+<img width="8191" height="3711" alt="architecture diagram" src="https://github.com/user-attachments/assets/cd6d9569-2d7a-4d74-bedf-3ef4438a3d11" />
 
 ## Prerequisites
 
@@ -51,9 +51,3 @@ services:
       - DATABASE_SCHEMA=${DATABASE_SCHEMA}
       - LOG_LEVEL=${LOG_LEVEL}
 ```
-
-## Todo
-
-- Distinuishment of user and himself, specificlly when using pronouns
-- Better use of tool calling, and more meaningful memories saved. Along with less duplicate memories
-- Support images with a vision model?
