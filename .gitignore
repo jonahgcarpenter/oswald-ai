@@ -5,3 +5,6 @@ __pycache__/
 
 # Client
 node_modules
+
+# Traning Scripts and Data
+training/
