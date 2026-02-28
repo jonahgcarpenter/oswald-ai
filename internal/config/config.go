@@ -9,7 +9,9 @@ import (
 )
 
 type Config struct {
-	Port string
+	Port              string
+	OllamaURL         string
+	OllamaRouterModel string
 }
 
 func Load() *Config {
@@ -18,7 +20,12 @@ func Load() *Config {
 	}
 
 	return &Config{
+		// Main
 		Port: getEnv("PORT", "8080"),
+
+		// Ollama
+		OllamaURL:         getEnv("OLLAMA_URL", "http://localhost:11434"),
+		OllamaRouterModel: getEnv("OLLAMA_ROUTER_MODEL", "llama3.2:3b"),
 	}
 }
 
