@@ -16,6 +16,7 @@ type Config struct {
 	OllamaCodingModel     string
 	OllamaUncensoredModel string
 	OllamaSimpleModel     string
+	DiscordToken          string
 }
 
 func Load() *Config {
@@ -34,6 +35,9 @@ func Load() *Config {
 		OllamaCodingModel:     getEnv("OLLAMA_CODING_MODEL", "qwen2.5-coder:7b"),
 		OllamaUncensoredModel: getEnv("OLLAMA_UNCENSORED_MODEL", "llama2-uncensored:7b"),
 		OllamaSimpleModel:     getEnv("OLLAMA_SIMPLE_MODEL", "llama3.2:3b"),
+
+		// Discord
+		DiscordToken: getEnv("DISCORD_TOKEN", ""),
 	}
 }
 
