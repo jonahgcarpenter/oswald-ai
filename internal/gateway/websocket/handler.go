@@ -1,4 +1,4 @@
-package ws
+package websocket
 
 import (
 	"context"
@@ -10,9 +10,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/router"
 )
 
 // Upgrades HTTP connection to WebSocket
@@ -86,7 +86,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, client *ollama.Cl
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 		// Ask the triage model to classify the prompt
-		decision, err := router.DetermineRoute(ctx, client, cfg.OllamaRouterModel, userPrompt)
+		decision, err := agent.DetermineRoute(ctx, client, cfg.OllamaRouterModel, userPrompt)
 		cancel()
 
 		if err != nil {

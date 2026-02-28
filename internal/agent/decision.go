@@ -1,4 +1,4 @@
-package router
+package agent
 
 import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"

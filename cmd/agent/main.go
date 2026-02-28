@@ -6,9 +6,9 @@ import (
 	"net/http"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/discord"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ws"
 )
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	// Expose /ws endpoint
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		// We pass the client and the router model into the websocket handler
-		ws.HandleConnections(w, r, ollamaClient, cfg)
+		websocket.HandleConnections(w, r, ollamaClient, cfg)
 	})
 
 	fmt.Printf("Websocket server starting on :%s\n", cfg.Port)

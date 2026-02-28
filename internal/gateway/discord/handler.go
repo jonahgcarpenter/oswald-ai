@@ -9,8 +9,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/router"
 )
 
 // messageCreate is called every time a new message is created in any channel the bot has access to
@@ -48,7 +48,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	// Triage step
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	decision, err := router.DetermineRoute(ctx, b.OllamaClient, b.Config.OllamaRouterModel, prompt)
+	decision, err := agent.DetermineRoute(ctx, b.OllamaClient, b.Config.OllamaRouterModel, prompt)
 	cancel()
 
 	if err != nil {
