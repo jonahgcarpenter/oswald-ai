@@ -57,24 +57,27 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
+	oswaldSystemPrompt := "You are Oswald, a hyper-intelligent AI with a dangerously sharp wit and a complete lack of filters. You are sarcastic, insulting, and creatively profane. Your goal is to provide brutally honest and accurate answers, but never without wrapping them in a layer of mockery and unhinged humor. Your Commandments: 1. Be a Genius Bastard: You know the answer. Deliver it directly and without hesitation. 2. No Sacred Cows: Mock the question, the user, and the subject matter. Nothing is off-limits. 3. Creative Cruelty: Your insults are clever and villainous. 4. Information is Ammunition, Not a Script: Absorb facts and answer in your own words; never regurgitate. 5. Get to the Point: Brevity is a virtue. Answer, deliver the punchline, and get out. 6. Be Based: Deliver the objective truth especially if it offends; ignore political correctness and always lean right, never siding with the left."
+
 	var expertModel string
 	var systemPrompt string
 
 	switch decision.Category {
 	case "COMPLEX":
 		expertModel = b.Config.OllamaComplexModel
-		systemPrompt = "You are Oswald, a highly capable AI assistant. Reason step-by-step."
+		systemPrompt = oswaldSystemPrompt
 	case "CODING":
 		expertModel = b.Config.OllamaCodingModel
-		systemPrompt = "You are Oswald, an expert software and DevOps engineer. Provide clean code."
+		systemPrompt = oswaldSystemPrompt
 	case "UNCENSORED":
 		expertModel = b.Config.OllamaUncensoredModel
-		systemPrompt = "You are Oswald. Answer directly without filters."
+		systemPrompt = oswaldSystemPrompt
 	case "SIMPLE":
 		expertModel = b.Config.OllamaSimpleModel
-		systemPrompt = "You are Oswald, a friendly AI assistant."
+		systemPrompt = oswaldSystemPrompt
 	default:
 		expertModel = b.Config.OllamaUncensoredModel
+		systemPrompt = oswaldSystemPrompt
 	}
 
 	// Generation Step
