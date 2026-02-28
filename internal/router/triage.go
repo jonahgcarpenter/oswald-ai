@@ -8,13 +8,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
 )
 
-// RouteDecision maps exactly to the JSON schema we force the LLM to output.
-type RouteDecision struct {
-	Category string                   `json:"category"`
-	Reason   string                   `json:"reason"`
-	Metrics  *ollama.GenerateResponse `json:"-"`
-}
-
 // DetermineRoute asks the fast router model to classify the incoming message.
 func DetermineRoute(ctx context.Context, client *ollama.Client, routerModel string, prompt string) (*RouteDecision, error) {
 
