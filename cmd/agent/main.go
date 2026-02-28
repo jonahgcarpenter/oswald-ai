@@ -17,17 +17,22 @@ func main() {
 
 	ollamaClient := ollama.NewClient(cfg.OllamaURL)
 
-	discordBot, err := discord.NewBot(cfg, ollamaClient)
-	if err != nil {
-		log.Fatal("Failed to create Discord bot:", err)
-	}
-
-	go func() {
-		if err := discordBot.Start(); err != nil {
-			log.Fatal("Failed to start Discord bot:", err)
+	if cfg.DiscordToken != "" {
+		discordBot, err := discord.NewBot(cfg, ollamaClient)
+		if err != nil {
+			// We log the error but don't Fatal, so the WS server can still run
+			log.Printf("Warning: Failed to create Discord bot: %v", err)
+		} else {
+			go func() {
+				if err := discordBot.Start(); err != nil {
+					log.Printf("Warning: Failed to start Discord bot: %v", err)
+				}
+			}()
+			defer discordBot.Stop()
 		}
-	}()
-	defer discordBot.Stop()
+	} else {
+		log.Println("Info: DISCORD_TOKEN not set, skipping Discord bot setup.")
+	}
 
 	// Expose /ws endpoint
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +43,7 @@ func main() {
 	fmt.Printf("Websocket server starting on :%s\n", cfg.Port)
 
 	// Start server
-	err = http.ListenAndServe(":"+cfg.Port, nil)
+	err := http.ListenAndServe(":"+cfg.Port, nil)
 	if err != nil {
 		log.Fatal("ListenAndServe error:", err)
 	}
