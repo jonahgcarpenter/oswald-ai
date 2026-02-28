@@ -19,7 +19,7 @@ func main() {
 	// Expose /ws endpoint
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		// We pass the client and the router model into the websocket handler
-		ws.HandleConnections(w, r, ollamaClient, cfg.OllamaRouterModel)
+		ws.HandleConnections(w, r, ollamaClient, cfg)
 	})
 
 	fmt.Printf("Websocket server starting on :%s\n", cfg.Port)

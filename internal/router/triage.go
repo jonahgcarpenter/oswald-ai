@@ -10,8 +10,9 @@ import (
 
 // RouteDecision maps exactly to the JSON schema we force the LLM to output.
 type RouteDecision struct {
-	Category string `json:"category"`
-	Reason   string `json:"reason"`
+	Category string                   `json:"category"`
+	Reason   string                   `json:"reason"`
+	Metrics  *ollama.GenerateResponse `json:"-"`
 }
 
 // DetermineRoute asks the fast router model to classify the incoming message.
@@ -47,24 +48,14 @@ func DetermineRoute(ctx context.Context, client *ollama.Client, routerModel stri
 		return nil, fmt.Errorf("router failed to reach Ollama: %w", err)
 	}
 
-	// Ollama metrics
-	if resp.EvalDuration > 0 {
-		// Calculate Tokens Per Second (TPS)
-		tps := float64(resp.EvalCount) / (float64(resp.EvalDuration) / 1e9)
-
-		fmt.Printf("\n   [Oswald Router Metrics] Model: %s\n", resp.Model)
-		fmt.Printf("   ├─ Speed: %.2f tokens/sec\n", tps)
-		fmt.Printf("   ├─ Load Time: %dms\n", resp.LoadDuration/1e6)
-		fmt.Printf("   ├─ Prompt Eval: %dms\n", resp.PromptEvalDuration/1e6)
-		fmt.Printf("   └─ Generate Time: %dms\n", resp.EvalDuration/1e6)
-	}
-
 	// Unmarshal the LLM's raw text response directly into our Go struct
 	var decision RouteDecision
 	if err := json.Unmarshal([]byte(resp.Response), &decision); err != nil {
 		return nil, fmt.Errorf("failed to parse router JSON: %w\nRaw response: %s", err, resp.Response)
 	}
 
+	// Attach the full response metrics to the decision object instead of printing them
+	decision.Metrics = resp
+
 	return &decision, nil
 }
-
