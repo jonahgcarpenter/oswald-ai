@@ -99,4 +99,3 @@ func mapMetrics(resp *llm.Response) *ModelMetrics {
 		TokensPerSecond:    tps,
 	}
 }
-

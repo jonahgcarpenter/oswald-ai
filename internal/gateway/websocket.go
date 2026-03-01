@@ -1,4 +1,4 @@
-package websocket
+package gateway
 
 import (
 	"encoding/json"
@@ -8,6 +8,25 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 )
+
+type WebsocketGateway struct {
+	Port string
+}
+
+func (wg *WebsocketGateway) Name() string {
+	return "Websocket"
+}
+
+func (wg *WebsocketGateway) Start(aiAgent *agent.Agent) error {
+	// Map the route to your existing handler
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		HandleConnections(w, r, aiAgent)
+	})
+
+	// Start the server
+	log.Printf("Websocket server listening on port %s", wg.Port)
+	return http.ListenAndServe(":"+wg.Port, nil)
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
