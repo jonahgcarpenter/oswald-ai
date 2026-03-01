@@ -1,16 +1,12 @@
 package discord
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
 )
 
 // messageCreate is called every time a new message is created in any channel the bot has access to
@@ -46,38 +42,21 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Trigger "Oswald is typing..." in Discord
 	s.ChannelTyping(m.ChannelID)
 
-	// Triage step
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	decision, err := agent.DetermineRoute(ctx, b.OllamaClient, b.Config.OllamaRouterModel, prompt)
-	cancel()
-
+	// Delegate ALL logic to the agent engine
+	agentResp, err := b.Engine.Process(prompt)
 	if err != nil {
-		log.Println("Discord Routing error:", err)
-		s.ChannelMessageSend(m.ChannelID, "Error: Oswald failed to route your request.")
+		log.Println("Discord Processing error:", err)
+		s.ChannelMessageSend(m.ChannelID, "Error: Oswald failed to process your request.")
 		return
 	}
 
-	expertModel, systemPrompt := decision.GetRouteDetails(b.Config)
-
-	// Generation Step
-	genCtx, genCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer genCancel()
-
-	expertResp, err := b.OllamaClient.Generate(genCtx, ollama.GenerateRequest{
-		Model:  expertModel,
-		Prompt: prompt,
-		System: systemPrompt,
-		Stream: false,
-	})
-
-	if err != nil {
-		log.Println("Discord Expert generation error:", err)
-		s.ChannelMessageSend(m.ChannelID, "Error: The model failed to respond.")
+	if agentResp.Error != "" {
+		s.ChannelMessageSend(m.ChannelID, agentResp.Error)
 		return
 	}
 
 	// Chunk and send response
-	chunks := splitMessage(expertResp.Response)
+	chunks := splitMessage(agentResp.Response)
 
 	for _, chunk := range chunks {
 		if chunk == "" {
