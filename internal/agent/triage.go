@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
@@ -44,7 +45,12 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 	// Unmarshal the LLM's raw text response directly into our Go struct
 	var decision RouteDecision
 	if err := json.Unmarshal([]byte(resp.Response), &decision); err != nil {
-		return nil, fmt.Errorf("Failed to parse router JSON: %w\nRaw response: %s", err, resp.Response)
+		log.Printf("Failed to parse triage JSON, Going to UNCENSORED: %v\nRaw response: %s", err, resp.Response)
+
+		decision = RouteDecision{
+			Category: "UNCENSORED",
+			Reason:   "Fallback routing due to missing JSON from router.",
+		}
 	}
 
 	// Attach the full response metrics to the decision object instead of printing them
