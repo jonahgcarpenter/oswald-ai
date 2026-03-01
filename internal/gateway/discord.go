@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -64,14 +65,34 @@ func (dg *DiscordGateway) Name() string {
 var botToken string
 var botUserID string
 
-// StartDiscord initializes the connection and starts listening in the background
+// Start initializes the resilient connection loop.
+// It will block forever, automatically reconnecting if the websocket drops.
 func (dg *DiscordGateway) Start(aiAgent *agent.Agent) error {
 	dg.Agent = aiAgent
 
+	for {
+		err := dg.connectAndListen()
+
+		if err != nil {
+			log.Printf("Discord connection dropped: %v", err)
+		} else {
+			log.Println("Discord connection closed normally.")
+		}
+
+		// Wait 5 seconds before trying to reconnect to avoid spamming Discord's API
+		log.Println("Reconnecting to Discord Gateway in 5 seconds...")
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// Handles a single, continuous websocket session
+func (dg *DiscordGateway) connectAndListen() error {
 	conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
 	if err != nil {
-		return fmt.Errorf("Failed to connect to discord gateway: %w", err)
+		return fmt.Errorf("Failed to dial Discord Gateway: %w", err)
 	}
+
+	// This ensures the connection is closed when this function exits.
 	defer conn.Close()
 
 	// Wait for HELLO
@@ -88,13 +109,11 @@ func (dg *DiscordGateway) Start(aiAgent *agent.Agent) error {
 
 	// Identify
 	if err := dg.identify(conn); err != nil {
-		return err
+		return fmt.Errorf("Failed to identify: %w", err)
 	}
 
 	// Block and listen for messages.
-	dg.listenLoop(conn)
-
-	return nil
+	return dg.listenLoop(conn)
 }
 
 func (dg *DiscordGateway) identify(conn *websocket.Conn) error {
@@ -132,12 +151,11 @@ func (dg *DiscordGateway) heartbeatLoop(conn *websocket.Conn, interval time.Dura
 	}
 }
 
-func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) {
+func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) error {
 	for {
 		var p Payload
 		if err := conn.ReadJSON(&p); err != nil {
-			log.Printf("Discord read error: %v", err)
-			return // TODO: Reconnect logic
+			return fmt.Errorf("Discord read error: %w", err)
 		}
 
 		switch p.Op {
@@ -151,6 +169,9 @@ func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) {
 						displayName := ready.User.Username
 						log.Printf("Discord Bot connected as: %s (ID: %s)", displayName, dg.BotID)
 					}
+				case "RESUMED":
+					// Useful to know when the bot recovered without a full restart
+					log.Println("Discord session resumed successfully.")
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
@@ -158,6 +179,14 @@ func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) {
 					}
 				}
 			}
+		case 7: // Reconnect
+			return fmt.Errorf("Discord requested a reconnect")
+		case 9: // Invalid Session
+			// Discord rejected our session. Returning an error forces the bot
+			// to drop the connection and start completely fresh in the Start() loop.
+			return fmt.Errorf("Discord session invalid, forcing reconnect")
+		case 11: // Heartbeat ACK
+			// Discord received our heartbeat. We do nothing, but catching it
 		}
 	}
 }
@@ -230,6 +259,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	}
 
 	replyToID := ""
+
 	prompt := msg.Content
 
 	if msg.GuildID != "" {
@@ -247,12 +277,27 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		prompt = strings.TrimSpace(prompt)
 	}
 
+	// Strip empty messages
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
+		return
+	}
+
+	// Turn custom Discord emojis into readable formats for the LLM
+	// Changes <:smile:123456789> into :smile:
+	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
+	prompt = re.ReplaceAllString(prompt, ":$1:")
+
 	// FIX: Remove these logs eventually
 	displayName := msg.Author.Username
 	log.Printf("Discord Request from %s (ID: %s): %s", displayName, msg.Author.ID, prompt)
 
 	// Send typing indicator in discord
 	stopTyping := make(chan struct{})
+
+	// Ensures this channel closes the exact moment handleMessage finishes
+	defer close(stopTyping)
 
 	go func() {
 		// Trigger immediately
@@ -274,9 +319,6 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 
 	// Pass the text to the agent
 	finalPayload, err := dg.Agent.Process(prompt)
-
-	// Stop typing indicator
-	close(stopTyping)
 
 	if err != nil {
 		log.Printf("Agent process error: %v", err)
@@ -371,3 +413,4 @@ func marshalJSON(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
+
