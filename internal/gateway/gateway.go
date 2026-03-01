@@ -29,7 +29,7 @@ func StartAll(cfg *config.Config, engine *agent.Engine) error {
 			// In a production app, you might want to pass a context or a stop channel here.
 		}
 	} else {
-		log.Println("Info: DISCORD_TOKEN not set, skipping Discord bot setup.")
+		log.Println("DISCORD_TOKEN not set, skipping Discord bot setup.")
 	}
 
 	// Initialize WebSocket Gateway
@@ -42,3 +42,4 @@ func StartAll(cfg *config.Config, engine *agent.Engine) error {
 	// Start the HTTP server (This is a blocking call)
 	return http.ListenAndServe(":"+cfg.Port, nil)
 }
+

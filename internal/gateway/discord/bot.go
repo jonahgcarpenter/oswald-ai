@@ -19,7 +19,7 @@ type Bot struct {
 func NewBot(cfg *config.Config, engine *agent.Engine) (*Bot, error) {
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
-		return nil, fmt.Errorf("error creating Discord session: %w", err)
+		return nil, fmt.Errorf("Error creating Discord session: %w", err)
 	}
 
 	bot := &Bot{
@@ -40,7 +40,7 @@ func NewBot(cfg *config.Config, engine *agent.Engine) (*Bot, error) {
 func (b *Bot) Start() error {
 	err := b.Session.Open()
 	if err != nil {
-		return fmt.Errorf("error opening connection: %w", err)
+		return fmt.Errorf("Error opening connection: %w", err)
 	}
 	log.Println("Oswald Discord Bot is now running. Press CTRL-C to exit.")
 	return nil
@@ -50,3 +50,4 @@ func (b *Bot) Start() error {
 func (b *Bot) Stop() {
 	b.Session.Close()
 }
+

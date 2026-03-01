@@ -34,6 +34,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	prompt = strings.ReplaceAll(prompt, fmt.Sprintf("<@!%s>", s.State.User.ID), "")
 	prompt = strings.TrimSpace(prompt)
 
+	// Default response if prompt is empty
 	if prompt == "" {
 		s.ChannelMessageSend(m.ChannelID, "How can I help you?")
 		return
@@ -84,3 +85,4 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
+

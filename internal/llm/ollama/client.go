@@ -33,33 +33,32 @@ func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 	// Marshal the request payload
 	payloadBytes, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("Failed to marshal request: %w", err)
 	}
 
 	// Create the HTTP request with the provided context
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("Failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Execute the request
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("ollama API request failed: %w", err)
+		return nil, fmt.Errorf("Ollama API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned non-200 status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("Ollama returned non-200 status: %d", resp.StatusCode)
 	}
 
 	// Decode the response
 	var ollamaResp GenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, fmt.Errorf("Failed to decode response: %w", err)
 	}
 
 	return &ollamaResp, nil
 }
-
