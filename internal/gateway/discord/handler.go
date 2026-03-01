@@ -44,7 +44,7 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	s.ChannelTyping(m.ChannelID)
 
 	// Delegate ALL logic to the agent engine
-	agentResp, err := b.Engine.Process(prompt)
+	agentResp, err := b.Agent.Process(prompt)
 	if err != nil {
 		log.Println("Discord Processing error:", err)
 		s.ChannelMessageSend(m.ChannelID, "Error: Oswald failed to process your request.")
@@ -85,4 +85,3 @@ func (b *Bot) messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		time.Sleep(200 * time.Millisecond)
 	}
 }
-

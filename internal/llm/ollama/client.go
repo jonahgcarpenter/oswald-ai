@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 // Client interacts with the local Ollama REST API.
@@ -15,35 +17,38 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// NewClient initializes a new Ollama client.
 func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
-			// A generous default timeout, but context deadlines will override this
 			Timeout: 2 * time.Minute,
 		},
 	}
 }
 
-// Generate sends a prompt to a specific model and waits for the full response.
-func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+// Generate now satisfies the llm.Provider interface
+func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, error) {
 	endpoint := fmt.Sprintf("%s/api/generate", c.BaseURL)
 
-	// Marshal the request payload
-	payloadBytes, err := json.Marshal(req)
+	// Map generic request to Ollama's specific JSON struct
+	ollamaReq := GenerateRequest{
+		Model:  req.Model,
+		Prompt: req.Prompt,
+		System: req.System,
+		Stream: req.Stream,
+	}
+
+	payloadBytes, err := json.Marshal(ollamaReq)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to marshal request: %w", err)
 	}
 
-	// Create the HTTP request with the provided context
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Execute the request
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("Ollama API request failed: %w", err)
@@ -54,11 +59,20 @@ func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 		return nil, fmt.Errorf("Ollama returned non-200 status: %d", resp.StatusCode)
 	}
 
-	// Decode the response
 	var ollamaResp GenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return nil, fmt.Errorf("Failed to decode response: %w", err)
 	}
 
-	return &ollamaResp, nil
+	// Map Ollama's response back to the generic standard response
+	return &llm.Response{
+		Model:              ollamaResp.Model,
+		Response:           ollamaResp.Response,
+		TotalDuration:      ollamaResp.TotalDuration,
+		LoadDuration:       ollamaResp.LoadDuration,
+		PromptEvalDuration: ollamaResp.PromptEvalDuration,
+		EvalDuration:       ollamaResp.EvalDuration,
+		EvalCount:          ollamaResp.EvalCount,
+	}, nil
 }
+

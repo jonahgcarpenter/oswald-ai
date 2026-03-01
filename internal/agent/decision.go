@@ -2,13 +2,13 @@ package agent
 
 import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 type RouteDecision struct {
-	Category string                   `json:"category"`
-	Reason   string                   `json:"reason"`
-	Metrics  *ollama.GenerateResponse `json:"-"`
+	Category string        `json:"category"`
+	Reason   string        `json:"reason"`
+	Metrics  *llm.Response `json:"-"`
 }
 
 // TODO: This will get removed eventually

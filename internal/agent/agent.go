@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 type ModelMetrics struct {
@@ -28,44 +28,45 @@ type AgentResponse struct {
 	ExpertMetrics *ModelMetrics `json:"expert_metrics,omitempty"`
 }
 
-// Engine handles all LLM orchestration
-type Engine struct {
-	client *ollama.Client
-	cfg    *config.Config
+// Agent handles all LLM orchestration
+type Agent struct {
+	provider llm.Provider
+	cfg      *config.Config
 }
 
-func NewEngine(client *ollama.Client, cfg *config.Config) *Engine {
-	return &Engine{
-		client: client,
-		cfg:    cfg,
+// NewAgent initializes the orchestration agent with a generic LLM provider
+func NewAgent(provider llm.Provider, cfg *config.Config) *Agent {
+	return &Agent{
+		provider: provider,
+		cfg:      cfg,
 	}
 }
 
 // Process handles the end-to-end agentic workflow: Triage -> Generation
-func (e *Engine) Process(userPrompt string) (*AgentResponse, error) {
+func (a *Agent) Process(userPrompt string) (*AgentResponse, error) {
 	// Triage routing
 	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 10*time.Second)
-	decision, err := DetermineRoute(ctxRoute, e.client, e.cfg.OllamaRouterModel, userPrompt)
+	decision, err := DetermineRoute(ctxRoute, a.provider, a.cfg.OllamaRouterModel, userPrompt)
 	cancelRoute()
 
 	if err != nil {
 		return nil, fmt.Errorf("Failed to route request: %w", err)
 	}
 
-	expertModel, systemPrompt := decision.GetRouteDetails(e.cfg)
+	expertModel, systemPrompt := decision.GetRouteDetails(a.cfg)
 
 	// Expert Generation
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelGen()
 
-	expertReq := ollama.GenerateRequest{
+	expertReq := llm.Request{
 		Model:  expertModel,
 		Prompt: userPrompt,
 		System: systemPrompt,
 		Stream: false, // Still false, so we wait for the entire markdown response
 	}
 
-	expertResp, err := e.client.Generate(ctxGen, expertReq)
+	expertResp, err := a.provider.Generate(ctxGen, expertReq)
 	if err != nil {
 		return &AgentResponse{
 			Category: decision.Category,
@@ -84,7 +85,7 @@ func (e *Engine) Process(userPrompt string) (*AgentResponse, error) {
 	}, nil
 }
 
-func mapMetrics(resp *ollama.GenerateResponse) *ModelMetrics {
+func mapMetrics(resp *llm.Response) *ModelMetrics {
 	if resp == nil || resp.EvalDuration <= 0 {
 		return nil
 	}
@@ -98,3 +99,4 @@ func mapMetrics(resp *ollama.GenerateResponse) *ModelMetrics {
 		TokensPerSecond:    tps,
 	}
 }
+

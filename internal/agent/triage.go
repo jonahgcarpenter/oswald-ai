@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 // DetermineRoute asks the fast router model to classify the incoming message.
-func DetermineRoute(ctx context.Context, client *ollama.Client, routerModel string, prompt string) (*RouteDecision, error) {
+func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel string, prompt string) (*RouteDecision, error) {
 
 	// This system prompt forces the model into a deterministic state.
 	systemPrompt := `You are a highly efficient API router for the Oswald AI agent. 
@@ -27,7 +27,7 @@ func DetermineRoute(ctx context.Context, client *ollama.Client, routerModel stri
 	{"category": "CODING", "reason": "brief explanation"}`
 
 	// Build the request using the types we defined in client.go
-	req := ollama.GenerateRequest{
+	req := llm.Request{
 		Model:  routerModel,
 		Prompt: prompt,
 		System: systemPrompt,
@@ -35,16 +35,16 @@ func DetermineRoute(ctx context.Context, client *ollama.Client, routerModel stri
 		Stream: false,  // We need the full JSON object at once, no streaming
 	}
 
-	// Send it to the Ollama client
-	resp, err := client.Generate(ctx, req)
+	// Send it to the generic provider interface
+	resp, err := provider.Generate(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("router failed to reach Ollama: %w", err)
+		return nil, fmt.Errorf("Router failed to reach Ollama: %w", err)
 	}
 
 	// Unmarshal the LLM's raw text response directly into our Go struct
 	var decision RouteDecision
 	if err := json.Unmarshal([]byte(resp.Response), &decision); err != nil {
-		return nil, fmt.Errorf("failed to parse router JSON: %w\nRaw response: %s", err, resp.Response)
+		return nil, fmt.Errorf("Failed to parse router JSON: %w\nRaw response: %s", err, resp.Response)
 	}
 
 	// Attach the full response metrics to the decision object instead of printing them

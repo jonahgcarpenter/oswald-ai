@@ -18,7 +18,7 @@ var upgrader = websocket.Upgrader{
 }
 
 // HandleConnections only relies on the agent Engine now
-func HandleConnections(w http.ResponseWriter, r *http.Request, engine *agent.Engine) {
+func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Agent) {
 	// Upgrade init request to Websocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -40,7 +40,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, engine *agent.Eng
 		userPrompt := string(message)
 
 		// Delegate ALL logic to the agent engine
-		finalPayload, err := engine.Process(userPrompt)
+		finalPayload, err := aiAgent.Process(userPrompt)
 		if err != nil {
 			log.Println("Engine processing error:", err)
 			conn.WriteMessage(messageType, []byte("Error: Failed to process request."))

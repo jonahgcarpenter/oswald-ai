@@ -12,11 +12,11 @@ import (
 // Bot wraps the discordgo session and our agent engine dependency
 type Bot struct {
 	Session *discordgo.Session
-	Engine  *agent.Engine
+	Agent   *agent.Agent
 }
 
 // NewBot initializes the Discord session
-func NewBot(cfg *config.Config, engine *agent.Engine) (*Bot, error) {
+func NewBot(cfg *config.Config, aiAgent *agent.Agent) (*Bot, error) {
 	dg, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
 		return nil, fmt.Errorf("Error creating Discord session: %w", err)
@@ -24,7 +24,7 @@ func NewBot(cfg *config.Config, engine *agent.Engine) (*Bot, error) {
 
 	bot := &Bot{
 		Session: dg,
-		Engine:  engine,
+		Agent:   aiAgent,
 	}
 
 	// Register the message handler
@@ -50,4 +50,3 @@ func (b *Bot) Start() error {
 func (b *Bot) Stop() {
 	b.Session.Close()
 }
-

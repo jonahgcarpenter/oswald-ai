@@ -12,11 +12,11 @@ import (
 
 // StartAll initializes and runs all configured gateways based on the environment variables.
 // It blocks indefinitely while the HTTP/WS server is running.
-func StartAll(cfg *config.Config, engine *agent.Engine) error {
+func StartAll(cfg *config.Config, aiAgent *agent.Agent) error {
 
 	// Initialize Discord Gateway (if configured)
 	if cfg.DiscordToken != "" {
-		discordBot, err := discord.NewBot(cfg, engine)
+		discordBot, err := discord.NewBot(cfg, aiAgent)
 		if err != nil {
 			log.Printf("Warning: Failed to create Discord bot: %v", err)
 		} else {
@@ -34,7 +34,7 @@ func StartAll(cfg *config.Config, engine *agent.Engine) error {
 
 	// Initialize WebSocket Gateway
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		websocket.HandleConnections(w, r, engine)
+		websocket.HandleConnections(w, r, aiAgent)
 	})
 
 	log.Printf("Websocket server starting on :%s\n", cfg.Port)
