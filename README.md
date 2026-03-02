@@ -5,7 +5,7 @@ I cannot afford a high end GPU setup to run the bigger local models with larger 
 
 They essentially built what I was going for all in Typescript without the complex AI logic, which made me re-think my own project. So now my re-write begins.
 
-The idea is to write in Golang for a smaller footprint, and handle a multi-user workload. All with **0** censorship, corperate gaurdrails, or I cannot assist responses!
+The idea is to write in Golang for a smaller footprint, and handle a multi-user workload. All with **0** censorship, corporate gaurdrails, or I cannot assist responses!
 
 ## Integrations
 
