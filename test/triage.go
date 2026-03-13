@@ -27,6 +27,9 @@ type TestCase struct {
 	Prompt   string
 }
 
+/*
+ * This test is designed to ensure specific prompts are getting routed to the correct model
+ */
 func main() {
 	port := "8080"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}
