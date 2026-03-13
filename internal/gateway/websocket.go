@@ -58,8 +58,14 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 
 		userPrompt := string(message)
 
+		// Define the callback to stream chunks to the client
+		streamFunc := func(chunk string) {
+			// You might want to wrap this in a JSON struct like {"type": "stream", "chunk": chunk}
+			conn.WriteMessage(messageType, []byte(chunk))
+		}
+
 		// Delegate ALL logic to the agent engine
-		finalPayload, err := aiAgent.Process(userPrompt)
+		finalPayload, err := aiAgent.Process(userPrompt, streamFunc)
 		if err != nil {
 			log.Println("Engine processing error:", err)
 			errorPayload := agent.AgentResponse{

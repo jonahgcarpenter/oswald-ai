@@ -36,8 +36,8 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 		Stream: false,  // We need the full JSON object at once, no streaming
 	}
 
-	// Send it to the generic provider interface
-	resp, err := provider.Generate(ctx, req)
+	// Send it to the generic provider interface, passing nil since we dont need streaming for an internal step
+	resp, err := provider.Generate(ctx, req, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Router failed to reach Ollama: %w", err)
 	}

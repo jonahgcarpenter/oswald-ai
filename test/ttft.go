@@ -28,12 +28,13 @@ type TestCase struct {
 
 /*
  * This test is designed to determine the Time to First Token (TTFT)
+ * and test the streaming capabilities of the WebSocket gateway.
  */
 func main() {
 	port := "8080"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}
 
-	fmt.Printf("Starting Oswald TTFT (Time To First Token) Benchmark against %s...\n", u.String())
+	fmt.Printf("Starting Oswald TTFT (Time To First Token) Streaming Benchmark against %s...\n", u.String())
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	tests := []TestCase{
@@ -69,27 +70,41 @@ func main() {
 			continue
 		}
 
-		// 3. Wait for the response to come back
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("Read error: %v", err)
-			conn.Close()
-			continue
+		var networkTTFT time.Duration
+		firstTokenReceived := false
+		var finalResp AgentResponse
+
+		// 3. Loop to receive streaming chunks
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Printf("Read error: %v", err)
+				break
+			}
+
+			// The moment we get the very first message back, stop the TTFT timer
+			if !firstTokenReceived {
+				networkTTFT = time.Since(startTime)
+				firstTokenReceived = true
+			}
+
+			// Try to parse the message as the final JSON payload
+			err = json.Unmarshal(message, &finalResp)
+
+			// If it parses successfully and has a Category, we know it's the final payload, not a text chunk
+			if err == nil && finalResp.Category != "" {
+				break
+			}
+
+			// Optional: If you want to see the stream in real-time in your terminal, uncomment the line below:
+			// fmt.Print(string(message))
 		}
 
-		// 4. Stop the network timer
-		networkWaitTime := time.Since(startTime)
+		// 4. Stop the total generation timer
+		totalNetworkWaitTime := time.Since(startTime)
 
-		// 5. Parse the JSON to get the internal Model TTFT
-		var resp AgentResponse
-		if err := json.Unmarshal(message, &resp); err != nil {
-			log.Printf("Failed to parse response JSON: %v\nRaw: %s", err, string(message))
-			conn.Close()
-			continue
-		}
-
-		if resp.Error != "" {
-			fmt.Printf(" ↳ Agent returned an error: %s\n", resp.Error)
+		if finalResp.Error != "" {
+			fmt.Printf(" ↳ Agent returned an error: %s\n", finalResp.Error)
 			conn.Close()
 			continue
 		}
@@ -97,16 +112,17 @@ func main() {
 		// Safely extract metrics if they exist
 		var modelTTFT int64 = 0
 		var modelName = "unknown"
-		if resp.ExpertMetrics != nil {
-			modelTTFT = resp.ExpertMetrics.PromptEvalDuration
-			modelName = resp.ExpertMetrics.Model
+		if finalResp.ExpertMetrics != nil {
+			modelTTFT = finalResp.ExpertMetrics.PromptEvalDuration
+			modelName = finalResp.ExpertMetrics.Model
 		}
 
 		// Print Results
 		fmt.Printf(" ↳ Model Used          : %s\n", modelName)
 		fmt.Printf(" ↳ Prompt Length       : %d characters\n", len(tc.Prompt))
+		fmt.Printf(" ↳ Network TTFT        : %v (Time to receive first streamed chunk)\n", networkTTFT)
 		fmt.Printf(" ↳ True Model TTFT     : %d ms (Ollama Prompt Eval Time)\n", modelTTFT)
-		fmt.Printf(" ↳ Total Network Wait  : %v (Because Stream is set to false)\n", networkWaitTime)
+		fmt.Printf(" ↳ Total Network Wait  : %v (Time for full streamed generation)\n", totalNetworkWaitTime)
 		fmt.Println("--------------------------------------------------------------------------------")
 
 		conn.Close()

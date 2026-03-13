@@ -24,5 +24,5 @@ type Response struct {
 
 // Provider defines the standard methods all LLM clients must implement.
 type Provider interface {
-	Generate(ctx context.Context, req Request) (*Response, error)
+	Generate(ctx context.Context, req Request, streamCallback func(chunk string)) (*Response, error)
 }

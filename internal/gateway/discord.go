@@ -317,8 +317,8 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		}
 	}()
 
-	// Pass the text to the agent
-	finalPayload, err := dg.Agent.Process(prompt)
+	// Pass the text to the agent, nil to disable streaming
+	finalPayload, err := dg.Agent.Process(prompt, nil)
 
 	if err != nil {
 		log.Printf("Agent process error: %v", err)
@@ -413,4 +413,3 @@ func marshalJSON(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
-

@@ -43,7 +43,7 @@ func NewAgent(provider llm.Provider, cfg *config.Config) *Agent {
 }
 
 // Process handles the end-to-end agentic workflow: Triage -> Generation
-func (a *Agent) Process(userPrompt string) (*AgentResponse, error) {
+func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*AgentResponse, error) {
 	// Triage routing
 	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 60*time.Second)
 	decision, err := DetermineRoute(ctxRoute, a.provider, a.cfg.OllamaRouterModel, userPrompt)
@@ -59,14 +59,17 @@ func (a *Agent) Process(userPrompt string) (*AgentResponse, error) {
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelGen()
 
+	// Check if the gateway requested a stream
+	isStreaming := streamCallback != nil
+
 	expertReq := llm.Request{
 		Model:  expertModel,
 		Prompt: userPrompt,
 		System: systemPrompt,
-		Stream: false, // Still false, so we wait for the entire markdown response
+		Stream: isStreaming,
 	}
 
-	expertResp, err := a.provider.Generate(ctxGen, expertReq)
+	expertResp, err := a.provider.Generate(ctxGen, expertReq, streamCallback)
 	if err != nil {
 		return &AgentResponse{
 			Category: decision.Category,

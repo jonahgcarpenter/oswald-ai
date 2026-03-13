@@ -29,6 +29,7 @@ type TestCase struct {
 
 /*
  * This test is designed to ensure specific prompts are getting routed to the correct model
+ * via the streaming WebSocket gateway.
  */
 func main() {
 	port := "8080"
@@ -85,20 +86,23 @@ func main() {
 			continue
 		}
 
-		// Read response
-		_, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("Read error: %v", err)
-			conn.Close()
-			continue
-		}
-
-		// Parse JSON response
 		var resp AgentResponse
-		if err := json.Unmarshal(message, &resp); err != nil {
-			log.Printf("JSON parse error: %v\nRaw response: %s", err, string(message))
-			conn.Close()
-			continue
+
+		// Loop to receive streaming chunks
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				log.Printf("Read error: %v", err)
+				break
+			}
+
+			// Try to parse the message as the final JSON payload
+			err = json.Unmarshal(message, &resp)
+
+			// If it parses successfully and has a Category, we know it's the final payload, not a text chunk
+			if err == nil && resp.Category != "" {
+				break
+			}
 		}
 
 		// Safe fallback for models incase metrics drop out

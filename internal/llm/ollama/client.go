@@ -1,6 +1,7 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,7 +28,7 @@ func NewClient(baseURL string) *Client {
 }
 
 // Generate now satisfies the llm.Provider interface
-func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, error) {
+func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback func(string)) (*llm.Response, error) {
 	endpoint := fmt.Sprintf("%s/api/generate", c.BaseURL)
 
 	// Map generic request to Ollama's specific JSON struct
@@ -55,10 +56,36 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Ollama returned non-200 status: %d", resp.StatusCode)
+	var finalResponse llm.Response
+	finalResponse.Model = req.Model
+
+	// Handle Streaming
+	if req.Stream && streamCallback != nil {
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			var chunk GenerateResponse
+			if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+				continue
+			}
+
+			// Fire the callback to the websocket
+			streamCallback(chunk.Response)
+
+			// Append to the final string
+			finalResponse.Response += chunk.Response
+
+			// Grab metrics on the final chunk
+			if chunk.Done {
+				finalResponse.TotalDuration = chunk.TotalDuration
+				finalResponse.EvalDuration = chunk.EvalDuration
+				finalResponse.EvalCount = chunk.EvalCount
+				finalResponse.PromptEvalDuration = chunk.PromptEvalDuration
+			}
+		}
+		return &finalResponse, nil
 	}
 
+	// Handle Non-Streaming (Discord)
 	var ollamaResp GenerateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
 		return nil, fmt.Errorf("Failed to decode response: %w", err)
@@ -75,4 +102,3 @@ func (c *Client) Generate(ctx context.Context, req llm.Request) (*llm.Response, 
 		EvalCount:          ollamaResp.EvalCount,
 	}, nil
 }
-
