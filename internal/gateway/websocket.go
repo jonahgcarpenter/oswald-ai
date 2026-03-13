@@ -62,7 +62,12 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 		finalPayload, err := aiAgent.Process(userPrompt)
 		if err != nil {
 			log.Println("Engine processing error:", err)
-			conn.WriteMessage(messageType, []byte("Error: Failed to process request."))
+			errorPayload := agent.AgentResponse{
+				Category: "ERROR",
+				Error:    "Internal engine timeout or failure",
+			}
+			errBytes, _ := json.Marshal(errorPayload)
+			conn.WriteMessage(messageType, errBytes)
 			continue
 		}
 

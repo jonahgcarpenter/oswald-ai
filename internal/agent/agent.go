@@ -45,7 +45,7 @@ func NewAgent(provider llm.Provider, cfg *config.Config) *Agent {
 // Process handles the end-to-end agentic workflow: Triage -> Generation
 func (a *Agent) Process(userPrompt string) (*AgentResponse, error) {
 	// Triage routing
-	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 10*time.Second)
+	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 60*time.Second)
 	decision, err := DetermineRoute(ctxRoute, a.provider, a.cfg.OllamaRouterModel, userPrompt)
 	cancelRoute()
 
