@@ -58,7 +58,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 		}
 
 		userPrompt := string(message)
-		log.Debug("Websocket request: %s", userPrompt)
+		log.Info("Websocket request: %q", truncate(userPrompt, 100))
 
 		// Define the callback to stream chunks to the client.
 		// Log once on the very first chunk so we know streaming has started.

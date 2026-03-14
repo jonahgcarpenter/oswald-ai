@@ -49,8 +49,19 @@ func NewAgent(provider llm.Provider, routerModel string, workers []WorkerAgent, 
 	}
 }
 
+// truncate returns s shortened to at most max runes, appending "…" if cut.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 // Process handles the end-to-end agentic workflow: Triage -> Generation.
 func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*AgentResponse, error) {
+	a.log.Info("Processing request: %q", truncate(userPrompt, 100))
+
 	// Triage routing
 	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 60*time.Second)
 	decision, err := DetermineRoute(ctxRoute, a.provider, a.routerModel, a.workers, userPrompt, a.log)
@@ -71,7 +82,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 	expertModel := worker.ResolveModel()
 	systemPrompt := worker.SystemPrompt
 
-	a.log.Debug("Routed to %s (%s): %s", decision.Category, expertModel, decision.Reason)
+	a.log.Debug("Expert generation starting: model=%s category=%s", expertModel, decision.Category)
 
 	// Expert Generation via /api/chat
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -110,6 +121,8 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 			Error:    fmt.Sprintf("Oswald's %s model failed to respond: %v", expertModel, err),
 		}, nil
 	}
+
+	a.log.Info("Response complete: category=%s model=%s", decision.Category, expertModel)
 
 	return &AgentResponse{
 		Category:      decision.Category,

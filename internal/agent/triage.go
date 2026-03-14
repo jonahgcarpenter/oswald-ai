@@ -47,8 +47,8 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 
 		lastResp = resp
 
-		log.Debug("Triage attempt %d: done_reason=%q tool_calls=%d content=%q",
-			attempt, resp.DoneReason, len(resp.Message.ToolCalls), resp.Message.Content)
+		log.Debug("Triage attempt %d/%d: done_reason=%q tool_calls=%d",
+			attempt, triageMaxAttempts, resp.DoneReason, len(resp.Message.ToolCalls))
 
 		if len(resp.Message.ToolCalls) == 0 {
 			log.Warn("Triage attempt %d/%d: no tool call in response", attempt, triageMaxAttempts)
@@ -63,6 +63,7 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 			if r, ok := toolCall.Function.Arguments["reason"]; ok {
 				reason, _ = r.(string)
 			}
+			log.Info("Triage: routed to %s — %s", worker.Category, reason)
 			return &RouteDecision{
 				Category: worker.Category,
 				Reason:   reason,

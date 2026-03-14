@@ -303,7 +303,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		)
 	}
 
-	dg.Log.Debug("Discord request from %s (ID: %s): %s", msg.Author.Username, msg.Author.ID, prompt)
+	dg.Log.Info("Discord request from %s: %q", msg.Author.Username, truncate(prompt, 100))
 
 	// Send typing indicator in discord
 	stopTyping := make(chan struct{})
@@ -343,8 +343,8 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	// Discord's 2,000 char limit
 	chunks := splitMessage(responseText, 2000)
 
-	dg.Log.Debug("Sending response to %s (ID: %s): %d chunk(s), %d chars, model: %s",
-		msg.Author.Username, msg.Author.ID, len(chunks), len(responseText), finalPayload.Model)
+	dg.Log.Debug("Discord response to %s: %d chunk(s), %d chars, model: %s",
+		msg.Author.Username, len(chunks), len(responseText), finalPayload.Model)
 
 	// Send each chunk
 	for i, chunk := range chunks {
@@ -427,4 +427,13 @@ func (dg *DiscordGateway) sendMessage(channelID, content, replyToID string) erro
 func marshalJSON(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// truncate returns s shortened to at most max runes, appending "…" if cut.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
