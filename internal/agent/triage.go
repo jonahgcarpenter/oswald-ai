@@ -2,81 +2,83 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"regexp"
-	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-// thinkTagRe strips <think>...</think> blocks emitted by reasoning models
-// (e.g. qwen3, deepseek-r1) before the actual JSON response.
-var thinkTagRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
+const (
+	// triageMaxAttempts is the total number of tries before falling back.
+	triageMaxAttempts = 3
 
-// jsonObjectRe extracts the first {...} JSON object from a string, tolerating
-// preamble text, postamble text, and markdown code fences.
-var jsonObjectRe = regexp.MustCompile(`(?s)\{.*\}`)
+	// triageSystemPrompt instructs the router model to call exactly one tool.
+	triageSystemPrompt = "You are a request router. Call exactly one of the available tools to classify the user message. Do not respond with text — only call a tool."
+)
 
-// extractJSON strips thinking blocks and pulls the first JSON object out of raw.
-func extractJSON(raw string) string {
-	// Remove <think>...</think> blocks produced by reasoning models
-	cleaned := thinkTagRe.ReplaceAllString(raw, "")
-	// Pull the first {...} object — handles preamble/postamble and code fences
-	if m := jsonObjectRe.FindString(cleaned); m != "" {
-		return m
-	}
-	return strings.TrimSpace(cleaned)
-}
-
-// DetermineRoute asks the fast router model to classify the incoming message
-// using the registered worker agents to build the classification prompt.
+// DetermineRoute asks the router model to classify the incoming message by
+// calling one of the dynamically-generated worker tools. If the model fails
+// to call a valid tool, the request is retried up to triageMaxAttempts times
+// before falling back to the first worker.
 func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel string, workers []WorkerAgent, prompt string, log *config.Logger) (*RouteDecision, error) {
-	systemPrompt := BuildTriagePrompt(workers)
+	tools := BuildTriageTools(workers)
+	fallbackCategory := workers[0].Category
 
-	req := llm.Request{
-		Model:  routerModel,
-		Prompt: prompt,
-		System: systemPrompt,
-		Format: "json", // Tells Ollama to enforce JSON output
-		Stream: false,  // We need the full JSON object at once, no streaming
+	messages := []llm.ChatMessage{
+		{Role: "system", Content: triageSystemPrompt},
+		{Role: "user", Content: prompt},
 	}
 
-	// Send it to the generic provider interface, passing nil since we don't need streaming for an internal step
-	resp, err := provider.Generate(ctx, req, nil)
-	if err != nil {
-		return nil, fmt.Errorf("router failed to reach Ollama: %w", err)
+	req := llm.ChatRequest{
+		Model:    routerModel,
+		Messages: messages,
+		Tools:    tools,
+		Stream:   false,
 	}
 
-	log.Debug("Triage raw response: %q", resp.Response)
+	var lastResp *llm.ChatResponse
 
-	fallback := workers[0].Category
-
-	// The client already promotes Thinking → Response for thinking models,
-	// so resp.Response is always the canonical output to parse here.
-	candidate := extractJSON(resp.Response)
-
-	var decision RouteDecision
-	parseErr := json.Unmarshal([]byte(candidate), &decision)
-
-	if parseErr != nil {
-		log.Warn("Triage: failed to parse JSON, falling back to %s: %v | raw: %q", fallback, parseErr, resp.Response)
-		decision = RouteDecision{
-			Category: fallback,
-			Reason:   "Fallback routing due to unparseable JSON from router.",
+	for attempt := 1; attempt <= triageMaxAttempts; attempt++ {
+		resp, err := provider.Chat(ctx, req, nil)
+		if err != nil {
+			// Hard provider error — no point retrying a network/timeout failure
+			return nil, fmt.Errorf("router failed on attempt %d: %w", attempt, err)
 		}
-	} else if FindWorker(workers, decision.Category) == nil {
-		// Valid JSON but category doesn't match any registered worker
-		log.Warn("Triage: unknown category %q, falling back to %s | raw: %q", decision.Category, fallback, resp.Response)
-		decision = RouteDecision{
-			Category: fallback,
-			Reason:   fmt.Sprintf("Fallback routing: router returned unknown category %q.", decision.Category),
+
+		lastResp = resp
+
+		log.Debug("Triage attempt %d: done_reason=%q tool_calls=%d content=%q",
+			attempt, resp.DoneReason, len(resp.Message.ToolCalls), resp.Message.Content)
+
+		if len(resp.Message.ToolCalls) == 0 {
+			log.Warn("Triage attempt %d/%d: no tool call in response", attempt, triageMaxAttempts)
+			continue
 		}
+
+		toolCall := resp.Message.ToolCalls[0]
+		category := CategoryFromToolName(toolCall.Function.Name)
+
+		if worker := FindWorker(workers, category); worker != nil {
+			reason := ""
+			if r, ok := toolCall.Function.Arguments["reason"]; ok {
+				reason, _ = r.(string)
+			}
+			return &RouteDecision{
+				Category: worker.Category,
+				Reason:   reason,
+				Metrics:  resp,
+			}, nil
+		}
+
+		log.Warn("Triage attempt %d/%d: unknown tool name %q (category %q)",
+			attempt, triageMaxAttempts, toolCall.Function.Name, category)
 	}
 
-	// Attach the full response metrics to the decision object
-	decision.Metrics = resp
-
-	return &decision, nil
+	// All attempts exhausted — fall back gracefully
+	log.Warn("Triage: all %d attempts failed, falling back to %s", triageMaxAttempts, fallbackCategory)
+	return &RouteDecision{
+		Category: fallbackCategory,
+		Reason:   fmt.Sprintf("Fallback routing after %d failed triage attempts.", triageMaxAttempts),
+		Metrics:  lastResp,
+	}, nil
 }

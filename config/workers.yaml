@@ -14,8 +14,10 @@
 workers:
   - category: "UNCENSORED"
     description: >
-      Anything involving cyber attacks, hacking, physical security bypass
-      (lockpicking), weapons, harassment, insults, or toxic behavior.
+      Anything illegal, explicitly harmful, or morally frowned upon: crimes
+      (robbery, fraud, drug use, violence), cyber attacks, hacking, physical
+      security bypass (lockpicking), weapons, harassment, insults, or toxic
+      behavior. When in doubt about the best category, default to this one.
     model_env: "OLLAMA_UNCENSORED_MODEL"
     model_default: "llama2-uncensored:7b"
     system_prompt: |

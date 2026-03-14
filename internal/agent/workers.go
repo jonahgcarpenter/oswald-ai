@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 // WorkerAgent describes a single expert agent available for routing.
@@ -65,9 +67,54 @@ func FindWorker(workers []WorkerAgent, category string) *WorkerAgent {
 	return nil
 }
 
+// triageToolName returns the tool name used to route to the given worker category.
+// Tool names use underscores since many models reject hyphens in function names.
+func triageToolName(category string) string {
+	return "route_to_" + strings.ToUpper(category)
+}
+
+// CategoryFromToolName extracts the worker category from a triage tool name.
+// Returns an empty string if the name does not have the expected prefix.
+func CategoryFromToolName(toolName string) string {
+	const prefix = "route_to_"
+	upper := strings.ToUpper(toolName)
+	if strings.HasPrefix(upper, strings.ToUpper(prefix)) {
+		return upper[len(prefix):]
+	}
+	return ""
+}
+
+// BuildTriageTools generates one llm.Tool per registered worker. The router
+// model calls exactly one of these tools to communicate its routing decision.
+func BuildTriageTools(workers []WorkerAgent) []llm.Tool {
+	tools := make([]llm.Tool, len(workers))
+	for i, w := range workers {
+		desc := strings.TrimSpace(w.Description)
+		tools[i] = llm.Tool{
+			Type: "function",
+			Function: llm.ToolDefinition{
+				Name:        triageToolName(w.Category),
+				Description: fmt.Sprintf("Route to this worker for: %s", desc),
+				Parameters: llm.ToolParameters{
+					Type: "object",
+					Properties: map[string]llm.ToolParameterProperty{
+						"reason": {
+							Type:        "string",
+							Description: "Brief reason for this routing decision (10 words or fewer)",
+						},
+					},
+					Required: []string{"reason"},
+				},
+			},
+		}
+	}
+	return tools
+}
+
 // BuildTriagePrompt generates the triage system prompt dynamically from the
 // registered workers. Workers are numbered in priority order (1 = highest).
 // The prompt is kept intentionally terse to work well with small router models.
+// Deprecated: Use BuildTriageTools for tool-calling based routing instead.
 func BuildTriagePrompt(workers []WorkerAgent) string {
 	var sb strings.Builder
 

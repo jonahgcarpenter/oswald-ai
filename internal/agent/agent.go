@@ -73,20 +73,35 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	a.log.Debug("Routed to %s (%s): %s", decision.Category, expertModel, decision.Reason)
 
-	// Expert Generation
+	// Expert Generation via /api/chat
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelGen()
 
 	isStreaming := streamCallback != nil
 
-	expertReq := llm.Request{
-		Model:  expertModel,
-		Prompt: userPrompt,
-		System: systemPrompt,
-		Stream: isStreaming,
+	expertMessages := []llm.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
 	}
 
-	expertResp, err := a.provider.Generate(ctxGen, expertReq, streamCallback)
+	expertReq := llm.ChatRequest{
+		Model:    expertModel,
+		Messages: expertMessages,
+		Stream:   isStreaming,
+	}
+
+	// Adapt the gateway's func(string) callback to the Chat API's func(ChatMessage) callback.
+	// Only the Content field is relevant for streaming to the client.
+	var chatCallback func(llm.ChatMessage)
+	if streamCallback != nil {
+		chatCallback = func(chunk llm.ChatMessage) {
+			if chunk.Content != "" {
+				streamCallback(chunk.Content)
+			}
+		}
+	}
+
+	expertResp, err := a.provider.Chat(ctxGen, expertReq, chatCallback)
 	if err != nil {
 		a.log.Error("Expert model %s failed: %v", expertModel, err)
 		return &AgentResponse{
@@ -100,13 +115,14 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 		Category:      decision.Category,
 		Reason:        decision.Reason,
 		Model:         expertModel,
-		Response:      expertResp.Response,
+		Response:      expertResp.Message.Content,
 		RouterMetrics: mapMetrics(decision.Metrics),
 		ExpertMetrics: mapMetrics(expertResp),
 	}, nil
 }
 
-func mapMetrics(resp *llm.Response) *ModelMetrics {
+// mapMetrics converts a *llm.ChatResponse into a *ModelMetrics summary.
+func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	if resp == nil || resp.EvalDuration <= 0 {
 		return nil
 	}
