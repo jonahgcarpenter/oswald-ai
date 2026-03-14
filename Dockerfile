@@ -27,6 +27,8 @@ COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
 
 RUN chmod +x ./oswald-agent
 
+COPY --from=builder --chown=oswald-ai:oswald-group /app/config/ ./config/
+
 USER oswald-ai
 
 EXPOSE 8080
