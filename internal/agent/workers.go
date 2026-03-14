@@ -14,8 +14,7 @@ import (
 type WorkerAgent struct {
 	Category     string `yaml:"category"`
 	Description  string `yaml:"description"`
-	ModelEnv     string `yaml:"model_env"`
-	ModelDefault string `yaml:"model_default"`
+	Model        string `yaml:"model"`
 	SystemPrompt string `yaml:"system_prompt"`
 }
 
@@ -44,15 +43,9 @@ func LoadWorkers(path string) ([]WorkerAgent, error) {
 	return wf.Workers, nil
 }
 
-// ResolveModel returns the model name for this worker, preferring the environment variable
-// override (ModelEnv) over the default. Allows dynamic model switching without redeployment.
+// ResolveModel returns the model name for this worker.
 func (w *WorkerAgent) ResolveModel() string {
-	if w.ModelEnv != "" {
-		if v, ok := os.LookupEnv(w.ModelEnv); ok && v != "" {
-			return v
-		}
-	}
-	return w.ModelDefault
+	return w.Model
 }
 
 // FindWorker returns the WorkerAgent whose Category matches the given string (case-insensitive).
