@@ -15,6 +15,7 @@ type Request struct {
 type Response struct {
 	Model              string
 	Response           string
+	Thinking           string // populated by thinking/reasoning models; may be empty
 	TotalDuration      int64
 	LoadDuration       int64
 	PromptEvalDuration int64

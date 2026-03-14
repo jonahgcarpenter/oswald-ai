@@ -50,6 +50,13 @@ type MessageCreate struct {
 		Bot      bool   `json:"bot"`
 		Username string `json:"username"`
 	} `json:"author"`
+	// ReferencedMessage is populated by Discord when this message is a reply.
+	ReferencedMessage *struct {
+		Content string `json:"content"`
+		Author  struct {
+			Username string `json:"username"`
+		} `json:"author"`
+	} `json:"referenced_message,omitempty"`
 }
 
 type DiscordGateway struct {
@@ -288,6 +295,16 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	// Changes <:smile:123456789> into :smile:
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
 	prompt = re.ReplaceAllString(prompt, ":$1:")
+
+	// If this message is a reply, prepend the quoted message so the LLM has context
+	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
+		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
+		prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
+			msg.ReferencedMessage.Author.Username,
+			quotedContent,
+			prompt,
+		)
+	}
 
 	// FIX: Remove these logs eventually
 	displayName := msg.Author.Username

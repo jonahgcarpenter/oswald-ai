@@ -17,6 +17,13 @@ func main() {
 	// Load config
 	cfg := config.Load()
 
+	// Load worker agent registry
+	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
+	if err != nil {
+		log.Fatalf("Failed to load workers config: %v", err)
+	}
+	log.Printf("Loaded %d worker agents from %s", len(workers), cfg.WorkersConfig)
+
 	// NOTE: I dont like this, I will only setup Ollama but leave the door open for others
 
 	// Determine and initialize the LLM Provider (The Factory Logic)
@@ -29,7 +36,7 @@ func main() {
 		log.Fatal("No valid LLM provider configured (missing Ollama URL or API keys)")
 	}
 
-	agentEngine := agent.NewAgent(llmProvider, cfg)
+	agentEngine := agent.NewAgent(llmProvider, cfg.OllamaRouterModel, workers)
 
 	// Initialize a slice of enabled gateways
 	var activeGateways []gateway.Service

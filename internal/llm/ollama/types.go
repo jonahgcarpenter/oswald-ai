@@ -17,6 +17,7 @@ type GenerateResponse struct {
 	Model              string    `json:"model"`
 	CreatedAt          time.Time `json:"created_at"`
 	Response           string    `json:"response"`
+	Thinking           string    `json:"thinking,omitempty"` // populated by thinking/reasoning models
 	Done               bool      `json:"done"`
 	DoneReason         string    `json:"done_reason,omitempty"`
 	Context            []int     `json:"context,omitempty"`

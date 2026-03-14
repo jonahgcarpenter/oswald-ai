@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -36,6 +37,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 		Model:  req.Model,
 		Prompt: req.Prompt,
 		System: req.System,
+		Format: req.Format,
 		Stream: req.Stream,
 	}
 
@@ -74,7 +76,8 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 			// Append to the final string
 			finalResponse.Response += chunk.Response
 
-			// Grab metrics on the final chunk
+			// Accumulate thinking content and grab metrics on the final chunk
+			finalResponse.Thinking += chunk.Thinking
 			if chunk.Done {
 				finalResponse.TotalDuration = chunk.TotalDuration
 				finalResponse.EvalDuration = chunk.EvalDuration
@@ -82,19 +85,37 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 				finalResponse.PromptEvalDuration = chunk.PromptEvalDuration
 			}
 		}
+		// Thinking models emit content in Thinking and leave Response empty.
+		// Promote Thinking to Response so all callers see output transparently.
+		if finalResponse.Response == "" && finalResponse.Thinking != "" {
+			finalResponse.Response = finalResponse.Thinking
+		}
 		return &finalResponse, nil
 	}
 
-	// Handle Non-Streaming (Discord)
-	var ollamaResp GenerateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return nil, fmt.Errorf("Failed to decode response: %w", err)
+	// Handle Non-Streaming
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Map Ollama's response back to the generic standard response
+	var ollamaResp GenerateResponse
+	if err := json.Unmarshal(rawBody, &ollamaResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Map Ollama's response back to the generic standard response.
+	// Thinking models emit content in Thinking and leave Response empty —
+	// promote Thinking to Response so all callers see output transparently.
+	response := ollamaResp.Response
+	if response == "" && ollamaResp.Thinking != "" {
+		response = ollamaResp.Thinking
+	}
+
 	return &llm.Response{
 		Model:              ollamaResp.Model,
-		Response:           ollamaResp.Response,
+		Response:           response,
+		Thinking:           ollamaResp.Thinking,
 		TotalDuration:      ollamaResp.TotalDuration,
 		LoadDuration:       ollamaResp.LoadDuration,
 		PromptEvalDuration: ollamaResp.PromptEvalDuration,
