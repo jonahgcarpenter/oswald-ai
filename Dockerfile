@@ -8,10 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
-
-# Might decide to load as config map later
 COPY config/ ./config/
-
 COPY internal/ ./internal/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o oswald-agent ./cmd/agent/main.go
@@ -30,7 +27,6 @@ COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
 
 RUN chmod +x ./oswald-agent
 
-# Might decide to load as config map later
 COPY --from=builder --chown=oswald-ai:oswald-group /app/config/ ./config/
 
 USER oswald-ai
