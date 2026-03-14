@@ -32,8 +32,9 @@ func NewClient(baseURL string, log *config.Logger) *Client {
 	}
 }
 
-// Generate satisfies the llm.Provider interface using /api/generate.
-// Deprecated: Use Chat instead.
+// Generate satisfies the llm.Provider interface using Ollama's /api/generate endpoint.
+// Deprecated: Use Chat instead. This endpoint lacks tool-calling support.
+// Migration: Switch to Chat with a single user message.
 func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback func(string)) (*llm.Response, error) {
 	endpoint := fmt.Sprintf("%s/api/generate", c.BaseURL)
 
@@ -66,7 +67,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 	var finalResponse llm.Response
 	finalResponse.Model = req.Model
 
-	// Handle Streaming
+	// Stream response from Ollama, accumulating chunks and metrics
 	if req.Stream && streamCallback != nil {
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
@@ -76,14 +77,14 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 				continue
 			}
 
-			// Fire the callback to the websocket
+			// Fire the callback immediately to avoid buffering entire response in memory
 			streamCallback(chunk.Response)
 
-			// Append to the final string
+			// Accumulate content and thinking
 			finalResponse.Response += chunk.Response
-
-			// Accumulate thinking content and grab metrics on the final chunk
 			finalResponse.Thinking += chunk.Thinking
+
+			// Grab metrics from the final chunk
 			if chunk.Done {
 				finalResponse.TotalDuration = chunk.TotalDuration
 				finalResponse.EvalDuration = chunk.EvalDuration
@@ -95,15 +96,15 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 			c.log.Warn("Ollama stream: scanner error: %v", err)
 		}
 
-		// Thinking models emit content in Thinking and leave Response empty.
-		// Promote Thinking to Response so all callers see output transparently.
+		// NOTE: Thinking models emit streaming content in Thinking, not Response.
+		// Promote Thinking to Response so all callers see output consistently.
 		if finalResponse.Response == "" && finalResponse.Thinking != "" {
 			finalResponse.Response = finalResponse.Thinking
 		}
 		return &finalResponse, nil
 	}
 
-	// Handle Non-Streaming
+	// Handle non-streaming response
 	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
@@ -120,9 +121,8 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Map Ollama's response back to the generic standard response.
-	// Thinking models emit content in Thinking and leave Response empty —
-	// promote Thinking to Response so all callers see output transparently.
+	// NOTE: Thinking models emit content in Thinking and leave Response empty —
+	// promote Thinking to Response so all callers see output consistently.
 	response := ollamaResp.Response
 	if response == "" && ollamaResp.Thinking != "" {
 		response = ollamaResp.Thinking
@@ -217,10 +217,11 @@ func mapFromOllamaMessage(m chatMessage) llm.ChatMessage {
 }
 
 // Chat satisfies the llm.Provider interface using Ollama's /api/chat endpoint.
-// It supports tool calling and streaming via chatStreamCallback.
+// Supports tool calling and streaming. Use this over Generate for new code.
 func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallback func(chunk llm.ChatMessage)) (*llm.ChatResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/chat", c.BaseURL)
 
+	// Build request, mapping tools if provided
 	ollamaReq := ChatRequest{
 		Model:    req.Model,
 		Messages: mapToOllamaMessages(req.Messages),
@@ -246,7 +247,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 	}
 	defer resp.Body.Close()
 
-	// Handle Streaming
+	// Stream response from Ollama, accumulating chunks and tool calls
 	if req.Stream && chatStreamCallback != nil {
 		var finalResp llm.ChatResponse
 		finalResp.Model = req.Model
@@ -262,10 +263,11 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 				continue
 			}
 
+			// Convert and stream chunk to caller
 			msg := mapFromOllamaMessage(chunk.Message)
 			chatStreamCallback(msg)
 
-			// Accumulate content and thinking
+			// Accumulate content, thinking, and tool calls
 			finalResp.Message.Role = msg.Role
 			finalResp.Message.Content += msg.Content
 			finalResp.Message.Thinking += msg.Thinking
@@ -273,6 +275,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 				finalResp.Message.ToolCalls = append(finalResp.Message.ToolCalls, msg.ToolCalls...)
 			}
 
+			// Grab metrics from the final chunk
 			if chunk.Done {
 				finalResp.DoneReason = chunk.DoneReason
 				finalResp.TotalDuration = chunk.TotalDuration
@@ -286,7 +289,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 			c.log.Warn("Ollama chat stream: scanner error: %v", err)
 		}
 
-		// Thinking models emit content in Thinking and leave Content empty.
+		// NOTE: Thinking models emit streaming content in Thinking, not Content.
 		// Promote Thinking to Content so all callers see output consistently.
 		if finalResp.Message.Content == "" && finalResp.Message.Thinking != "" {
 			finalResp.Message.Content = finalResp.Message.Thinking
@@ -294,7 +297,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 		return &finalResp, nil
 	}
 
-	// Handle Non-Streaming
+	// Handle non-streaming response
 	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read chat response body: %w", err)
@@ -313,7 +316,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 
 	msg := mapFromOllamaMessage(ollamaResp.Message)
 
-	// Thinking models emit content in Thinking and leave Content empty —
+	// NOTE: Thinking models emit content in Thinking and leave Content empty —
 	// promote Thinking to Content so all callers see output consistently.
 	if msg.Content == "" && msg.Thinking != "" {
 		msg.Content = msg.Thinking

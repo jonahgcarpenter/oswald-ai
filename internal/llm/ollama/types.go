@@ -31,34 +31,40 @@ type GenerateResponse struct {
 	EvalDuration       int64     `json:"eval_duration,omitempty"`
 }
 
-// chatToolFunction holds the name and arguments of a tool call from the model.
+// chatToolFunction holds the name and arguments of a tool invocation from the model.
+// Differs from llm.ToolFunction in that Arguments is map[string]interface{} for lazy decoding.
 type chatToolFunction struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
-// chatToolCall represents a single tool invocation emitted by the model.
+// chatToolCall represents a single tool invocation in Ollama's chat response.
+// Corresponds to llm.ToolCall but using Ollama's internal structures.
 type chatToolCall struct {
 	Function chatToolFunction `json:"function"`
 }
 
-// chatMessage is a single conversation turn in the Ollama chat API.
+// chatMessage is a single conversation turn in Ollama's chat API format.
+// Differs from the generic llm.ChatMessage in field names and structure.
+// mapToOllamaMessages and mapFromOllamaMessage handle the conversion.
 type chatMessage struct {
 	Role      string         `json:"role"`
 	Content   string         `json:"content"`
-	Thinking  string         `json:"thinking,omitempty"`
+	Thinking  string         `json:"thinking,omitempty"` // Thinking models emit content here
 	ToolCalls []chatToolCall `json:"tool_calls,omitempty"`
 	ToolName  string         `json:"tool_name,omitempty"`
 }
 
-// chatToolParameterProperty describes one property in a tool's parameter schema.
+// chatToolParameterProperty describes a single property in a tool's parameter schema.
+// Used as a value in chatToolParameters.Properties map for JSON Schema validation.
 type chatToolParameterProperty struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Enum        []string `json:"enum,omitempty"`
 }
 
-// chatToolParameters is the JSON Schema for a tool's inputs.
+// chatToolParameters is the JSON Schema definition for a tool's input parameters.
+// Mirrors llm.ToolParameters but uses Ollama's exact field structure.
 type chatToolParameters struct {
 	Type       string                               `json:"type"`
 	Properties map[string]chatToolParameterProperty `json:"properties"`
@@ -66,13 +72,15 @@ type chatToolParameters struct {
 }
 
 // chatToolDefinition holds the schema for a single function tool.
+// Corresponds to llm.ToolDefinition but using Ollama's internal structures.
 type chatToolDefinition struct {
 	Name        string             `json:"name"`
 	Description string             `json:"description"`
 	Parameters  chatToolParameters `json:"parameters"`
 }
 
-// chatTool wraps a chatToolDefinition with its type identifier.
+// chatTool wraps a chatToolDefinition with its type (always "function" for Ollama).
+// Corresponds to llm.Tool but using Ollama's internal message format.
 type chatTool struct {
 	Type     string             `json:"type"`
 	Function chatToolDefinition `json:"function"`

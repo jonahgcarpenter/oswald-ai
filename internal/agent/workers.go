@@ -44,8 +44,8 @@ func LoadWorkers(path string) ([]WorkerAgent, error) {
 	return wf.Workers, nil
 }
 
-// ResolveModel returns the model name for this worker, preferring the
-// environment variable override over the default.
+// ResolveModel returns the model name for this worker, preferring the environment variable
+// override (ModelEnv) over the default. Allows dynamic model switching without redeployment.
 func (w *WorkerAgent) ResolveModel() string {
 	if w.ModelEnv != "" {
 		if v, ok := os.LookupEnv(w.ModelEnv); ok && v != "" {
@@ -55,8 +55,8 @@ func (w *WorkerAgent) ResolveModel() string {
 	return w.ModelDefault
 }
 
-// FindWorker returns the WorkerAgent whose Category matches the given string
-// (case-insensitive). Returns nil if no match is found.
+// FindWorker returns the WorkerAgent whose Category matches the given string (case-insensitive).
+// Returns nil if no match is found.
 func FindWorker(workers []WorkerAgent, category string) *WorkerAgent {
 	upper := strings.ToUpper(category)
 	for i := range workers {
@@ -68,13 +68,13 @@ func FindWorker(workers []WorkerAgent, category string) *WorkerAgent {
 }
 
 // triageToolName returns the tool name used to route to the given worker category.
-// Tool names use underscores since many models reject hyphens in function names.
+// Tool names use underscores since many LLMs reject hyphens in function names.
 func triageToolName(category string) string {
 	return "route_to_" + strings.ToUpper(category)
 }
 
 // CategoryFromToolName extracts the worker category from a triage tool name.
-// Returns an empty string if the name does not have the expected prefix.
+// Expects the format "route_to_CATEGORY". Returns an empty string if the name does not match.
 func CategoryFromToolName(toolName string) string {
 	const prefix = "route_to_"
 	upper := strings.ToUpper(toolName)
@@ -84,8 +84,9 @@ func CategoryFromToolName(toolName string) string {
 	return ""
 }
 
-// BuildTriageTools generates one llm.Tool per registered worker. The router
-// model calls exactly one of these tools to communicate its routing decision.
+// BuildTriageTools generates one llm.Tool per registered worker. Each tool represents
+// a routing option; the router model calls exactly one to communicate its decision.
+// This tool-calling approach is more reliable than parsing generated text.
 func BuildTriageTools(workers []WorkerAgent) []llm.Tool {
 	tools := make([]llm.Tool, len(workers))
 	for i, w := range workers {

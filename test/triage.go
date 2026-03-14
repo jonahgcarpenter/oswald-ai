@@ -9,8 +9,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// AgentResponse mirrors the struct from internal/agent/agent.go
-// We only define the fields we actually need to parse for the test.
+// AgentResponse mirrors internal/agent/agent.go's AgentResponse but only includes
+// fields we need for routing verification. This avoids importing internal types.
 type AgentResponse struct {
 	Category      string `json:"category"`
 	Reason        string `json:"reason"`
@@ -22,15 +22,17 @@ type AgentResponse struct {
 	} `json:"expert_metrics"`
 }
 
+// TestCase defines a triage test: the expected category and the prompt to route.
 type TestCase struct {
-	Expected string
-	Prompt   string
+	Expected string // Expected routing category (e.g., "SIMPLE", "CODING")
+	Prompt   string // User prompt to classify
 }
 
-/*
- * This test is designed to ensure specific prompts are getting routed to the correct model
- * via the streaming WebSocket gateway.
- */
+// main runs triage accuracy tests against the WebSocket gateway.
+// Connects to ws://localhost:8080/ws and validates that 20 test prompts
+// are routed to their correct expert categories. Each test opens a new
+// connection, sends a prompt, reads streamed chunks, and validates the
+// final JSON response's category against the expected value.
 func main() {
 	port := "8080"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}

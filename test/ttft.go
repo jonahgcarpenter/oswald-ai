@@ -10,7 +10,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// AgentResponse mirrors the struct to extract metrics
+// AgentResponse mirrors internal/agent/agent.go's AgentResponse but includes only
+// fields we need for TTFT measurement: model name and prompt eval duration.
 type AgentResponse struct {
 	Category      string `json:"category"`
 	Error         string `json:"error"`
@@ -21,15 +22,18 @@ type AgentResponse struct {
 	} `json:"expert_metrics"`
 }
 
+// TestCase defines a benchmark test: a name label and prompt of varying complexity.
 type TestCase struct {
-	Name   string
-	Prompt string
+	Name   string // Test label (SHORT, MEDIUM, LONG)
+	Prompt string // User prompt to benchmark
 }
 
-/*
- * This test is designed to determine the Time to First Token (TTFT)
- * and test the streaming capabilities of the WebSocket gateway.
- */
+// main runs Time To First Token (TTFT) benchmarks against the WebSocket gateway.
+// Tests three prompt complexities (SHORT, MEDIUM, LONG) to measure:
+// - Network TTFT: time from sending prompt to receiving first streamed chunk
+// - Model TTFT: Ollama's prompt evaluation duration (from metrics)
+// - Total network wait: time from send to final JSON response
+// Each test opens a new connection and allows 2 seconds between tests for GPU cooldown.
 func main() {
 	port := "8080"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}

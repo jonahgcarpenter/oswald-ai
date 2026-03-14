@@ -58,11 +58,13 @@ func truncate(s string, max int) string {
 	return string(r[:max]) + "…"
 }
 
-// Process handles the end-to-end agentic workflow: Triage -> Generation.
+// Process handles the end-to-end agentic workflow: routing incoming prompts to the best
+// worker, then executing the expert model. Returns the final response with routing/execution
+// metrics. Streams partial content via streamCallback if provided.
 func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*AgentResponse, error) {
 	a.log.Info("Processing request: %q", truncate(userPrompt, 100))
 
-	// Triage routing
+	// Determine route via triage
 	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 60*time.Second)
 	decision, err := DetermineRoute(ctxRoute, a.provider, a.routerModel, a.workers, userPrompt, a.log)
 	cancelRoute()
@@ -71,10 +73,10 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 		return nil, fmt.Errorf("failed to route request: %w", err)
 	}
 
-	// Resolve the matched worker for model name and system prompt
+	// Resolve worker for the matched category
 	worker := FindWorker(a.workers, decision.Category)
 	if worker == nil {
-		// Should not happen if the fallback in DetermineRoute is correct,
+		// Fallback: Should not happen if DetermineRoute defaults correctly,
 		// but guard anyway by using the first worker.
 		worker = &a.workers[0]
 	}
@@ -84,7 +86,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	a.log.Debug("Expert generation starting: model=%s category=%s", expertModel, decision.Category)
 
-	// Expert Generation via /api/chat
+	// Generate response from expert model
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelGen()
 
@@ -101,8 +103,10 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 		Stream:   isStreaming,
 	}
 
-	// Adapt the gateway's func(string) callback to the Chat API's func(ChatMessage) callback.
-	// Only the Content field is relevant for streaming to the client.
+	// Adapt gateway callback (func(string)) to Chat API callback (func(ChatMessage)).
+	// Extract Content field only; tool calls and thinking are not streamed to gateway.
+	// NOTE: Gateways expect plain text content only. Complex fields like tool calls
+	// are captured in the final response but not streamed incrementally.
 	var chatCallback func(llm.ChatMessage)
 	if streamCallback != nil {
 		chatCallback = func(chunk llm.ChatMessage) {
@@ -124,6 +128,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	a.log.Info("Response complete: category=%s model=%s", decision.Category, expertModel)
 
+	// Assemble final response with metrics
 	return &AgentResponse{
 		Category:      decision.Category,
 		Reason:        decision.Reason,
@@ -134,7 +139,9 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 	}, nil
 }
 
-// mapMetrics converts a *llm.ChatResponse into a *ModelMetrics summary.
+// mapMetrics converts a *llm.ChatResponse into a *ModelMetrics summary for reporting.
+// Returns nil if the response is missing or has no evaluation duration (partial failure).
+// Converts nanosecond timings to milliseconds and calculates tokens/second throughput.
 func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	if resp == nil || resp.EvalDuration <= 0 {
 		return nil

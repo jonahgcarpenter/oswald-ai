@@ -84,13 +84,16 @@ func (dg *DiscordGateway) Start(aiAgent *agent.Agent) error {
 			dg.Log.Info("Discord connection closed normally.")
 		}
 
-		// Wait 5 seconds before trying to reconnect to avoid spamming Discord's API
+		// TODO: Implement exponential backoff with max delay.
+		// Currently retries every 5 seconds, which may overwhelm Discord's API on sustained outages.
 		dg.Log.Info("Reconnecting to Discord Gateway in 5 seconds...")
 		time.Sleep(5 * time.Second)
 	}
 }
 
-// Handles a single, continuous websocket session
+// connectAndListen manages a single Discord gateway session, handling authentication,
+// heartbeat loops, and message routing. Returns when the connection drops or Discord
+// requests a reconnection.
 func (dg *DiscordGateway) connectAndListen() error {
 	conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
 	if err != nil {
@@ -100,7 +103,7 @@ func (dg *DiscordGateway) connectAndListen() error {
 	// This ensures the connection is closed when this function exits.
 	defer conn.Close()
 
-	// Wait for HELLO
+	// Wait for HELLO to receive heartbeat interval
 	var helloPayload Payload
 	if err := conn.ReadJSON(&helloPayload); err != nil || helloPayload.Op != 10 {
 		return fmt.Errorf("Expected HELLO payload: %v", err)
@@ -109,18 +112,19 @@ func (dg *DiscordGateway) connectAndListen() error {
 	var hello HelloEvent
 	json.Unmarshal(helloPayload.D, &hello)
 
-	// Start Heartbeat
+	// Start heartbeat loop with Discord's specified interval
 	go dg.heartbeatLoop(conn, hello.HeartbeatInterval*time.Millisecond)
 
-	// Identify
+	// Identify to Discord with bot token and intents
 	if err := dg.identify(conn); err != nil {
 		return fmt.Errorf("Failed to identify: %w", err)
 	}
 
-	// Block and listen for messages.
+	// Block and listen for incoming messages until connection closes
 	return dg.listenLoop(conn)
 }
 
+// identify sends the IDENTIFY opcode to Discord, authenticating the bot with its token and intents.
 func (dg *DiscordGateway) identify(conn *websocket.Conn) error {
 	identifyData := map[string]interface{}{
 		"token":   dg.Token,
@@ -143,6 +147,9 @@ func (dg *DiscordGateway) identify(conn *websocket.Conn) error {
 	return nil
 }
 
+// heartbeatLoop sends heartbeat packets to Discord at the specified interval.
+// Exits when the connection closes or a send fails. Discord requires heartbeats
+// to maintain the session; missing them triggers automatic disconnection.
 func (dg *DiscordGateway) heartbeatLoop(conn *websocket.Conn, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -156,6 +163,9 @@ func (dg *DiscordGateway) heartbeatLoop(conn *websocket.Conn, interval time.Dura
 	}
 }
 
+// listenLoop continuously reads events from the Discord gateway and dispatches them
+// to handlers. Returns when the connection closes or Discord sends a reconnect/invalid
+// session opcode.
 func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) error {
 	for {
 		var p Payload
@@ -164,19 +174,21 @@ func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) error {
 		}
 
 		switch p.Op {
-		case 0:
+		case 0: // Dispatch event
 			if p.T != nil {
 				switch *p.T {
 				case "READY":
+					// Session established; capture bot identity
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
 						dg.BotID = ready.User.ID
 						dg.Log.Info("Discord Bot connected as: %s (ID: %s)", ready.User.Username, dg.BotID)
 					}
 				case "RESUMED":
-					// Useful to know when the bot recovered without a full restart
+					// Session resumed after a drop; bot is already connected
 					dg.Log.Info("Discord session resumed successfully.")
 				case "MESSAGE_CREATE":
+					// Incoming message; route to handler for processing
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
 						dg.handleMessage(msg)
@@ -190,12 +202,14 @@ func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) error {
 			// to drop the connection and start completely fresh in the Start() loop.
 			return fmt.Errorf("Discord session invalid, forcing reconnect")
 		case 11: // Heartbeat ACK
-			// Discord received our heartbeat. We do nothing, but catching it
+			// Discord acknowledged our heartbeat; connection is healthy
 		}
 	}
 }
 
-// splitMessage breaks a large string into chunks, prioritizing newlines, sentence ends, and spaces.
+// splitMessage breaks a large string into chunks respecting Discord's 2000-char limit.
+// Prioritizes splitting at newlines (P1), sentence boundaries (P2), word spaces (P3),
+// and falls back to hard split if the text is one massive unbroken string (P4).
 func splitMessage(text string, limit int) []string {
 	var chunks []string
 	runes := []rune(text)
@@ -256,16 +270,18 @@ func splitMessage(text string, limit int) []string {
 	return chunks
 }
 
+// handleMessage processes an incoming Discord message, validating it, extracting context,
+// sending it to the agent, and streaming responses back to Discord.
 func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
-	// Skip messages from bots
+	// Skip messages from bots (avoid feedback loops)
 	if msg.Author.Bot {
 		return
 	}
 
 	replyToID := ""
-
 	prompt := msg.Content
 
+	// In guild channels, require an explicit bot mention; in DMs, process all messages
 	if msg.GuildID != "" {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 		mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
@@ -275,25 +291,25 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		}
 		replyToID = msg.ID
 
-		// Strip the mention out of the text so the AI doesn't see "<@12345> hello"
+		// Strip the mention from the prompt so the LLM doesn't see "<@12345> hello"
 		prompt = strings.ReplaceAll(prompt, mention1, "")
 		prompt = strings.ReplaceAll(prompt, mention2, "")
 		prompt = strings.TrimSpace(prompt)
 	}
 
-	// Strip empty messages
+	// Validate prompt isn't empty after mention stripping
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
 		return
 	}
 
-	// Turn custom Discord emojis into readable formats for the LLM
-	// Changes <:smile:123456789> into :smile:
+	// Normalize custom Discord emoji format for the LLM
+	// Changes <:smile:123456789> into :smile: for readability
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
 	prompt = re.ReplaceAllString(prompt, ":$1:")
 
-	// If this message is a reply, prepend the quoted message so the LLM has context
+	// Include quoted context if this is a reply to another message
 	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
 		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
 		prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
@@ -305,17 +321,15 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 
 	dg.Log.Info("Discord request from %s: %q", msg.Author.Username, truncate(prompt, 100))
 
-	// Send typing indicator in discord
+	// Launch typing indicator loop; signals when message handling completes
 	stopTyping := make(chan struct{})
-
-	// Ensures this channel closes the exact moment handleMessage finishes
 	defer close(stopTyping)
 
 	go func() {
-		// Trigger immediately
+		// Trigger immediately to show the bot is processing
 		_ = dg.sendTyping(msg.ChannelID)
 
-		// Set a ticker for 9 seconds to refresh the 10-second indicator
+		// Discord typing indicator lasts 10 seconds; refresh every 9 to stay visible
 		ticker := time.NewTicker(9 * time.Second)
 		defer ticker.Stop()
 
@@ -329,7 +343,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		}
 	}()
 
-	// Pass the text to the agent, nil to disable streaming
+	// Send prompt to agent for routing and response generation
 	finalPayload, err := dg.Agent.Process(prompt, nil)
 
 	if err != nil {
@@ -340,15 +354,15 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 
 	responseText := finalPayload.Response
 
-	// Discord's 2,000 char limit
+	// NOTE: Discord enforces a 2000-character limit per message and silently truncates.
+	// We detect and split preemptively to avoid losing content.
 	chunks := splitMessage(responseText, 2000)
 
 	dg.Log.Debug("Discord response to %s: %d chunk(s), %d chars, model: %s",
 		msg.Author.Username, len(chunks), len(responseText), finalPayload.Model)
 
-	// Send each chunk
+	// Send each chunk, attaching the reply reference only to the first chunk
 	for i, chunk := range chunks {
-		// Only attach the reply reference to the very first chunk
 		currentReplyID := ""
 		if i == 0 {
 			currentReplyID = replyToID
@@ -362,6 +376,8 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	}
 }
 
+// sendTyping posts a typing indicator to Discord, showing that the bot is processing a message.
+// Discord's typing indicator lasts 10 seconds, so callers should refresh periodically.
 func (dg *DiscordGateway) sendTyping(channelID string) error {
 	url := fmt.Sprintf("%s/channels/%s/typing", apiBaseURL, channelID)
 
@@ -372,7 +388,7 @@ func (dg *DiscordGateway) sendTyping(channelID string) error {
 
 	req.Header.Set("Authorization", "Bot "+dg.Token)
 
-	// A short timeout is fine here, it's a lightweight request
+	// Lightweight request; short timeout is acceptable
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -386,15 +402,15 @@ func (dg *DiscordGateway) sendTyping(channelID string) error {
 	return nil
 }
 
+// sendMessage posts a message to a Discord channel, optionally as a reply to another message.
 func (dg *DiscordGateway) sendMessage(channelID, content, replyToID string) error {
 	url := fmt.Sprintf("%s/channels/%s/messages", apiBaseURL, channelID)
 
-	// Use a map[string]interface{} so we can conditionally add nested objects
+	// Build payload with optional message_reference for replies
 	payload := map[string]interface{}{
 		"content": content,
 	}
 
-	// If a replyToID was provided, attach the message_reference object
 	if replyToID != "" {
 		payload["message_reference"] = map[string]string{
 			"message_id": replyToID,
@@ -424,6 +440,8 @@ func (dg *DiscordGateway) sendMessage(channelID, content, replyToID string) erro
 	return nil
 }
 
+// marshalJSON converts any value to a json.RawMessage, ignoring marshal errors.
+// Used for Discord gateway payloads where the structure is known to be JSON-safe.
 func marshalJSON(v interface{}) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b

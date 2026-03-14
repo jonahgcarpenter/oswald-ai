@@ -9,11 +9,13 @@ type Service interface {
 	Name() string
 }
 
-// TODO: I need to create an middleman to aviod cross gateway contamination
-// This way every message is directed to where it came from
+// AgentRequest is reserved for future request routing across multiple gateways.
+// TODO: Implement a message broker/multiplexer to route responses back to the correct gateway.
+// Currently, messages are not routed by gateway (responses are broadcast or directed by context).
+// This structure prepares for multi-gateway request attribution.
 type AgentRequest struct {
-	Channel    string // Name of gateway
-	ChatID     string // The specific  user ID.
-	SenderID   string // The specific room.
-	SessionKey string // A unique identifier for the conversation context.
+	Channel    string // Gateway name (e.g., "discord", "websocket")
+	ChatID     string // Conversation/room identifier
+	SenderID   string // User identifier
+	SessionKey string // Unique conversation context identifier
 }
