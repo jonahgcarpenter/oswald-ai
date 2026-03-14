@@ -1,59 +1,210 @@
-# Oswald-AI
+# Oswald AI - Digital Servant
 
-<div align="center">
+> A pure Go LLM-powered chat agent with intelligent request routing and expert model selection. Zero external API dependencies—fully local, fully uncensored.
 
-**A persistent, cross-platform digital manservant.**
+## Overview
 
-Oswald is a personal AI project designed to occupy the space between a classic British butler and a hyper-advanced neural network.
+**Oswald** is a lightweight, orchestration agent that intelligently routes incoming requests to specialized expert models based on query classification. Built in Go for minimal resource overhead, it supports multiple gateways (Discord, WebSocket) and integrates seamlessly with local Ollama installations.
 
-![Oswald Preview](https://y.yarn.co/eb976dbd-fa42-4e1a-bb55-d3adac9785cf_text.gif) ![Oswald Preview](https://media.tenor.com/EifGeTRyvxoAAAAM/alfred-alfred-batman.gif)
+### Key Features
 
-</div>
+- **Intelligent Routing**: LLM-powered triage system classifies requests into expert categories
+- **Blazing Fast**: Pure Go, single-binary deployment, minimal overhead
+- **Multi-Gateway Support**: Discord bot, WebSocket API
+- **Zero Censorship**: Fully uncensored local models—no corporate guardrails
+- **Tool-Calling Support**: Dynamic tool generation for robust routing decisions
 
-Built on a "write once, serve everywhere" philosophy, Oswald acts as the connective tissue for my digital ecosystem. He seamlessly transitions between environments—managing homelab infrastructure via terminal, controlling smart home devices through IoT integrations, and facilitating social interactions within Discord communities.
+---
 
-Unlike stateless assistants, Oswald is architected with memory and context-awareness. He doesn't just respond to prompts; he remembers them. By building unique memory profiles for every user, he learns routines, adapts to conversational quirks, and recalls preferences across sessions. The result is a unified assistant that manages my digital life with efficiency and a touch of dry wit, ensuring the environment is exactly to my liking—often before I even ask.
-
-## Integrations
-
-- **Discord** There are no complex commands to remember—just mention the bot's user (`@Bot Name`) with your question or prompt.
-
-## How It Works
-
-<img width="1024" height="559" alt="image" src="https://github.com/user-attachments/assets/e5c227a4-7fa7-43ac-a799-994051944bba" />
-
-## Prerequisites
-
-Before running the application, you will need the following services available:
-
-- **PostgreSQL w/ PGVector:** Used as a vector database, along with saving chat history for monitoring
-- **SearXNG:** A running instance is required to act as the search engine tool for the bot.
-- **Ollama:** Required to serve the local Large Language Model
-
-## Installation
-
-All default variables can be found [here](https://github.com/jonahgcarpenter/oswald-ai/blob/master/app/utils/config.py)
-
-### Docker Compose:
+## Architecture
 
 ```
-services:
-  oswald-ai:
-    container_name: oswald-ai
-    image: ghcr.io/jonahgcarpenter/oswald-ai/oswald-ai:latest
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
-      - OLLAMA_BASE_MODEL=${OLLAMA_BASE_MODEL}
-      - OLLAMA_EMBEDDING_MODEL=${OLLAMA_EMBEDDING_MODEL}
-      - SEARXNG_URL=${SEARXNG_URL}
-      - DATABASE_URL=${DATABASE_URL}
-      - DATABASE_SCHEMA=${DATABASE_SCHEMA}
-      - LOG_LEVEL=${LOG_LEVEL}
+┌─────────────────────────────────────────────────────────────────┐
+│                        External Sources                         │
+├──────────────────┬──────────────────────────────────────────────┤
+│   Discord User   │   WebSocket Client (testing/integration)     │
+│    Messages      │          Raw Text Input                      │
+└────────┬─────────┴──────────────────────────────────────────────┘
+         │
+    ┌────▼────────────────────────────────────────────────────────┐
+    │                    GATEWAY LAYER                            │
+    │  ┌──────────────────┐          ┌──────────────────────────┐ │
+    │  │ DiscordGateway   │          │ WebsocketGateway         │ │
+    │  ├──────────────────┤          ├──────────────────────────┤ │
+    │  │ • WebSocket Conn │          │ • HTTP WS Upgrade        │ │
+    │  │ • Auth + Identity│          │ • Message Streaming      │ │
+    │  │ • Heartbeat Loop │          │ • JSON Response          │ │
+    │  │ • Typing Status  │          │                          │ │
+    │  │ • Reply Context  │          │ Port: 8080               │ │
+    │  │ • Message Split  │          │                          │ │
+    │  └────────┬─────────┘          └──────────┬───────────────┘ │
+    └───────────┼──────────────────────────────┼──────────────────┘
+                │                              │
+                │          Prompt Text         │
+                │     + Streaming Callback     │
+                │                              │
+    ┌───────────▼──────────────────────────────▼─────────────────┐
+    │                   AGENT ORCHESTRATION                      │
+    │  ┌──────────────────────────────────────────────────────┐  │
+    │  │              Agent.Process()                         │  │
+    │  │                                                      │  │
+    │  │  1. TRIAGE ROUTING                                   │  │
+    │  │     ┌────────────────────────────────────┐           │  │
+    │  │     │ DetermineRoute()                   │           │  │
+    │  │     │ • Router model classifies request  │           │  │
+    │  │     │ • Calls worker tools dynamically   │           │  │
+    │  │     │ • Max 3 retry attempts             │           │  │
+    │  │     │ • Falls back to first worker       │           │  │
+    │  │     └────────┬───────────────────────────┘           │  │
+    │  │              │ Returns: RouteDecision                │  │
+    │  │              │ (Category, Reason, Metrics)           │  │
+    │  │              │                                       │  │
+    │  │  2. EXPERT GENERATION                                │  │
+    │  │     ┌────────────────────────────────────┐           │  │
+    │  │     │ Provider.Chat()                    │           │  │
+    │  │     │ • Expert model for selected worker │           │  │
+    │  │     │ • System prompt from worker config │           │  │
+    │  │     │ • Streaming to client via callback │           │  │
+    │  │     │ • 3-minute timeout protection      │           │  │
+    │  │     └────────┬───────────────────────────┘           │  │
+    │  │              │ Returns: ChatResponse                 │  │
+    │  │              │ (Content, Metrics, Thinking)          │  │
+    │  │              │                                       │  │
+    │  │  3. RESPONSE ASSEMBLY                                │  │
+    │  │     • Adapt callbacks (string vs ChatMessage)        │  │
+    │  │     • Convert metrics to readable format             │  │
+    │  │     • Return AgentResponse with all metadata         │  │
+    │  │                                                      │  │
+    │  └──────────────────────────────────────────────────────┘  │
+    │                                                            │
+    └────────────────┬───────────────────────────────────────────┘
+                     │ AgentResponse
+                     │ (Category, Model, Content,
+                     │  RouterMetrics, ExpertMetrics)
+                     │
+                ┌────▼──────────────────────────┐
+                │    LLM PROVIDER LAYER         │
+                │  ┌──────────────────────────┐ │
+                │  │  Ollama Client (HTTP)    │ │
+                │  ├──────────────────────────┤ │
+                │  │ • /api/chat endpoint     │ │
+                │  │ • Streaming responses    │ │
+                │  │ • Tool calling support   │ │
+                │  │ • Thinking models (o1)   │ │
+                │  │ • Metrics collection     │ │
+                │  │ • Error recovery         │ │
+                │  │                          │ │
+                │  │ Connected to:            │ │
+                │  │ http://localhost:11434   │ │
+                │  └──────────────────────────┘ │
+                └───────────────────────────────┘
+                     │
+                     │ HTTP/REST
+                     │
+              ┌──────▼───────┐
+              │ Ollama       │
+              │ Local Models │
+              │ + GPU/CPU    │
+              └──────────────┘
 ```
 
-## Todo
+## Installation & Setup
 
-- Distinuishment of user and himself, specificlly when using pronouns
-- Better use of tool calling, and more meaningful memories saved. Along with less duplicate memories
-- Support images with a vision model?
+### Prerequisites
+
+- **Go 1.25+** (for building)
+- **Ollama** running locally (default: `http://localhost:11434`)
+- **Discord Token** (optional, only if using Discord gateway)
+
+### Quick Start
+
+#### 1. Clone the repository
+
+```bash
+git clone https://github.com/jonahgcarpenter/oswald-ai.git
+cd oswald-ai
+```
+
+#### 2. Configure environment
+
+Create a `.env` file:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PORT` | `8080` | HTTP server port |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b` | Router classification model |
+| `WORKERS_CONFIG` | `config/workers.yaml` | Worker definitions |
+| `DISCORD_TOKEN` | `` | Discord bot token (optional) |
+| `LOG_LEVEL` | `info` | Logging verbosity |
+
+##### Logging Levels
+
+- `debug` - Verbose diagnostic info (triage attempts, metrics)
+- `info` - Standard operational logging
+- `warn` - Non-fatal issues (fallbacks, retries)
+- `error` - Critical issues
+
+#### 3. Set up workers
+
+Edit `config/workers.yaml` to define your expert categories and models.
+
+#### 4. Build & Run
+
+```bash
+go run ./cmd/agent/main.go
+```
+
+### Hot Reload (Development)
+
+Install `air` for hot-reload:
+
+```bash
+go install github.com/cosmtrek/air@latest
+air
+```
+
+---
+
+## API Usage
+
+### WebSocket
+
+Connect to `ws://localhost:8080/ws`:
+
+```bash
+# Send a prompt
+websocat ws://localhost:8080/ws
+hello
+
+# Receive streaming chunks, then final JSON:
+# "Hello there! How can I..."
+# {...final JSON response...}
+```
+
+### Discord Bot
+
+Simply mention the bot in any message or reply:
+
+```
+@Oswald What is the capital of France?
+```
+
+---
+
+## Roadmap
+
+- [ ] Persistent conversation history (multi-user context)
+- [ ] Multi-gateway response routing
+- [ ] Message queue for imcoming queries
+- [ ] Tool calling for expert models
+
+---
+
+## License
+
+MIT
+
+---
+
+**Oswald AI** - Built for those (me) who want uncensored, locally-hosted intelligence... sort of.
