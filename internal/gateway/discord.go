@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 const (
@@ -63,14 +63,12 @@ type DiscordGateway struct {
 	Token string
 	BotID string
 	Agent *agent.Agent
+	Log   *config.Logger
 }
 
 func (dg *DiscordGateway) Name() string {
 	return "Discord"
 }
-
-var botToken string
-var botUserID string
 
 // Start initializes the resilient connection loop.
 // It will block forever, automatically reconnecting if the websocket drops.
@@ -81,13 +79,13 @@ func (dg *DiscordGateway) Start(aiAgent *agent.Agent) error {
 		err := dg.connectAndListen()
 
 		if err != nil {
-			log.Printf("Discord connection dropped: %v", err)
+			dg.Log.Warn("Discord connection dropped: %v", err)
 		} else {
-			log.Println("Discord connection closed normally.")
+			dg.Log.Info("Discord connection closed normally.")
 		}
 
 		// Wait 5 seconds before trying to reconnect to avoid spamming Discord's API
-		log.Println("Reconnecting to Discord Gateway in 5 seconds...")
+		dg.Log.Info("Reconnecting to Discord Gateway in 5 seconds...")
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -152,7 +150,7 @@ func (dg *DiscordGateway) heartbeatLoop(conn *websocket.Conn, interval time.Dura
 	for range ticker.C {
 		hb := Payload{Op: 1, D: []byte("null")}
 		if err := conn.WriteJSON(hb); err != nil {
-			log.Printf("Heartbeat failed: %v", err)
+			dg.Log.Error("Heartbeat failed: %v", err)
 			return
 		}
 	}
@@ -173,12 +171,11 @@ func (dg *DiscordGateway) listenLoop(conn *websocket.Conn) error {
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
 						dg.BotID = ready.User.ID
-						displayName := ready.User.Username
-						log.Printf("Discord Bot connected as: %s (ID: %s)", displayName, dg.BotID)
+						dg.Log.Info("Discord Bot connected as: %s (ID: %s)", ready.User.Username, dg.BotID)
 					}
 				case "RESUMED":
 					// Useful to know when the bot recovered without a full restart
-					log.Println("Discord session resumed successfully.")
+					dg.Log.Info("Discord session resumed successfully.")
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
@@ -306,9 +303,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 		)
 	}
 
-	// FIX: Remove these logs eventually
-	displayName := msg.Author.Username
-	log.Printf("Discord Request from %s (ID: %s): %s", displayName, msg.Author.ID, prompt)
+	dg.Log.Debug("Discord request from %s (ID: %s): %s", msg.Author.Username, msg.Author.ID, prompt)
 
 	// Send typing indicator in discord
 	stopTyping := make(chan struct{})
@@ -338,7 +333,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	finalPayload, err := dg.Agent.Process(prompt, nil)
 
 	if err != nil {
-		log.Printf("Agent process error: %v", err)
+		dg.Log.Error("Agent process error: %v", err)
 		dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID)
 		return
 	}
@@ -347,6 +342,9 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 
 	// Discord's 2,000 char limit
 	chunks := splitMessage(responseText, 2000)
+
+	dg.Log.Debug("Sending response to %s (ID: %s): %d chunk(s), %d chars, model: %s",
+		msg.Author.Username, msg.Author.ID, len(chunks), len(responseText), finalPayload.Model)
 
 	// Send each chunk
 	for i, chunk := range chunks {
@@ -358,7 +356,7 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 
 		err = dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
 		if err != nil {
-			log.Printf("Failed to send chunk %d to Discord: %v", i+1, err)
+			dg.Log.Error("Failed to send chunk %d to Discord: %v", i+1, err)
 			break // Stop trying to send the rest if a chunk fails
 		}
 	}

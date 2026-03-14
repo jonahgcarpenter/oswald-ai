@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -13,12 +12,13 @@ type Config struct {
 	OllamaRouterModel string
 	WorkersConfig     string
 	DiscordToken      string
+	LogLevel          Level
 }
 
 func Load() *Config {
-	if err := godotenv.Load(); err != nil {
-		log.Println("Info: No .env file found, relying on system environment variables")
-	}
+	// Attempt to load .env before anything else so LOG_LEVEL can come from it.
+	// Failures are expected in production and logged after the logger is set up.
+	godotenv.Load() // nolint: errcheck
 
 	return &Config{
 		// Main
@@ -33,6 +33,9 @@ func Load() *Config {
 
 		// Discord
 		DiscordToken: getEnv("DISCORD_TOKEN", ""),
+
+		// Logging
+		LogLevel: ParseLevel(getEnv("LOG_LEVEL", "info")),
 	}
 }
 

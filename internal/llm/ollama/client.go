@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
@@ -17,14 +18,17 @@ import (
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+	log        *config.Logger
 }
 
-func NewClient(baseURL string) *Client {
+// NewClient creates an Ollama client with the given base URL and logger.
+func NewClient(baseURL string, log *config.Logger) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
+		log: log,
 	}
 }
 
@@ -67,6 +71,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 		for scanner.Scan() {
 			var chunk GenerateResponse
 			if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+				c.log.Debug("Ollama stream: failed to parse chunk: %v | raw: %q", err, scanner.Text())
 				continue
 			}
 
@@ -85,6 +90,10 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 				finalResponse.PromptEvalDuration = chunk.PromptEvalDuration
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			c.log.Warn("Ollama stream: scanner error: %v", err)
+		}
+
 		// Thinking models emit content in Thinking and leave Response empty.
 		// Promote Thinking to Response so all callers see output transparently.
 		if finalResponse.Response == "" && finalResponse.Thinking != "" {
@@ -99,8 +108,14 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.log.Error("Ollama returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+		return nil, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
+	}
+
 	var ollamaResp GenerateResponse
 	if err := json.Unmarshal(rawBody, &ollamaResp); err != nil {
+		c.log.Error("Ollama response decode failed: %v | raw: %q", err, string(rawBody))
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 

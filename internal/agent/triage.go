@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
@@ -32,7 +32,7 @@ func extractJSON(raw string) string {
 
 // DetermineRoute asks the fast router model to classify the incoming message
 // using the registered worker agents to build the classification prompt.
-func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel string, workers []WorkerAgent, prompt string) (*RouteDecision, error) {
+func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel string, workers []WorkerAgent, prompt string, log *config.Logger) (*RouteDecision, error) {
 	systemPrompt := BuildTriagePrompt(workers)
 
 	req := llm.Request{
@@ -49,6 +49,8 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 		return nil, fmt.Errorf("router failed to reach Ollama: %w", err)
 	}
 
+	log.Debug("Triage raw response: %q", resp.Response)
+
 	fallback := workers[0].Category
 
 	// The client already promotes Thinking → Response for thinking models,
@@ -59,14 +61,14 @@ func DetermineRoute(ctx context.Context, provider llm.Provider, routerModel stri
 	parseErr := json.Unmarshal([]byte(candidate), &decision)
 
 	if parseErr != nil {
-		log.Printf("Triage: failed to parse JSON, falling back to %s: %v\nRaw: %s", fallback, parseErr, resp.Response)
+		log.Warn("Triage: failed to parse JSON, falling back to %s: %v | raw: %q", fallback, parseErr, resp.Response)
 		decision = RouteDecision{
 			Category: fallback,
 			Reason:   "Fallback routing due to unparseable JSON from router.",
 		}
 	} else if FindWorker(workers, decision.Category) == nil {
 		// Valid JSON but category doesn't match any registered worker
-		log.Printf("Triage: unknown category %q, falling back to %s\nRaw: %s", decision.Category, fallback, resp.Response)
+		log.Warn("Triage: unknown category %q, falling back to %s | raw: %q", decision.Category, fallback, resp.Response)
 		decision = RouteDecision{
 			Category: fallback,
 			Reason:   fmt.Sprintf("Fallback routing: router returned unknown category %q.", decision.Category),

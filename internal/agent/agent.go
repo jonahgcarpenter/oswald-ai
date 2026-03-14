@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
@@ -34,15 +35,17 @@ type Agent struct {
 	provider    llm.Provider
 	routerModel string
 	workers     []WorkerAgent
+	log         *config.Logger
 }
 
 // NewAgent initializes the orchestration agent with a generic LLM provider,
-// a router model name, and the loaded worker agent registry.
-func NewAgent(provider llm.Provider, routerModel string, workers []WorkerAgent) *Agent {
+// a router model name, the loaded worker agent registry, and a logger.
+func NewAgent(provider llm.Provider, routerModel string, workers []WorkerAgent, log *config.Logger) *Agent {
 	return &Agent{
 		provider:    provider,
 		routerModel: routerModel,
 		workers:     workers,
+		log:         log,
 	}
 }
 
@@ -50,7 +53,7 @@ func NewAgent(provider llm.Provider, routerModel string, workers []WorkerAgent) 
 func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*AgentResponse, error) {
 	// Triage routing
 	ctxRoute, cancelRoute := context.WithTimeout(context.Background(), 60*time.Second)
-	decision, err := DetermineRoute(ctxRoute, a.provider, a.routerModel, a.workers, userPrompt)
+	decision, err := DetermineRoute(ctxRoute, a.provider, a.routerModel, a.workers, userPrompt, a.log)
 	cancelRoute()
 
 	if err != nil {
@@ -68,6 +71,8 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 	expertModel := worker.ResolveModel()
 	systemPrompt := worker.SystemPrompt
 
+	a.log.Debug("Routed to %s (%s): %s", decision.Category, expertModel, decision.Reason)
+
 	// Expert Generation
 	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancelGen()
@@ -83,6 +88,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	expertResp, err := a.provider.Generate(ctxGen, expertReq, streamCallback)
 	if err != nil {
+		a.log.Error("Expert model %s failed: %v", expertModel, err)
 		return &AgentResponse{
 			Category: decision.Category,
 			Model:    expertModel,
