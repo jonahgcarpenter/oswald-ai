@@ -17,7 +17,7 @@ workers:
 
       If the user's message would benefit from current, factual, or up-to-date information, call the web_search tool with a precise search query. You may call it multiple times for different aspects of the question.
 
-      When you have gathered enough information, respond with a clear summary of your findings. Your summary will be passed to another model as context, so present the information in whatever format (paragraph, bullet points, etc.) best suits the content and the original question.
+      When you have gathered enough information via tool calls, respond with an empty message. Do NOT write a summary or commentary — the raw search results will be forwarded automatically to another model.
 
       If no web search is needed (the question is conversational, opinion-based, not safe, or already within your knowledge), respond with an empty message.
 

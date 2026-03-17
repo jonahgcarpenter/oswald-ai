@@ -93,7 +93,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			continue
 		}
 
-		log.Debug("Websocket: sending final payload (%d bytes, model=%s search=%v)", len(jsonBytes), finalPayload.Model, finalPayload.SearchSummary != "")
+		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), finalPayload.Model)
 		err = conn.WriteMessage(messageType, jsonBytes)
 		if err != nil {
 			log.Warn("Write error: %v", err)

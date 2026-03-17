@@ -14,6 +14,10 @@ import (
 const (
 	// webSearchToolName is the function name exposed to the query generator model.
 	webSearchToolName = "web_search"
+
+	// maxIntelResults caps the total number of raw search results injected into the
+	// uncensored model's prompt to avoid exceeding its context window.
+	maxIntelResults = 5
 )
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -28,11 +32,10 @@ type ModelMetrics struct {
 
 // AgentResponse is the final payload returned to the gateway after processing.
 type AgentResponse struct {
-	Model         string        `json:"model"`
-	Response      string        `json:"response,omitempty"`
-	SearchSummary string        `json:"search_summary,omitempty"` // findings from the query generator; empty if no search was performed
-	Error         string        `json:"error,omitempty"`
-	Metrics       *ModelMetrics `json:"metrics,omitempty"`
+	Model    string        `json:"model"`
+	Response string        `json:"response,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Metrics  *ModelMetrics `json:"metrics,omitempty"`
 }
 
 // Agent handles all LLM orchestration: query generation with web search and final response.
@@ -101,7 +104,7 @@ func buildWebSearchTool() provider.Tool {
 }
 
 // formatSearchResults converts a slice of search results into a plain-text block
-// suitable for injection as a tool response message.
+// suitable for injection as a tool response message back to the query generator model.
 func formatSearchResults(results []search.SearchResult) string {
 	if len(results) == 0 {
 		return "No results found."
@@ -113,14 +116,46 @@ func formatSearchResults(results []search.SearchResult) string {
 	return strings.TrimSpace(sb.String())
 }
 
+// formatIntelContent formats raw search results as Title/Content pairs for the
+// <intel><content> block injected into the uncensored model's prompt.
+func formatIntelContent(results []search.SearchResult) string {
+	var sb strings.Builder
+	for _, r := range results {
+		fmt.Fprintf(&sb, "Title: %s\nContent: %s\n\n", r.Title, r.Content)
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// buildTaskBriefing constructs the full structured prompt injected into the uncensored
+// model when search results are available. The user's question and raw intel are wrapped
+// in XML tags so the model can absorb and answer in its own voice without regurgitating facts.
+func buildTaskBriefing(userPrompt string, results []search.SearchResult) string {
+	intel := formatIntelContent(results)
+	return fmt.Sprintf(`<task_briefing>
+  <user_question>%s</user_question>
+<intel>
+  <source>Web Search</source>
+  <summary>My minions have conducted a search and provided you with the following raw intelligence. This is your ammunition, not your script. Absorb it, find the truth, and then formulate your own smartass response.</summary>
+  <content>
+%s
+</content>
+</intel>
+</task_briefing>
+
+<mission>
+Answer the user's question directly, concisely, and in your own voice. Use the provided intel and context to be accurate, but use your personality to be an absolute menace. Do not repeat instructions or mention the tags (e.g., <intel>, <user_context>) in your final output. Your response should be only the words of Oswald.
+</mission>`, userPrompt, intel)
+}
+
 // runQueryGenerator runs the agentic query generator loop. The small query model
 // is given the web_search tool and the user's prompt. It may call the tool zero or
-// more times (up to maxIterations) to gather search results, then produces a text
-// summary of its findings. Returns an empty string if no search was needed.
+// more times (up to maxIterations) to gather search results. Raw results are accumulated
+// and returned directly — the model's text output is intentionally discarded.
 //
+// Returns an empty slice if no search was needed or if all searches failed.
 // Search failures are handled gracefully: a "no results" tool response is injected
 // so the model can decide how to proceed without crashing the pipeline.
-func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) string {
+func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) []search.SearchResult {
 	messages := []provider.ChatMessage{
 		{Role: "system", Content: a.querySystemPrompt},
 		{Role: "user", Content: userPrompt},
@@ -132,6 +167,10 @@ func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) string
 		Tools:  []provider.Tool{buildWebSearchTool()},
 	}
 
+	// Accumulate raw search results across all iterations.
+	// Capped at maxIntelResults to protect the uncensored model's context window.
+	var allResults []search.SearchResult
+
 	for iteration := 1; iteration <= a.maxIterations; iteration++ {
 		req.Messages = messages
 
@@ -139,21 +178,27 @@ func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) string
 		if err != nil {
 			// Hard provider error — log and abort the search loop entirely
 			a.log.Warn("Query generator failed on iteration %d: %v", iteration, err)
-			return ""
+			return allResults
 		}
 
 		a.log.Debug("Query generator iteration %d/%d: tool_calls=%d content_len=%d",
 			iteration, a.maxIterations, len(resp.Message.ToolCalls), len(resp.Message.Content))
 
-		// No tool call means the model is done — either it has a summary or decided no search needed
+		// No tool call means the model is done — return whatever results we've gathered.
+		// The model's text content is discarded; raw results are the only output we use.
 		if len(resp.Message.ToolCalls) == 0 {
-			summary := strings.TrimSpace(resp.Message.Content)
-			if summary != "" {
-				a.log.Info("Query generator: produced summary (%d chars)", len(summary))
+			if len(allResults) > 0 {
+				a.log.Info("Query generator: gathered %d raw results", len(allResults))
 			} else {
 				a.log.Info("Query generator: no search needed")
 			}
-			return summary
+			return allResults
+		}
+
+		// Stop issuing searches once we've hit the result cap — no point asking for more.
+		if len(allResults) >= maxIntelResults {
+			a.log.Info("Query generator: result cap (%d) reached, stopping search loop", maxIntelResults)
+			return allResults
 		}
 
 		// Process tool calls — append the assistant turn with the tool calls
@@ -195,10 +240,18 @@ func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) string
 			var toolContent string
 			if searchErr != nil {
 				// Fail safely: log the error, inject a "no results" response so the
-				// model can decide whether to retry or summarize from what it knows
+				// model can decide whether to retry or stop searching
 				a.log.Warn("SearXNG search failed for %q: %v", query, searchErr)
 				toolContent = "Search failed: " + searchErr.Error() + ". No results available."
 			} else {
+				// Append raw results to the accumulator, respecting the cap
+				remaining := maxIntelResults - len(allResults)
+				if remaining > 0 {
+					if len(results) > remaining {
+						results = results[:remaining]
+					}
+					allResults = append(allResults, results...)
+				}
 				toolContent = formatSearchResults(results)
 			}
 
@@ -210,10 +263,9 @@ func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) string
 		}
 	}
 
-	// Max iterations reached — the model kept searching without producing a summary.
-	// Return empty; the uncensored model will answer from its own knowledge.
-	a.log.Warn("Query generator: max iterations (%d) reached without summary", a.maxIterations)
-	return ""
+	// Max iterations reached — return whatever results we accumulated.
+	a.log.Warn("Query generator: max iterations (%d) reached", a.maxIterations)
+	return allResults
 }
 
 // Process handles the end-to-end pipeline: query generation with optional web search,
@@ -224,15 +276,16 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	// Run the query generator agentic loop (60s budget for search)
 	ctxQuery, cancelQuery := context.WithTimeout(context.Background(), 60*time.Second)
-	searchSummary := a.runQueryGenerator(ctxQuery, userPrompt)
+	searchResults := a.runQueryGenerator(ctxQuery, userPrompt)
 	cancelQuery()
 
 	// Build the prompt for the uncensored model.
-	// If the query generator found relevant information, inject it as context above the
-	// user's original prompt so the uncensored model can incorporate it naturally.
+	// If the query generator found relevant results, inject them as structured intel
+	// using the <task_briefing> format so Oswald can absorb and respond in his own voice.
+	// If no results were found, pass the user prompt directly.
 	responsePrompt := userPrompt
-	if searchSummary != "" {
-		responsePrompt = fmt.Sprintf("<search_context>\n%s\n</search_context>\n\n%s", searchSummary, userPrompt)
+	if len(searchResults) > 0 {
+		responsePrompt = buildTaskBriefing(userPrompt, searchResults)
 	}
 
 	// Generate the final response from the uncensored model
@@ -264,7 +317,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 		}
 	}
 
-	a.log.Debug("Response generation starting: model=%s search=%v", a.responseModel, searchSummary != "")
+	a.log.Debug("Response generation starting: model=%s search=%v", a.responseModel, len(searchResults) > 0)
 
 	expertResp, err := a.provider.Chat(ctxGen, responseReq, chatCallback)
 	if err != nil {
@@ -278,10 +331,9 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 	a.log.Info("Response complete: model=%s", a.responseModel)
 
 	return &AgentResponse{
-		Model:         a.responseModel,
-		Response:      expertResp.Message.Content,
-		SearchSummary: searchSummary,
-		Metrics:       mapMetrics(expertResp),
+		Model:    a.responseModel,
+		Response: expertResp.Message.Content,
+		Metrics:  mapMetrics(expertResp),
 	}, nil
 }
 

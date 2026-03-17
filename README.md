@@ -129,14 +129,14 @@ cd oswald-ai
 
 Create a `.env` file:
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `8080` | HTTP server port |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
-| `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b` | Router classification model |
-| `WORKERS_CONFIG` | `config/workers.yaml` | Worker definitions |
-| `DISCORD_TOKEN` | `` | Discord bot token (optional) |
-| `LOG_LEVEL` | `info` | Logging verbosity |
+| Variable              | Default                  | Purpose                      |
+| --------------------- | ------------------------ | ---------------------------- |
+| `PORT`                | `8080`                   | HTTP server port             |
+| `OLLAMA_URL`          | `http://localhost:11434` | Ollama API endpoint          |
+| `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b`           | Router classification model  |
+| `WORKERS_CONFIG`      | `config/workers.yaml`    | Worker definitions           |
+| `DISCORD_TOKEN`       | ``                       | Discord bot token (optional) |
+| `LOG_LEVEL`           | `info`                   | Logging verbosity            |
 
 ##### Logging Levels
 
