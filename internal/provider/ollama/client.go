@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
 )
 
 // Client interacts with the local Ollama REST API.
@@ -32,10 +32,10 @@ func NewClient(baseURL string, log *config.Logger) *Client {
 	}
 }
 
-// Generate satisfies the llm.Provider interface using Ollama's /api/generate endpoint.
+// Generate satisfies the provider.Provider interface using Ollama's /api/generate endpoint.
 // Deprecated: Use Chat instead. This endpoint lacks tool-calling support.
 // Migration: Switch to Chat with a single user message.
-func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback func(string)) (*llm.Response, error) {
+func (c *Client) Generate(ctx context.Context, req provider.Request, streamCallback func(string)) (*provider.Response, error) {
 	endpoint := fmt.Sprintf("%s/api/generate", c.BaseURL)
 
 	// Map generic request to Ollama's specific JSON struct
@@ -64,7 +64,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 	}
 	defer resp.Body.Close()
 
-	var finalResponse llm.Response
+	var finalResponse provider.Response
 	finalResponse.Model = req.Model
 
 	// Stream response from Ollama, accumulating chunks and metrics
@@ -128,7 +128,7 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 		response = ollamaResp.Thinking
 	}
 
-	return &llm.Response{
+	return &provider.Response{
 		Model:              ollamaResp.Model,
 		Response:           response,
 		Thinking:           ollamaResp.Thinking,
@@ -140,8 +140,8 @@ func (c *Client) Generate(ctx context.Context, req llm.Request, streamCallback f
 	}, nil
 }
 
-// mapToOllamaMessages converts generic llm.ChatMessage slice to Ollama's internal chat message type.
-func mapToOllamaMessages(msgs []llm.ChatMessage) []chatMessage {
+// mapToOllamaMessages converts generic provider.ChatMessage slice to Ollama's internal chat message type.
+func mapToOllamaMessages(msgs []provider.ChatMessage) []chatMessage {
 	result := make([]chatMessage, len(msgs))
 	for i, m := range msgs {
 		cm := chatMessage{
@@ -166,8 +166,8 @@ func mapToOllamaMessages(msgs []llm.ChatMessage) []chatMessage {
 	return result
 }
 
-// mapToOllamaTools converts generic llm.Tool slice to Ollama's internal tool type.
-func mapToOllamaTools(tools []llm.Tool) []chatTool {
+// mapToOllamaTools converts generic provider.Tool slice to Ollama's internal tool type.
+func mapToOllamaTools(tools []provider.Tool) []chatTool {
 	result := make([]chatTool, len(tools))
 	for i, t := range tools {
 		props := make(map[string]chatToolParameterProperty, len(t.Function.Parameters.Properties))
@@ -194,19 +194,19 @@ func mapToOllamaTools(tools []llm.Tool) []chatTool {
 	return result
 }
 
-// mapFromOllamaMessage converts Ollama's internal chat message to the generic llm.ChatMessage.
-func mapFromOllamaMessage(m chatMessage) llm.ChatMessage {
-	msg := llm.ChatMessage{
+// mapFromOllamaMessage converts Ollama's internal chat message to the generic provider.ChatMessage.
+func mapFromOllamaMessage(m chatMessage) provider.ChatMessage {
+	msg := provider.ChatMessage{
 		Role:     m.Role,
 		Content:  m.Content,
 		Thinking: m.Thinking,
 		ToolName: m.ToolName,
 	}
 	if len(m.ToolCalls) > 0 {
-		msg.ToolCalls = make([]llm.ToolCall, len(m.ToolCalls))
+		msg.ToolCalls = make([]provider.ToolCall, len(m.ToolCalls))
 		for i, tc := range m.ToolCalls {
-			msg.ToolCalls[i] = llm.ToolCall{
-				Function: llm.ToolFunction{
+			msg.ToolCalls[i] = provider.ToolCall{
+				Function: provider.ToolFunction{
 					Name:      tc.Function.Name,
 					Arguments: tc.Function.Arguments,
 				},
@@ -216,9 +216,9 @@ func mapFromOllamaMessage(m chatMessage) llm.ChatMessage {
 	return msg
 }
 
-// Chat satisfies the llm.Provider interface using Ollama's /api/chat endpoint.
+// Chat satisfies the provider.Provider interface using Ollama's /api/chat endpoint.
 // Supports tool calling and streaming. Use this over Generate for new code.
-func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallback func(chunk llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (c *Client) Chat(ctx context.Context, req provider.ChatRequest, chatStreamCallback func(chunk provider.ChatMessage)) (*provider.ChatResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/chat", c.BaseURL)
 
 	// Build request, mapping tools if provided
@@ -249,7 +249,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 
 	// Stream response from Ollama, accumulating chunks and tool calls
 	if req.Stream && chatStreamCallback != nil {
-		var finalResp llm.ChatResponse
+		var finalResp provider.ChatResponse
 		finalResp.Model = req.Model
 
 		scanner := bufio.NewScanner(resp.Body)
@@ -322,7 +322,7 @@ func (c *Client) Chat(ctx context.Context, req llm.ChatRequest, chatStreamCallba
 		msg.Content = msg.Thinking
 	}
 
-	return &llm.ChatResponse{
+	return &provider.ChatResponse{
 		Model:              ollamaResp.Model,
 		Message:            msg,
 		DoneReason:         ollamaResp.DoneReason,

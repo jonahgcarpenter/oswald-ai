@@ -8,8 +8,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
+	"github.com/jonahgcarpenter/oswald-ai/internal/provider/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/search/searxng"
 )
 
 func main() {
@@ -20,26 +21,46 @@ func main() {
 	log := config.NewLogger(cfg.LogLevel)
 	log.Info("Log level: %s", cfg.LogLevel)
 
-	// Load worker agent registry
+	// Load worker agent registry (query generator + uncensored response model)
 	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
 	if err != nil {
 		log.Fatal("Failed to load workers config: %v", err)
 	}
-	log.Info("Loaded %d worker agents from %s", len(workers), cfg.WorkersConfig)
 
-	// NOTE: I dont like this, I will only setup Ollama but leave the door open for others
+	queryWorker := agent.FindWorker(workers, "QUERY")
+	if queryWorker == nil {
+		log.Fatal("Workers config is missing required QUERY worker entry")
+	}
 
-	// Determine and initialize the LLM Provider (The Factory Logic)
-	var llmProvider llm.Provider
+	responseWorker := agent.FindWorker(workers, "GENERAL")
+	if responseWorker == nil {
+		log.Fatal("Workers config is missing required GENERAL worker entry")
+	}
 
+	log.Info("Query worker: model=%s", queryWorker.ResolveModel())
+	log.Info("Response worker: model=%s", responseWorker.ResolveModel())
+
+	// NOTE: Only Ollama is supported; leave the door open for future providers
+	var llmProvider provider.Provider
 	if cfg.OllamaURL != "" {
 		llmProvider = ollama.NewClient(cfg.OllamaURL, log)
 	} else {
 		// Later, add `else if cfg.OpenAIKey != ""` here
-		log.Fatal("No valid LLM provider configured (missing Ollama URL or API keys)")
+		log.Fatal("No valid LLM provider configured (missing OLLAMA_URL)")
 	}
 
-	agentEngine := agent.NewAgent(llmProvider, cfg.OllamaRouterModel, workers, log)
+	// Initialize the SearXNG search client
+	searchClient := searxng.NewClient(cfg.SearxngURL, log)
+	log.Info("SearXNG search client configured: %s", cfg.SearxngURL)
+
+	agentEngine := agent.NewAgent(
+		llmProvider,
+		searchClient,
+		queryWorker,
+		responseWorker,
+		cfg.QueryMaxIterations,
+		log,
+	)
 
 	// Initialize a slice of enabled gateways
 	var activeGateways []gateway.Service

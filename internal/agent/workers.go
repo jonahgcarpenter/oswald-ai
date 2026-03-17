@@ -6,14 +6,12 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-// WorkerAgent describes a single expert agent available for routing.
+// WorkerAgent describes a single model entry: its category identifier, Ollama model name,
+// and the system prompt injected into every call for that model.
 type WorkerAgent struct {
 	Category     string `yaml:"category"`
-	Description  string `yaml:"description"`
 	Model        string `yaml:"model"`
 	SystemPrompt string `yaml:"system_prompt"`
 }
@@ -23,8 +21,8 @@ type workerFile struct {
 	Workers []WorkerAgent `yaml:"workers"`
 }
 
-// LoadWorkers reads the YAML file at path and resolves each worker's model
-// from its ModelEnv environment variable, falling back to ModelDefault.
+// LoadWorkers reads the YAML file at path and returns the list of worker agents.
+// Returns an error if the file is missing, unparseable, or defines no workers.
 func LoadWorkers(path string) ([]WorkerAgent, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -58,79 +56,4 @@ func FindWorker(workers []WorkerAgent, category string) *WorkerAgent {
 		}
 	}
 	return nil
-}
-
-// triageToolName returns the tool name used to route to the given worker category.
-// Tool names use underscores since many LLMs reject hyphens in function names.
-func triageToolName(category string) string {
-	return "route_to_" + strings.ToUpper(category)
-}
-
-// CategoryFromToolName extracts the worker category from a triage tool name.
-// Expects the format "route_to_CATEGORY". Returns an empty string if the name does not match.
-func CategoryFromToolName(toolName string) string {
-	const prefix = "route_to_"
-	upper := strings.ToUpper(toolName)
-	if strings.HasPrefix(upper, strings.ToUpper(prefix)) {
-		return upper[len(prefix):]
-	}
-	return ""
-}
-
-// BuildTriageTools generates one llm.Tool per registered worker. Each tool represents
-// a routing option; the router model calls exactly one to communicate its decision.
-// This tool-calling approach is more reliable than parsing generated text.
-func BuildTriageTools(workers []WorkerAgent) []llm.Tool {
-	tools := make([]llm.Tool, len(workers))
-	for i, w := range workers {
-		desc := strings.TrimSpace(w.Description)
-		tools[i] = llm.Tool{
-			Type: "function",
-			Function: llm.ToolDefinition{
-				Name:        triageToolName(w.Category),
-				Description: fmt.Sprintf("Route to this worker for: %s", desc),
-				Parameters: llm.ToolParameters{
-					Type: "object",
-					Properties: map[string]llm.ToolParameterProperty{
-						"reason": {
-							Type:        "string",
-							Description: "Brief reason for this routing decision (10 words or fewer)",
-						},
-					},
-					Required: []string{"reason"},
-				},
-			},
-		}
-	}
-	return tools
-}
-
-// BuildTriagePrompt generates the triage system prompt dynamically from the
-// registered workers. Workers are numbered in priority order (1 = highest).
-// The prompt is kept intentionally terse to work well with small router models.
-// Deprecated: Use BuildTriageTools for tool-calling based routing instead.
-func BuildTriagePrompt(workers []WorkerAgent) string {
-	var sb strings.Builder
-
-	// Build the allowed category list for the output rule
-	cats := make([]string, len(workers))
-	for i, w := range workers {
-		cats[i] = fmt.Sprintf("%q", w.Category)
-	}
-
-	sb.WriteString("You are a request router. Classify the user message into exactly one category.\n\n")
-	sb.WriteString("CATEGORIES (check in order — use the first one that matches):\n")
-
-	for i, w := range workers {
-		desc := strings.TrimSpace(w.Description)
-		fmt.Fprintf(&sb, "%d. %s — %s\n", i+1, w.Category, desc)
-	}
-
-	sb.WriteString("\nRULES:\n")
-	fmt.Fprintf(&sb, "- category MUST be one of: %s\n", strings.Join(cats, ", "))
-	sb.WriteString("- reason must be 10 words or fewer\n")
-	sb.WriteString("- output ONLY valid JSON, no other text\n\n")
-	sb.WriteString(`Output format: {"category": "...", "reason": "..."}`)
-
-	return sb.String()
 }

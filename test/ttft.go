@@ -10,20 +10,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// AgentResponse mirrors internal/agent/agent.go's AgentResponse but includes only
-// fields we need for TTFT measurement: model name and prompt eval duration.
-type AgentResponse struct {
-	Category      string `json:"category"`
-	Error         string `json:"error"`
-	ExpertMetrics *struct {
+// ttftAgentResponse mirrors internal/agent/agent.go's AgentResponse, including only
+// fields needed for TTFT measurement. Named distinctly to avoid conflicts with triage.go
+// when both files are analysed together by the LSP.
+type ttftAgentResponse struct {
+	Model   string `json:"model"`
+	Error   string `json:"error"`
+	Metrics *struct {
 		Model              string `json:"model"`
 		PromptEvalDuration int64  `json:"prompt_eval_duration_ms"`
 		EvalDuration       int64  `json:"eval_duration_ms"`
-	} `json:"expert_metrics"`
+	} `json:"metrics"`
 }
 
-// TestCase defines a benchmark test: a name label and prompt of varying complexity.
-type TestCase struct {
+// ttftTestCase defines a benchmark test: a name label and prompt of varying complexity.
+type ttftTestCase struct {
 	Name   string // Test label (SHORT, MEDIUM, LONG)
 	Prompt string // User prompt to benchmark
 }
@@ -41,7 +42,7 @@ func main() {
 	fmt.Printf("Starting Oswald TTFT (Time To First Token) Streaming Benchmark against %s...\n", u.String())
 	fmt.Println("--------------------------------------------------------------------------------")
 
-	tests := []TestCase{
+	tests := []ttftTestCase{
 		{
 			Name:   "SHORT",
 			Prompt: "Hello.",
@@ -59,13 +60,13 @@ func main() {
 	for _, tc := range tests {
 		fmt.Printf("Running [%s] Prompt Benchmark...\n", tc.Name)
 
-		// 1. Establish connection
+		// Establish connection
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {
 			log.Fatalf("Failed to connect: %v", err)
 		}
 
-		// 2. Start the timer and send the prompt
+		// Start the timer and send the prompt
 		startTime := time.Now()
 		err = conn.WriteMessage(websocket.TextMessage, []byte(tc.Prompt))
 		if err != nil {
@@ -76,9 +77,9 @@ func main() {
 
 		var networkTTFT time.Duration
 		firstTokenReceived := false
-		var finalResp AgentResponse
+		var finalResp ttftAgentResponse
 
-		// 3. Loop to receive streaming chunks
+		// Loop to receive streaming chunks
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
@@ -95,16 +96,16 @@ func main() {
 			// Try to parse the message as the final JSON payload
 			err = json.Unmarshal(message, &finalResp)
 
-			// If it parses successfully and has a Category, we know it's the final payload, not a text chunk
-			if err == nil && finalResp.Category != "" {
+			// Final payload has a non-empty model field
+			if err == nil && finalResp.Model != "" {
 				break
 			}
 
-			// Optional: If you want to see the stream in real-time in your terminal, uncomment the line below:
+			// Optional: uncomment to see the stream in real-time:
 			// fmt.Print(string(message))
 		}
 
-		// 4. Stop the total generation timer
+		// Stop the total generation timer
 		totalNetworkWaitTime := time.Since(startTime)
 
 		if finalResp.Error != "" {
@@ -114,14 +115,13 @@ func main() {
 		}
 
 		// Safely extract metrics if they exist
-		var modelTTFT int64 = 0
-		var modelName = "unknown"
-		if finalResp.ExpertMetrics != nil {
-			modelTTFT = finalResp.ExpertMetrics.PromptEvalDuration
-			modelName = finalResp.ExpertMetrics.Model
+		var modelTTFT int64
+		modelName := "unknown"
+		if finalResp.Metrics != nil {
+			modelTTFT = finalResp.Metrics.PromptEvalDuration
+			modelName = finalResp.Metrics.Model
 		}
 
-		// Print Results
 		fmt.Printf(" ↳ Model Used          : %s\n", modelName)
 		fmt.Printf(" ↳ Prompt Length       : %d characters\n", len(tc.Prompt))
 		fmt.Printf(" ↳ Network TTFT        : %v (Time to receive first streamed chunk)\n", networkTTFT)
