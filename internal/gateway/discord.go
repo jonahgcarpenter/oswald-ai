@@ -60,6 +60,7 @@ type MessageCreate struct {
 	ReferencedMessage *struct {
 		Content string `json:"content"`
 		Author  struct {
+			ID       string `json:"id"`
 			Username string `json:"username"`
 		} `json:"author"`
 	} `json:"referenced_message,omitempty"`
@@ -314,17 +315,19 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	replyToID := ""
 	prompt := msg.Content
 
-	// In guild channels, require an explicit bot mention; in DMs, process all messages
+	// In guild channels, require an explicit bot mention — unless the message is a
+	// direct reply to the bot, in which case the conversational context is implicit.
 	if msg.GuildID != "" {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 		mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
+		isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
 
-		if !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
+		if !isReplyToBot && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
 			return
 		}
 		replyToID = msg.ID
 
-		// Strip the mention from the prompt so the LLM doesn't see "<@12345> hello"
+		// Strip the bot mention from the prompt so the LLM doesn't see "<@12345> hello"
 		prompt = strings.ReplaceAll(prompt, mention1, "")
 		prompt = strings.ReplaceAll(prompt, mention2, "")
 		prompt = strings.TrimSpace(prompt)
