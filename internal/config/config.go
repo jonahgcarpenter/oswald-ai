@@ -2,40 +2,36 @@ package config
 
 import (
 	"os"
+	"strconv"
 
 	"github.com/joho/godotenv"
 )
 
-// Config holds all environment-based application settings loaded at startup.
-// All fields are required unless a fallback default is provided in Load().
+// Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	Port              string // HTTP server port (default: "8080")
-	OllamaURL         string // Base URL for Ollama API (default: "http://localhost:11434")
-	OllamaRouterModel string // Router model name for triage (default: "qwen3.5:0.8b")
-	WorkersConfig     string // Path to workers.yaml (default: "config/workers.yaml")
-	DiscordToken      string // Discord bot token (required for Discord gateway)
-	LogLevel          Level  // Logging verbosity (default: info)
+	Port               string // HTTP port for the WebSocket gateway (default: "8080")
+	OllamaURL          string // Ollama API base URL (default: "http://localhost:11434")
+	WorkersConfig      string // Path to the workers YAML file (default: "config/workers.yaml")
+	DiscordToken       string // Discord bot token; Discord gateway disabled if empty
+	SearxngURL         string // SearXNG base URL for web search (default: "http://localhost:8888")
+	QueryMaxIterations int    // Maximum search iterations in the query generator loop (default: 5)
+	LogLevel           Level  // Logging verbosity (default: LevelInfo)
 }
 
-// Load constructs a Config from environment variables with sensible defaults.
-// Attempts to load a .env file first (failures are silent; this is normal in production).
-// All fields default to safe development values if the env var is unset.
+// Load reads configuration from environment variables, with .env file support.
+// Missing variables fall back to sensible defaults.
 func Load() *Config {
-	// Attempt to load .env before anything else so LOG_LEVEL can come from it.
-	// Failures are expected in production; they're logged after the logger is set up.
+	// Silently ignore missing .env — production environments use real env vars
 	godotenv.Load() // nolint: errcheck
 
 	return &Config{
-		Port: getEnv("PORT", "8080"),
-
-		OllamaURL:         getEnv("OLLAMA_URL", "http://localhost:11434"),
-		OllamaRouterModel: getEnv("OLLAMA_ROUTER_MODEL", "qwen3.5:0.8b"),
-
-		WorkersConfig: getEnv("WORKERS_CONFIG", "config/workers.yaml"),
-
-		DiscordToken: getEnv("DISCORD_TOKEN", ""),
-
-		LogLevel: ParseLevel(getEnv("LOG_LEVEL", "info")),
+		Port:               getEnv("PORT", "8080"),
+		OllamaURL:          getEnv("OLLAMA_URL", "http://localhost:11434"),
+		WorkersConfig:      getEnv("WORKERS_CONFIG", "config/workers.yaml"),
+		DiscordToken:       getEnv("DISCORD_TOKEN", ""),
+		SearxngURL:         getEnv("SEARXNG_URL", "http://localhost:8888"),
+		QueryMaxIterations: getEnvInt("QUERY_MAX_ITERATIONS", 5),
+		LogLevel:           ParseLevel(getEnv("LOG_LEVEL", "info")),
 	}
 }
 
@@ -46,4 +42,18 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// getEnvInt retrieves an environment variable as an integer with a fallback default.
+// Returns the default if the variable is missing or cannot be parsed as an integer.
+func getEnvInt(key string, defaultValue int) int {
+	value, exists := os.LookupEnv(key)
+	if !exists || value == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return n
 }

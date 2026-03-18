@@ -1,18 +1,19 @@
-# Oswald AI - Digital Servant
+# Oswald AI - Uncensored Digital Servant
 
-> A pure Go LLM-powered chat agent with intelligent request routing and expert model selection. Zero external API dependencies—fully local, fully uncensored.
+> A pure Go LLM-powered chat agent with web search integration and two-stage response generation. Fully local, fully uncensored, zero external API dependencies.
 
 ## Overview
 
-**Oswald** is a lightweight, orchestration agent that intelligently routes incoming requests to specialized expert models based on query classification. Built in Go for minimal resource overhead, it supports multiple gateways (Discord, WebSocket) and integrates seamlessly with local Ollama installations.
+**Oswald** is a lightweight orchestration agent that routes incoming messages through a two-stage pipeline: first, a small query model decides whether web search is needed and gathers results; second, an uncensored model generates the final response using raw search intel as context. Built in pure Go with zero external APIs—everything runs locally on your machine.
 
 ### Key Features
 
-- **Intelligent Routing**: LLM-powered triage system classifies requests into expert categories
-- **Blazing Fast**: Pure Go, single-binary deployment, minimal overhead
-- **Multi-Gateway Support**: Discord bot, WebSocket API
-- **Zero Censorship**: Fully uncensored local models—no corporate guardrails
-- **Tool-Calling Support**: Dynamic tool generation for robust routing decisions
+- **Two-Stage Pipeline**: Query generator (search decision) + Uncensored responder (final generation)
+- **Web Search Integration**: SearXNG-powered search with configurable result limits (capped at 5 results to protect context window)
+- **Discord Bot Support**: Full Discord integration with mention resolution, reply context, typing indicators
+- **WebSocket API**: Lightweight HTTP WebSocket server
+- **Streaming Responses**: Real-time response streaming to clients
+- **Zero Censorship**: Fully uncensored local models—no safety filters, no corporate guardrails (besides what is searched for legal reasons)
 
 ---
 
@@ -35,7 +36,8 @@
     │  │ • Auth + Identity│          │ • Message Streaming      │ │
     │  │ • Heartbeat Loop │          │ • JSON Response          │ │
     │  │ • Typing Status  │          │                          │ │
-    │  │ • Reply Context  │          │ Port: 8080               │ │
+    │  │ • Mention Resolve│          │ Port: 8080               │ │
+    │  │ • Reply Context  │          │                          │ │
     │  │ • Message Split  │          │                          │ │
     │  └────────┬─────────┘          └──────────┬───────────────┘ │
     └───────────┼──────────────────────────────┼──────────────────┘
@@ -48,39 +50,42 @@
     │  ┌──────────────────────────────────────────────────────┐  │
     │  │              Agent.Process()                         │  │
     │  │                                                      │  │
-    │  │  1. TRIAGE ROUTING                                   │  │
+    │  │  1. QUERY GENERATION (with optional web search)      │  │
     │  │     ┌────────────────────────────────────┐           │  │
-    │  │     │ DetermineRoute()                   │           │  │
-    │  │     │ • Router model classifies request  │           │  │
-    │  │     │ • Calls worker tools dynamically   │           │  │
-    │  │     │ • Max 3 retry attempts             │           │  │
-    │  │     │ • Falls back to first worker       │           │  │
+    │  │     │ runQueryGenerator()                │           │  │
+    │  │     │ • Small model (qwen3.5:0.8b)       │           │  │
+    │  │     │ • Evaluates need for web search    │           │  │
+    │  │     │ • Issues web_search tool calls     │           │  │
+    │  │     │ • Accumulates raw results (cap: 5) │           │  │
+    │  │     │ • Returns []SearchResult           │           │  │
+    │  │     │ • 60-second timeout                │           │  │
     │  │     └────────┬───────────────────────────┘           │  │
-    │  │              │ Returns: RouteDecision                │  │
-    │  │              │ (Category, Reason, Metrics)           │  │
+    │  │              │ Returns: []SearchResult               │  │
+    │  │              │ (or empty if no search needed)        │  │
     │  │              │                                       │  │
-    │  │  2. EXPERT GENERATION                                │  │
+    │  │  2. FINAL RESPONSE GENERATION                        │  │
     │  │     ┌────────────────────────────────────┐           │  │
-    │  │     │ Provider.Chat()                    │           │  │
-    │  │     │ • Expert model for selected worker │           │  │
-    │  │     │ • System prompt from worker config │           │  │
-    │  │     │ • Streaming to client via callback │           │  │
-    │  │     │ • 3-minute timeout protection      │           │  │
+    │  │     │ Uncensored Model Response          │           │  │
+    │  │     │ • Large model (llama2-uncensored:7b)           │  │
+    │  │     │ • System: Oswald personality prompt│           │  │
+    │  │     │ • User: <task_briefing> with intel │           │  │
+    │  │     │   (or raw prompt if no search)     │           │  │
+    │  │     │ • Streaming to callback            │           │  │
+    │  │     │ • 3-minute timeout                 │           │  │
     │  │     └────────┬───────────────────────────┘           │  │
     │  │              │ Returns: ChatResponse                 │  │
     │  │              │ (Content, Metrics, Thinking)          │  │
     │  │              │                                       │  │
     │  │  3. RESPONSE ASSEMBLY                                │  │
-    │  │     • Adapt callbacks (string vs ChatMessage)        │  │
+    │  │     • Extract response content                       │  │
     │  │     • Convert metrics to readable format             │  │
-    │  │     • Return AgentResponse with all metadata         │  │
+    │  │     • Return AgentResponse with metadata             │  │
     │  │                                                      │  │
     │  └──────────────────────────────────────────────────────┘  │
     │                                                            │
     └────────────────┬───────────────────────────────────────────┘
                      │ AgentResponse
-                     │ (Category, Model, Content,
-                     │  RouterMetrics, ExpertMetrics)
+                     │ (Model, Response, Metrics)
                      │
                 ┌────▼──────────────────────────┐
                 │    LLM PROVIDER LAYER         │
@@ -90,7 +95,6 @@
                 │  │ • /api/chat endpoint     │ │
                 │  │ • Streaming responses    │ │
                 │  │ • Tool calling support   │ │
-                │  │ • Thinking models (o1)   │ │
                 │  │ • Metrics collection     │ │
                 │  │ • Error recovery         │ │
                 │  │                          │ │
@@ -106,6 +110,21 @@
               │ Local Models │
               │ + GPU/CPU    │
               └──────────────┘
+
+                    SEARCH LAYER
+
+              ┌──────────────────────┐
+              │  SearXNG Client      │
+              │  (HTTP)              │
+              ├──────────────────────┤
+              │ • Web search queries │
+              │ • Result aggregation │
+              │ • ~5 results per qry │
+              │ • 10s timeout        │
+              │                      │
+              │ Connected to:        │
+              │ http://localhost:8888│
+              └──────────────────────┘
 ```
 
 ## Installation & Setup
@@ -114,6 +133,7 @@
 
 - **Go 1.25+** (for building)
 - **Ollama** running locally (default: `http://localhost:11434`)
+- **SearXNG** running locally (default: `http://localhost:8888`) — optional if you don't use web search
 - **Discord Token** (optional, only if using Discord gateway)
 
 ### Quick Start
@@ -129,25 +149,40 @@ cd oswald-ai
 
 Create a `.env` file:
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `PORT` | `8080` | HTTP server port |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
-| `OLLAMA_ROUTER_MODEL` | `qwen3.5:0.8b` | Router classification model |
-| `WORKERS_CONFIG` | `config/workers.yaml` | Worker definitions |
-| `DISCORD_TOKEN` | `` | Discord bot token (optional) |
-| `LOG_LEVEL` | `info` | Logging verbosity |
+| Variable         | Default                  | Purpose                                              |
+| ---------------- | ------------------------ | ---------------------------------------------------- |
+| `PORT`           | `8080`                   | HTTP server port (WebSocket)                         |
+| `OLLAMA_URL`     | `http://localhost:11434` | Ollama API endpoint                                  |
+| `SEARXNG_URL`    | `http://localhost:8888`  | SearXNG web search API endpoint                      |
+| `WORKERS_CONFIG` | `config/workers.yaml`    | Query generator + response model config              |
+| `DISCORD_TOKEN`  | `` (empty)               | Discord bot token (optional)                         |
+| `LOG_LEVEL`      | `info`                   | Logging verbosity (`debug`, `info`, `warn`, `error`) |
 
 ##### Logging Levels
 
-- `debug` - Verbose diagnostic info (triage attempts, metrics)
-- `info` - Standard operational logging
-- `warn` - Non-fatal issues (fallbacks, retries)
-- `error` - Critical issues
+- `debug` - Full prompt inspection, iteration details, model metrics, search queries
+- `info` - Operational logs (requests, responses, model selection)
+- `warn` - Non-fatal issues (fallbacks, retries, timeouts)
+- `error` - Critical failures
 
-#### 3. Set up workers
+#### 3. Configure workers
 
-Edit `config/workers.yaml` to define your expert categories and models.
+Edit `config/workers.yaml` to define your models:
+
+```yaml
+workers:
+  - category: "QUERY"
+    model: "llama3.2:1" # Small, fast query generator
+    system_prompt: |
+      You are a research assistant...
+
+  - category: "GENERAL"
+    model: "llama2-uncensored:7b" # Uncensored responder
+    system_prompt: |
+      You are Oswald...
+```
+
+The QUERY model decides whether web search is needed and what to search for. The GENERAL model generates the final user-facing response.
 
 #### 4. Build & Run
 
@@ -166,28 +201,51 @@ air
 
 ---
 
-## API Usage
+## Usage
 
-### WebSocket
+### Discord Bot
+
+#### In Server Channels
+
+Mention the bot to get a response:
+
+```
+@Oswald What is the capital of France?
+```
+
+#### In DMs
+
+Send any message directly—no mention required:
+
+```
+What is the current weather?
+```
+
+#### Replying to Oswald
+
+You can reply to Oswald's previous message without mentioning:
+
+```
+[Reply to Oswald's message]
+Can you elaborate on that?
+```
+
+Oswald will include the previous exchange as context automatically.
+
+### WebSocket API
 
 Connect to `ws://localhost:8080/ws`:
 
 ```bash
-# Send a prompt
+# Using websocat
 websocat ws://localhost:8080/ws
-hello
+
+# Send a prompt
+What is Bitcoin's current price?
 
 # Receive streaming chunks, then final JSON:
-# "Hello there! How can I..."
-# {...final JSON response...}
-```
-
-### Discord Bot
-
-Simply mention the bot in any message or reply:
-
-```
-@Oswald What is the capital of France?
+# "Bitcoin is currently..."
+# {"model":"llama2-uncensored:7b","response":"..."}
 ```
 
 ---
@@ -197,7 +255,7 @@ Simply mention the bot in any message or reply:
 - [ ] Persistent conversation history (multi-user context)
 - [ ] Multi-gateway response routing
 - [ ] Message queue for imcoming queries
-- [ ] Tool calling for expert models
+- [ ] Tool calling model for uncensored
 
 ---
 
@@ -207,4 +265,4 @@ MIT
 
 ---
 
-**Oswald AI** - Built for those (me) who want uncensored, locally-hosted intelligence... sort of.
+**Oswald AI** — Uncensored local intelligence for the unapologetic.

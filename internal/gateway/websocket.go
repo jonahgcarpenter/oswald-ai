@@ -74,13 +74,12 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			conn.WriteMessage(messageType, []byte(chunk)) // nolint: errcheck
 		}
 
-		// Route prompt to agent for triage and generation
+		// Route prompt to agent for query generation and response
 		finalPayload, err := aiAgent.Process(userPrompt, streamFunc)
 		if err != nil {
 			log.Error("Engine processing error: %v", err)
 			errorPayload := agent.AgentResponse{
-				Category: "ERROR",
-				Error:    "Internal engine timeout or failure",
+				Error: "Internal engine timeout or failure",
 			}
 			errBytes, _ := json.Marshal(errorPayload)
 			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
@@ -94,7 +93,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			continue
 		}
 
-		log.Debug("Websocket: sending final payload (%d bytes, model: %s)", len(jsonBytes), finalPayload.Model)
+		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), finalPayload.Model)
 		err = conn.WriteMessage(messageType, jsonBytes)
 		if err != nil {
 			log.Warn("Write error: %v", err)

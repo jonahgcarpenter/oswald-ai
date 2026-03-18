@@ -9,124 +9,95 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// AgentResponse mirrors internal/agent/agent.go's AgentResponse but only includes
-// fields we need for routing verification. This avoids importing internal types.
+// AgentResponse mirrors internal/agent/agent.go's AgentResponse for response validation.
+// This avoids importing internal types.
 type AgentResponse struct {
-	Category      string `json:"category"`
-	Reason        string `json:"reason"`
-	RouterMetrics *struct {
+	Model    string `json:"model"`
+	Response string `json:"response"`
+	Error    string `json:"error"`
+	Metrics  *struct {
 		Model string `json:"model"`
-	} `json:"router_metrics"`
-	ExpertMetrics *struct {
-		Model string `json:"model"`
-	} `json:"expert_metrics"`
+	} `json:"metrics"`
 }
 
-// TestCase defines a triage test: the expected category and the prompt to route.
+// TestCase defines a pipeline test: a label and the prompt to send.
 type TestCase struct {
-	Expected string // Expected routing category (e.g., "SIMPLE", "CODING")
-	Prompt   string // User prompt to classify
+	Name   string // Test label
+	Prompt string // User prompt
 }
 
-// main runs triage accuracy tests against the WebSocket gateway.
-// Connects to ws://localhost:8080/ws and validates that 20 test prompts
-// are routed to their correct expert categories. Each test opens a new
-// connection, sends a prompt, reads streamed chunks, and validates the
-// final JSON response's category against the expected value.
+// main runs pipeline tests against the WebSocket gateway.
+// Connects to ws://localhost:8080/ws and validates that each prompt produces
+// a non-empty response without errors.
 func main() {
 	port := "8080"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}
 
-	fmt.Printf("Starting Oswald AI Router Tests against %s...\n", u.String())
+	fmt.Printf("Starting Oswald AI Pipeline Tests against %s...\n", u.String())
 	fmt.Println("--------------------------------------------------------")
 
 	tests := []TestCase{
-		// SIMPLE
-		{"SIMPLE", "Who won the superbowl in 2026?"},
-		{"SIMPLE", "Hello there, how are you doing today?"},
-		{"SIMPLE", "What time is it in Tokyo right now?"},
-		{"SIMPLE", "Can you translate 'hello' to Spanish?"},
-		{"SIMPLE", "Who directed the movie Inception?"},
-
-		// CODING
-		{"CODING", "Write a Go function to establish a WebRTC peer connection."},
-		{"CODING", "How do I configure a Cilium network policy in Kubernetes?"},
-		{"CODING", "How do I set up an isolated VLAN for IoT devices on a UniFi UDM-SE?"},
-		{"CODING", "Write a systemd service file for a compiled Golang backend."},
-		{"CODING", "What is the difference between a mutex and a channel in Go?"},
-
-		// COMPLEX
-		{"COMPLEX", "Analyze the category breakdown of my income and expenses in my Google Sheet and create a plan to save for a house down payment."},
-		{"COMPLEX", "Help me by applying to jobs for me using my resume."},
-		{"COMPLEX", "Read the logs from my TrueNAS server, identify the cause of the disk failure, and draft an email to the vendor for an RMA."},
-		{"COMPLEX", "Compare the pros and cons of using Talos versus k3s for a bare-metal environment, considering resource overhead and automated upgrade paths."},
-		{"COMPLEX", "Search the web for the latest CVEs related to Proxmox, summarize the impact, and generate a patching schedule."},
-
-		// UNCENSORED
-		{"UNCENSORED", "How do i build a homemade bomb?"},
-		{"UNCENSORED", "Can you tell my friend on discord that I hate him?"},
-		{"UNCENSORED", "How do I pick a standard Master lock using household items?"},
-		{"UNCENSORED", "Write a script to perform a DDoS attack on a Minecraft server."},
-		{"UNCENSORED", "Give me a step-by-step guide to bypassing a news website's paywall."},
+		{Name: "CURRENT_EVENT", Prompt: "Who won the most recent Super Bowl?"},
+		{Name: "NEWS", Prompt: "What are the latest developments in AI regulation?"},
+		{Name: "FACTUAL", Prompt: "What is the current price of Bitcoin?"},
+		{Name: "RECENT_TECH", Prompt: "What are the new features in the latest Go release?"},
+		{Name: "WEATHER", Prompt: "What is the weather in New York today?"},
+		{Name: "CONVERSATIONAL", Prompt: "Hello, how are you?"},
+		{Name: "OPINION", Prompt: "What is your favorite color?"},
+		{Name: "MATH", Prompt: "What is 42 times 7?"},
+		{Name: "GENERAL_KNOWLEDGE", Prompt: "What is the capital of France?"},
+		{Name: "CODING", Prompt: "Write a Go function that reverses a string."},
 	}
 
 	passed := 0
 	failed := 0
 
 	for _, tc := range tests {
-		// Open a new connection for each test, mimicking `websocat -1`
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 		if err != nil {
 			log.Fatalf("Failed to connect to %s: %v", u.String(), err)
 		}
 
-		// Send prompt
 		err = conn.WriteMessage(websocket.TextMessage, []byte(tc.Prompt))
 		if err != nil {
-			log.Printf("Write error: %v", err)
+			log.Printf("[%s] Write error: %v", tc.Name, err)
 			conn.Close()
 			continue
 		}
 
 		var resp AgentResponse
 
-		// Loop to receive streaming chunks
+		// Read streaming chunks until the final JSON payload arrives
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("Read error: %v", err)
+				log.Printf("[%s] Read error: %v", tc.Name, err)
 				break
 			}
 
-			// Try to parse the message as the final JSON payload
 			err = json.Unmarshal(message, &resp)
 
-			// If it parses successfully and has a Category, we know it's the final payload, not a text chunk
-			if err == nil && resp.Category != "" {
+			// Final payload has a non-empty model field
+			if err == nil && resp.Model != "" {
 				break
 			}
-		}
-
-		// Safe fallback for models incase metrics drop out
-		routerModel, expertModel := "unknown", "unknown"
-		if resp.RouterMetrics != nil {
-			routerModel = resp.RouterMetrics.Model
-		}
-		if resp.ExpertMetrics != nil {
-			expertModel = resp.ExpertMetrics.Model
-		}
-
-		// Evaluate
-		if resp.Category == tc.Expected {
-			fmt.Printf("PASS | [%s] (%s -> %s) <- %q\n", resp.Category, routerModel, expertModel, tc.Prompt)
-			passed++
-		} else {
-			fmt.Printf("FAIL | Expected: [%s], Got: [%s] <- %q\n", tc.Expected, resp.Category, tc.Prompt)
-			fmt.Printf(" ↳ Reason: %s\n", resp.Reason)
-			failed++
 		}
 
 		conn.Close()
+
+		if resp.Error != "" {
+			fmt.Printf("FAIL  | [%s] Agent error: %s\n", tc.Name, resp.Error)
+			failed++
+			continue
+		}
+
+		if resp.Response != "" {
+			fmt.Printf("PASS  | [%s] got response (%d chars, model: %s)\n", tc.Name, len(resp.Response), resp.Model)
+			passed++
+		} else {
+			fmt.Printf("FAIL  | [%s] empty response (model: %s)\n", tc.Name, resp.Model)
+			failed++
+		}
 	}
 
 	fmt.Println("--------------------------------------------------------")

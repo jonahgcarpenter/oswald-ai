@@ -32,20 +32,20 @@ type GenerateResponse struct {
 }
 
 // chatToolFunction holds the name and arguments of a tool invocation from the model.
-// Differs from llm.ToolFunction in that Arguments is map[string]interface{} for lazy decoding.
+// Differs from provider.ToolFunction in that Arguments is map[string]interface{} for lazy decoding.
 type chatToolFunction struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
 }
 
 // chatToolCall represents a single tool invocation in Ollama's chat response.
-// Corresponds to llm.ToolCall but using Ollama's internal structures.
+// Corresponds to provider.ToolCall but using Ollama's internal structures.
 type chatToolCall struct {
 	Function chatToolFunction `json:"function"`
 }
 
 // chatMessage is a single conversation turn in Ollama's chat API format.
-// Differs from the generic llm.ChatMessage in field names and structure.
+// Differs from the generic provider.ChatMessage in field names and structure.
 // mapToOllamaMessages and mapFromOllamaMessage handle the conversion.
 type chatMessage struct {
 	Role      string         `json:"role"`
@@ -64,7 +64,7 @@ type chatToolParameterProperty struct {
 }
 
 // chatToolParameters is the JSON Schema definition for a tool's input parameters.
-// Mirrors llm.ToolParameters but uses Ollama's exact field structure.
+// Mirrors provider.ToolParameters but uses Ollama's exact field structure.
 type chatToolParameters struct {
 	Type       string                               `json:"type"`
 	Properties map[string]chatToolParameterProperty `json:"properties"`
@@ -72,7 +72,7 @@ type chatToolParameters struct {
 }
 
 // chatToolDefinition holds the schema for a single function tool.
-// Corresponds to llm.ToolDefinition but using Ollama's internal structures.
+// Corresponds to provider.ToolDefinition but using Ollama's internal structures.
 type chatToolDefinition struct {
 	Name        string             `json:"name"`
 	Description string             `json:"description"`
@@ -80,7 +80,7 @@ type chatToolDefinition struct {
 }
 
 // chatTool wraps a chatToolDefinition with its type (always "function" for Ollama).
-// Corresponds to llm.Tool but using Ollama's internal message format.
+// Corresponds to provider.Tool but using Ollama's internal message format.
 type chatTool struct {
 	Type     string             `json:"type"`
 	Function chatToolDefinition `json:"function"`
