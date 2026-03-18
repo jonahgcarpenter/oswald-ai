@@ -319,6 +319,9 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*
 
 	a.log.Debug("Response generation starting: model=%s search=%v", a.responseModel, len(searchResults) > 0)
 
+	// NOTE: Uncomment to see full prompt before its sent
+	// a.log.Debug("Final prompt to uncensored model:\n[SYSTEM]\n%s\n[USER]\n%s", a.responseSystemPrompt, responsePrompt)
+
 	expertResp, err := a.provider.Chat(ctxGen, responseReq, chatCallback)
 	if err != nil {
 		a.log.Error("Response model %s failed: %v", a.responseModel, err)
