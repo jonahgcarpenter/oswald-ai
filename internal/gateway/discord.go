@@ -50,6 +50,12 @@ type MessageCreate struct {
 		Bot      bool   `json:"bot"`
 		Username string `json:"username"`
 	} `json:"author"`
+	// Mentions contains every user object Discord embeds for <@ID> tokens in the message.
+	// Populated by Discord automatically; no extra API call required.
+	Mentions []struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	} `json:"mentions,omitempty"`
 	// ReferencedMessage is populated by Discord when this message is a reply.
 	ReferencedMessage *struct {
 		Content string `json:"content"`
@@ -270,6 +276,33 @@ func splitMessage(text string, limit int) []string {
 	return chunks
 }
 
+// resolveMentions replaces every <@ID> and <@!ID> token in text with @username using
+// the mentions list Discord embeds directly in the MESSAGE_CREATE payload. IDs that have
+// no corresponding entry in the list are left as-is to avoid silent data loss.
+func resolveMentions(text string, mentions []struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+}) string {
+	// Build an ID → username lookup from the embedded mention objects.
+	lookup := make(map[string]string, len(mentions))
+	for _, m := range mentions {
+		lookup[m.ID] = m.Username
+	}
+
+	// Replace both <@ID> and <@!ID> variants (the latter is the legacy nickname form).
+	re := regexp.MustCompile(`<@!?(\d+)>`)
+	return re.ReplaceAllStringFunc(text, func(match string) string {
+		sub := re.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		if username, ok := lookup[sub[1]]; ok {
+			return "@" + username
+		}
+		return match // Unknown ID — leave the raw token intact
+	})
+}
+
 // handleMessage processes an incoming Discord message, validating it, extracting context,
 // sending it to the agent, and streaming responses back to Discord.
 func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
@@ -308,6 +341,9 @@ func (dg *DiscordGateway) handleMessage(msg MessageCreate) {
 	// Changes <:smile:123456789> into :smile: for readability
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
 	prompt = re.ReplaceAllString(prompt, ":$1:")
+
+	// Replace <@ID> mention tokens with @username so the LLM sees real names
+	prompt = resolveMentions(prompt, msg.Mentions)
 
 	// Include quoted context if this is a reply to another message
 	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
