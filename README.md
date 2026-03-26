@@ -256,6 +256,7 @@ What is Bitcoin's current price?
 - [ ] Multi-gateway response routing
 - [ ] Message queue for imcoming queries
 - [ ] Tool calling model for uncensored
+- [ ] Support for images, and URLs in a prompt
 
 ---
 
