@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/search"
 )
 
@@ -26,7 +26,7 @@ type ToolParamSpec struct {
 }
 
 // ToolSpec holds the fully parsed definition from a single tool markdown file.
-// Name and Description are sent to the model via the provider.Tool schema.
+// Name and Description are sent to the model via the ollama.Tool schema.
 type ToolSpec struct {
 	Name        string
 	Description string
@@ -104,16 +104,16 @@ func (r *ToolRegistry) RegisterHandler(name string, handler ToolHandler) error {
 	return nil
 }
 
-// ProviderTools converts all loaded ToolSpecs into the []provider.Tool slice
+// OllamaTools converts all loaded ToolSpecs into the []ollama.Tool slice
 // passed to ChatRequest.Tools. All loaded specs are included regardless of
 // whether a handler has been registered.
-func (r *ToolRegistry) ProviderTools() []provider.Tool {
-	tools := make([]provider.Tool, 0, len(r.specs))
+func (r *ToolRegistry) OllamaTools() []ollama.Tool {
+	tools := make([]ollama.Tool, 0, len(r.specs))
 	for _, spec := range r.specs {
-		props := make(map[string]provider.ToolParameterProperty, len(spec.Parameters))
+		props := make(map[string]ollama.ToolParameterProperty, len(spec.Parameters))
 		required := []string{}
 		for _, p := range spec.Parameters {
-			props[p.Name] = provider.ToolParameterProperty{
+			props[p.Name] = ollama.ToolParameterProperty{
 				Type:        p.Type,
 				Description: p.Description,
 			}
@@ -121,12 +121,12 @@ func (r *ToolRegistry) ProviderTools() []provider.Tool {
 				required = append(required, p.Name)
 			}
 		}
-		tools = append(tools, provider.Tool{
+		tools = append(tools, ollama.Tool{
 			Type: "function",
-			Function: provider.ToolDefinition{
+			Function: ollama.ToolDefinition{
 				Name:        spec.Name,
 				Description: spec.Description,
-				Parameters: provider.ToolParameters{
+				Parameters: ollama.ToolParameters{
 					Type:       "object",
 					Properties: props,
 					Required:   required,

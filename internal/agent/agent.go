@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 const (
@@ -60,7 +60,7 @@ type AgentResponse struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	provider      provider.Provider
+	chatClient    ollama.Chatter
 	registry      *ToolRegistry
 	model         string
 	systemPrompt  string
@@ -68,17 +68,17 @@ type Agent struct {
 	log           *config.Logger
 }
 
-// NewAgent initializes the Agent with a provider, tool registry, worker config,
+// NewAgent initializes the Agent with an Ollama chat client, tool registry, worker config,
 // iteration cap, and logger. The single worker drives the entire agentic loop.
 func NewAgent(
-	provider provider.Provider,
+	chatClient ollama.Chatter,
 	registry *ToolRegistry,
 	worker *WorkerAgent,
 	maxIterations int,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
-		provider:      provider,
+		chatClient:    chatClient,
 		registry:      registry,
 		model:         worker.ResolveModel(),
 		systemPrompt:  worker.SystemPrompt,
@@ -96,10 +96,10 @@ func truncate(s string, max int) string {
 	return string(r[:max]) + "…"
 }
 
-// mapMetrics converts a *provider.ChatResponse into a *ModelMetrics summary for reporting.
+// mapMetrics converts an *ollama.ChatResponse into a *ModelMetrics summary for reporting.
 // Returns nil if the response is missing or has no evaluation duration (partial failure).
 // Converts nanosecond timings to milliseconds and calculates tokens/second throughput.
-func mapMetrics(resp *provider.ChatResponse) *ModelMetrics {
+func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 	if resp == nil || resp.EvalDuration <= 0 {
 		return nil
 	}
@@ -128,14 +128,14 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	messages := []provider.ChatMessage{
+	messages := []ollama.ChatMessage{
 		{Role: "system", Content: a.systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
-	req := provider.ChatRequest{
+	req := ollama.ChatRequest{
 		Model:  a.model,
-		Tools:  a.registry.ProviderTools(),
+		Tools:  a.registry.OllamaTools(),
 		Stream: streamCallback != nil,
 	}
 
@@ -152,9 +152,9 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
 	// deciding to call a tool. The stream pauses naturally while tools execute.
-	var chatCallback func(provider.ChatMessage)
+	var chatCallback func(ollama.ChatMessage)
 	if streamCallback != nil {
-		chatCallback = func(chunk provider.ChatMessage) {
+		chatCallback = func(chunk ollama.ChatMessage) {
 			if chunk.Thinking != "" {
 				accumulatedThinking.WriteString(chunk.Thinking)
 				streamCallback(StreamChunk{Type: ChunkThinking, Text: chunk.Thinking})
@@ -166,7 +166,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 		}
 	}
 
-	var lastResp *provider.ChatResponse
+	var lastResp *ollama.ChatResponse
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls or the iteration cap is hit.
@@ -177,7 +177,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 
 		req.Messages = messages
 
-		resp, err := a.provider.Chat(ctx, req, chatCallback)
+		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
 		if err != nil {
 			a.log.Error("Model %s failed on iteration %d: %v", a.model, iteration, err)
 			return &AgentResponse{
@@ -231,7 +231,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 				}
 			}
 
-			messages = append(messages, provider.ChatMessage{
+			messages = append(messages, ollama.ChatMessage{
 				Role:     "tool",
 				ToolName: toolName,
 				Content:  toolContent,
@@ -247,7 +247,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	a.log.Info("Response complete: model=%s", a.model)
 
 	// Extract the final response content. The Ollama client already handles
-	// thinking-to-content promotion at the provider layer for non-streaming calls.
+	// thinking-to-content promotion for non-streaming calls.
 	// For streaming, we tracked content separately via the callback above.
 	finalContent := accumulatedContent.String()
 	if finalContent == "" && lastResp != nil {

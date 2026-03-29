@@ -8,8 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/search/searxng"
 )
 
@@ -34,14 +33,11 @@ func main() {
 
 	log.Info("Worker: model=%s", responseWorker.ResolveModel())
 
-	// NOTE: Only Ollama is supported; leave the door open for future providers
-	var llmProvider provider.Provider
-	if cfg.OllamaURL != "" {
-		llmProvider = ollama.NewClient(cfg.OllamaURL, log)
-	} else {
-		// Later, add `else if cfg.OpenAIKey != ""` here
-		log.Fatal("No valid LLM provider configured (missing OLLAMA_URL)")
+	if cfg.OllamaURL == "" {
+		log.Fatal("Missing required OLLAMA_URL configuration")
 	}
+
+	llmClient := ollama.NewClient(cfg.OllamaURL, log)
 
 	// Initialize the SearXNG search client
 	searchClient := searxng.NewClient(cfg.SearxngURL, log)
@@ -61,7 +57,7 @@ func main() {
 	log.Info("Tool registry: %d tool(s) loaded from %s", toolRegistry.Count(), cfg.ToolsConfig)
 
 	agentEngine := agent.NewAgent(
-		llmProvider,
+		llmClient,
 		toolRegistry,
 		responseWorker,
 		cfg.MaxIterations,
