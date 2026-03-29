@@ -64,14 +64,21 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 		userPrompt := string(message)
 		log.Info("Websocket request: %q", truncate(userPrompt, 100))
 
-		// Set up streaming callback for partial responses
+		// Set up streaming callback that forwards typed chunks as JSON to the client.
+		// Thinking tokens, content tokens, and agent status messages are all forwarded
+		// so the client can differentiate and display them appropriately.
 		firstChunk := true
-		streamFunc := func(chunk string) {
+		streamFunc := func(chunk agent.StreamChunk) {
 			if firstChunk {
-				log.Debug("Websocket: streaming response started")
+				log.Debug("Websocket: streaming response started (type=%s)", chunk.Type)
 				firstChunk = false
 			}
-			conn.WriteMessage(messageType, []byte(chunk)) // nolint: errcheck
+			chunkBytes, err := json.Marshal(chunk)
+			if err != nil {
+				log.Warn("Websocket: failed to marshal stream chunk: %v", err)
+				return
+			}
+			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
 		// Route prompt to agent for query generation and response

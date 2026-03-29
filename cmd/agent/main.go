@@ -21,15 +21,10 @@ func main() {
 	log := config.NewLogger(cfg.LogLevel)
 	log.Info("Log level: %s", cfg.LogLevel)
 
-	// Load worker agent registry (query generator + uncensored response model)
+	// Load worker agent registry (single GENERAL worker drives the agentic loop)
 	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
 	if err != nil {
 		log.Fatal("Failed to load workers config: %v", err)
-	}
-
-	queryWorker := agent.FindWorker(workers, "QUERY")
-	if queryWorker == nil {
-		log.Fatal("Workers config is missing required QUERY worker entry")
 	}
 
 	responseWorker := agent.FindWorker(workers, "GENERAL")
@@ -37,8 +32,7 @@ func main() {
 		log.Fatal("Workers config is missing required GENERAL worker entry")
 	}
 
-	log.Info("Query worker: model=%s", queryWorker.ResolveModel())
-	log.Info("Response worker: model=%s", responseWorker.ResolveModel())
+	log.Info("Worker: model=%s", responseWorker.ResolveModel())
 
 	// NOTE: Only Ollama is supported; leave the door open for future providers
 	var llmProvider provider.Provider
@@ -53,12 +47,24 @@ func main() {
 	searchClient := searxng.NewClient(cfg.SearxngURL, log)
 	log.Info("SearXNG search client configured: %s", cfg.SearxngURL)
 
+	// Load tool definitions from markdown files and register execution handlers.
+	// To add a new tool: create config/tools/<name>.md and register a handler below.
+	toolRegistry := agent.NewToolRegistry(log)
+	if err := toolRegistry.LoadFromDirectory(cfg.ToolsConfig); err != nil {
+		log.Fatal("Failed to load tool definitions: %v", err)
+	}
+
+	if err := toolRegistry.RegisterHandler("web_search", agent.NewWebSearchHandler(searchClient, log)); err != nil {
+		log.Fatal("Failed to register web_search handler: %v", err)
+	}
+
+	log.Info("Tool registry: %d tool(s) loaded from %s", toolRegistry.Count(), cfg.ToolsConfig)
+
 	agentEngine := agent.NewAgent(
 		llmProvider,
-		searchClient,
-		queryWorker,
+		toolRegistry,
 		responseWorker,
-		cfg.QueryMaxIterations,
+		cfg.MaxIterations,
 		log,
 	)
 

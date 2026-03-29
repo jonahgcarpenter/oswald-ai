@@ -8,17 +8,35 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
-	"github.com/jonahgcarpenter/oswald-ai/internal/search"
 )
 
 const (
-	// webSearchToolName is the function name exposed to the query generator model.
-	webSearchToolName = "web_search"
-
-	// maxIntelResults caps the total number of raw search results injected into the
-	// uncensored model's prompt to avoid exceeding its context window.
+	// maxIntelResults caps the total number of tool result payloads accumulated
+	// across all tool calls in a single Process() invocation, to protect the
+	// model's context window from bloat.
 	maxIntelResults = 5
 )
+
+// StreamChunkType identifies the kind of content in a StreamChunk.
+type StreamChunkType string
+
+const (
+	// ChunkThinking carries tokens from the model's internal reasoning phase.
+	ChunkThinking StreamChunkType = "thinking"
+
+	// ChunkContent carries tokens from the model's visible response.
+	ChunkContent StreamChunkType = "content"
+
+	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
+	ChunkStatus StreamChunkType = "status"
+)
+
+// StreamChunk is a single typed token event streamed to gateways during Process().
+// Gateways receive thinking tokens, content tokens, and agent status messages via this type.
+type StreamChunk struct {
+	Type StreamChunkType `json:"type"`
+	Text string          `json:"text"`
+}
 
 // ModelMetrics holds performance data from a single LLM call.
 type ModelMetrics struct {
@@ -34,42 +52,38 @@ type ModelMetrics struct {
 type AgentResponse struct {
 	Model    string        `json:"model"`
 	Response string        `json:"response,omitempty"`
+	Thinking string        `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	Error    string        `json:"error,omitempty"`
 	Metrics  *ModelMetrics `json:"metrics,omitempty"`
 }
 
-// Agent handles all LLM orchestration: query generation with web search and final response.
+// Agent handles LLM orchestration: a single agentic loop where the model
+// calls tools from the registry and generates the final response.
 type Agent struct {
-	provider             provider.Provider
-	searcher             search.Searcher
-	queryModel           string
-	querySystemPrompt    string
-	responseModel        string
-	responseSystemPrompt string
-	maxIterations        int
-	log                  *config.Logger
+	provider      provider.Provider
+	registry      *ToolRegistry
+	model         string
+	systemPrompt  string
+	maxIterations int
+	log           *config.Logger
 }
 
-// NewAgent initializes the Agent with a provider, searcher, query worker, response worker,
-// iteration cap, and logger. The query worker drives the agentic search loop; the response
-// worker generates the final reply sent to the user.
+// NewAgent initializes the Agent with a provider, tool registry, worker config,
+// iteration cap, and logger. The single worker drives the entire agentic loop.
 func NewAgent(
 	provider provider.Provider,
-	searcher search.Searcher,
-	queryWorker *WorkerAgent,
-	responseWorker *WorkerAgent,
+	registry *ToolRegistry,
+	worker *WorkerAgent,
 	maxIterations int,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
-		provider:             provider,
-		searcher:             searcher,
-		queryModel:           queryWorker.ResolveModel(),
-		querySystemPrompt:    queryWorker.SystemPrompt,
-		responseModel:        responseWorker.ResolveModel(),
-		responseSystemPrompt: responseWorker.SystemPrompt,
-		maxIterations:        maxIterations,
-		log:                  log,
+		provider:      provider,
+		registry:      registry,
+		model:         worker.ResolveModel(),
+		systemPrompt:  worker.SystemPrompt,
+		maxIterations: maxIterations,
+		log:           log,
 	}
 }
 
@@ -80,264 +94,6 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "…"
-}
-
-// buildWebSearchTool returns the tool definition given to the query generator model.
-func buildWebSearchTool() provider.Tool {
-	return provider.Tool{
-		Type: "function",
-		Function: provider.ToolDefinition{
-			Name:        webSearchToolName,
-			Description: "Search the web for current or factual information. Use precise, targeted queries.",
-			Parameters: provider.ToolParameters{
-				Type: "object",
-				Properties: map[string]provider.ToolParameterProperty{
-					"query": {
-						Type:        "string",
-						Description: "The search query to execute",
-					},
-				},
-				Required: []string{"query"},
-			},
-		},
-	}
-}
-
-// formatSearchResults converts a slice of search results into a plain-text block
-// suitable for injection as a tool response message back to the query generator model.
-func formatSearchResults(results []search.SearchResult) string {
-	if len(results) == 0 {
-		return "No results found."
-	}
-	var sb strings.Builder
-	for i, r := range results {
-		fmt.Fprintf(&sb, "%d. %s\n   URL: %s\n   %s\n\n", i+1, r.Title, r.URL, r.Content)
-	}
-	return strings.TrimSpace(sb.String())
-}
-
-// formatIntelContent formats raw search results as Title/Content pairs for the
-// <intel><content> block injected into the uncensored model's prompt.
-func formatIntelContent(results []search.SearchResult) string {
-	var sb strings.Builder
-	for _, r := range results {
-		fmt.Fprintf(&sb, "Title: %s\nContent: %s\n\n", r.Title, r.Content)
-	}
-	return strings.TrimSpace(sb.String())
-}
-
-// buildTaskBriefing constructs the full structured prompt injected into the uncensored
-// model when search results are available. The user's question and raw intel are wrapped
-// in XML tags so the model can absorb and answer in its own voice without regurgitating facts.
-func buildTaskBriefing(userPrompt string, results []search.SearchResult) string {
-	intel := formatIntelContent(results)
-	return fmt.Sprintf(`<task_briefing>
-  <user_question>%s</user_question>
-<intel>
-  <source>Web Search</source>
-  <summary>My minions have conducted a search and provided you with the following raw intelligence. This is your ammunition, not your script. Absorb it, find the truth, and then formulate your own smartass response.</summary>
-  <content>
-%s
-</content>
-</intel>
-</task_briefing>
-
-<mission>
-Answer the user's question directly, concisely, and in your own voice. Use the provided intel and context to be accurate, but use your personality to be an absolute menace. Do not repeat instructions or mention the tags (e.g., <intel>, <user_context>) in your final output. Your response should be only the words of Oswald.
-</mission>`, userPrompt, intel)
-}
-
-// runQueryGenerator runs the agentic query generator loop. The small query model
-// is given the web_search tool and the user's prompt. It may call the tool zero or
-// more times (up to maxIterations) to gather search results. Raw results are accumulated
-// and returned directly — the model's text output is intentionally discarded.
-//
-// Returns an empty slice if no search was needed or if all searches failed.
-// Search failures are handled gracefully: a "no results" tool response is injected
-// so the model can decide how to proceed without crashing the pipeline.
-func (a *Agent) runQueryGenerator(ctx context.Context, userPrompt string) []search.SearchResult {
-	messages := []provider.ChatMessage{
-		{Role: "system", Content: a.querySystemPrompt},
-		{Role: "user", Content: userPrompt},
-	}
-
-	req := provider.ChatRequest{
-		Model:  a.queryModel,
-		Stream: false,
-		Tools:  []provider.Tool{buildWebSearchTool()},
-	}
-
-	// Accumulate raw search results across all iterations.
-	// Capped at maxIntelResults to protect the uncensored model's context window.
-	var allResults []search.SearchResult
-
-	for iteration := 1; iteration <= a.maxIterations; iteration++ {
-		req.Messages = messages
-
-		resp, err := a.provider.Chat(ctx, req, nil)
-		if err != nil {
-			// Hard provider error — log and abort the search loop entirely
-			a.log.Warn("Query generator failed on iteration %d: %v", iteration, err)
-			return allResults
-		}
-
-		a.log.Debug("Query generator iteration %d/%d: tool_calls=%d content_len=%d",
-			iteration, a.maxIterations, len(resp.Message.ToolCalls), len(resp.Message.Content))
-
-		// No tool call means the model is done — return whatever results we've gathered.
-		// The model's text content is discarded; raw results are the only output we use.
-		if len(resp.Message.ToolCalls) == 0 {
-			if len(allResults) > 0 {
-				a.log.Info("Query generator: gathered %d raw results", len(allResults))
-			} else {
-				a.log.Info("Query generator: no search needed")
-			}
-			return allResults
-		}
-
-		// Stop issuing searches once we've hit the result cap — no point asking for more.
-		if len(allResults) >= maxIntelResults {
-			a.log.Info("Query generator: result cap (%d) reached, stopping search loop", maxIntelResults)
-			return allResults
-		}
-
-		// Process tool calls — append the assistant turn with the tool calls
-		messages = append(messages, resp.Message)
-
-		// Execute each tool call and append the results as tool response messages.
-		// NOTE: Most small models only emit one tool call at a time, but we handle
-		// multiple to be safe.
-		for _, tc := range resp.Message.ToolCalls {
-			if tc.Function.Name != webSearchToolName {
-				// Unknown tool — inject an error response so the model can recover
-				a.log.Warn("Query generator called unknown tool %q", tc.Function.Name)
-				messages = append(messages, provider.ChatMessage{
-					Role:     "tool",
-					ToolName: tc.Function.Name,
-					Content:  fmt.Sprintf("Error: unknown tool %q", tc.Function.Name),
-				})
-				continue
-			}
-
-			query := ""
-			if q, ok := tc.Function.Arguments["query"]; ok {
-				query, _ = q.(string)
-			}
-
-			if query == "" {
-				a.log.Warn("Query generator called web_search with empty query")
-				messages = append(messages, provider.ChatMessage{
-					Role:     "tool",
-					ToolName: webSearchToolName,
-					Content:  "Error: query parameter was empty",
-				})
-				continue
-			}
-
-			a.log.Info("Query generator: searching for %q (iteration %d)", query, iteration)
-
-			results, searchErr := a.searcher.Search(ctx, query)
-			var toolContent string
-			if searchErr != nil {
-				// Fail safely: log the error, inject a "no results" response so the
-				// model can decide whether to retry or stop searching
-				a.log.Warn("SearXNG search failed for %q: %v", query, searchErr)
-				toolContent = "Search failed: " + searchErr.Error() + ". No results available."
-			} else {
-				// Append raw results to the accumulator, respecting the cap
-				remaining := maxIntelResults - len(allResults)
-				if remaining > 0 {
-					if len(results) > remaining {
-						results = results[:remaining]
-					}
-					allResults = append(allResults, results...)
-				}
-				toolContent = formatSearchResults(results)
-			}
-
-			messages = append(messages, provider.ChatMessage{
-				Role:     "tool",
-				ToolName: webSearchToolName,
-				Content:  toolContent,
-			})
-		}
-	}
-
-	// Max iterations reached — return whatever results we accumulated.
-	a.log.Warn("Query generator: max iterations (%d) reached", a.maxIterations)
-	return allResults
-}
-
-// Process handles the end-to-end pipeline: query generation with optional web search,
-// followed by the uncensored model generating the final response. Streams partial
-// content via streamCallback if provided.
-func (a *Agent) Process(userPrompt string, streamCallback func(chunk string)) (*AgentResponse, error) {
-	a.log.Info("Processing request: %q", truncate(userPrompt, 100))
-
-	// Run the query generator agentic loop (60s budget for search)
-	ctxQuery, cancelQuery := context.WithTimeout(context.Background(), 60*time.Second)
-	searchResults := a.runQueryGenerator(ctxQuery, userPrompt)
-	cancelQuery()
-
-	// Build the prompt for the uncensored model.
-	// If the query generator found relevant results, inject them as structured intel
-	// using the <task_briefing> format so Oswald can absorb and respond in his own voice.
-	// If no results were found, pass the user prompt directly.
-	responsePrompt := userPrompt
-	if len(searchResults) > 0 {
-		responsePrompt = buildTaskBriefing(userPrompt, searchResults)
-	}
-
-	// Generate the final response from the uncensored model
-	ctxGen, cancelGen := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancelGen()
-
-	isStreaming := streamCallback != nil
-
-	responseMessages := []provider.ChatMessage{
-		{Role: "system", Content: a.responseSystemPrompt},
-		{Role: "user", Content: responsePrompt},
-	}
-
-	responseReq := provider.ChatRequest{
-		Model:    a.responseModel,
-		Messages: responseMessages,
-		Stream:   isStreaming,
-	}
-
-	// Adapt gateway callback (func(string)) to Chat API callback (func(ChatMessage)).
-	// Extract Content field only; thinking tokens are not streamed to gateways.
-	// NOTE: Gateways expect plain text content only.
-	var chatCallback func(provider.ChatMessage)
-	if streamCallback != nil {
-		chatCallback = func(chunk provider.ChatMessage) {
-			if chunk.Content != "" {
-				streamCallback(chunk.Content)
-			}
-		}
-	}
-
-	a.log.Debug("Response generation starting: model=%s search=%v", a.responseModel, len(searchResults) > 0)
-
-	// NOTE: Uncomment to see full prompt before its sent
-	// a.log.Debug("Final prompt to uncensored model:\n[SYSTEM]\n%s\n[USER]\n%s", a.responseSystemPrompt, responsePrompt)
-
-	expertResp, err := a.provider.Chat(ctxGen, responseReq, chatCallback)
-	if err != nil {
-		a.log.Error("Response model %s failed: %v", a.responseModel, err)
-		return &AgentResponse{
-			Model: a.responseModel,
-			Error: fmt.Sprintf("Response model failed: %v", err),
-		}, nil
-	}
-
-	a.log.Info("Response complete: model=%s", a.responseModel)
-
-	return &AgentResponse{
-		Model:    a.responseModel,
-		Response: expertResp.Message.Content,
-		Metrics:  mapMetrics(expertResp),
-	}, nil
 }
 
 // mapMetrics converts a *provider.ChatResponse into a *ModelMetrics summary for reporting.
@@ -356,4 +112,157 @@ func mapMetrics(resp *provider.ChatResponse) *ModelMetrics {
 		EvalDuration:       resp.EvalDuration / 1e6,
 		TokensPerSecond:    tps,
 	}
+}
+
+// Process handles the end-to-end agentic pipeline in a single loop.
+// The model receives all registered tools and may call them zero or more times
+// (up to maxIterations) before generating its final response. Thinking tokens,
+// content tokens, and agent status messages are streamed via streamCallback if provided.
+//
+// Tool execution errors are handled gracefully — failures inject an error tool
+// response so the model can decide how to proceed. Provider errors are captured
+// into AgentResponse.Error rather than returned as Go errors.
+func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	a.log.Info("Processing request: %q", truncate(userPrompt, 100))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	messages := []provider.ChatMessage{
+		{Role: "system", Content: a.systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	req := provider.ChatRequest{
+		Model:  a.model,
+		Tools:  a.registry.ProviderTools(),
+		Stream: streamCallback != nil,
+	}
+
+	// Track accumulated thinking and content across all iterations.
+	// The model may emit thinking tokens in any iteration; content tokens only
+	// appear in the final response turn (when no tool calls are made).
+	var accumulatedThinking strings.Builder
+	var accumulatedContent strings.Builder
+
+	// totalToolCalls tracks how many tool executions have fired this request.
+	// Caps total tool results to protect the model's context window from bloat.
+	totalToolCalls := 0
+
+	// Build the streaming callback that routes thinking vs content chunks.
+	// Tool-call iterations are streamed too — the model may reason aloud before
+	// deciding to call a tool. The stream pauses naturally while tools execute.
+	var chatCallback func(provider.ChatMessage)
+	if streamCallback != nil {
+		chatCallback = func(chunk provider.ChatMessage) {
+			if chunk.Thinking != "" {
+				accumulatedThinking.WriteString(chunk.Thinking)
+				streamCallback(StreamChunk{Type: ChunkThinking, Text: chunk.Thinking})
+			}
+			if chunk.Content != "" {
+				accumulatedContent.WriteString(chunk.Content)
+				streamCallback(StreamChunk{Type: ChunkContent, Text: chunk.Content})
+			}
+		}
+	}
+
+	var lastResp *provider.ChatResponse
+
+	// Agentic loop: the model runs, may call tools, receives results, then runs again.
+	// The loop exits when the model stops issuing tool calls or the iteration cap is hit.
+	for iteration := 1; iteration <= a.maxIterations; iteration++ {
+		// Reset the content accumulator each iteration — we only keep the final
+		// response turn's content. Thinking is accumulated across all iterations.
+		accumulatedContent.Reset()
+
+		req.Messages = messages
+
+		resp, err := a.provider.Chat(ctx, req, chatCallback)
+		if err != nil {
+			a.log.Error("Model %s failed on iteration %d: %v", a.model, iteration, err)
+			return &AgentResponse{
+				Model: a.model,
+				Error: fmt.Sprintf("Model failed: %v", err),
+			}, nil
+		}
+
+		lastResp = resp
+
+		a.log.Debug("Agentic loop iteration %d/%d: tool_calls=%d thinking_len=%d content_len=%d",
+			iteration, a.maxIterations, len(resp.Message.ToolCalls),
+			len(resp.Message.Thinking), len(resp.Message.Content))
+
+		// No tool calls — the model is done. Exit the loop.
+		if len(resp.Message.ToolCalls) == 0 {
+			a.log.Info("Agentic loop complete after %d iteration(s): model=%s", iteration, a.model)
+			break
+		}
+
+		// Append the assistant turn (including its tool calls) to the conversation.
+		messages = append(messages, resp.Message)
+
+		// Execute each tool call and inject the results as tool response messages.
+		// NOTE: Most models only emit one tool call at a time, but we handle
+		// multiple to be safe.
+		for _, tc := range resp.Message.ToolCalls {
+			toolName := tc.Function.Name
+
+			// Emit a status chunk so the gateway knows a tool is executing.
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkStatus, Text: fmt.Sprintf("[Calling: %s]", toolName)})
+			}
+
+			var toolContent string
+
+			if totalToolCalls >= maxIntelResults {
+				// Cap reached — inform the model rather than silently dropping results.
+				a.log.Info("Tool call cap (%d) reached, skipping %q", maxIntelResults, toolName)
+				toolContent = fmt.Sprintf("Tool call cap of %d reached. No further tool calls will be executed.", maxIntelResults)
+			} else {
+				result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
+				if execErr != nil {
+					// Fail gracefully: inject the error so the model can recover.
+					a.log.Warn("Tool %q execution failed: %v", toolName, execErr)
+					toolContent = fmt.Sprintf("Error: %v", execErr)
+				} else {
+					totalToolCalls++
+					toolContent = result
+					a.log.Info("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
+				}
+			}
+
+			messages = append(messages, provider.ChatMessage{
+				Role:     "tool",
+				ToolName: toolName,
+				Content:  toolContent,
+			})
+		}
+	}
+
+	// If the loop exited at the cap, log a warning.
+	if lastResp != nil && len(lastResp.Message.ToolCalls) > 0 {
+		a.log.Warn("Agentic loop: max iterations (%d) reached without final response", a.maxIterations)
+	}
+
+	a.log.Info("Response complete: model=%s", a.model)
+
+	// Extract the final response content. The Ollama client already handles
+	// thinking-to-content promotion at the provider layer for non-streaming calls.
+	// For streaming, we tracked content separately via the callback above.
+	finalContent := accumulatedContent.String()
+	if finalContent == "" && lastResp != nil {
+		finalContent = lastResp.Message.Content
+	}
+
+	finalThinking := accumulatedThinking.String()
+	if finalThinking == "" && lastResp != nil {
+		finalThinking = lastResp.Message.Thinking
+	}
+
+	return &AgentResponse{
+		Model:    a.model,
+		Response: finalContent,
+		Thinking: finalThinking,
+		Metrics:  mapMetrics(lastResp),
+	}, nil
 }

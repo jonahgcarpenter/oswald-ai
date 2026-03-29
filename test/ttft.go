@@ -79,7 +79,9 @@ func main() {
 		firstTokenReceived := false
 		var finalResp ttftAgentResponse
 
-		// Loop to receive streaming chunks
+		// Loop to receive streaming chunks.
+		// Streaming chunks are {"type":"thinking"|"content"|"status","text":"..."}.
+		// The final payload is an AgentResponse JSON object with a non-empty model field.
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
