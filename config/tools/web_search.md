@@ -19,7 +19,7 @@ Search the web for current or factual information. Use precise, targeted queries
 - Keep queries short (3–7 words) and precise
 - Never include subjective or emotional language in the query
 
-If no web search is needed (the question is conversational, opinion-based, or already within your knowledge), answer directly without calling this tool.
+If no web search is needed, answer directly without calling this tool.
 
 ## Parameters
 

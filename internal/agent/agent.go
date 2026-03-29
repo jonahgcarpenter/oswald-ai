@@ -129,8 +129,14 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	// Inject the real-time date into the system prompt
+	dynamicSystemPrompt := fmt.Sprintf("%s\n\nCurrent Date and Time: %s",
+		a.systemPrompt,
+		time.Now().Format(time.RFC1123),
+	)
+
 	messages := []ollama.ChatMessage{
-		{Role: "system", Content: a.systemPrompt},
+		{Role: "system", Content: dynamicSystemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
 
