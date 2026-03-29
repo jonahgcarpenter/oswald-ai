@@ -9,13 +9,14 @@ import (
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	Port               string // HTTP port for the WebSocket gateway (default: "8080")
-	OllamaURL          string // Ollama API base URL (default: "http://localhost:11434")
-	WorkersConfig      string // Path to the workers YAML file (default: "config/workers.yaml")
-	DiscordToken       string // Discord bot token; Discord gateway disabled if empty
-	SearxngURL         string // SearXNG base URL for web search (default: "http://localhost:8888")
-	QueryMaxIterations int    // Maximum search iterations in the query generator loop (default: 5)
-	LogLevel           Level  // Logging verbosity (default: LevelInfo)
+	Port          string // HTTP port for the WebSocket gateway (default: "8080")
+	OllamaURL     string // Ollama API base URL (default: "http://localhost:11434")
+	WorkersConfig string // Path to the workers YAML file (default: "config/workers.yaml")
+	ToolsConfig   string // Path to the tools directory (default: "config/tools")
+	DiscordToken  string // Discord bot token; Discord gateway disabled if empty
+	SearxngURL    string // SearXNG base URL for web search (default: "http://localhost:8888")
+	MaxIterations int    // Maximum tool-call iterations in the agentic loop (default: 5)
+	LogLevel      Level  // Logging verbosity (default: LevelInfo)
 }
 
 // Load reads configuration from environment variables, with .env file support.
@@ -25,13 +26,14 @@ func Load() *Config {
 	godotenv.Load() // nolint: errcheck
 
 	return &Config{
-		Port:               getEnv("PORT", "8080"),
-		OllamaURL:          getEnv("OLLAMA_URL", "http://localhost:11434"),
-		WorkersConfig:      getEnv("WORKERS_CONFIG", "config/workers.yaml"),
-		DiscordToken:       getEnv("DISCORD_TOKEN", ""),
-		SearxngURL:         getEnv("SEARXNG_URL", "http://localhost:8888"),
-		QueryMaxIterations: getEnvInt("QUERY_MAX_ITERATIONS", 5),
-		LogLevel:           ParseLevel(getEnv("LOG_LEVEL", "info")),
+		Port:          getEnv("PORT", "8080"),
+		OllamaURL:     getEnv("OLLAMA_URL", "http://localhost:11434"),
+		WorkersConfig: getEnv("WORKERS_CONFIG", "config/workers.yaml"),
+		ToolsConfig:   getEnv("TOOLS_CONFIG", "config/tools"),
+		DiscordToken:  getEnv("DISCORD_TOKEN", ""),
+		SearxngURL:    getEnv("SEARXNG_URL", "http://localhost:8888"),
+		MaxIterations: getEnvInt("MAX_ITERATIONS", 5),
+		LogLevel:      ParseLevel(getEnv("LOG_LEVEL", "info")),
 	}
 }
 

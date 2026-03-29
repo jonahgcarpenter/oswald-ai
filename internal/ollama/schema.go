@@ -1,8 +1,8 @@
-package provider
+package ollama
 
 import "context"
 
-// Request represents the generic payload sent to any LLM provider.
+// Request represents the payload sent to Ollama's /api/generate endpoint.
 // Deprecated: Use ChatRequest with the Chat method instead.
 type Request struct {
 	Model  string
@@ -12,7 +12,7 @@ type Request struct {
 	Stream bool
 }
 
-// Response represents a standardized reply from any LLM provider.
+// Response represents the standardized reply from Ollama's /api/generate endpoint.
 // Deprecated: Use ChatResponse with the Chat method instead.
 type Response struct {
 	Model              string
@@ -40,9 +40,9 @@ type ToolCall struct {
 type ChatMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
-	Thinking  string     `json:"thinking,omitempty"` // populated by reasoning models
+	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolName  string     `json:"tool_name,omitempty"` // used when role == "tool"
+	ToolName  string     `json:"tool_name,omitempty"`
 }
 
 // ToolParameterProperty describes a single property within a tool's parameter schema.
@@ -72,7 +72,7 @@ type Tool struct {
 	Function ToolDefinition `json:"function"`
 }
 
-// ChatRequest is the generic payload for a chat-style LLM request.
+// ChatRequest is the payload for a chat-style Ollama request.
 type ChatRequest struct {
 	Model    string        `json:"model"`
 	Messages []ChatMessage `json:"messages"`
@@ -93,13 +93,7 @@ type ChatResponse struct {
 	EvalCount          int
 }
 
-// Provider defines the standard methods all LLM clients must implement.
-type Provider interface {
-	// Generate sends a single-turn prompt to the model and returns the response.
-	// Deprecated: Use Chat instead.
-	Generate(ctx context.Context, req Request, streamCallback func(chunk string)) (*Response, error)
-
-	// Chat sends a multi-turn conversation to the model and returns the response.
-	// It supports tool calling and streaming via chatStreamCallback.
+// Chatter describes the single Ollama capability the agent depends on.
+type Chatter interface {
 	Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error)
 }

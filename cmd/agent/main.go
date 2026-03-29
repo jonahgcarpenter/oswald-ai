@@ -8,9 +8,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider"
-	"github.com/jonahgcarpenter/oswald-ai/internal/provider/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/search/searxng"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
 
 func main() {
@@ -19,17 +18,12 @@ func main() {
 
 	// Initialize logger — all components receive this instance
 	log := config.NewLogger(cfg.LogLevel)
-	log.Info("Log level: %s", cfg.LogLevel)
+	log.Debug("Log level: %s", cfg.LogLevel)
 
-	// Load worker agent registry (query generator + uncensored response model)
+	// Load worker agent registry (single GENERAL worker drives the agentic loop)
 	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
 	if err != nil {
 		log.Fatal("Failed to load workers config: %v", err)
-	}
-
-	queryWorker := agent.FindWorker(workers, "QUERY")
-	if queryWorker == nil {
-		log.Fatal("Workers config is missing required QUERY worker entry")
 	}
 
 	responseWorker := agent.FindWorker(workers, "GENERAL")
@@ -37,47 +31,31 @@ func main() {
 		log.Fatal("Workers config is missing required GENERAL worker entry")
 	}
 
-	log.Info("Query worker: model=%s", queryWorker.ResolveModel())
-	log.Info("Response worker: model=%s", responseWorker.ResolveModel())
+	log.Info("Worker model: %s", responseWorker.ResolveModel())
 
-	// NOTE: Only Ollama is supported; leave the door open for future providers
-	var llmProvider provider.Provider
-	if cfg.OllamaURL != "" {
-		llmProvider = ollama.NewClient(cfg.OllamaURL, log)
-	} else {
-		// Later, add `else if cfg.OpenAIKey != ""` here
-		log.Fatal("No valid LLM provider configured (missing OLLAMA_URL)")
+	if cfg.OllamaURL == "" {
+		log.Fatal("Missing required OLLAMA_URL configuration")
 	}
 
-	// Initialize the SearXNG search client
-	searchClient := searxng.NewClient(cfg.SearxngURL, log)
-	log.Info("SearXNG search client configured: %s", cfg.SearxngURL)
+	llmClient := ollama.NewClient(cfg.OllamaURL, log)
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, log)
+	if err != nil {
+		log.Fatal("Failed to initialize tools: %v", err)
+	}
+
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, log)
+	if err != nil {
+		log.Fatal("Failed to initialize gateways: %v", err)
+	}
 
 	agentEngine := agent.NewAgent(
-		llmProvider,
-		searchClient,
-		queryWorker,
+		llmClient,
+		toolRegistry,
 		responseWorker,
-		cfg.QueryMaxIterations,
+		cfg.MaxIterations,
 		log,
 	)
-
-	// Initialize a slice of enabled gateways
-	var activeGateways []gateway.Service
-
-	// Register Websocket
-	activeGateways = append(activeGateways, &gateway.WebsocketGateway{
-		Port: cfg.Port,
-		Log:  log,
-	})
-
-	// Conditionally register Discord
-	if cfg.DiscordToken != "" {
-		activeGateways = append(activeGateways, &gateway.DiscordGateway{
-			Token: cfg.DiscordToken,
-			Log:   log,
-		})
-	}
 
 	// Boot up all registered gateways dynamically
 	log.Info("Starting Oswald AI...")
