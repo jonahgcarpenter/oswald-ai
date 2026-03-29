@@ -44,6 +44,11 @@ func main() {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
 
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, log)
+	if err != nil {
+		log.Fatal("Failed to initialize gateways: %v", err)
+	}
+
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
@@ -51,23 +56,6 @@ func main() {
 		cfg.MaxIterations,
 		log,
 	)
-
-	// Initialize a slice of enabled gateways
-	var activeGateways []gateway.Service
-
-	// Register Websocket
-	activeGateways = append(activeGateways, &gateway.WebsocketGateway{
-		Port: cfg.Port,
-		Log:  log,
-	})
-
-	// Conditionally register Discord
-	if cfg.DiscordToken != "" {
-		activeGateways = append(activeGateways, &gateway.DiscordGateway{
-			Token: cfg.DiscordToken,
-			Log:   log,
-		})
-	}
 
 	// Boot up all registered gateways dynamically
 	log.Info("Starting Oswald AI...")

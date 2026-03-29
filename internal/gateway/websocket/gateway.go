@@ -1,50 +1,30 @@
-package gateway
+package websocket
 
 import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/gorilla/websocket"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
-// WebsocketGateway handles local WebSocket connections for testing and client access.
-type WebsocketGateway struct {
-	Port string
-	Log  *config.Logger
-}
-
-func (wg *WebsocketGateway) Name() string {
+// Name returns the human-readable gateway name.
+func (wg *Gateway) Name() string {
 	return "Websocket"
 }
 
 // Start initializes the HTTP server and registers the WebSocket handler.
-// Blocks indefinitely while the server is running; returns on server error.
-func (wg *WebsocketGateway) Start(aiAgent *agent.Agent) error {
-	// Register WebSocket upgrade handler
+func (wg *Gateway) Start(aiAgent *agent.Agent) error {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		HandleConnections(w, r, aiAgent, wg.Log)
+		handleConnections(w, r, aiAgent, wg.Log)
 	})
 
-	// Start the HTTP server
 	wg.Log.Info("Websocket server listening on port %s", wg.Port)
 	return http.ListenAndServe(":"+wg.Port, nil)
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
-// HandleConnections accepts WebSocket connections and routes incoming prompts to the agent.
-// Streams partial responses as they arrive and sends final structured JSON when complete.
-// Closes the connection on read error or client disconnect.
-func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Agent, log *config.Logger) {
-	// Upgrade HTTP connection to WebSocket
+// handleConnections accepts WebSocket connections and routes prompts to the agent.
+func handleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Agent, log *config.Logger) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Error("Upgrader error: %v", err)
@@ -52,9 +32,7 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 	}
 	defer conn.Close()
 
-	// Message loop
 	for {
-		// Read incoming message
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Warn("Read error: %v", err)
@@ -64,9 +42,6 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 		userPrompt := string(message)
 		log.Info("Websocket request: %q", truncate(userPrompt, 100))
 
-		// Set up streaming callback that forwards typed chunks as JSON to the client.
-		// Thinking tokens, content tokens, and agent status messages are all forwarded
-		// so the client can differentiate and display them appropriately.
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
 			if firstChunk {
@@ -81,19 +56,15 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
-		// Route prompt to agent for query generation and response
 		finalPayload, err := aiAgent.Process(userPrompt, streamFunc)
 		if err != nil {
 			log.Error("Engine processing error: %v", err)
-			errorPayload := agent.AgentResponse{
-				Error: "Internal engine timeout or failure",
-			}
+			errorPayload := agent.AgentResponse{Error: "Internal engine timeout or failure"}
 			errBytes, _ := json.Marshal(errorPayload)
 			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
 			continue
 		}
 
-		// Send final structured response as JSON
 		jsonBytes, err := json.Marshal(finalPayload)
 		if err != nil {
 			log.Error("Failed to marshal JSON payload: %v", err)
@@ -107,4 +78,13 @@ func HandleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			break
 		}
 	}
+}
+
+// truncate returns s shortened to at most max runes, appending "..." if cut.
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "..."
 }
