@@ -9,7 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/search/searxng"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
 
 func main() {
@@ -39,22 +39,10 @@ func main() {
 
 	llmClient := ollama.NewClient(cfg.OllamaURL, log)
 
-	// Initialize the SearXNG search client
-	searchClient := searxng.NewClient(cfg.SearxngURL, log)
-	log.Info("SearXNG search client configured: %s", cfg.SearxngURL)
-
-	// Load tool definitions from markdown files and register execution handlers.
-	// To add a new tool: create config/tools/<name>.md and register a handler below.
-	toolRegistry := agent.NewToolRegistry(log)
-	if err := toolRegistry.LoadFromDirectory(cfg.ToolsConfig); err != nil {
-		log.Fatal("Failed to load tool definitions: %v", err)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, log)
+	if err != nil {
+		log.Fatal("Failed to initialize tools: %v", err)
 	}
-
-	if err := toolRegistry.RegisterHandler("web_search", agent.NewWebSearchHandler(searchClient, log)); err != nil {
-		log.Fatal("Failed to register web_search handler: %v", err)
-	}
-
-	log.Info("Tool registry: %d tool(s) loaded from %s", toolRegistry.Count(), cfg.ToolsConfig)
 
 	agentEngine := agent.NewAgent(
 		llmClient,

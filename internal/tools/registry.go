@@ -1,4 +1,4 @@
-package agent
+package tools
 
 import (
 	"context"
@@ -9,53 +9,61 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
-	"github.com/jonahgcarpenter/oswald-ai/internal/search"
 )
 
-// ToolHandler is the execution function for a single tool.
+// Handler is the execution function for a single tool.
 // It receives the model's tool call arguments and returns the text content to
 // inject as a tool response message. ctx is propagated for timeout cancellation.
-type ToolHandler func(ctx context.Context, arguments map[string]interface{}) (string, error)
+type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
 
-// ToolParamSpec describes one parameter row parsed from the markdown table.
-type ToolParamSpec struct {
+// ParamSpec describes one parameter row parsed from the markdown table.
+type ParamSpec struct {
 	Name        string
 	Type        string
 	Required    bool
 	Description string
 }
 
-// ToolSpec holds the fully parsed definition from a single tool markdown file.
+// Spec holds the fully parsed definition from a single tool markdown file.
 // Name and Description are sent to the model via the ollama.Tool schema.
-type ToolSpec struct {
+type Spec struct {
 	Name        string
 	Description string
-	Parameters  []ToolParamSpec
+	Parameters  []ParamSpec
 }
 
-// ToolRegistry maps tool names to their parsed ToolSpec and registered ToolHandler.
+// Registry maps tool names to their parsed Spec and registered Handler.
 // Load tool definitions from a directory of markdown files, then register a Go
-// handler for each tool before passing the registry to NewAgent.
-type ToolRegistry struct {
-	specs    map[string]ToolSpec
-	handlers map[string]ToolHandler
+// handler for each tool before passing the registry to the agent.
+type Registry struct {
+	specs    map[string]Spec
+	handlers map[string]Handler
 	log      *config.Logger
 }
 
-// NewToolRegistry creates an empty ToolRegistry. Call LoadFromDirectory to populate
+// NewRegistry creates an empty Registry. Call LoadFromDirectory to populate
 // it with tool definitions, then RegisterHandler for each tool that needs execution.
-func NewToolRegistry(log *config.Logger) *ToolRegistry {
-	return &ToolRegistry{
-		specs:    make(map[string]ToolSpec),
-		handlers: make(map[string]ToolHandler),
+func NewRegistry(log *config.Logger) *Registry {
+	return &Registry{
+		specs:    make(map[string]Spec),
+		handlers: make(map[string]Handler),
 		log:      log,
 	}
+}
+
+// NewRegistryFromDirectory creates a Registry and loads tool definitions from dir.
+func NewRegistryFromDirectory(dir string, log *config.Logger) (*Registry, error) {
+	registry := NewRegistry(log)
+	if err := registry.LoadFromDirectory(dir); err != nil {
+		return nil, fmt.Errorf("failed to load tool definitions: %w", err)
+	}
+	return registry, nil
 }
 
 // LoadFromDirectory reads all *.md files in dir and parses each as a tool definition.
 // Files that fail to parse are logged and skipped; the method only returns an error
 // if the directory itself cannot be read.
-func (r *ToolRegistry) LoadFromDirectory(dir string) error {
+func (r *Registry) LoadFromDirectory(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read tools directory %q: %w", dir, err)
@@ -92,10 +100,10 @@ func (r *ToolRegistry) LoadFromDirectory(dir string) error {
 	return nil
 }
 
-// RegisterHandler associates a ToolHandler with a tool name.
+// RegisterHandler associates a Handler with a tool name.
 // Returns an error if the name does not match any loaded tool spec, to catch
 // typos and orphaned handlers early at startup.
-func (r *ToolRegistry) RegisterHandler(name string, handler ToolHandler) error {
+func (r *Registry) RegisterHandler(name string, handler Handler) error {
 	if _, ok := r.specs[name]; !ok {
 		return fmt.Errorf("cannot register handler for %q: no tool spec loaded with that name", name)
 	}
@@ -104,10 +112,10 @@ func (r *ToolRegistry) RegisterHandler(name string, handler ToolHandler) error {
 	return nil
 }
 
-// OllamaTools converts all loaded ToolSpecs into the []ollama.Tool slice
+// OllamaTools converts all loaded Specs into the []ollama.Tool slice
 // passed to ChatRequest.Tools. All loaded specs are included regardless of
 // whether a handler has been registered.
-func (r *ToolRegistry) OllamaTools() []ollama.Tool {
+func (r *Registry) OllamaTools() []ollama.Tool {
 	tools := make([]ollama.Tool, 0, len(r.specs))
 	for _, spec := range r.specs {
 		props := make(map[string]ollama.ToolParameterProperty, len(spec.Parameters))
@@ -139,7 +147,7 @@ func (r *ToolRegistry) OllamaTools() []ollama.Tool {
 
 // Execute calls the registered handler for the named tool with the given arguments.
 // Returns an error if no handler is registered for the tool name.
-func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
 		return "", fmt.Errorf("no handler registered for tool %q", name)
@@ -148,13 +156,13 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, args map[string
 }
 
 // HasHandler returns true if a handler has been registered for the given tool name.
-func (r *ToolRegistry) HasHandler(name string) bool {
+func (r *Registry) HasHandler(name string) bool {
 	_, ok := r.handlers[name]
 	return ok
 }
 
 // Count returns the number of tool specs loaded in the registry.
-func (r *ToolRegistry) Count() int {
+func (r *Registry) Count() int {
 	return len(r.specs)
 }
 
@@ -173,12 +181,11 @@ func (r *ToolRegistry) Count() int {
 //	| Name | Type | Required | Description |
 //	|------|------|----------|-------------|
 //	| param | string | yes | Description of the parameter |
-func parseToolMarkdown(content string) (ToolSpec, error) {
-	var spec ToolSpec
+func parseToolMarkdown(content string) (Spec, error) {
+	var spec Spec
 
 	lines := strings.Split(content, "\n")
 
-	// Extract tool name from first H1 heading
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "# ") {
@@ -190,7 +197,6 @@ func parseToolMarkdown(content string) (ToolSpec, error) {
 		return spec, fmt.Errorf("missing # heading for tool name")
 	}
 
-	// Split into sections by ## headings
 	sections := splitMarkdownSections(content)
 
 	descSection, hasDesc := sections["Description"]
@@ -226,13 +232,11 @@ func splitMarkdownSections(content string) map[string]string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// Skip the H1 line
 		if strings.HasPrefix(trimmed, "# ") && !strings.HasPrefix(trimmed, "## ") {
 			continue
 		}
 
 		if strings.HasPrefix(trimmed, "## ") {
-			// Save previous section if any
 			if currentSection != "" {
 				sections[currentSection] = sb.String()
 				sb.Reset()
@@ -247,7 +251,6 @@ func splitMarkdownSections(content string) map[string]string {
 		}
 	}
 
-	// Save last section
 	if currentSection != "" {
 		sections[currentSection] = sb.String()
 	}
@@ -258,18 +261,16 @@ func splitMarkdownSections(content string) map[string]string {
 // parseParameterTable parses a markdown table of tool parameters.
 // Expected columns (in order): Name, Type, Required, Description.
 // Skips the header row and any separator rows (containing only dashes and pipes).
-func parseParameterTable(section, toolName string) ([]ToolParamSpec, error) {
-	var params []ToolParamSpec
+func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
+	var params []ParamSpec
 
 	for _, line := range strings.Split(section, "\n") {
 		line = strings.TrimSpace(line)
 
-		// Must be a table row
 		if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
 			continue
 		}
 
-		// Strip outer pipes and split into cells
 		inner := strings.TrimPrefix(line, "|")
 		inner = strings.TrimSuffix(inner, "|")
 		cells := strings.Split(inner, "|")
@@ -283,7 +284,6 @@ func parseParameterTable(section, toolName string) ([]ToolParamSpec, error) {
 		reqStr := strings.TrimSpace(cells[2])
 		desc := strings.TrimSpace(cells[3])
 
-		// Skip header row (Name/Type/Required/Description) and separator rows (---|---|...)
 		if name == "Name" || strings.ContainsAny(name, "-") {
 			continue
 		}
@@ -291,7 +291,7 @@ func parseParameterTable(section, toolName string) ([]ToolParamSpec, error) {
 			continue
 		}
 
-		params = append(params, ToolParamSpec{
+		params = append(params, ParamSpec{
 			Name:        name,
 			Type:        typ,
 			Required:    strings.EqualFold(reqStr, "yes"),
@@ -304,43 +304,4 @@ func parseParameterTable(section, toolName string) ([]ToolParamSpec, error) {
 	}
 
 	return params, nil
-}
-
-// formatSearchResults converts a slice of search results into a plain-text block
-// suitable for injection as a tool response message back to the model.
-func formatSearchResults(results []search.SearchResult) string {
-	if len(results) == 0 {
-		return "No results found."
-	}
-	var sb strings.Builder
-	for i, r := range results {
-		fmt.Fprintf(&sb, "%d. %s\n   URL: %s\n   %s\n\n", i+1, r.Title, r.URL, r.Content)
-	}
-	return strings.TrimSpace(sb.String())
-}
-
-// NewWebSearchHandler returns a ToolHandler that executes web searches via searcher.
-// The result cap (maxResults) limits how many total search results are accumulated
-// across all tool calls within a single Process() invocation.
-// NOTE: The cap is tracked externally by the agent; this handler is stateless.
-func NewWebSearchHandler(searcher search.Searcher, log *config.Logger) ToolHandler {
-	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		query := ""
-		if q, ok := args["query"]; ok {
-			query, _ = q.(string)
-		}
-
-		if query == "" {
-			return "", fmt.Errorf("query parameter was empty")
-		}
-
-		log.Info("Web search: executing query %q", query)
-
-		results, err := searcher.Search(ctx, query)
-		if err != nil {
-			return "", fmt.Errorf("search failed: %w", err)
-		}
-
-		return formatSearchResults(results), nil
-	}
 }

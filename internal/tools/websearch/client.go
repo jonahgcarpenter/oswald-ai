@@ -1,4 +1,4 @@
-package searxng
+package websearch
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/search"
 )
 
 const (
@@ -21,14 +20,14 @@ const (
 	httpTimeout = 10 * time.Second
 )
 
-// Client implements search.Searcher against a local SearXNG instance.
+// Client implements Searcher against a local SearXNG instance.
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	log        *config.Logger
 }
 
-// NewClient creates a SearXNG search client targeting the given base URL.
+// NewClient creates a SearXNG web search client targeting the given base URL.
 func NewClient(baseURL string, log *config.Logger) *Client {
 	return &Client{
 		baseURL: baseURL,
@@ -39,10 +38,8 @@ func NewClient(baseURL string, log *config.Logger) *Client {
 	}
 }
 
-// Search queries the SearXNG instance for the given query string and returns up to
-// maxResults results. Failures are logged and return empty results rather than
-// propagating errors, so the query generator pipeline is never blocked by search failures.
-func (c *Client) Search(ctx context.Context, query string) ([]search.SearchResult, error) {
+// Search queries the configured SearXNG instance for the given query string.
+func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, error) {
 	reqURL := fmt.Sprintf("%s/search?q=%s&format=json", c.baseURL, url.QueryEscape(query))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -70,15 +67,14 @@ func (c *Client) Search(ctx context.Context, query string) ([]search.SearchResul
 		return nil, fmt.Errorf("failed to parse SearXNG response: %w", err)
 	}
 
-	// Cap to maxResults to avoid bloating the query generator context window
 	results := sr.Results
 	if len(results) > maxResults {
 		results = results[:maxResults]
 	}
 
-	out := make([]search.SearchResult, len(results))
+	out := make([]SearchResult, len(results))
 	for i, r := range results {
-		out[i] = search.SearchResult{
+		out[i] = SearchResult{
 			Title:   r.Title,
 			URL:     r.URL,
 			Content: r.Content,

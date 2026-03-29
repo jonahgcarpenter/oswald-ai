@@ -1,4 +1,4 @@
-package searxng
+package websearch
 
 // searxngResponse is the top-level JSON response from the SearXNG /search endpoint.
 type searxngResponse struct {
@@ -9,5 +9,5 @@ type searxngResponse struct {
 type searxngResult struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
-	Content string `json:"content"` // snippet or description
+	Content string `json:"content"`
 }

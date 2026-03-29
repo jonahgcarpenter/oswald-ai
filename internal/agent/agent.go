@@ -8,6 +8,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
 
 const (
@@ -61,7 +62,7 @@ type AgentResponse struct {
 // calls tools from the registry and generates the final response.
 type Agent struct {
 	chatClient    ollama.Chatter
-	registry      *ToolRegistry
+	registry      *tools.Registry
 	model         string
 	systemPrompt  string
 	maxIterations int
@@ -72,7 +73,7 @@ type Agent struct {
 // iteration cap, and logger. The single worker drives the entire agentic loop.
 func NewAgent(
 	chatClient ollama.Chatter,
-	registry *ToolRegistry,
+	registry *tools.Registry,
 	worker *WorkerAgent,
 	maxIterations int,
 	log *config.Logger,
