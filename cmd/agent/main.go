@@ -18,7 +18,7 @@ func main() {
 
 	// Initialize logger — all components receive this instance
 	log := config.NewLogger(cfg.LogLevel)
-	log.Info("Log level: %s", cfg.LogLevel)
+	log.Debug("Log level: %s", cfg.LogLevel)
 
 	// Load worker agent registry (single GENERAL worker drives the agentic loop)
 	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
@@ -31,7 +31,7 @@ func main() {
 		log.Fatal("Workers config is missing required GENERAL worker entry")
 	}
 
-	log.Info("Worker: model=%s", responseWorker.ResolveModel())
+	log.Info("Worker model: %s", responseWorker.ResolveModel())
 
 	if cfg.OllamaURL == "" {
 		log.Fatal("Missing required OLLAMA_URL configuration")

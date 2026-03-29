@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -89,7 +90,7 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 		}
 
 		r.specs[spec.Name] = spec
-		r.log.Info("Tools: loaded %q from %s", spec.Name, entry.Name())
+		r.log.Debug("Tools: loaded %q from %s", spec.Name, entry.Name())
 		loaded++
 	}
 
@@ -108,7 +109,7 @@ func (r *Registry) RegisterHandler(name string, handler Handler) error {
 		return fmt.Errorf("cannot register handler for %q: no tool spec loaded with that name", name)
 	}
 	r.handlers[name] = handler
-	r.log.Info("Tools: registered handler for %q", name)
+	r.log.Debug("Tools: registered handler for %q", name)
 	return nil
 }
 
@@ -164,6 +165,16 @@ func (r *Registry) HasHandler(name string) bool {
 // Count returns the number of tool specs loaded in the registry.
 func (r *Registry) Count() int {
 	return len(r.specs)
+}
+
+// Names returns the loaded tool names in stable sorted order.
+func (r *Registry) Names() []string {
+	names := make([]string, 0, len(r.specs))
+	for name := range r.specs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // parseToolMarkdown parses a tool definition from a markdown string.

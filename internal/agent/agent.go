@@ -124,7 +124,7 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
 func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Info("Processing request: %q", truncate(userPrompt, 100))
+	a.log.Debug("Processing request: %q", truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -195,7 +195,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
-			a.log.Info("Agentic loop complete after %d iteration(s): model=%s", iteration, a.model)
+			a.log.Debug("Agentic loop complete after %d iteration(s): model=%s", iteration, a.model)
 			break
 		}
 
@@ -217,7 +217,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 
 			if totalToolCalls >= maxIntelResults {
 				// Cap reached — inform the model rather than silently dropping results.
-				a.log.Info("Tool call cap (%d) reached, skipping %q", maxIntelResults, toolName)
+				a.log.Warn("Tool call cap (%d) reached, skipping %q", maxIntelResults, toolName)
 				toolContent = fmt.Sprintf("Tool call cap of %d reached. No further tool calls will be executed.", maxIntelResults)
 			} else {
 				result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
@@ -228,7 +228,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 				} else {
 					totalToolCalls++
 					toolContent = result
-					a.log.Info("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
+					a.log.Debug("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
 				}
 			}
 
@@ -245,7 +245,7 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 		a.log.Warn("Agentic loop: max iterations (%d) reached without final response", a.maxIterations)
 	}
 
-	a.log.Info("Response complete: model=%s", a.model)
+	a.log.Debug("Response complete: model=%s", a.model)
 
 	// Extract the final response content. The Ollama client already handles
 	// thinking-to-content promotion for non-streaming calls.

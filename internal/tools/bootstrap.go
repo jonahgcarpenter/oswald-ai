@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
@@ -18,7 +19,7 @@ func NewRegistryFromConfig(cfg *config.Config, log *config.Logger) (*Registry, e
 		return nil, err
 	}
 
-	log.Info("Tool registry: %d tool(s) loaded from %s", registry.Count(), cfg.ToolsConfig)
+	log.Info("Tools enabled: %s", strings.Join(registry.Names(), ", "))
 	return registry, nil
 }
 
@@ -29,7 +30,7 @@ func registerBuiltins(registry *Registry, cfg *config.Config, log *config.Logger
 		return fmt.Errorf("failed to initialize web_search tool: %w", err)
 	}
 
-	log.Info("Tools: web search client configured: %s", cfg.SearxngURL)
+	log.Debug("Tools: web search client configured: %s", cfg.SearxngURL)
 
 	return nil
 }

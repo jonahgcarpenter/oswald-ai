@@ -35,12 +35,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 	for {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Warn("Read error: %v", err)
+			log.Debug("Websocket connection closed: %v", err)
 			break
 		}
 
 		userPrompt := string(message)
-		log.Info("Websocket request: %q", truncate(userPrompt, 100))
+		log.Debug("Websocket request: %q", truncate(userPrompt, 100))
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
@@ -74,7 +74,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), finalPayload.Model)
 		err = conn.WriteMessage(messageType, jsonBytes)
 		if err != nil {
-			log.Warn("Write error: %v", err)
+			log.Debug("Websocket write error: %v", err)
 			break
 		}
 	}

@@ -30,10 +30,10 @@ func (dg *Gateway) Start(aiAgent *agent.Agent) error {
 		if err != nil {
 			dg.Log.Warn("Discord connection dropped: %v", err)
 		} else {
-			dg.Log.Info("Discord connection closed normally.")
+			dg.Log.Debug("Discord connection closed normally.")
 		}
 
-		dg.Log.Info("Reconnecting to Discord Gateway in 5 seconds...")
+		dg.Log.Debug("Reconnecting to Discord Gateway in 5 seconds...")
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -116,10 +116,10 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
 						dg.BotID = ready.User.ID
-						dg.Log.Info("Discord Bot connected as: %s (ID: %s)", ready.User.Username, dg.BotID)
+						dg.Log.Debug("Discord Bot connected as: %s (ID: %s)", ready.User.Username, dg.BotID)
 					}
 				case "RESUMED":
-					dg.Log.Info("Discord session resumed successfully.")
+					dg.Log.Debug("Discord session resumed successfully.")
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
@@ -253,7 +253,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		)
 	}
 
-	dg.Log.Info("Discord request from %s: %q", msg.Author.Username, truncate(prompt, 100))
+	dg.Log.Debug("Discord request from %s: %q", msg.Author.Username, truncate(prompt, 100))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)

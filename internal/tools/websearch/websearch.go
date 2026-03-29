@@ -47,7 +47,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 			return "", fmt.Errorf("query parameter was empty")
 		}
 
-		log.Info("Web search: executing query %q", query)
+		log.Debug("Web search: executing query %q", query)
 
 		results, err := searcher.Search(ctx, query)
 		if err != nil {

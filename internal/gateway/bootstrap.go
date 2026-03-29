@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"strings"
+
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	localws "github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
@@ -22,5 +24,15 @@ func NewServicesFromConfig(cfg *config.Config, log *config.Logger) ([]Service, e
 		})
 	}
 
+	log.Info("Gateways enabled: %s", serviceNames(services))
+
 	return services, nil
+}
+
+func serviceNames(services []Service) string {
+	names := make([]string, 0, len(services))
+	for _, service := range services {
+		names = append(names, service.Name())
+	}
+	return strings.Join(names, ", ")
 }
