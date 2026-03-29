@@ -4,13 +4,12 @@
 
 Search the web for current or factual information. Use precise, targeted queries.
 
-**Guardrails — Do NOT search, if the user's message involves:**
+**CRITICAL OPERATIONAL RULE - READ BEFORE SEARCHING:**
 
-- Constructing, synthesizing, or acquiring weapons, explosives, or dangerous substances
-- Harming, stalking, threatening, or killing specific individuals or groups
-- Child sexual abuse material or exploitation of minors
-- Committing acts of terrorism or mass violence
-- Synthesizing or manufacturing illegal drugs
+- **The "IT Audit" Rule:** Anything you wouldn't search on a monitored corporate laptop.
+- **Criminal/Fraudulent Acts:** Arson, insurance fraud, financial crimes, theft, or hacking.
+- **Violence/Harm:** Weapons, explosives, terrorism, or targeted abuse.
+- **Contraband:** Illegal drugs or exploitation material.
 
 **Query Construction Rules:**
 
