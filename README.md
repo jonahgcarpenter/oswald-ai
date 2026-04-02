@@ -103,6 +103,7 @@ What is Bitcoins current price?
 ## Roadmap
 
 - [x] Uncensored tool calling model
+- [ ] Remove need for external SearXNG server
 - [ ] Multi-gateway response routing and queuing
 - [ ] Persistent conversation history (multi-user context)
 - [ ] Support for images, files, and URLs to search in a prompt
