@@ -188,8 +188,9 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 		if err != nil {
 			a.log.Error("Model %s failed on iteration %d: %v", a.model, iteration, err)
 			return &AgentResponse{
-				Model: a.model,
-				Error: fmt.Sprintf("Model failed: %v", err),
+				Model:    a.model,
+				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
+				Error:    fmt.Sprintf("Model failed: %v", err),
 			}, nil
 		}
 
