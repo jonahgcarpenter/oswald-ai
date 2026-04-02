@@ -10,7 +10,7 @@ import (
 const (
 	// requestQueueSize is the maximum number of requests that can be buffered
 	// in the broker channel before Submit blocks callers.
-	requestQueueSize = 50
+	requestQueueSize = 10
 )
 
 // Request carries a single user request from a gateway into the broker.
