@@ -123,7 +123,7 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
-						dg.handleMessage(msg)
+						go dg.handleMessage(msg)
 					}
 				}
 			}
