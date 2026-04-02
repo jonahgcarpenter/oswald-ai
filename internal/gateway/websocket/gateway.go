@@ -57,6 +57,8 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
+		// NOTE: This is fine since websocket is only used for testing locally
+		// But for any further implementation I will need to generate IDs here
 		req := &broker.Request{
 			Channel:      "websocket",
 			ChatID:       "",
