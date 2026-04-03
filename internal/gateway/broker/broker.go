@@ -9,7 +9,7 @@ import (
 
 const (
 	// requestQueueSize is the maximum number of requests that can be buffered
-	// in the broker channel before Submit blocks callers.
+	// in the broker channel before Submit rejects new callers.
 	requestQueueSize = 10
 )
 
@@ -70,13 +70,24 @@ func (b *Broker) Start() {
 	b.log.Info("Broker started with %d worker(s)", b.workerCount)
 }
 
-// Submit enqueues a request for processing. It blocks if the internal queue is
-// full (i.e., all workers are busy and requestQueueSize requests are already
-// waiting). The caller must set req.ResponseChan to a buffered(1) channel before
+// Submit enqueues a request for processing. If the internal queue is full
+// (i.e., all workers are busy and requestQueueSize requests are already
+// waiting), it immediately returns a hardcoded response to the caller instead of
+// blocking. The caller must set req.ResponseChan to a buffered(1) channel before
 // calling Submit; the broker will write exactly one result to it.
 func (b *Broker) Submit(req *Request) {
 	b.log.Debug("Broker: queuing request from %s (chatID=%s)", req.Channel, req.ChatID)
-	b.requests <- req
+
+	select {
+	case b.requests <- req:
+	default:
+		b.log.Warn("Broker: rejecting request from %s (chatID=%s): queue full", req.Channel, req.ChatID)
+		req.ResponseChan <- Result{
+			Response: &agent.AgentResponse{
+				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
+			},
+		}
+	}
 }
 
 // Shutdown closes the request channel, signalling all workers to stop after

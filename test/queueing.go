@@ -13,8 +13,9 @@ import (
 
 // responsePayload mirrors the final JSON payload
 type responsePayload struct {
-	Model string `json:"model"`
-	Error string `json:"error"`
+	Model    string `json:"model"`
+	Response string `json:"response"`
+	Error    string `json:"error"`
 }
 
 // chunkPayload helps detect the first stream token
@@ -27,8 +28,11 @@ type requestStats struct {
 	SubmitTime       time.Time
 	ProcessStartTime time.Time
 	EndTime          time.Time
+	Response         string
 	Error            error
 }
+
+const queueFullMessage = "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues."
 
 func main() {
 	port := "8080"
@@ -37,7 +41,7 @@ func main() {
 	// We send 12 requests.
 	// Worker pool = 1 (Active)
 	// Queue size = 10 (Buffered)
-	// The 12th request will force b.Submit to block, testing backpressure safely.
+	// The 12th request should be rejected immediately with the queue-full response.
 	totalRequests := 12
 
 	fmt.Printf("Starting Queue & FIFO Test against %s...\n", u.String())
@@ -97,8 +101,9 @@ func main() {
 
 				// Check if it's the final payload
 				var finalResp responsePayload
-				if err := json.Unmarshal(message, &finalResp); err == nil && finalResp.Model != "" {
+				if err := json.Unmarshal(message, &finalResp); err == nil && (finalResp.Model != "" || finalResp.Response != "" || finalResp.Error != "") {
 					stats.EndTime = time.Now()
+					stats.Response = finalResp.Response
 					if finalResp.Error != "" {
 						stats.Error = fmt.Errorf("agent error: %s", finalResp.Error)
 					}
@@ -134,6 +139,23 @@ func main() {
 			continue
 		}
 
+		if r.ID == totalRequests {
+			if r.Response != queueFullMessage {
+				fifoPassed = false
+				fmt.Printf("#%-5d | ERROR: expected queue rejection %q, got %q\n", r.ID, queueFullMessage, r.Response)
+				continue
+			}
+
+			totalTime := r.EndTime.Sub(r.SubmitTime)
+			fmt.Printf("#%-5d | %-15s | %-15s | %-15v | REJECTED\n",
+				r.ID,
+				"n/a",
+				"n/a",
+				totalTime.Round(time.Millisecond),
+			)
+			continue
+		}
+
 		queueWait := r.ProcessStartTime.Sub(r.SubmitTime)
 		processingTime := r.EndTime.Sub(r.ProcessStartTime)
 		totalTime := r.EndTime.Sub(r.SubmitTime)
@@ -158,7 +180,7 @@ func main() {
 
 	if fifoPassed {
 		fmt.Println("FIFO Test Passed: All requests were processed in chronological order.")
-		fmt.Println("Queue Limit Passed: Server handled 12 concurrent requests (1 active, 10 queued, 1 backpressured) without dropping connections.")
+		fmt.Println("Queue Limit Passed: Server handled 12 concurrent requests (1 active, 10 queued, 1 rejected) with the expected queue-full response.")
 	} else {
 		fmt.Println("Test Failed: Requests were processed out of order.")
 	}
