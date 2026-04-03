@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
@@ -63,6 +64,7 @@ type AgentResponse struct {
 type Agent struct {
 	chatClient    ollama.Chatter
 	registry      *tools.Registry
+	memory        *memory.Store
 	model         string
 	systemPrompt  string
 	maxIterations int
@@ -70,17 +72,20 @@ type Agent struct {
 }
 
 // NewAgent initializes the Agent with an Ollama chat client, tool registry, worker config,
-// iteration cap, and logger. The single worker drives the entire agentic loop.
+// conversation memory store, iteration cap, and logger. The single worker drives the
+// entire agentic loop.
 func NewAgent(
 	chatClient ollama.Chatter,
 	registry *tools.Registry,
 	worker *WorkerAgent,
 	maxIterations int,
+	memoryStore *memory.Store,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
 		chatClient:    chatClient,
 		registry:      registry,
+		memory:        memoryStore,
 		model:         worker.ResolveModel(),
 		systemPrompt:  worker.SystemPrompt,
 		maxIterations: maxIterations,
@@ -120,11 +125,15 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 // (up to maxIterations) before generating its final response. Thinking tokens,
 // content tokens, and agent status messages are streamed via streamCallback if provided.
 //
+// sessionKey identifies the conversation session for memory retrieval and
+// persistence. Passing an empty sessionKey disables memory for this request
+// (stateless one-shot behaviour).
+//
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Processing request: %q", truncate(userPrompt, 100))
+func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	a.log.Debug("Processing request (session=%q): %q", sessionKey, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -135,9 +144,17 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 		time.Now().Format(time.RFC1123),
 	)
 
-	messages := []ollama.ChatMessage{
-		{Role: "system", Content: dynamicSystemPrompt},
-		{Role: "user", Content: userPrompt},
+	// Retrieve conversation history for this session and build the message slice.
+	// The system prompt is always first; history (user/assistant pairs) follows;
+	// the current user message is last.
+	history := a.memory.History(sessionKey)
+	messages := make([]ollama.ChatMessage, 0, 2+len(history))
+	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
+	messages = append(messages, history...)
+	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt})
+
+	if len(history) > 0 {
+		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(history), sessionKey)
 	}
 
 	req := ollama.ChatRequest{
@@ -265,6 +282,16 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	finalThinking := accumulatedThinking.String()
 	if finalThinking == "" && lastResp != nil {
 		finalThinking = lastResp.Message.Thinking
+	}
+
+	// Persist the user prompt and the assistant's final response to memory.
+	// Tool-call intermediaries are intentionally excluded to keep history lean —
+	// only the conversational exchange (not the internal reasoning steps) is retained.
+	if finalContent != "" {
+		a.memory.Append(sessionKey,
+			ollama.ChatMessage{Role: "user", Content: userPrompt},
+			ollama.ChatMessage{Role: "assistant", Content: finalContent},
+		)
 	}
 
 	return &AgentResponse{

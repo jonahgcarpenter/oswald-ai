@@ -2,6 +2,7 @@ package discord
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -51,6 +52,7 @@ type MessageCreate struct {
 		Username string `json:"username"`
 	} `json:"mentions,omitempty"`
 	ReferencedMessage *struct {
+		ID      string `json:"id"`
 		Content string `json:"content"`
 		Author  struct {
 			ID       string `json:"id"`
@@ -59,10 +61,24 @@ type MessageCreate struct {
 	} `json:"referenced_message,omitempty"`
 }
 
+type createMessageResponse struct {
+	ID string `json:"id"`
+}
+
+type replyContext struct {
+	SessionKey string
+	ChannelID  string
+	SenderID   string
+	CreatedAt  time.Time
+}
+
 // Gateway runs the Discord gateway connection loop.
 type Gateway struct {
-	Token  string
-	BotID  string
-	Broker *broker.Broker
-	Log    *config.Logger
+	Token         string
+	BotID         string
+	Broker        *broker.Broker
+	Log           *config.Logger
+	DebugDumpPath string
+	replyMu       sync.RWMutex
+	replyIndex    map[string]replyContext
 }

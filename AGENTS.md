@@ -16,8 +16,9 @@ Current architecture layers:
 1. **Gateway bootstrap** — shared gateway interface + startup wiring in `internal/gateway/`
 2. **Gateway implementations** — Discord and local WebSocket in `internal/gateway/discord/` and `internal/gateway/websocket/`
 3. **Agent/Orchestration** — single tool-calling loop in `internal/agent/`
-4. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/`
-5. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
+4. **Conversation Memory** — in-memory session store with sliding-window eviction and TTL reaping in `internal/memory/`
+5. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/`
+6. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
 
 ---
 
@@ -85,16 +86,38 @@ The core runtime path is `(*Agent).Process()` in `internal/agent/agent.go`.
 
 Flow:
 
-1. Build the initial chat request with:
+1. Retrieve conversation history for the session from `internal/memory`
+2. Build the initial chat request with:
    - the configured system prompt from `config/workers.yaml`
-   - the user prompt
+   - the retrieved conversation history (user/assistant turn pairs)
+   - the current user prompt
    - all registered tools from the tool registry
-2. Send the request to Ollama via `internal/ollama`
-3. If the model emits tool calls:
+3. Send the request to Ollama via `internal/ollama`
+4. If the model emits tool calls:
    - execute each registered tool handler
    - append tool results as `tool` messages
    - repeat until the model stops calling tools or `MAX_ITERATIONS` is reached
-4. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
+5. Persist the user prompt and final assistant response to memory (tool intermediaries excluded)
+6. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
+
+### Conversation Memory
+
+Session state is managed by `internal/memory.Store`.
+
+- Each session is identified by a `SessionKey` string set at the gateway level
+- Only user and assistant final messages are stored — tool call intermediaries are excluded to keep history lean
+- A sliding window evicts the oldest turn pairs when the session exceeds `maxTurns` pairs
+- A background reaper goroutine removes sessions idle longer than `maxAge`
+- An empty `SessionKey` disables memory for a request (stateless one-shot behaviour)
+
+**Hybrid Session Key Strategy (Discord gateway):**
+
+| Context | Session Key | Behaviour |
+| ------- | ----------- | --------- |
+| DM | `SenderID` | Continuous per-user memory across all DMs |
+| Guild channel / thread | `ChannelID:SenderID` | Per-user isolation; prevents cross-talk between users in the same channel |
+
+**WebSocket gateway:** uses the connection's remote address as the session key, giving each connected client its own conversation memory for the connection lifetime.
 
 Important runtime limits:
 
@@ -154,6 +177,7 @@ There is no longer a generic provider abstraction in the codebase.
 | `internal/agent/agent.go`               | Core agentic tool-calling loop and response assembly               |
 | `internal/agent/workers.go`             | Load `config/workers.yaml` and resolve workers                     |
 | `internal/config/config.go`             | Environment config loading                                         |
+| `internal/memory/store.go`              | In-memory conversation store with sliding-window eviction and TTL reaping |
 | `internal/ollama/client.go`             | Ollama HTTP client with chat streaming and tool support            |
 | `internal/tools/registry.go`            | Generic tool registry and markdown parsing                         |
 | `internal/tools/bootstrap.go`           | Builtin tool bootstrap                                             |
@@ -297,16 +321,18 @@ go build -o ./tmp/main ./cmd/agent/main.go
 
 ## Environment Configuration
 
-| Variable         | Default                  | Purpose                 |
-| ---------------- | ------------------------ | ----------------------- |
-| `PORT`           | `8080`                   | WebSocket gateway port  |
-| `OLLAMA_URL`     | `http://localhost:11434` | Ollama API              |
-| `SEARXNG_URL`    | `http://localhost:8888`  | SearXNG API             |
-| `WORKERS_CONFIG` | `config/workers.yaml`    | Worker definitions      |
-| `TOOLS_CONFIG`   | `config/tools`           | Tool definitions        |
-| `DISCORD_TOKEN`  | empty                    | Enables Discord gateway |
-| `MAX_ITERATIONS` | `5`                      | Agentic loop cap        |
-| `LOG_LEVEL`      | `info`                   | Logging verbosity       |
+| Variable            | Default                  | Purpose                              |
+| ------------------- | ------------------------ | ------------------------------------ |
+| `PORT`              | `8080`                   | WebSocket gateway port               |
+| `OLLAMA_URL`        | `http://localhost:11434` | Ollama API                           |
+| `SEARXNG_URL`       | `http://localhost:8888`  | SearXNG API                          |
+| `WORKERS_CONFIG`    | `config/workers.yaml`    | Worker definitions                   |
+| `TOOLS_CONFIG`      | `config/tools`           | Tool definitions                     |
+| `DISCORD_TOKEN`     | empty                    | Enables Discord gateway              |
+| `MAX_ITERATIONS`    | `5`                      | Agentic loop cap                     |
+| `LOG_LEVEL`         | `info`                   | Logging verbosity                    |
+| `MEMORY_MAX_TURNS`  | `10`                     | Max turn pairs per conversation session |
+| `MEMORY_MAX_AGE`    | `30m`                    | Idle session TTL (e.g. `30m`, `1h`) |
 
 Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus `os.LookupEnv()`.
 
@@ -326,7 +352,7 @@ After dependency changes, run `go mod tidy`.
 
 ## Known Limitations
 
-- No persistent conversation history
+- No persistent conversation history (memory is in-process only; restarts clear all sessions)
 - No session resumption for Discord reconnects
 - WebSocket API has no authentication layer
 - Only one builtin tool is currently implemented: `web_search`

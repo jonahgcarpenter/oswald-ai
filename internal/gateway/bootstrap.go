@@ -19,8 +19,9 @@ func NewServicesFromConfig(cfg *config.Config, log *config.Logger) ([]Service, e
 
 	if cfg.DiscordToken != "" {
 		services = append(services, &discord.Gateway{
-			Token: cfg.DiscordToken,
-			Log:   log,
+			Token:         cfg.DiscordToken,
+			Log:           log,
+			DebugDumpPath: cfg.MemoryDebugDumpPath,
 		})
 	}
 

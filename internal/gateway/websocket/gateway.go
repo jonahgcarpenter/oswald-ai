@@ -41,7 +41,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 		}
 
 		userPrompt := string(message)
-		log.Debug("Websocket request: %q", truncate(userPrompt, 100))
+
+		// Use the remote address as a per-connection session key so each
+		// WebSocket client gets its own conversation memory for the duration
+		// of the connection.
+		sessionKey := conn.RemoteAddr().String()
+		log.Debug("Websocket request (session=%s): %q", sessionKey, truncate(userPrompt, 100))
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
@@ -57,12 +62,11 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
-		// NOTE: This is fine since websocket is only used for testing locally
-		// But for any further implementation I will need to generate IDs here
 		req := &broker.Request{
 			Channel:      "websocket",
-			ChatID:       "",
-			SenderID:     "",
+			ChatID:       sessionKey,
+			SenderID:     sessionKey,
+			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
 			StreamFunc:   streamFunc,
 			ResponseChan: make(chan broker.Result, 1),

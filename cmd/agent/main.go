@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
@@ -50,11 +51,18 @@ func main() {
 		log.Fatal("Failed to initialize gateways: %v", err)
 	}
 
+	memoryStore := memory.NewStore(cfg.MemoryMaxTurns, cfg.MemoryMaxAge, cfg.MemoryDebugDumpPath, log)
+	log.Info("Memory: max %d turn pairs per session, idle TTL %s", cfg.MemoryMaxTurns, cfg.MemoryMaxAge)
+	if cfg.MemoryDebugDumpPath != "" {
+		log.Info("Debug dump snapshots enabled at %s", cfg.MemoryDebugDumpPath)
+	}
+
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
 		responseWorker,
 		cfg.MaxIterations,
+		memoryStore,
 		log,
 	)
 
