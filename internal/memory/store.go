@@ -9,22 +9,17 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
-// session holds the accumulated conversation turns for a single session and
-// the last time it was updated, used for idle-session expiry.
+// session holds the accumulated conversation turns for a single session.
 type session struct {
-	messages  []ollama.ChatMessage
-	updatedAt time.Time
+	messages []ollama.ChatMessage
 }
 
 // Store is a concurrency-safe in-memory conversation history store.
-// Each session is identified by a string key and holds a sliding window of
-// the most recent user/assistant turn pairs. Sessions that have been idle
-// longer than maxAge are evicted automatically by the background reaper.
+// Each session is identified by a string key and retains its full in-process
+// user/assistant history until the process exits.
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
-	maxTurns int
-	maxAge   time.Duration
 	dumpPath string
 	log      *config.Logger
 }
@@ -35,23 +30,16 @@ type snapshot struct {
 }
 
 type snapshotSession struct {
-	UpdatedAt string               `json:"updated_at"`
-	Messages  []ollama.ChatMessage `json:"messages"`
+	Messages []ollama.ChatMessage `json:"messages"`
 }
 
-// NewStore creates a Store and starts the background reaper goroutine.
-// maxTurns is the maximum number of user+assistant turn pairs to retain per
-// session (each pair is 2 messages). maxAge is the idle TTL after which a
-// session is evicted.
-func NewStore(maxTurns int, maxAge time.Duration, dumpPath string, log *config.Logger) *Store {
+// NewStore creates an in-memory conversation store.
+func NewStore(dumpPath string, log *config.Logger) *Store {
 	s := &Store{
 		sessions: make(map[string]*session),
-		maxTurns: maxTurns,
-		maxAge:   maxAge,
 		dumpPath: dumpPath,
 		log:      log,
 	}
-	go s.startReaper()
 	return s
 }
 
@@ -77,9 +65,7 @@ func (s *Store) History(sessionKey string) []ollama.ChatMessage {
 	return cp
 }
 
-// Append adds one or more messages to the session identified by sessionKey,
-// then enforces the sliding-window limit by evicting the oldest turn pairs
-// from the front until the message count is within maxTurns*2.
+// Append adds one or more messages to the session identified by sessionKey.
 // If sessionKey is empty, Append is a no-op.
 func (s *Store) Append(sessionKey string, msgs ...ollama.ChatMessage) {
 	if sessionKey == "" || len(msgs) == 0 {
@@ -94,56 +80,8 @@ func (s *Store) Append(sessionKey string, msgs ...ollama.ChatMessage) {
 	}
 
 	sess.messages = append(sess.messages, msgs...)
-	sess.updatedAt = time.Now()
-
-	// Enforce the sliding window: each "turn" is one user message + one
-	// assistant message. Evict pairs from the front until we are within
-	// the limit. We always evict in pairs so the history stays coherent
-	// (never starts mid-turn).
-	limit := s.maxTurns * 2
-	for len(sess.messages) > limit {
-		// Drop two messages (one user + one assistant turn pair) from the front.
-		if len(sess.messages) >= 2 {
-			sess.messages = sess.messages[2:]
-		} else {
-			sess.messages = sess.messages[:0]
-		}
-	}
 
 	s.log.Debug("Memory: session %q has %d message(s) after append", sessionKey, len(sess.messages))
-	snap := s.snapshotLocked()
-	s.mu.Unlock()
-
-	s.dumpSnapshot(snap)
-}
-
-// startReaper runs as a background goroutine, pruning idle sessions every
-// 5 minutes. Sessions that have not been updated within maxAge are removed.
-func (s *Store) startReaper() {
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		s.prune()
-	}
-}
-
-// prune removes all sessions whose updatedAt is older than maxAge.
-func (s *Store) prune() {
-	cutoff := time.Now().Add(-s.maxAge)
-
-	s.mu.Lock()
-	pruned := 0
-	for key, sess := range s.sessions {
-		if sess.updatedAt.Before(cutoff) {
-			delete(s.sessions, key)
-			pruned++
-		}
-	}
-
-	if pruned > 0 {
-		s.log.Debug("Memory: pruned %d idle session(s) (maxAge=%s)", pruned, s.maxAge)
-	}
 	snap := s.snapshotLocked()
 	s.mu.Unlock()
 
@@ -156,8 +94,7 @@ func (s *Store) snapshotLocked() snapshot {
 		messages := make([]ollama.ChatMessage, len(sess.messages))
 		copy(messages, sess.messages)
 		sessions[key] = snapshotSession{
-			UpdatedAt: sess.updatedAt.UTC().Format(time.RFC3339),
-			Messages:  messages,
+			Messages: messages,
 		}
 	}
 

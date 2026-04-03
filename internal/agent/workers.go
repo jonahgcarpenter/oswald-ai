@@ -11,9 +11,13 @@ import (
 // WorkerAgent describes a single model entry: its category identifier, Ollama model name,
 // and the system prompt injected into every call for that model.
 type WorkerAgent struct {
-	Category     string `yaml:"category"`
-	Model        string `yaml:"model"`
-	SystemPrompt string `yaml:"system_prompt"`
+	Category        string `yaml:"category"`
+	Model           string `yaml:"model"`
+	SystemPrompt    string `yaml:"system_prompt"`
+	ContextWindow   int    `yaml:"context_window,omitempty"`
+	ResponseReserve int    `yaml:"response_reserve,omitempty"`
+	ToolReserve     int    `yaml:"tool_reserve,omitempty"`
+	SafetyMargin    int    `yaml:"safety_margin,omitempty"`
 }
 
 // workerFile is the top-level structure of workers.yaml.

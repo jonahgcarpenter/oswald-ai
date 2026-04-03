@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -125,6 +126,47 @@ func (c *Client) Generate(ctx context.Context, req Request, streamCallback func(
 		EvalDuration:       ollamaResp.EvalDuration,
 		EvalCount:          ollamaResp.EvalCount,
 	}, nil
+}
+
+// Show retrieves model metadata from Ollama's /api/show endpoint.
+func (c *Client) Show(ctx context.Context, req ShowRequest) (*ShowResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/show", c.BaseURL)
+
+	payloadBytes, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal show request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create show request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("Ollama show API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read show response body: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.log.Error("Ollama show returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+		return nil, fmt.Errorf("Ollama show returned HTTP %d", resp.StatusCode)
+	}
+
+	var showResp ShowResponse
+	if err := json.Unmarshal(rawBody, &showResp); err != nil {
+		c.log.Error("Ollama show response decode failed: %v | raw: %q", err, string(rawBody))
+		return nil, fmt.Errorf("failed to decode show response: %w", err)
+	}
+
+	showResp.Parameters = strings.TrimSpace(showResp.Parameters)
+	return &showResp, nil
 }
 
 // mapToOllamaMessages converts ChatMessage values to Ollama's internal chat message type.
@@ -300,6 +342,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	return &ChatResponse{
 		Model:              ollamaResp.Model,
 		Message:            msg,
+		PromptEvalCount:    ollamaResp.PromptEvalCount,
 		DoneReason:         ollamaResp.DoneReason,
 		TotalDuration:      ollamaResp.TotalDuration,
 		LoadDuration:       ollamaResp.LoadDuration,

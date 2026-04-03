@@ -65,6 +65,7 @@ type Agent struct {
 	chatClient    ollama.Chatter
 	registry      *tools.Registry
 	memory        *memory.Store
+	budget        ContextBudget
 	model         string
 	systemPrompt  string
 	maxIterations int
@@ -78,6 +79,7 @@ func NewAgent(
 	chatClient ollama.Chatter,
 	registry *tools.Registry,
 	worker *WorkerAgent,
+	budget ContextBudget,
 	maxIterations int,
 	memoryStore *memory.Store,
 	log *config.Logger,
@@ -86,6 +88,7 @@ func NewAgent(
 		chatClient:    chatClient,
 		registry:      registry,
 		memory:        memoryStore,
+		budget:        budget,
 		model:         worker.ResolveModel(),
 		systemPrompt:  worker.SystemPrompt,
 		maxIterations: maxIterations,
@@ -144,17 +147,25 @@ func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback fun
 		time.Now().Format(time.RFC1123),
 	)
 
-	// Retrieve conversation history for this session and build the message slice.
-	// The system prompt is always first; history (user/assistant pairs) follows;
-	// the current user message is last.
+	// Retrieve conversation history for this session, then trim the oldest turn
+	// pairs until the estimated prompt fits the active model's context budget.
 	history := a.memory.History(sessionKey)
-	messages := make([]ollama.ChatMessage, 0, 2+len(history))
+	trimmedHistory, prune := PruneHistoryToFit(a.budget, dynamicSystemPrompt, history, userPrompt, a.registry.OllamaTools())
+	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
-	messages = append(messages, history...)
+	messages = append(messages, trimmedHistory...)
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt})
 
 	if len(history) > 0 {
 		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(history), sessionKey)
+	}
+	if prune.RemovedPairs > 0 {
+		a.log.Debug("Context budget: pruned %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
+			prune.RemovedPairs, a.model, a.budget.PromptBudget(), prune.EstimatedBefore, prune.EstimatedAfter)
+	}
+	if prune.EstimatedAfter > a.budget.PromptBudget() {
+		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history pruning",
+			a.model, prune.EstimatedAfter, a.budget.PromptBudget())
 	}
 
 	req := ollama.ChatRequest{
@@ -212,6 +223,10 @@ func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback fun
 		}
 
 		lastResp = resp
+		if iteration == 1 && resp.PromptEvalCount > 0 {
+			a.log.Debug("Context budget: model=%s estimated_prompt_tokens=%d actual_prompt_tokens=%d",
+				a.model, prune.EstimatedAfter, resp.PromptEvalCount)
+		}
 
 		a.log.Debug("Agentic loop iteration %d/%d: tool_calls=%d thinking_len=%d content_len=%d",
 			iteration, a.maxIterations, len(resp.Message.ToolCalls),

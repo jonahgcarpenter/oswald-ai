@@ -85,12 +85,26 @@ type ChatRequest struct {
 type ChatResponse struct {
 	Model              string
 	Message            ChatMessage
+	PromptEvalCount    int
 	DoneReason         string
 	TotalDuration      int64
 	LoadDuration       int64
 	PromptEvalDuration int64
 	EvalDuration       int64
 	EvalCount          int
+}
+
+// ShowRequest requests model metadata from Ollama's /api/show endpoint.
+type ShowRequest struct {
+	Model   string `json:"model"`
+	Verbose bool   `json:"verbose,omitempty"`
+}
+
+// ShowResponse contains model metadata returned by Ollama's /api/show endpoint.
+type ShowResponse struct {
+	Parameters   string                 `json:"parameters,omitempty"`
+	Capabilities []string               `json:"capabilities,omitempty"`
+	ModelInfo    map[string]interface{} `json:"model_info,omitempty"`
 }
 
 // Chatter describes the single Ollama capability the agent depends on.

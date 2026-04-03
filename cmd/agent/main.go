@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -40,6 +41,20 @@ func main() {
 	}
 
 	llmClient := ollama.NewClient(cfg.OllamaURL, log)
+	workerBudgets := make(map[string]agent.ContextBudget, len(workers))
+	for i := range workers {
+		budget, budgetErr := agent.ResolveContextBudget(context.Background(), llmClient, &workers[i])
+		if budgetErr != nil {
+			log.Warn("Failed to discover context budget for worker %s (%s): %v", workers[i].Category, workers[i].ResolveModel(), budgetErr)
+		}
+		workerBudgets[workers[i].Category] = budget
+		log.Info("Worker %s context budget: window=%d prompt_budget=%d source=%s", workers[i].Category, budget.ContextWindow, budget.PromptBudget(), budget.Source)
+	}
+
+	budget, ok := workerBudgets[responseWorker.Category]
+	if !ok {
+		log.Fatal("Missing context budget for GENERAL worker")
+	}
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, log)
 	if err != nil {
@@ -51,8 +66,8 @@ func main() {
 		log.Fatal("Failed to initialize gateways: %v", err)
 	}
 
-	memoryStore := memory.NewStore(cfg.MemoryMaxTurns, cfg.MemoryMaxAge, cfg.MemoryDebugDumpPath, log)
-	log.Info("Memory: max %d turn pairs per session, idle TTL %s", cfg.MemoryMaxTurns, cfg.MemoryMaxAge)
+	memoryStore := memory.NewStore(cfg.MemoryDebugDumpPath, log)
+	log.Info("Memory: retaining in-process session history until restart")
 	if cfg.MemoryDebugDumpPath != "" {
 		log.Info("Debug dump snapshots enabled at %s", cfg.MemoryDebugDumpPath)
 	}
@@ -61,6 +76,7 @@ func main() {
 		llmClient,
 		toolRegistry,
 		responseWorker,
+		budget,
 		cfg.MaxIterations,
 		memoryStore,
 		log,

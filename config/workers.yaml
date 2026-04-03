@@ -10,6 +10,10 @@
 #   system_prompt: System prompt injected into every call for this worker.
 #                  Keep this focused on personality — tool instructions are
 #                  defined in config/tools/*.md and sent via the API tool schema.
+#   context_window: Optional override for the worker's usable context window.
+#                   If omitted, Oswald discovers it from Ollama's /api/show metadata.
+#   response_reserve/tool_reserve/safety_margin:
+#                   Optional token-budget overrides used when pruning history.
 
 workers:
   - category: "GENERAL"
