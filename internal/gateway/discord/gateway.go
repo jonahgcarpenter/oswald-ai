@@ -11,7 +11,7 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 )
 
 // Name returns the human-readable gateway name.
@@ -21,8 +21,8 @@ func (dg *Gateway) Name() string {
 
 // Start initializes the resilient connection loop.
 // It blocks forever, automatically reconnecting if the websocket drops.
-func (dg *Gateway) Start(aiAgent *agent.Agent) error {
-	dg.Agent = aiAgent
+func (dg *Gateway) Start(b *broker.Broker) error {
+	dg.Broker = b
 
 	for {
 		err := dg.connectAndListen()
@@ -123,7 +123,7 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
-						dg.handleMessage(msg)
+						go dg.handleMessage(msg)
 					}
 				}
 			}
@@ -273,13 +273,25 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		}
 	}()
 
-	finalPayload, err := dg.Agent.Process(prompt, nil)
-	if err != nil {
-		dg.Log.Error("Agent process error: %v", err)
+	req := &broker.Request{
+		Channel:      "discord",
+		ChatID:       msg.ChannelID,
+		SenderID:     msg.Author.ID,
+		SessionKey:   msg.ChannelID,
+		Prompt:       prompt,
+		StreamFunc:   nil,
+		ResponseChan: make(chan broker.Result, 1),
+	}
+	dg.Broker.Submit(req)
+	result := <-req.ResponseChan
+
+	if result.Err != nil {
+		dg.Log.Error("Agent process error: %v", result.Err)
 		dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID) // nolint: errcheck
 		return
 	}
 
+	finalPayload := result.Response
 	responseText := finalPayload.Response
 	chunks := splitMessage(responseText, 2000)
 
@@ -292,8 +304,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			currentReplyID = replyToID
 		}
 
-		err = dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
-		if err != nil {
+		if err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID); err != nil {
 			dg.Log.Error("Failed to send chunk %d to Discord: %v", i+1, err)
 			break
 		}

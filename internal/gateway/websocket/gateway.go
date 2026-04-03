@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 )
 
 // Name returns the human-readable gateway name.
@@ -14,17 +15,17 @@ func (wg *Gateway) Name() string {
 }
 
 // Start initializes the HTTP server and registers the WebSocket handler.
-func (wg *Gateway) Start(aiAgent *agent.Agent) error {
+func (wg *Gateway) Start(b *broker.Broker) error {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handleConnections(w, r, aiAgent, wg.Log)
+		handleConnections(w, r, b, wg.Log)
 	})
 
 	wg.Log.Info("Websocket server listening on port %s", wg.Port)
 	return http.ListenAndServe(":"+wg.Port, nil)
 }
 
-// handleConnections accepts WebSocket connections and routes prompts to the agent.
-func handleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Agent, log *config.Logger) {
+// handleConnections accepts WebSocket connections and routes prompts to the broker.
+func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker, log *config.Logger) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Error("Upgrader error: %v", err)
@@ -56,24 +57,35 @@ func handleConnections(w http.ResponseWriter, r *http.Request, aiAgent *agent.Ag
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
-		finalPayload, err := aiAgent.Process(userPrompt, streamFunc)
-		if err != nil {
-			log.Error("Engine processing error: %v", err)
+		// NOTE: This is fine since websocket is only used for testing locally
+		// But for any further implementation I will need to generate IDs here
+		req := &broker.Request{
+			Channel:      "websocket",
+			ChatID:       "",
+			SenderID:     "",
+			Prompt:       userPrompt,
+			StreamFunc:   streamFunc,
+			ResponseChan: make(chan broker.Result, 1),
+		}
+		b.Submit(req)
+		result := <-req.ResponseChan
+
+		if result.Err != nil {
+			log.Error("Engine processing error: %v", result.Err)
 			errorPayload := agent.AgentResponse{Error: "Internal engine timeout or failure"}
 			errBytes, _ := json.Marshal(errorPayload)
 			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
 			continue
 		}
 
-		jsonBytes, err := json.Marshal(finalPayload)
+		jsonBytes, err := json.Marshal(result.Response)
 		if err != nil {
 			log.Error("Failed to marshal JSON payload: %v", err)
 			continue
 		}
 
-		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), finalPayload.Model)
-		err = conn.WriteMessage(messageType, jsonBytes)
-		if err != nil {
+		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), result.Response.Model)
+		if err = conn.WriteMessage(messageType, jsonBytes); err != nil {
 			log.Debug("Websocket write error: %v", err)
 			break
 		}

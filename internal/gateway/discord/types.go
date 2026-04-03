@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 )
 
 const (
@@ -61,8 +61,8 @@ type MessageCreate struct {
 
 // Gateway runs the Discord gateway connection loop.
 type Gateway struct {
-	Token string
-	BotID string
-	Agent *agent.Agent
-	Log   *config.Logger
+	Token  string
+	BotID  string
+	Broker *broker.Broker
+	Log    *config.Logger
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 )
@@ -57,12 +58,18 @@ func main() {
 		log,
 	)
 
+	// Create the broker and start its worker pool.
+	// All gateways submit requests through the broker; it enforces the concurrency
+	// limit and routes responses back to the originating gateway.
+	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, log)
+	requestBroker.Start()
+
 	// Boot up all registered gateways dynamically
 	log.Info("Starting Oswald AI...")
 	for _, gw := range activeGateways {
 		// Pass 'gw' into the closure to avoid loop variable capture bugs
 		go func(g gateway.Service) {
-			if err := g.Start(agentEngine); err != nil {
+			if err := g.Start(requestBroker); err != nil {
 				log.Error("%s gateway stopped/failed: %v", g.Name(), err)
 			}
 		}(gw)
@@ -77,4 +84,8 @@ func main() {
 	<-stop // The main thread will pause here indefinitely until a signal is received
 
 	log.Info("Shutting down Oswald AI gracefully...")
+
+	// Drain the broker: stop accepting new requests and wait for all in-flight
+	// Process() calls to complete before the process exits.
+	requestBroker.Shutdown()
 }
