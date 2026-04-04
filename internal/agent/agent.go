@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/toolctx"
 )
 
 const (
@@ -132,14 +133,23 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 // persistence. Passing an empty sessionKey disables memory for this request
 // (stateless one-shot behaviour).
 //
+// senderID is the stable user identifier from the originating gateway (e.g. a
+// Discord user ID or WebSocket user ID). It is injected into the request context
+// so that tools such as persistent_memory can identify the user without needing
+// the session key. An empty senderID disables user-scoped tool behaviour.
+//
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Processing request (session=%q): %q", sessionKey, truncate(userPrompt, 100))
+func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	a.log.Debug("Processing request (session=%q sender=%q): %q", sessionKey, senderID, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	// Inject the sender ID into the context so tool handlers can identify
+	// which user this request belongs to without coupling to the session key.
+	ctx = toolctx.WithSenderID(ctx, senderID)
 
 	// Inject the real-time date into the system prompt
 	dynamicSystemPrompt := fmt.Sprintf("%s\n\nCurrent Date and Time: %s",

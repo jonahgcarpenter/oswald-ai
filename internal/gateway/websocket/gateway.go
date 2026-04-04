@@ -7,9 +7,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
-)
-
-// Name returns the human-readable gateway name.
+) // Name returns the human-readable gateway name.
 func (wg *Gateway) Name() string {
 	return "Websocket"
 }
@@ -33,6 +31,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 	}
 	defer conn.Close()
 
+	// remoteAddr is used as the fallback identity for clients that send plain text.
+	remoteAddr := conn.RemoteAddr().String()
+
 	for {
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
@@ -40,13 +41,29 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			break
 		}
 
-		userPrompt := string(message)
+		// Attempt to decode a structured IncomingMessage. Fall back to treating
+		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
+		// clients keep working without modification.
+		var userPrompt, userID string
+		var incoming IncomingMessage
+		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && incoming.Prompt != "" {
+			userPrompt = incoming.Prompt
+			userID = incoming.UserID
+		} else {
+			userPrompt = string(message)
+			userID = remoteAddr
+		}
 
-		// Use the remote address as a per-connection session key so each
-		// WebSocket client gets its own conversation memory for the duration
-		// of the connection.
-		sessionKey := conn.RemoteAddr().String()
-		log.Debug("Websocket request (session=%s): %q", sessionKey, truncate(userPrompt, 100))
+		// Build the session key from the user ID for persistent per-user
+		// conversation memory. Fall back to the remote address if no user ID
+		// was provided so anonymous connections still get session isolation.
+		sessionKey := userID
+		if sessionKey == "" {
+			sessionKey = remoteAddr
+			userID = remoteAddr
+		}
+
+		log.Debug("Websocket request (session=%s sender=%s): %q", sessionKey, userID, truncate(userPrompt, 100))
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
@@ -65,7 +82,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 		req := &broker.Request{
 			Channel:      "websocket",
 			ChatID:       sessionKey,
-			SenderID:     sessionKey,
+			SenderID:     userID,
 			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
 			StreamFunc:   streamFunc,

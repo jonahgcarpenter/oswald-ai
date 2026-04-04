@@ -22,6 +22,7 @@ type Config struct {
 	MemoryDebugDumpPath string        // Optional JSON snapshot path for memory debugging
 	MemoryMaxTurns      int           // Maximum retained conversation turn pairs per session; 0 disables the limit
 	MemoryMaxAge        time.Duration // Maximum age for retained conversation turn pairs; 0 disables expiry
+	UserMemoryPath      string        // Directory for persistent per-user Markdown memory files
 }
 
 // Load reads configuration from environment variables, with .env file support.
@@ -42,7 +43,8 @@ func Load() *Config {
 		LogLevel:            ParseLevel(getEnv("LOG_LEVEL", "info")),
 		MemoryDebugDumpPath: getEnv("MEMORY_DEBUG_DUMP_PATH", ""),
 		MemoryMaxTurns:      getEnvInt("MEMORY_MAX_TURNS", 10),
-		MemoryMaxAge:        getEnvDuration("MEMORY_MAX_AGE", 12),
+		MemoryMaxAge:        getEnvDuration("MEMORY_MAX_AGE", 0),
+		UserMemoryPath:      getEnv("USER_MEMORY_PATH", "data/memory/users"),
 	}
 }
 

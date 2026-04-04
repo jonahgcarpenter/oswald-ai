@@ -1,6 +1,7 @@
 # Golang
 tmp/ 
 .env
+data/
 
 # Gemini export, might be useful
 IMPORT.md

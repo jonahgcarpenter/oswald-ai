@@ -14,6 +14,18 @@ type Gateway struct {
 	Log  *config.Logger
 }
 
+// IncomingMessage is the JSON payload clients send over the WebSocket connection.
+// UserID identifies the sender for persistent memory and session keying.
+// Prompt is the user's message text.
+//
+// Clients that send a plain text string (non-JSON) are handled with legacy
+// fallback behaviour: the raw text is used as the prompt and the connection's
+// remote address is used as both the user ID and session key.
+type IncomingMessage struct {
+	UserID string `json:"user_id"`
+	Prompt string `json:"prompt"`
+}
+
 var upgrader = gorilla.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,

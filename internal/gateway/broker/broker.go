@@ -111,7 +111,7 @@ func (b *Broker) runWorker(id int) {
 	for req := range b.requests {
 		b.log.Debug("Broker worker %d: processing request from %s (chatID=%s)", id, req.Channel, req.ChatID)
 
-		resp, err := b.agent.Process(req.SessionKey, req.Prompt, req.StreamFunc)
+		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.Prompt, req.StreamFunc)
 
 		req.ResponseChan <- Result{
 			Response: resp,

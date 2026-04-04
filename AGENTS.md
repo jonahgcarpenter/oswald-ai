@@ -17,8 +17,9 @@ Current architecture layers:
 2. **Gateway implementations** — Discord and local WebSocket in `internal/gateway/discord/` and `internal/gateway/websocket/`
 3. **Agent/Orchestration** — single tool-calling loop in `internal/agent/`
 4. **Conversation Memory** — in-memory session store with TTL/max-turn retention plus request-time context-budget pruning in `internal/memory/` and `internal/agent/`
-5. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/`
-6. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
+5. **Persistent User Memory** — per-user Markdown files on disk managed by the `persistent_memory` tool in `internal/tools/usermemory/`
+6. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/` and `internal/tools/usermemory/`; context key helpers in `internal/tools/toolctx/`
+7. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
 
 ---
 
@@ -196,17 +197,20 @@ There is no longer a generic provider abstraction in the codebase.
 | `internal/memory/store.go`              | In-memory conversation store with TTL/max-turn retention and history flattening |
 | `internal/memory/dump.go`               | Shared JSON debug snapshot writer used by memory and Discord reply metadata |
 | `internal/ollama/client.go`             | Ollama HTTP client with chat streaming and tool support            |
-| `internal/tools/registry.go`            | Generic tool registry and markdown parsing                         |
-| `internal/tools/bootstrap.go`           | Builtin tool bootstrap                                             |
-| `internal/tools/websearch/client.go`    | SearXNG-backed web search client                                   |
-| `internal/tools/websearch/websearch.go` | Web search handler + shared search types                           |
-| `internal/gateway/bootstrap.go`         | Enabled gateway assembly from config                               |
-| `internal/gateway/discord/gateway.go`   | Discord runtime behavior                                           |
-| `internal/gateway/discord/types.go`     | Discord constants and payload structs                              |
-| `internal/gateway/websocket/gateway.go` | Local WebSocket runtime behavior                                   |
-| `internal/gateway/websocket/types.go`   | WebSocket gateway shared types                                     |
-| `config/workers.yaml`                   | Model/system prompt config                                         |
-| `config/tools/*.md`                     | Tool schemas exposed to the model                                  |
+| `internal/tools/registry.go`                | Generic tool registry and markdown parsing                         |
+| `internal/tools/bootstrap.go`               | Builtin tool bootstrap                                             |
+| `internal/tools/websearch/client.go`        | SearXNG-backed web search client                                   |
+| `internal/tools/websearch/websearch.go`     | Web search handler + shared search types                           |
+| `internal/tools/usermemory/store.go`        | Persistent per-user Markdown file store with per-user locking      |
+| `internal/tools/usermemory/usermemory.go`  | `persistent_memory` tool handler (remember / recall / forget)      |
+| `internal/tools/toolctx/toolctx.go`        | Context key helpers for sender ID injection into tool handlers     |
+| `internal/gateway/bootstrap.go`             | Enabled gateway assembly from config                               |
+| `internal/gateway/discord/gateway.go`       | Discord runtime behavior                                           |
+| `internal/gateway/discord/types.go`         | Discord constants and payload structs                              |
+| `internal/gateway/websocket/gateway.go`     | Local WebSocket runtime behavior                                   |
+| `internal/gateway/websocket/types.go`       | WebSocket gateway shared types including `IncomingMessage`         |
+| `config/workers.yaml`                       | Model/system prompt config                                         |
+| `config/tools/*.md`                         | Tool schemas exposed to the model                                  |
 
 ---
 
@@ -358,9 +362,10 @@ go build -o ./tmp/main ./cmd/agent/main.go
 | `DISCORD_TOKEN`     | empty                    | Enables Discord gateway              |
 | `MAX_ITERATIONS`    | `5`                      | Agentic loop cap                     |
 | `LOG_LEVEL`         | `info`                   | Logging verbosity                    |
-| `MEMORY_MAX_TURNS`  | `0`                      | Max retained memory turn pairs per session; `0` disables the cap |
+| `MEMORY_MAX_TURNS`  | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
 | `MEMORY_MAX_AGE`    | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
 | `MEMORY_DEBUG_DUMP_PATH` | empty               | Unified debug snapshot for memory and gateway reply metadata |
+| `USER_MEMORY_PATH`  | `data/memory/users`      | Directory for persistent per-user Markdown memory files |
 
 Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus `os.LookupEnv()`.
 
@@ -380,10 +385,10 @@ After dependency changes, run `go mod tidy`.
 
 ## Known Limitations
 
-- No persistent conversation history (memory is in-process only; restarts clear all sessions)
+- No persistent conversation history (conversation memory is in-process only; restarts clear all sessions — per-user fact memory via `persistent_memory` tool does survive restarts)
 - No session resumption for Discord reconnects
 - WebSocket API has no authentication layer
-- Only one builtin tool is currently implemented: `web_search`
+- Two builtin tools are currently implemented: `web_search` and `persistent_memory`
 - Ollama is the only model backend
 
 ---

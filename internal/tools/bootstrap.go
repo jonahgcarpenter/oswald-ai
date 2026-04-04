@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
 )
 
@@ -29,8 +30,13 @@ func registerBuiltins(registry *Registry, cfg *config.Config, log *config.Logger
 	if err := registry.RegisterHandler("web_search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
 		return fmt.Errorf("failed to initialize web_search tool: %w", err)
 	}
-
 	log.Debug("Tools: web search client configured: %s", cfg.SearxngURL)
+
+	memStore := usermemory.NewStore(cfg.UserMemoryPath, log)
+	if err := registry.RegisterHandler("persistent_memory", Handler(usermemory.NewHandler(memStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize persistent_memory tool: %w", err)
+	}
+	log.Debug("Tools: persistent user memory configured: %s", cfg.UserMemoryPath)
 
 	return nil
 }

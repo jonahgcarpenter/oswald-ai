@@ -16,6 +16,7 @@ import (
 const (
 	defaultPort     = "8080"
 	defaultDumpPath = "./tmp/memory-debug.json"
+	defaultUserID   = "memory-test-user"
 	testPrefix      = "MEMTEST"
 
 	maxTurnPhaseCount = 5
@@ -75,6 +76,7 @@ type memorySnapshotMessage struct {
 func main() {
 	port := getEnv("MEMORY_TEST_PORT", defaultPort)
 	dumpPath := getEnv("MEMORY_TEST_DUMP_PATH", defaultDumpPath)
+	userID := getEnv("MEMORY_TEST_USER_ID", defaultUserID)
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
@@ -84,11 +86,12 @@ func main() {
 	defer conn.Close()
 
 	fmt.Printf("Running memory integration test against %s\n", u.String())
-	fmt.Printf("Reading debug dump from %s\n\n", dumpPath)
+	fmt.Printf("Reading debug dump from %s\n", dumpPath)
+	fmt.Printf("Using user ID: %s\n\n", userID)
 
-	maxTurnsLabels := runMaxTurnPhase(conn, dumpPath)
-	ttlTriggerLabel := runTTLPhase(conn, dumpPath)
-	runContextPhase(conn, dumpPath)
+	maxTurnsLabels := runMaxTurnPhase(conn, dumpPath, userID)
+	ttlTriggerLabel := runTTLPhase(conn, dumpPath, userID)
+	runContextPhase(conn, dumpPath, userID)
 
 	finalDump := mustReadDump(dumpPath)
 	sessionKey, session := selectTestSession(finalDump.Memory)
@@ -106,14 +109,14 @@ func main() {
 	fmt.Println("Inspect ./tmp/memory-debug.json for full state and turn contents.")
 }
 
-func runMaxTurnPhase(conn *websocket.Conn, dumpPath string) []string {
+func runMaxTurnPhase(conn *websocket.Conn, dumpPath string, userID string) []string {
 	fmt.Println("Phase 1 - max turn retention")
 	labels := make([]string, 0, maxTurnPhaseCount)
 	for i := 1; i <= maxTurnPhaseCount; i++ {
 		label := fmt.Sprintf("%s-MAX-%02d", testPrefix, i)
 		labels = append(labels, label)
 		prompt := fmt.Sprintf("%s\nStore this exact label for memory testing: %s\nReply with exactly: ACK %s", label, label, label)
-		resp := sendPrompt(conn, prompt)
+		resp := sendPrompt(conn, userID, prompt)
 		fmt.Printf("sent %-16s response=%q\n", label, resp.Response)
 	}
 
@@ -125,7 +128,7 @@ func runMaxTurnPhase(conn *websocket.Conn, dumpPath string) []string {
 	return labels
 }
 
-func runTTLPhase(conn *websocket.Conn, dumpPath string) string {
+func runTTLPhase(conn *websocket.Conn, dumpPath string, userID string) string {
 	fmt.Println("Phase 2 - TTL retention")
 	dump := mustReadDump(dumpPath)
 	maxAge, err := time.ParseDuration(dump.Memory.Retention.MaxAge)
@@ -142,7 +145,7 @@ func runTTLPhase(conn *websocket.Conn, dumpPath string) string {
 	time.Sleep(waitFor)
 
 	prompt := fmt.Sprintf("%s\nThis prompt should trigger TTL pruning. Reply with exactly: ACK %s", label, label)
-	resp := sendPrompt(conn, prompt)
+	resp := sendPrompt(conn, userID, prompt)
 	fmt.Printf("sent %-16s response=%q\n", label, resp.Response)
 
 	dump = mustReadDump(dumpPath)
@@ -152,12 +155,12 @@ func runTTLPhase(conn *websocket.Conn, dumpPath string) string {
 	return label
 }
 
-func runContextPhase(conn *websocket.Conn, dumpPath string) {
+func runContextPhase(conn *websocket.Conn, dumpPath string, userID string) {
 	fmt.Println("Phase 3 - context-budget pruning")
 	for i := 1; i <= contextPhaseCount; i++ {
 		label := fmt.Sprintf("%s-CTX-%02d", testPrefix, i)
 		prompt := buildLargeContextPrompt(label)
-		resp := sendPrompt(conn, prompt)
+		resp := sendPrompt(conn, userID, prompt)
 		fmt.Printf("sent %-16s response=%q\n", label, resp.Response)
 	}
 
@@ -177,8 +180,15 @@ func buildLargeContextPrompt(label string) string {
 	return fmt.Sprintf("%s\nRemember this exact label for context pruning diagnostics: %s\n%s\nReply with exactly: ACK %s", label, label, largeBody, label)
 }
 
-func sendPrompt(conn *websocket.Conn, prompt string) memoryAgentResponse {
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(prompt)); err != nil {
+func sendPrompt(conn *websocket.Conn, userID string, prompt string) memoryAgentResponse {
+	msg, err := json.Marshal(struct {
+		UserID string `json:"user_id"`
+		Prompt string `json:"prompt"`
+	}{UserID: userID, Prompt: prompt})
+	if err != nil {
+		log.Fatalf("Failed to marshal prompt: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 		log.Fatalf("Failed to send prompt: %v", err)
 	}
 
