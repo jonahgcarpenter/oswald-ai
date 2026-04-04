@@ -1,7 +1,7 @@
 // Package toolctx provides context key helpers for passing request-scoped
 // metadata (such as the sender's user ID) through the tool execution pipeline.
-// It is a leaf package with no internal dependencies, so both the tools
-// registry and individual tool packages can import it without cycles.
+// It is a leaf package with no internal dependencies, so both the agent and
+// individual tool packages can import it without cycles.
 package toolctx
 
 import "context"

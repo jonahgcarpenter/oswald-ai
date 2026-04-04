@@ -9,9 +9,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/toolctx"
 )
 
 const (

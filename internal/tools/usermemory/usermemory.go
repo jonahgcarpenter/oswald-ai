@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
 // NewHandler returns a Handler for the persistent_memory tool.
