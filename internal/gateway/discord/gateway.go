@@ -12,8 +12,8 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/debugdump"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 )
 
 const replyIndexTTL = time.Hour
@@ -114,7 +114,7 @@ func (dg *Gateway) dumpReplyIndexSnapshot(snap replyIndexSnapshot) {
 		return
 	}
 
-	if err := debugdump.WriteSection(dg.DebugDumpPath, "discord_reply_index", snap); err != nil {
+	if err := memory.WriteSection(dg.DebugDumpPath, "discord_reply_index", snap); err != nil {
 		dg.Log.Warn("Discord reply index: failed to write debug snapshot to %q: %v", dg.DebugDumpPath, err)
 		return
 	}

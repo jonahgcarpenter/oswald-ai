@@ -66,10 +66,15 @@ func main() {
 		log.Fatal("Failed to initialize gateways: %v", err)
 	}
 
-	memoryStore := memory.NewStore(cfg.MemoryDebugDumpPath, log)
-	log.Info("Memory: retaining in-process session history until restart")
+	memoryStore := memory.NewStore(memory.Options{
+		MaxTurns:      cfg.MemoryMaxTurns,
+		MaxAge:        cfg.MemoryMaxAge,
+		ContextWindow: budget.ContextWindow,
+		PromptBudget:  budget.PromptBudget(),
+	}, cfg.MemoryDebugDumpPath, log)
+	log.Debug("Memory: retaining in-process session history until restart (max_turns=%d max_age=%s context_window=%d prompt_budget=%d)", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
 	if cfg.MemoryDebugDumpPath != "" {
-		log.Info("Debug dump snapshots enabled at %s", cfg.MemoryDebugDumpPath)
+		log.Debug("Debug dump snapshots enabled at %s", cfg.MemoryDebugDumpPath)
 	}
 
 	agentEngine := agent.NewAgent(

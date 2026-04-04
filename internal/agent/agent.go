@@ -151,6 +151,7 @@ func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback fun
 	// pairs until the estimated prompt fits the active model's context budget.
 	history := a.memory.History(sessionKey)
 	trimmedHistory, prune := PruneHistoryToFit(a.budget, dynamicSystemPrompt, history, userPrompt, a.registry.OllamaTools())
+	a.memory.RecordPromptEstimate(sessionKey, prune.EstimatedBefore, prune.EstimatedAfter)
 	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
 	messages = append(messages, trimmedHistory...)
@@ -303,7 +304,8 @@ func (a *Agent) Process(sessionKey string, userPrompt string, streamCallback fun
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
 	if finalContent != "" {
-		a.memory.Append(sessionKey,
+		a.memory.AppendTurn(
+			sessionKey,
 			ollama.ChatMessage{Role: "user", Content: userPrompt},
 			ollama.ChatMessage{Role: "assistant", Content: finalContent},
 		)

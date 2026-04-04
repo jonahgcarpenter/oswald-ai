@@ -1,4 +1,4 @@
-package debugdump
+package memory
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-var mu sync.Mutex
+var dumpMu sync.Mutex
 
 // WriteSection merges a named JSON section into a shared debug dump file.
 // Existing sections are preserved so multiple subsystems can contribute to
@@ -17,8 +17,8 @@ func WriteSection(path string, section string, value interface{}) error {
 		return nil
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	dumpMu.Lock()
+	defer dumpMu.Unlock()
 
 	sections := make(map[string]json.RawMessage)
 

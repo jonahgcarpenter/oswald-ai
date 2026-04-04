@@ -10,6 +10,7 @@ The model receives the user prompt, can call registered tools such as `web_searc
 ## Features
 
 - Single-pass agentic loop with tool execution and streaming
+- In-memory conversation memory with TTL, max-turn retention, and request-time context-budget pruning
 - SearXNG-backed `web_search` tool
 - Discord bot gateway with mention resolution, reply context, typing indicators, and message splitting
 - Local WebSocket gateway at `ws://localhost:8080/ws`
@@ -38,16 +39,26 @@ The model name and system prompt both live there, so behavior changes do not req
 
 ### Environment variables:
 
-| Variable         | Default                  | Purpose                              |
-| ---------------- | ------------------------ | ------------------------------------ |
-| `PORT`           | `8080`                   | Local WebSocket server port          |
-| `OLLAMA_URL`     | `http://localhost:11434` | Ollama base URL                      |
-| `SEARXNG_URL`    | `http://localhost:8888`  | SearXNG base URL                     |
-| `WORKERS_CONFIG` | `config/workers.yaml`    | Worker config path                   |
-| `TOOLS_CONFIG`   | `config/tools`           | Tool definition directory            |
-| `DISCORD_TOKEN`  | empty                    | Enables Discord gateway when set     |
-| `MAX_ITERATIONS` | `5`                      | Max tool-call iterations per request |
-| `LOG_LEVEL`      | `info`                   | `debug`, `info`, `warn`, `error`     |
+| Variable                 | Default                  | Purpose                                                                         |
+| ------------------------ | ------------------------ | ------------------------------------------------------------------------------- |
+| `PORT`                   | `8080`                   | Local WebSocket server port                                                     |
+| `OLLAMA_URL`             | `http://localhost:11434` | Ollama base URL                                                                 |
+| `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG base URL                                                                |
+| `WORKERS_CONFIG`         | `config/workers.yaml`    | Worker config path                                                              |
+| `TOOLS_CONFIG`           | `config/tools`           | Tool definition directory                                                       |
+| `DISCORD_TOKEN`          | empty                    | Enables Discord gateway when set                                                |
+| `MAX_ITERATIONS`         | `5`                      | Max tool-call iterations per request                                            |
+| `LOG_LEVEL`              | `info`                   | `debug`, `info`, `warn`, `error`                                                |
+| `MEMORY_MAX_TURNS`       | `0`                      | Max retained memory turn pairs per session; `0` disables the cap                |
+| `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
+| `MEMORY_DEBUG_DUMP_PATH` | empty                    | Shared debug snapshot path for memory and Discord reply metadata                |
+
+### Memory behavior:
+
+- Session memory stores only final user/assistant turn pairs.
+- Retention is applied inside the memory store using `MEMORY_MAX_TURNS` and `MEMORY_MAX_AGE`.
+- After retention pruning, the agent still trims the oldest remaining turns to fit the active model's prompt budget.
+- `MEMORY_DEBUG_DUMP_PATH` writes a shared JSON dump containing memory snapshots, retention settings, context window metadata, per-session prompt estimates before/after pruning, and Discord reply-index metadata.
 
 ---
 
@@ -97,6 +108,26 @@ What is Bitcoins current price?
 # "Bitcoin is currently..."
 # {"model":"llama2-uncensored:7b","response":"..."}
 ```
+
+## Integration checks
+
+Start the server first, then run standalone test programs from another terminal:
+
+```bash
+go run ./test/ttft.go
+go run ./test/interactive.go
+go run ./test/memory.go
+```
+
+For the memory test, use intentionally small settings such as:
+
+```env
+MEMORY_MAX_TURNS=3
+MEMORY_MAX_AGE=5s
+MEMORY_DEBUG_DUMP_PATH=./tmp/memory-debug.json
+```
+
+The memory test uses the shared dump file to show retention pruning and context-budget pruning in one session.
 
 ---
 

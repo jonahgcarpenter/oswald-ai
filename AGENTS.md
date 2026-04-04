@@ -16,7 +16,7 @@ Current architecture layers:
 1. **Gateway bootstrap** — shared gateway interface + startup wiring in `internal/gateway/`
 2. **Gateway implementations** — Discord and local WebSocket in `internal/gateway/discord/` and `internal/gateway/websocket/`
 3. **Agent/Orchestration** — single tool-calling loop in `internal/agent/`
-4. **Conversation Memory** — in-memory session store plus request-time context-budget pruning in `internal/memory/` and `internal/agent/`
+4. **Conversation Memory** — in-memory session store with TTL/max-turn retention plus request-time context-budget pruning in `internal/memory/` and `internal/agent/`
 5. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/`
 6. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
 
@@ -65,14 +65,18 @@ go run ./test/ttft.go
 
 # Separate terminal
 go run ./test/interactive.go
+
+# Separate terminal
+go run ./test/memory.go
 ```
 
-Both tests connect to `ws://localhost:8080/ws` and require Ollama to be reachable.
+These integration programs connect to `ws://localhost:8080/ws` and require Ollama to be reachable.
 
 | File                  | Purpose                                               |
 | --------------------- | ----------------------------------------------------- |
 | `test/ttft.go`        | Benchmarks time to first token for streamed responses |
 | `test/interactive.go` | Interactive prompting environment for testing         |
+| `test/memory.go`      | Exercises TTL, max-turn retention, and context pruning via debug dumps |
 
 When adding new integration checks, keep using the same standalone `package main` pattern inside `test/`.
 
@@ -89,7 +93,7 @@ Flow:
 1. Retrieve conversation history for the session from `internal/memory`
 2. Build the initial chat request with:
    - the configured system prompt from `config/workers.yaml`
-   - the retrieved conversation history (user/assistant turn pairs), pruned to fit the active model's context budget
+   - the retrieved conversation history (user/assistant turn pairs), first pruned by memory retention policy and then pruned to fit the active model's context budget
    - the current user prompt
    - all registered tools from the tool registry
 3. Send the request to Ollama via `internal/ollama`
@@ -106,8 +110,10 @@ Session state is managed by `internal/memory.Store`.
 
 - Each session is identified by a `SessionKey` string set at the gateway level
 - Only user and assistant final messages are stored — tool call intermediaries are excluded to keep history lean
-- Session history is retained in memory until process exit
-- History is pruned at request time, not storage time, based on the active model's context budget
+- Session history is retained in memory until process exit, subject to optional TTL and max-turn retention limits
+- `MEMORY_MAX_TURNS` retains only the newest N stored turn pairs per session when set above `0`
+- `MEMORY_MAX_AGE` expires stored turn pairs older than the configured Go duration when set above `0`
+- History is pruned for retention in `internal/memory`, then pruned again at request time based on the active model's context budget
 - An empty `SessionKey` disables memory for a request (stateless one-shot behaviour)
 
 ### Context Budgeting
@@ -118,7 +124,7 @@ Before each `/api/chat` call, the agent trims the oldest stored turn pairs until
 - `num_ctx` from the model parameters is preferred when available
 - Model metadata `*.context_length` is used as a fallback
 - Worker config may override the discovered `context_window`, `response_reserve`, `tool_reserve`, and `safety_margin`
-- Prompt history is pruned dynamically per request; stored memory is not permanently deleted
+- Prompt history is pruned dynamically per request; retention pruning inside `internal/memory` is permanent for expired/overflow turns
 
 **Hybrid Session Key Strategy (Discord gateway):**
 
@@ -187,7 +193,8 @@ There is no longer a generic provider abstraction in the codebase.
 | `internal/agent/agent.go`               | Core agentic tool-calling loop and response assembly               |
 | `internal/agent/workers.go`             | Load `config/workers.yaml` and resolve workers                     |
 | `internal/config/config.go`             | Environment config loading                                         |
-| `internal/memory/store.go`              | In-memory conversation store retaining full in-process session history |
+| `internal/memory/store.go`              | In-memory conversation store with TTL/max-turn retention and history flattening |
+| `internal/memory/dump.go`               | Shared JSON debug snapshot writer used by memory and Discord reply metadata |
 | `internal/ollama/client.go`             | Ollama HTTP client with chat streaming and tool support            |
 | `internal/tools/registry.go`            | Generic tool registry and markdown parsing                         |
 | `internal/tools/bootstrap.go`           | Builtin tool bootstrap                                             |
@@ -314,10 +321,20 @@ LOG_LEVEL=debug go run ./cmd/agent/main.go
 Useful debug output includes:
 
 - request processing
+- memory retention pruning and context-budget pruning
 - tool execution
 - agentic loop iteration counts
 - websocket and Discord request handling
 - web search query execution
+
+### Debug Snapshots
+
+Set `MEMORY_DEBUG_DUMP_PATH` to write a shared JSON file that preserves named sections from multiple subsystems.
+
+- `memory` section: session memory snapshots after retention-aware updates, including `max_age`, `max_turns`, `context_window`, `prompt_budget`, and per-session prompt estimates before/after context pruning
+- `discord_reply_index` section: Discord reply metadata used for reply-context lookup
+
+The shared writer lives in `internal/memory/dump.go`.
 
 ### Common Verification Commands
 
@@ -341,6 +358,8 @@ go build -o ./tmp/main ./cmd/agent/main.go
 | `DISCORD_TOKEN`     | empty                    | Enables Discord gateway              |
 | `MAX_ITERATIONS`    | `5`                      | Agentic loop cap                     |
 | `LOG_LEVEL`         | `info`                   | Logging verbosity                    |
+| `MEMORY_MAX_TURNS`  | `0`                      | Max retained memory turn pairs per session; `0` disables the cap |
+| `MEMORY_MAX_AGE`    | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
 | `MEMORY_DEBUG_DUMP_PATH` | empty               | Unified debug snapshot for memory and gateway reply metadata |
 
 Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus `os.LookupEnv()`.
