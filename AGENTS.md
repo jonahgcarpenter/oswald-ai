@@ -351,14 +351,14 @@ Useful debug output includes:
 - web search query execution
 - soul file read/write operations
 
-### Debug Snapshots
+### Prompt Debug Dumps
 
-Set `MEMORY_DEBUG_DUMP_PATH` to write a shared JSON file that preserves named sections from multiple subsystems.
+Set `PROMPT_DEBUG_PATH` to write a timestamped Markdown file for every request.
 
-- `memory` section: session memory snapshots after retention-aware updates, including `max_age`, `max_turns`, `context_window`, `prompt_budget`, and per-session prompt estimates before/after context pruning
-- `discord_reply_index` section: Discord reply metadata used for reply-context lookup
-
-The shared writer lives in `internal/memory/dump.go`.
+- metadata: model, session, token budget, and pruning estimates
+- session history: retained conversation history before context-budget pruning
+- final message array: the exact messages sent to Ollama
+- tool schemas: every tool definition included in the request
 
 ### Common Verification Commands
 
@@ -383,7 +383,7 @@ go build -o ./tmp/main ./cmd/agent/main.go
 | `LOG_LEVEL`              | `info`                   | Logging verbosity                    |
 | `MEMORY_MAX_TURNS`       | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
 | `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
-| `MEMORY_DEBUG_DUMP_PATH` | empty                    | Unified debug snapshot for memory and gateway reply metadata |
+| `PROMPT_DEBUG_PATH`      | empty                    | Directory for per-request Markdown prompt dumps; each request writes a timestamped `.md` file showing retained session history, the final message array, tool schemas, and context budget |
 
 Paths for the soul file, tool definitions, and persistent user memory are hardcoded in `internal/config/config.go`.
 

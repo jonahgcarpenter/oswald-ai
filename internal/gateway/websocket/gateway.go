@@ -46,11 +46,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 		// Attempt to decode a structured IncomingMessage. Fall back to treating
 		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
 		// clients keep working without modification.
-		var userPrompt, userID string
+		var userPrompt, userID, displayName string
 		var incoming IncomingMessage
 		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && incoming.Prompt != "" {
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
+			displayName = incoming.DisplayName
 		} else {
 			userPrompt = string(message)
 			userID = remoteAddr
@@ -85,6 +86,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			Channel:      "websocket",
 			ChatID:       sessionKey,
 			SenderID:     userID,
+			DisplayName:  displayName,
 			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
 			StreamFunc:   streamFunc,

@@ -77,11 +77,10 @@ type replyContext struct {
 
 // Gateway runs the Discord gateway connection loop.
 type Gateway struct {
-	Token         string
-	BotID         string
-	Broker        *broker.Broker
-	Log           *config.Logger
-	DebugDumpPath string
-	replyMu       sync.RWMutex
-	replyIndex    map[string]replyContext
+	Token      string
+	BotID      string
+	Broker     *broker.Broker
+	Log        *config.Logger
+	replyMu    sync.RWMutex
+	replyIndex map[string]replyContext
 }

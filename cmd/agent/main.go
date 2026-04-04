@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 )
 
 func main() {
@@ -47,7 +48,12 @@ func main() {
 	soulStore := soulmemory.NewStore(config.DefaultSoulPath, log)
 	log.Debug("Soul file: %s", config.DefaultSoulPath)
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, log)
+	// The user memory store is owned by the tool registry so the persistent_memory
+	// tool handler can remember, recall, and forget facts on behalf of the model.
+	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, log)
+	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, log)
 	if err != nil {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
@@ -62,10 +68,11 @@ func main() {
 		MaxAge:        cfg.MemoryMaxAge,
 		ContextWindow: budget.ContextWindow,
 		PromptBudget:  budget.PromptBudget(),
-	}, cfg.MemoryDebugDumpPath, log)
+	}, log)
 	log.Debug("Memory: retaining in-process session history until restart (max_turns=%d max_age=%s context_window=%d prompt_budget=%d)", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
-	if cfg.MemoryDebugDumpPath != "" {
-		log.Debug("Debug dump snapshots enabled at %s", cfg.MemoryDebugDumpPath)
+
+	if cfg.PromptDebugPath != "" {
+		log.Info("Prompt debug dumps enabled at %s", cfg.PromptDebugPath)
 	}
 
 	agentEngine := agent.NewAgent(
@@ -76,6 +83,7 @@ func main() {
 		budget,
 		cfg.MaxIterations,
 		memoryStore,
+		cfg.PromptDebugPath,
 		log,
 	)
 

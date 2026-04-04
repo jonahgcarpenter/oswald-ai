@@ -105,8 +105,10 @@ func parseModelInfoContextLength(modelInfo map[string]interface{}) (int, string,
 	return 0, "", false
 }
 
-// PruneHistoryToFit trims the oldest user/assistant pairs from history until
-// the estimated prompt fits within the active prompt budget.
+// PruneHistoryToFit trims the lowest-value user/assistant pairs from history
+// until the estimated prompt fits within the active prompt budget.
+// Pairs are scored by recency and content significance — short/trivial exchanges
+// are removed before long substantive ones, regardless of position.
 func PruneHistoryToFit(budget ContextBudget, systemPrompt string, history []ollama.ChatMessage, userPrompt string, tools []ollama.Tool) ([]ollama.ChatMessage, PruneResult) {
 	trimmed := append([]ollama.ChatMessage(nil), history...)
 	result := PruneResult{
@@ -114,12 +116,85 @@ func PruneHistoryToFit(budget ContextBudget, systemPrompt string, history []olla
 	}
 
 	for len(trimmed) >= 2 && estimatePromptTokens(systemPrompt, trimmed, userPrompt, tools) > budget.PromptBudget() {
-		trimmed = trimmed[2:]
+		// Find and remove the pair with the lowest retention score.
+		lowestIdx := leastValuablePairIndex(trimmed)
+		// Remove the pair at lowestIdx (two consecutive messages).
+		trimmed = append(trimmed[:lowestIdx], trimmed[lowestIdx+2:]...)
 		result.RemovedPairs++
 	}
 
 	result.EstimatedAfter = estimatePromptTokens(systemPrompt, trimmed, userPrompt, tools)
 	return trimmed, result
+}
+
+// leastValuablePairIndex returns the index of the first message in the pair
+// that should be dropped to reclaim context budget. It prefers removing short
+// or trivial exchanges before long substantive ones, and older pairs before
+// newer ones when scores are equal.
+func leastValuablePairIndex(msgs []ollama.ChatMessage) int {
+	n := len(msgs) / 2 // number of complete pairs
+	lowestScore := 1e18
+	lowestIdx := 0
+
+	for i := 0; i < n; i++ {
+		userMsg := msgs[i*2]
+		assistantMsg := msgs[i*2+1]
+
+		score := scorePair(i, n, userMsg, assistantMsg)
+		if score < lowestScore {
+			lowestScore = score
+			lowestIdx = i * 2
+		}
+	}
+	return lowestIdx
+}
+
+// scorePair computes a retention score for a user/assistant message pair.
+// Higher score = more valuable = keep longer.
+// Factors: recency, message length (substantiveness), and identity-bearing content.
+func scorePair(pairIdx, totalPairs int, user, assistant ollama.ChatMessage) float64 {
+	// Recency bonus: newer pairs score higher. Range [0.1, 1.0].
+	recency := 0.1 + 0.9*(float64(pairIdx)/float64(max(totalPairs-1, 1)))
+
+	userLen := len(user.Content)
+	assistantLen := len(assistant.Content)
+	combined := userLen + assistantLen
+
+	// Length bonus: short exchanges (greetings, acks) score lower.
+	// Scale: 0.5 for empty, 1.0 at 200+ chars, capped.
+	lengthScore := 0.5 + 0.5*min(float64(combined)/200.0, 1.0)
+
+	// Identity bonus: turns where the user stated personal facts are valuable.
+	identityBonus := 1.0
+	identityKeywords := []string{
+		"my name", "i am ", "i'm ", "i work", "i live", "my job",
+		"i prefer", "i like", "i need", "i want", "my age", "i use",
+	}
+	lowerUser := strings.ToLower(user.Content)
+	for _, kw := range identityKeywords {
+		if strings.Contains(lowerUser, kw) {
+			identityBonus = 1.5
+			break
+		}
+	}
+
+	return recency * lengthScore * identityBonus
+}
+
+// max returns the larger of two ints.
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// min returns the smaller of two float64s.
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func estimatePromptTokens(systemPrompt string, history []ollama.ChatMessage, userPrompt string, tools []ollama.Tool) int {

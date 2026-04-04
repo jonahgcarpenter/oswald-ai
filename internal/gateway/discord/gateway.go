@@ -13,22 +13,9 @@ import (
 	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 )
 
 const replyIndexTTL = time.Hour
-
-type replyIndexSnapshot struct {
-	GeneratedAt string                        `json:"generated_at"`
-	Replies     map[string]replyContextRecord `json:"replies"`
-}
-
-type replyContextRecord struct {
-	SessionKey string `json:"session_key"`
-	ChannelID  string `json:"channel_id"`
-	SenderID   string `json:"sender_id"`
-	CreatedAt  string `json:"created_at"`
-}
 
 // Name returns the human-readable gateway name.
 func (dg *Gateway) Name() string {
@@ -65,10 +52,7 @@ func (dg *Gateway) rememberReply(messageID string, ctx replyContext) {
 	dg.replyMu.Lock()
 	dg.pruneReplyIndexLocked()
 	dg.replyIndex[messageID] = ctx
-	snap := dg.snapshotReplyIndexLocked()
 	dg.replyMu.Unlock()
-
-	dg.dumpReplyIndexSnapshot(snap)
 }
 
 func (dg *Gateway) lookupReply(messageID string) (replyContext, bool) {
@@ -77,49 +61,11 @@ func (dg *Gateway) lookupReply(messageID string) (replyContext, bool) {
 	}
 
 	dg.replyMu.Lock()
-	pruned := dg.pruneReplyIndexLocked()
+	dg.pruneReplyIndexLocked()
 	ctx, ok := dg.replyIndex[messageID]
-	snap := replyIndexSnapshot{}
-	if pruned > 0 {
-		snap = dg.snapshotReplyIndexLocked()
-	}
 	dg.replyMu.Unlock()
 
-	if pruned > 0 {
-		dg.dumpReplyIndexSnapshot(snap)
-	}
-
 	return ctx, ok
-}
-
-func (dg *Gateway) snapshotReplyIndexLocked() replyIndexSnapshot {
-	replies := make(map[string]replyContextRecord, len(dg.replyIndex))
-	for messageID, ctx := range dg.replyIndex {
-		replies[messageID] = replyContextRecord{
-			SessionKey: ctx.SessionKey,
-			ChannelID:  ctx.ChannelID,
-			SenderID:   ctx.SenderID,
-			CreatedAt:  ctx.CreatedAt.UTC().Format(time.RFC3339),
-		}
-	}
-
-	return replyIndexSnapshot{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		Replies:     replies,
-	}
-}
-
-func (dg *Gateway) dumpReplyIndexSnapshot(snap replyIndexSnapshot) {
-	if dg.DebugDumpPath == "" {
-		return
-	}
-
-	if err := memory.WriteSection(dg.DebugDumpPath, "discord_reply_index", snap); err != nil {
-		dg.Log.Warn("Discord reply index: failed to write debug snapshot to %q: %v", dg.DebugDumpPath, err)
-		return
-	}
-
-	dg.Log.Debug("Discord reply index: wrote debug snapshot section to %q", dg.DebugDumpPath)
 }
 
 func (dg *Gateway) pruneReplyIndexLocked() int {
@@ -405,6 +351,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		Channel:      "discord",
 		ChatID:       msg.ChannelID,
 		SenderID:     msg.Author.ID,
+		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
 		StreamFunc:   nil,

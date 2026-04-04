@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/debug"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
@@ -64,14 +65,16 @@ type AgentResponse struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient    ollama.Chatter
-	registry      *tools.Registry
-	memory        *memory.Store
-	budget        ContextBudget
-	model         string
-	soul          *soulmemory.Store
-	maxIterations int
-	log           *config.Logger
+	chatClient      ollama.Chatter
+	registry        *tools.Registry
+	memory          *memory.Store
+	budget          ContextBudget
+	model           string
+	soul            *soulmemory.Store
+	summarizer      *OllamaSummarizer
+	promptDebugPath string // directory for per-request prompt debug dumps; empty disables
+	maxIterations   int
+	log             *config.Logger
 }
 
 // NewAgent initializes the Agent with an Ollama chat client, tool registry, model name,
@@ -84,18 +87,37 @@ func NewAgent(
 	budget ContextBudget,
 	maxIterations int,
 	memoryStore *memory.Store,
+	promptDebugPath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
-		chatClient:    chatClient,
-		registry:      registry,
-		memory:        memoryStore,
-		budget:        budget,
-		model:         model,
-		soul:          soul,
-		maxIterations: maxIterations,
-		log:           log,
+		chatClient:      chatClient,
+		registry:        registry,
+		memory:          memoryStore,
+		budget:          budget,
+		model:           model,
+		soul:            soul,
+		summarizer:      NewOllamaSummarizer(chatClient, model, log),
+		promptDebugPath: promptDebugPath,
+		maxIterations:   maxIterations,
+		log:             log,
 	}
+}
+
+// msgsToTurns converts a flat interleaved user/assistant ChatMessage slice
+// (as returned by memory.History) back into a []memory.Turn slice suitable
+// for summarization. Messages must be in user/assistant pairs; odd-length
+// slices are truncated to the nearest complete pair.
+func msgsToTurns(msgs []ollama.ChatMessage) []memory.Turn {
+	n := (len(msgs) / 2) * 2 // round down to even
+	turns := make([]memory.Turn, 0, n/2)
+	for i := 0; i+1 < n; i += 2 {
+		turns = append(turns, memory.Turn{
+			User:      msgs[i],
+			Assistant: msgs[i+1],
+		})
+	}
+	return turns
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.
@@ -139,11 +161,15 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 // so that tools such as persistent_memory can identify the user without needing
 // the session key. An empty senderID disables user-scoped tool behaviour.
 //
+// displayName is the human-readable name for the sender (e.g. a Discord username).
+// If non-empty it is injected into the system prompt so the model knows who it is
+// speaking with without requiring a tool call.
+//
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Processing request (session=%q sender=%q): %q", sessionKey, senderID, truncate(userPrompt, 100))
+func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	a.log.Debug("Processing request (session=%q sender=%q display=%q): %q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -159,21 +185,95 @@ func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, s
 		a.log.Warn("Failed to read soul file: %v", soulErr)
 	}
 
-	// Inject the real-time date into the system prompt
-	dynamicSystemPrompt := fmt.Sprintf("%s\n\nCurrent Date and Time: %s",
-		soulContent,
-		time.Now().Format(time.RFC1123),
-	)
+	// Build the dynamic system prompt: soul + timestamp + speaker identity.
+	// User memory is not injected automatically — the model retrieves it via
+	// the persistent_memory tool when needed.
+	var promptParts []string
+	promptParts = append(promptParts, soulContent)
+	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
 
-	// Retrieve conversation history for this session, then trim the oldest turn
-	// pairs until the estimated prompt fits the active model's context budget.
-	history := a.memory.History(sessionKey)
+	if senderID != "" {
+		if displayName != "" {
+			promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s (ID: %s).", displayName, senderID))
+		} else {
+			promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with user ID: %s.", senderID))
+		}
+	}
+
+	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
+
+	// Retrieve conversation history for this session. If retention pruning
+	// removed turns, summarize them and persist the rolling summary so the
+	// model retains the gist of older context.
+	history, prunedTurns, existingSummary := a.memory.HistoryWithPruneInfo(sessionKey)
+
+	if len(prunedTurns) > 0 {
+		a.log.Debug("Memory: %d turn(s) pruned from session %q; generating rolling summary", len(prunedTurns), sessionKey)
+		newSummary, sumErr := a.summarizer.Summarize(ctx, existingSummary, prunedTurns)
+		if sumErr != nil {
+			a.log.Warn("Failed to summarize pruned turns for session %q: %v", sessionKey, sumErr)
+		} else {
+			a.memory.SetSummary(sessionKey, newSummary)
+			existingSummary = newSummary
+		}
+	}
+
+	// If there is a rolling summary from prior pruned turns, inject it into
+	// the system prompt so the model has context beyond the active window.
+	if existingSummary != "" {
+		dynamicSystemPrompt += "\n\n## Earlier Conversation Summary\n" + existingSummary
+	}
+
+	// Trim the oldest turn pairs until the estimated prompt fits the active
+	// model's context budget.
 	trimmedHistory, prune := PruneHistoryToFit(a.budget, dynamicSystemPrompt, history, userPrompt, a.registry.OllamaTools())
-	a.memory.RecordPromptEstimate(sessionKey, prune.EstimatedBefore, prune.EstimatedAfter)
+
+	// If context budget pruning removed additional pairs, summarize those too
+	// and merge them into the rolling summary.
+	if prune.RemovedPairs > 0 && len(history) >= prune.RemovedPairs*2 {
+		budgetPrunedMsgs := history[:prune.RemovedPairs*2]
+		budgetPrunedTurns := msgsToTurns(budgetPrunedMsgs)
+		a.log.Debug("Context budget: %d turn pair(s) pruned for budget; summarizing for session %q", prune.RemovedPairs, sessionKey)
+		mergedSummary, sumErr := a.summarizer.Summarize(ctx, existingSummary, budgetPrunedTurns)
+		if sumErr != nil {
+			a.log.Warn("Failed to summarize budget-pruned turns for session %q: %v", sessionKey, sumErr)
+		} else {
+			a.memory.SetSummary(sessionKey, mergedSummary)
+			// Update the system prompt to include the freshly merged summary
+			if existingSummary != mergedSummary {
+				idx := strings.Index(dynamicSystemPrompt, "\n\n## Earlier Conversation Summary\n")
+				if idx >= 0 {
+					dynamicSystemPrompt = dynamicSystemPrompt[:idx]
+				}
+				dynamicSystemPrompt += "\n\n## Earlier Conversation Summary\n" + mergedSummary
+			}
+		}
+	}
+
 	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
 	messages = append(messages, trimmedHistory...)
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt})
+
+	// Write a full prompt debug dump when PROMPT_DEBUG_PATH is set.
+	if a.promptDebugPath != "" {
+		if dumpErr := debug.DumpPrompt(
+			a.promptDebugPath,
+			sessionKey,
+			a.model,
+			messages,
+			a.registry.OllamaTools(),
+			a.budget.ContextWindow,
+			a.budget.PromptBudget(),
+			prune.EstimatedBefore,
+			prune.EstimatedAfter,
+			prune.RemovedPairs,
+		); dumpErr != nil {
+			a.log.Warn("Prompt debug: failed to write dump: %v", dumpErr)
+		} else {
+			a.log.Debug("Prompt debug: wrote dump to %s", a.promptDebugPath)
+		}
+	}
 
 	if len(history) > 0 {
 		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(history), sessionKey)
@@ -202,6 +302,11 @@ func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, s
 	// totalToolCalls tracks how many tool executions have fired this request.
 	// Caps total tool results to protect the model's context window from bloat.
 	totalToolCalls := 0
+
+	// toolAnnotations collects brief notes about tools used this request.
+	// These are appended to the stored assistant message so future turns
+	// show what tools were called without ballooning history size.
+	var toolAnnotations []string
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -287,6 +392,8 @@ func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, s
 					totalToolCalls++
 					toolContent = result
 					a.log.Debug("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
+					// Record a brief annotation for history storage.
+					toolAnnotations = append(toolAnnotations, toolName)
 				}
 			}
 
@@ -321,11 +428,17 @@ func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, s
 	// Persist the user prompt and the assistant's final response to memory.
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
+	// A brief tool-use annotation is appended to the assistant message so future
+	// turns show what tools were called without ballooning history size.
 	if finalContent != "" {
+		storedContent := finalContent
+		if len(toolAnnotations) > 0 {
+			storedContent += "\n\n---\n_Tools used: " + strings.Join(toolAnnotations, ", ") + "_"
+		}
 		a.memory.AppendTurn(
 			sessionKey,
 			ollama.ChatMessage{Role: "user", Content: userPrompt},
-			ollama.ChatMessage{Role: "assistant", Content: finalContent},
+			ollama.ChatMessage{Role: "assistant", Content: storedContent},
 		)
 	}
 

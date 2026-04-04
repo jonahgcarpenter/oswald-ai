@@ -21,6 +21,7 @@ type Request struct {
 	Channel      string                  // Gateway name (e.g., "discord", "websocket")
 	ChatID       string                  // Conversation/room identifier
 	SenderID     string                  // User identifier
+	DisplayName  string                  // Human-readable display name for the sender (optional)
 	SessionKey   string                  // Unique conversation context key
 	Prompt       string                  // The user's message text
 	StreamFunc   func(agent.StreamChunk) // Optional: streaming callback (nil for non-streaming gateways)
@@ -111,7 +112,7 @@ func (b *Broker) runWorker(id int) {
 	for req := range b.requests {
 		b.log.Debug("Broker worker %d: processing request from %s (chatID=%s)", id, req.Channel, req.ChatID)
 
-		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.Prompt, req.StreamFunc)
+		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.StreamFunc)
 
 		req.ResponseChan <- Result{
 			Response: resp,
