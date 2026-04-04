@@ -2,29 +2,6 @@ package ollama
 
 import "context"
 
-// Request represents the payload sent to Ollama's /api/generate endpoint.
-// Deprecated: Use ChatRequest with the Chat method instead.
-type Request struct {
-	Model  string
-	Prompt string
-	System string
-	Format string
-	Stream bool
-}
-
-// Response represents the standardized reply from Ollama's /api/generate endpoint.
-// Deprecated: Use ChatResponse with the Chat method instead.
-type Response struct {
-	Model              string
-	Response           string
-	Thinking           string // populated by thinking/reasoning models; may be empty
-	TotalDuration      int64
-	LoadDuration       int64
-	PromptEvalDuration int64
-	EvalDuration       int64
-	EvalCount          int
-}
-
 // ToolFunction holds the name and arguments of a single tool invocation.
 type ToolFunction struct {
 	Name      string                 `json:"name"`

@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 )
 
 const (
@@ -61,10 +61,13 @@ type MessageCreate struct {
 	} `json:"referenced_message,omitempty"`
 }
 
+// createMessageResponse is the minimal Discord API response for a created message.
 type createMessageResponse struct {
 	ID string `json:"id"`
 }
 
+// replyContext records the routing metadata for a message Oswald sent, so that
+// reply-chain lookups can determine which session and channel a prior message belongs to.
 type replyContext struct {
 	SessionKey string
 	ChannelID  string

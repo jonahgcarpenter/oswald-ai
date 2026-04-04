@@ -5,8 +5,8 @@ import (
 	"net/http"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
 )
 
 // Name returns the human-readable gateway name.

@@ -1,6 +1,6 @@
 package gateway
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+import "github.com/jonahgcarpenter/oswald-ai/internal/broker"
 
 // Service is the contract every gateway implementation must satisfy.
 // Start receives a Broker for submitting agent requests and should block

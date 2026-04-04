@@ -2,35 +2,6 @@ package ollama
 
 import "time"
 
-// GenerateRequest represents the payload sent to Ollama's /api/generate endpoint.
-// Deprecated: Use ChatRequest with /api/chat instead.
-type GenerateRequest struct {
-	Model   string                 `json:"model"`
-	Prompt  string                 `json:"prompt"`
-	Format  string                 `json:"format,omitempty"`
-	Stream  bool                   `json:"stream"`
-	System  string                 `json:"system,omitempty"`
-	Options map[string]interface{} `json:"options,omitempty"`
-}
-
-// GenerateResponse represents Ollama's reply from /api/generate.
-// Deprecated: Use ChatResponse with /api/chat instead.
-type GenerateResponse struct {
-	Model              string    `json:"model"`
-	CreatedAt          time.Time `json:"created_at"`
-	Response           string    `json:"response"`
-	Thinking           string    `json:"thinking,omitempty"`
-	Done               bool      `json:"done"`
-	DoneReason         string    `json:"done_reason,omitempty"`
-	Context            []int     `json:"context,omitempty"`
-	TotalDuration      int64     `json:"total_duration,omitempty"`
-	LoadDuration       int64     `json:"load_duration,omitempty"`
-	PromptEvalCount    int       `json:"prompt_eval_count,omitempty"`
-	PromptEvalDuration int64     `json:"prompt_eval_duration,omitempty"`
-	EvalCount          int       `json:"eval_count,omitempty"`
-	EvalDuration       int64     `json:"eval_duration,omitempty"`
-}
-
 // ollamaToolFunction holds the name and arguments of a tool invocation from the model.
 // Differs from ToolFunction in that Arguments is map[string]interface{} for lazy decoding.
 type ollamaToolFunction struct {

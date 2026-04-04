@@ -12,7 +12,7 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 )
 

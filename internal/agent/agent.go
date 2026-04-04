@@ -98,13 +98,13 @@ func NewAgent(
 	}
 }
 
-// truncate returns s shortened to at most max runes, appending "…" if cut.
+// truncate returns s shortened to at most max runes, appending "..." if cut.
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
 		return s
 	}
-	return string(r[:max]) + "…"
+	return string(r[:max]) + "..."
 }
 
 // mapMetrics converts an *ollama.ChatResponse into a *ModelMetrics summary for reporting.
