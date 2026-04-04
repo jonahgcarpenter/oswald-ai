@@ -5,18 +5,21 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
 )
 
 // NewRegistryFromConfig creates a Registry, loads tool definitions, and wires builtin tools.
-func NewRegistryFromConfig(cfg *config.Config, log *config.Logger) (*Registry, error) {
+// The soul store is created externally and passed in so the agent can also hold a reference
+// to it for reading the system prompt on every request.
+func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, log *config.Logger) (*Registry, error) {
 	registry, err := NewRegistryFromDirectory(cfg.ToolsConfig, log)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := registerBuiltins(registry, cfg, log); err != nil {
+	if err := registerBuiltins(registry, cfg, soulStore, log); err != nil {
 		return nil, err
 	}
 
@@ -25,7 +28,7 @@ func NewRegistryFromConfig(cfg *config.Config, log *config.Logger) (*Registry, e
 }
 
 // registerBuiltins wires all builtin tools into the shared registry.
-func registerBuiltins(registry *Registry, cfg *config.Config, log *config.Logger) error {
+func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, log *config.Logger) error {
 	searchClient := websearch.NewClient(cfg.SearxngURL, log)
 	if err := registry.RegisterHandler("web_search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
 		return fmt.Errorf("failed to initialize web_search tool: %w", err)
@@ -37,6 +40,11 @@ func registerBuiltins(registry *Registry, cfg *config.Config, log *config.Logger
 		return fmt.Errorf("failed to initialize persistent_memory tool: %w", err)
 	}
 	log.Debug("Tools: persistent user memory configured: %s", cfg.UserMemoryPath)
+
+	if err := registry.RegisterHandler("soul_memory", Handler(soulmemory.NewHandler(soulStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize soul_memory tool: %w", err)
+	}
+	log.Debug("Tools: soul memory configured: %s", cfg.SoulPath)
 
 	return nil
 }

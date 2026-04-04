@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 )
 
 func main() {
@@ -23,40 +24,30 @@ func main() {
 	log := config.NewLogger(cfg.LogLevel)
 	log.Debug("Log level: %s", cfg.LogLevel)
 
-	// Load worker agent registry (single GENERAL worker drives the agentic loop)
-	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
-	if err != nil {
-		log.Fatal("Failed to load workers config: %v", err)
+	if cfg.OllamaModel == "" {
+		log.Fatal("Missing required OLLAMA_MODEL environment variable")
 	}
-
-	responseWorker := agent.FindWorker(workers, "GENERAL")
-	if responseWorker == nil {
-		log.Fatal("Workers config is missing required GENERAL worker entry")
-	}
-
-	log.Info("Worker model: %s", responseWorker.ResolveModel())
+	log.Info("Model: %s", cfg.OllamaModel)
 
 	if cfg.OllamaURL == "" {
 		log.Fatal("Missing required OLLAMA_URL configuration")
 	}
 
 	llmClient := ollama.NewClient(cfg.OllamaURL, log)
-	workerBudgets := make(map[string]agent.ContextBudget, len(workers))
-	for i := range workers {
-		budget, budgetErr := agent.ResolveContextBudget(context.Background(), llmClient, &workers[i])
-		if budgetErr != nil {
-			log.Warn("Failed to discover context budget for worker %s (%s): %v", workers[i].Category, workers[i].ResolveModel(), budgetErr)
-		}
-		workerBudgets[workers[i].Category] = budget
-		log.Info("Worker %s context budget: window=%d prompt_budget=%d source=%s", workers[i].Category, budget.ContextWindow, budget.PromptBudget(), budget.Source)
-	}
 
-	budget, ok := workerBudgets[responseWorker.Category]
-	if !ok {
-		log.Fatal("Missing context budget for GENERAL worker")
+	budget, budgetErr := agent.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
+	if budgetErr != nil {
+		log.Warn("Failed to discover context budget for model %s: %v", cfg.OllamaModel, budgetErr)
 	}
+	log.Info("Context budget: window=%d prompt_budget=%d source=%s", budget.ContextWindow, budget.PromptBudget(), budget.Source)
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, log)
+	// The soul store is shared between the tool registry (so the agent can edit
+	// its soul via the soul_memory tool) and the agent itself (so it can read
+	// the current soul on every request as its system prompt).
+	soulStore := soulmemory.NewStore(cfg.SoulPath, log)
+	log.Debug("Soul file: %s", cfg.SoulPath)
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, log)
 	if err != nil {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
@@ -80,7 +71,8 @@ func main() {
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
-		responseWorker,
+		cfg.OllamaModel,
+		soulStore,
 		budget,
 		cfg.MaxIterations,
 		memoryStore,

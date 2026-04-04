@@ -44,9 +44,10 @@ type PruneResult struct {
 	RemovedPairs    int
 }
 
-// ResolveContextBudget discovers a worker's usable context window from Ollama,
-// then applies optional worker-level overrides for stable tuning.
-func ResolveContextBudget(ctx context.Context, client *ollama.Client, worker *WorkerAgent) (ContextBudget, error) {
+// ResolveContextBudget discovers the usable context window for the given model
+// from Ollama's /api/show endpoint. Reserve values fall back to package defaults
+// when Ollama metadata is unavailable.
+func ResolveContextBudget(ctx context.Context, client *ollama.Client, model string) (ContextBudget, error) {
 	budget := ContextBudget{
 		ContextWindow:   defaultContextWindow,
 		ResponseReserve: defaultResponseReserve,
@@ -55,11 +56,9 @@ func ResolveContextBudget(ctx context.Context, client *ollama.Client, worker *Wo
 		Source:          "fallback",
 	}
 
-	showResp, err := client.Show(ctx, ollama.ShowRequest{Model: worker.ResolveModel()})
+	showResp, err := client.Show(ctx, ollama.ShowRequest{Model: model})
 	if err != nil {
-		applyBudgetOverrides(&budget, worker)
-		budget.Source = budgetSourceWithOverride(budget.Source, worker)
-		return budget, fmt.Errorf("failed to discover model context for %s: %w", worker.ResolveModel(), err)
+		return budget, fmt.Errorf("failed to discover model context for %s: %w", model, err)
 	}
 
 	if numCtx, ok := parseNumCtx(showResp.Parameters); ok {
@@ -70,31 +69,7 @@ func ResolveContextBudget(ctx context.Context, client *ollama.Client, worker *Wo
 		budget.Source = "show.model_info." + key
 	}
 
-	applyBudgetOverrides(&budget, worker)
-	budget.Source = budgetSourceWithOverride(budget.Source, worker)
 	return budget, nil
-}
-
-func applyBudgetOverrides(budget *ContextBudget, worker *WorkerAgent) {
-	if worker.ContextWindow > 0 {
-		budget.ContextWindow = worker.ContextWindow
-	}
-	if worker.ResponseReserve > 0 {
-		budget.ResponseReserve = worker.ResponseReserve
-	}
-	if worker.ToolReserve > 0 {
-		budget.ToolReserve = worker.ToolReserve
-	}
-	if worker.SafetyMargin > 0 {
-		budget.SafetyMargin = worker.SafetyMargin
-	}
-}
-
-func budgetSourceWithOverride(source string, worker *WorkerAgent) string {
-	if worker.ContextWindow > 0 || worker.ResponseReserve > 0 || worker.ToolReserve > 0 || worker.SafetyMargin > 0 {
-		return source + "+worker_override"
-	}
-	return source
 }
 
 func parseNumCtx(parameters string) (int, bool) {

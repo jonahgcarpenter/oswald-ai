@@ -16,10 +16,23 @@ Current architecture layers:
 1. **Gateway bootstrap** — shared gateway interface + startup wiring in `internal/gateway/`
 2. **Gateway implementations** — Discord and local WebSocket in `internal/gateway/discord/` and `internal/gateway/websocket/`
 3. **Agent/Orchestration** — single tool-calling loop in `internal/agent/`
-4. **Conversation Memory** — in-memory session store with TTL/max-turn retention plus request-time context-budget pruning in `internal/memory/` and `internal/agent/`
-5. **Persistent User Memory** — per-user Markdown files on disk managed by the `persistent_memory` tool in `internal/tools/usermemory/`
-6. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages such as `internal/tools/websearch/` and `internal/tools/usermemory/`; context key helpers in `internal/tools/toolctx/`
-7. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
+4. **Three-tier Memory Model** — soul identity, per-user persistent facts, and in-session conversation history (see below)
+5. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages; context key helpers in `internal/tools/toolctx/`
+6. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
+
+---
+
+## Three-Tier Memory Model
+
+Oswald maintains three distinct layers of memory, each serving a different question:
+
+| Layer | Storage | Answers | Mutable by agent |
+| ----- | ------- | ------- | ---------------- |
+| **Soul** | `config/soul.md` (disk) | Who is Oswald? (identity, origin, personality, directives) | Yes — via `soul_memory` tool |
+| **User memory** | `data/memory/users/<id>.md` (disk) | Who is this user? (name, preferences, facts they've stated) | Yes — via `persistent_memory` tool |
+| **Chat history** | In-process memory store | What is this conversation about? | Implicitly (turn pairs appended each request) |
+
+The soul file is read fresh on every request, so edits via the `soul_memory` tool take effect on the next message without a restart.
 
 ---
 
@@ -91,19 +104,20 @@ The core runtime path is `(*Agent).Process()` in `internal/agent/agent.go`.
 
 Flow:
 
-1. Retrieve conversation history for the session from `internal/memory`
-2. Build the initial chat request with:
-   - the configured system prompt from `config/workers.yaml`
+1. Read `config/soul.md` fresh via the soul store — this becomes the system prompt
+2. Retrieve conversation history for the session from `internal/memory`
+3. Build the initial chat request with:
+   - the current soul content (plus injected date/time)
    - the retrieved conversation history (user/assistant turn pairs), first pruned by memory retention policy and then pruned to fit the active model's context budget
    - the current user prompt
    - all registered tools from the tool registry
-3. Send the request to Ollama via `internal/ollama`
-4. If the model emits tool calls:
+4. Send the request to Ollama via `internal/ollama`
+5. If the model emits tool calls:
    - execute each registered tool handler
    - append tool results as `tool` messages
    - repeat until the model stops calling tools or `MAX_ITERATIONS` is reached
-5. Persist the user prompt and final assistant response to memory (tool intermediaries excluded)
-6. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
+6. Persist the user prompt and final assistant response to memory (tool intermediaries excluded)
+7. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
 
 ### Conversation Memory
 
@@ -124,7 +138,7 @@ Before each `/api/chat` call, the agent trims the oldest stored turn pairs until
 - Model metadata is discovered from Ollama's `/api/show` endpoint at startup
 - `num_ctx` from the model parameters is preferred when available
 - Model metadata `*.context_length` is used as a fallback
-- Worker config may override the discovered `context_window`, `response_reserve`, `tool_reserve`, and `safety_margin`
+- Reserve values (`response_reserve`, `tool_reserve`, `safety_margin`) fall back to hardcoded package defaults when Ollama metadata provides no override
 - Prompt history is pruned dynamically per request; retention pruning inside `internal/memory` is permanent for expired/overflow turns
 
 **Hybrid Session Key Strategy (Discord gateway):**
@@ -155,9 +169,11 @@ Tools are split into two layers:
   - external API clients
   - handler creation
 
-Current builtin tool:
+Current builtin tools:
 
 - `web_search` in `internal/tools/websearch/`
+- `persistent_memory` in `internal/tools/usermemory/`
+- `soul_memory` in `internal/tools/soulmemory/`
 
 Tool definitions are loaded from `config/tools/*.md`.
 
@@ -188,28 +204,29 @@ There is no longer a generic provider abstraction in the codebase.
 
 ## Key Files & Responsibilities
 
-| File                                    | Purpose                                                            |
-| --------------------------------------- | ------------------------------------------------------------------ |
-| `cmd/agent/main.go`                     | Entrypoint: load config, bootstrap tools and gateways, start agent |
-| `internal/agent/agent.go`               | Core agentic tool-calling loop and response assembly               |
-| `internal/agent/workers.go`             | Load `config/workers.yaml` and resolve workers                     |
-| `internal/config/config.go`             | Environment config loading                                         |
-| `internal/memory/store.go`              | In-memory conversation store with TTL/max-turn retention and history flattening |
-| `internal/memory/dump.go`               | Shared JSON debug snapshot writer used by memory and Discord reply metadata |
-| `internal/ollama/client.go`             | Ollama HTTP client with chat streaming and tool support            |
+| File                                        | Purpose                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------ |
+| `cmd/agent/main.go`                         | Entrypoint: load config, bootstrap tools and gateways, start agent |
+| `internal/agent/agent.go`                   | Core agentic tool-calling loop and response assembly               |
+| `internal/config/config.go`                 | Environment config loading                                         |
+| `internal/memory/store.go`                  | In-memory conversation store with TTL/max-turn retention and history flattening |
+| `internal/memory/dump.go`                   | Shared JSON debug snapshot writer used by memory and Discord reply metadata |
+| `internal/ollama/client.go`                 | Ollama HTTP client with chat streaming and tool support            |
 | `internal/tools/registry.go`                | Generic tool registry and markdown parsing                         |
 | `internal/tools/bootstrap.go`               | Builtin tool bootstrap                                             |
 | `internal/tools/websearch/client.go`        | SearXNG-backed web search client                                   |
 | `internal/tools/websearch/websearch.go`     | Web search handler + shared search types                           |
 | `internal/tools/usermemory/store.go`        | Persistent per-user Markdown file store with per-user locking      |
-| `internal/tools/usermemory/usermemory.go`  | `persistent_memory` tool handler (remember / recall / forget)      |
-| `internal/tools/toolctx/toolctx.go`        | Context key helpers for sender ID injection into tool handlers     |
+| `internal/tools/usermemory/usermemory.go`   | `persistent_memory` tool handler (remember / recall / forget)      |
+| `internal/tools/soulmemory/store.go`        | Single-file soul store with RWMutex for safe concurrent access     |
+| `internal/tools/soulmemory/soulmemory.go`   | `soul_memory` tool handler (read / write / append)                 |
+| `internal/tools/toolctx/toolctx.go`         | Context key helpers for sender ID injection into tool handlers     |
 | `internal/gateway/bootstrap.go`             | Enabled gateway assembly from config                               |
 | `internal/gateway/discord/gateway.go`       | Discord runtime behavior                                           |
 | `internal/gateway/discord/types.go`         | Discord constants and payload structs                              |
 | `internal/gateway/websocket/gateway.go`     | Local WebSocket runtime behavior                                   |
 | `internal/gateway/websocket/types.go`       | WebSocket gateway shared types including `IncomingMessage`         |
-| `config/workers.yaml`                       | Model/system prompt config                                         |
+| `config/soul.md`                            | Agent identity and personality (system prompt); editable at runtime |
 | `config/tools/*.md`                         | Tool schemas exposed to the model                                  |
 
 ---
@@ -263,8 +280,8 @@ if err != nil {
 Logging levels are intentionally opinionated:
 
 - `Debug` — noisy by design; request details, tool execution, iteration state, connection churn
-- `Info` — production-facing operational milestones; startup, enabled tools, enabled gateways, selected worker model
-- `Warn` — degraded but recoverable behavior; skipped work, retries, parse failures, tool failures
+- `Info` — production-facing operational milestones; startup, enabled tools, enabled gateways, selected model
+- `Warn` — degraded but recoverable behavior; skipped work, retries, parse failures, tool failures, soul file modifications
 - `Error` — request or runtime failures that prevented intended behavior
 
 Do not put per-request or per-token chatter at `Info` level.
@@ -300,11 +317,13 @@ Do not put per-request or per-token chatter at `Info` level.
 3. Wire it in `internal/gateway/bootstrap.go`
 4. Do not wire concrete gateways directly in `cmd/agent/main.go`
 
-### Changing Model Behavior
+### Changing the Model
 
-Edit `config/workers.yaml`.
+Set the `OLLAMA_MODEL` environment variable. The model name is passed directly to Ollama — any model available in your local Ollama instance can be used.
 
-At the moment, the only required worker is `GENERAL`, and it drives the entire runtime loop.
+### Changing Oswald's Personality
+
+Edit `config/soul.md` directly, or let the agent do it via the `soul_memory` tool. The file is read fresh on every request, so changes take effect immediately without a restart.
 
 ### Web Search Configuration
 
@@ -330,6 +349,7 @@ Useful debug output includes:
 - agentic loop iteration counts
 - websocket and Discord request handling
 - web search query execution
+- soul file read/write operations
 
 ### Debug Snapshots
 
@@ -352,20 +372,21 @@ go build -o ./tmp/main ./cmd/agent/main.go
 
 ## Environment Configuration
 
-| Variable            | Default                  | Purpose                              |
-| ------------------- | ------------------------ | ------------------------------------ |
-| `PORT`              | `8080`                   | WebSocket gateway port               |
-| `OLLAMA_URL`        | `http://localhost:11434` | Ollama API                           |
-| `SEARXNG_URL`       | `http://localhost:8888`  | SearXNG API                          |
-| `WORKERS_CONFIG`    | `config/workers.yaml`    | Worker definitions                   |
-| `TOOLS_CONFIG`      | `config/tools`           | Tool definitions                     |
-| `DISCORD_TOKEN`     | empty                    | Enables Discord gateway              |
-| `MAX_ITERATIONS`    | `5`                      | Agentic loop cap                     |
-| `LOG_LEVEL`         | `info`                   | Logging verbosity                    |
-| `MEMORY_MAX_TURNS`  | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
-| `MEMORY_MAX_AGE`    | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
-| `MEMORY_DEBUG_DUMP_PATH` | empty               | Unified debug snapshot for memory and gateway reply metadata |
-| `USER_MEMORY_PATH`  | `data/memory/users`      | Directory for persistent per-user Markdown memory files |
+| Variable                 | Default                  | Purpose                              |
+| ------------------------ | ------------------------ | ------------------------------------ |
+| `PORT`                   | `8080`                   | WebSocket gateway port               |
+| `OLLAMA_URL`             | `http://localhost:11434` | Ollama API                           |
+| `OLLAMA_MODEL`           | *(required)*             | Ollama model name; startup fails if empty |
+| `SOUL_PATH`              | `config/soul.md`         | Path to the soul Markdown file       |
+| `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG API                          |
+| `TOOLS_CONFIG`           | `config/tools`           | Tool definitions directory           |
+| `DISCORD_TOKEN`          | empty                    | Enables Discord gateway              |
+| `MAX_ITERATIONS`         | `5`                      | Agentic loop cap                     |
+| `LOG_LEVEL`              | `info`                   | Logging verbosity                    |
+| `MEMORY_MAX_TURNS`       | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
+| `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
+| `MEMORY_DEBUG_DUMP_PATH` | empty                    | Unified debug snapshot for memory and gateway reply metadata |
+| `USER_MEMORY_PATH`       | `data/memory/users`      | Directory for persistent per-user Markdown memory files |
 
 Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus `os.LookupEnv()`.
 
@@ -377,7 +398,6 @@ Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus
 | ------------------------------ | --------------------------------------------------- |
 | `github.com/gorilla/websocket` | Discord WebSocket client and local WebSocket server |
 | `github.com/joho/godotenv`     | `.env` loading                                      |
-| `gopkg.in/yaml.v3`             | Worker config parsing                               |
 
 After dependency changes, run `go mod tidy`.
 
@@ -385,10 +405,10 @@ After dependency changes, run `go mod tidy`.
 
 ## Known Limitations
 
-- No persistent conversation history (conversation memory is in-process only; restarts clear all sessions — per-user fact memory via `persistent_memory` tool does survive restarts)
+- No persistent conversation history (conversation memory is in-process only; restarts clear all sessions — per-user fact memory via `persistent_memory` tool and soul identity via `soul_memory` tool both survive restarts)
 - No session resumption for Discord reconnects
 - WebSocket API has no authentication layer
-- Two builtin tools are currently implemented: `web_search` and `persistent_memory`
+- Three builtin tools: `web_search`, `persistent_memory`, and `soul_memory`
 - Ollama is the only model backend
 
 ---

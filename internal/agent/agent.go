@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/toolctx"
 )
 
@@ -68,18 +69,18 @@ type Agent struct {
 	memory        *memory.Store
 	budget        ContextBudget
 	model         string
-	systemPrompt  string
+	soul          *soulmemory.Store
 	maxIterations int
 	log           *config.Logger
 }
 
-// NewAgent initializes the Agent with an Ollama chat client, tool registry, worker config,
-// conversation memory store, iteration cap, and logger. The single worker drives the
-// entire agentic loop.
+// NewAgent initializes the Agent with an Ollama chat client, tool registry, model name,
+// soul store, conversation memory store, iteration cap, and logger.
 func NewAgent(
 	chatClient ollama.Chatter,
 	registry *tools.Registry,
-	worker *WorkerAgent,
+	model string,
+	soul *soulmemory.Store,
 	budget ContextBudget,
 	maxIterations int,
 	memoryStore *memory.Store,
@@ -90,8 +91,8 @@ func NewAgent(
 		registry:      registry,
 		memory:        memoryStore,
 		budget:        budget,
-		model:         worker.ResolveModel(),
-		systemPrompt:  worker.SystemPrompt,
+		model:         model,
+		soul:          soul,
 		maxIterations: maxIterations,
 		log:           log,
 	}
@@ -151,9 +152,16 @@ func (a *Agent) Process(sessionKey string, senderID string, userPrompt string, s
 	// which user this request belongs to without coupling to the session key.
 	ctx = toolctx.WithSenderID(ctx, senderID)
 
+	// Read the soul file fresh on every request so that any edits the agent
+	// made via the soul_memory tool take effect immediately.
+	soulContent, soulErr := a.soul.Read()
+	if soulErr != nil {
+		a.log.Warn("Failed to read soul file: %v", soulErr)
+	}
+
 	// Inject the real-time date into the system prompt
 	dynamicSystemPrompt := fmt.Sprintf("%s\n\nCurrent Date and Time: %s",
-		a.systemPrompt,
+		soulContent,
 		time.Now().Format(time.RFC1123),
 	)
 

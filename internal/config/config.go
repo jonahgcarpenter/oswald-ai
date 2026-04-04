@@ -12,7 +12,8 @@ import (
 type Config struct {
 	Port                string        // HTTP port for the WebSocket gateway (default: "8080")
 	OllamaURL           string        // Ollama API base URL (default: "http://localhost:11434")
-	WorkersConfig       string        // Path to the workers YAML file (default: "config/workers.yaml")
+	OllamaModel         string        // Ollama model name; required — startup fails if empty
+	SoulPath            string        // Path to the soul Markdown file (default: "config/soul.md")
 	ToolsConfig         string        // Path to the tools directory (default: "config/tools")
 	DiscordToken        string        // Discord bot token; Discord gateway disabled if empty
 	SearxngURL          string        // SearXNG base URL for web search (default: "http://localhost:8888")
@@ -34,7 +35,8 @@ func Load() *Config {
 	return &Config{
 		Port:                getEnv("PORT", "8080"),
 		OllamaURL:           getEnv("OLLAMA_URL", "http://localhost:11434"),
-		WorkersConfig:       getEnv("WORKERS_CONFIG", "config/workers.yaml"),
+		OllamaModel:         getEnv("OLLAMA_MODEL", "jaahas/qwen3.5-uncensored:4b"),
+		SoulPath:            getEnv("SOUL_PATH", "config/soul.md"),
 		ToolsConfig:         getEnv("TOOLS_CONFIG", "config/tools"),
 		DiscordToken:        getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:          getEnv("SEARXNG_URL", "http://localhost:8888"),
