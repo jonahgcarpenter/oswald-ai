@@ -45,7 +45,6 @@ The model name and system prompt both live there, so behavior changes do not req
 | `OLLAMA_URL`             | `http://localhost:11434` | Ollama base URL                                                                 |
 | `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG base URL                                                                |
 | `WORKERS_CONFIG`         | `config/workers.yaml`    | Worker config path                                                              |
-| `TOOLS_CONFIG`           | `config/tools`           | Tool definition directory                                                       |
 | `DISCORD_TOKEN`          | empty                    | Enables Discord gateway when set                                                |
 | `MAX_ITERATIONS`         | `5`                      | Max tool-call iterations per request                                            |
 | `LOG_LEVEL`              | `info`                   | `debug`, `info`, `warn`, `error`                                                |

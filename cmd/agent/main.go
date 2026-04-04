@@ -44,8 +44,8 @@ func main() {
 	// The soul store is shared between the tool registry (so the agent can edit
 	// its soul via the soul_memory tool) and the agent itself (so it can read
 	// the current soul on every request as its system prompt).
-	soulStore := soulmemory.NewStore(cfg.SoulPath, log)
-	log.Debug("Soul file: %s", cfg.SoulPath)
+	soulStore := soulmemory.NewStore(config.DefaultSoulPath, log)
+	log.Debug("Soul file: %s", config.DefaultSoulPath)
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, log)
 	if err != nil {

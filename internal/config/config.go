@@ -13,8 +13,6 @@ type Config struct {
 	Port                string        // HTTP port for the WebSocket gateway (default: "8080")
 	OllamaURL           string        // Ollama API base URL (default: "http://localhost:11434")
 	OllamaModel         string        // Ollama model name; required — startup fails if empty
-	SoulPath            string        // Path to the soul Markdown file (default: "config/soul.md")
-	ToolsConfig         string        // Path to the tools directory (default: "config/tools")
 	DiscordToken        string        // Discord bot token; Discord gateway disabled if empty
 	SearxngURL          string        // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxIterations       int           // Maximum tool-call iterations in the agentic loop (default: 5)
@@ -23,8 +21,13 @@ type Config struct {
 	MemoryDebugDumpPath string        // Optional JSON snapshot path for memory debugging
 	MemoryMaxTurns      int           // Maximum retained conversation turn pairs per session; 0 disables the limit
 	MemoryMaxAge        time.Duration // Maximum age for retained conversation turn pairs; 0 disables expiry
-	UserMemoryPath      string        // Directory for persistent per-user Markdown memory files
 }
+
+const (
+	DefaultSoulPath       = "config/soul.md"
+	DefaultToolsConfigDir = "config/tools"
+	DefaultUserMemoryPath = "data/memory/users"
+)
 
 // Load reads configuration from environment variables, with .env file support.
 // Missing variables fall back to sensible defaults.
@@ -36,8 +39,6 @@ func Load() *Config {
 		Port:                getEnv("PORT", "8080"),
 		OllamaURL:           getEnv("OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:         getEnv("OLLAMA_MODEL", "jaahas/qwen3.5-uncensored:4b"),
-		SoulPath:            getEnv("SOUL_PATH", "config/soul.md"),
-		ToolsConfig:         getEnv("TOOLS_CONFIG", "config/tools"),
 		DiscordToken:        getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:          getEnv("SEARXNG_URL", "http://localhost:8888"),
 		MaxIterations:       getEnvInt("MAX_ITERATIONS", 5),
@@ -46,7 +47,6 @@ func Load() *Config {
 		MemoryDebugDumpPath: getEnv("MEMORY_DEBUG_DUMP_PATH", ""),
 		MemoryMaxTurns:      getEnvInt("MEMORY_MAX_TURNS", 10),
 		MemoryMaxAge:        getEnvDuration("MEMORY_MAX_AGE", 0),
-		UserMemoryPath:      getEnv("USER_MEMORY_PATH", "data/memory/users"),
 	}
 }
 

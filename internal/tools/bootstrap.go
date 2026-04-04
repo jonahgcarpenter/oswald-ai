@@ -14,7 +14,7 @@ import (
 // The soul store is created externally and passed in so the agent can also hold a reference
 // to it for reading the system prompt on every request.
 func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, log *config.Logger) (*Registry, error) {
-	registry, err := NewRegistryFromDirectory(cfg.ToolsConfig, log)
+	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log)
 	if err != nil {
 		return nil, err
 	}
@@ -35,16 +35,16 @@ func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmem
 	}
 	log.Debug("Tools: web search client configured: %s", cfg.SearxngURL)
 
-	memStore := usermemory.NewStore(cfg.UserMemoryPath, log)
+	memStore := usermemory.NewStore(config.DefaultUserMemoryPath, log)
 	if err := registry.RegisterHandler("persistent_memory", Handler(usermemory.NewHandler(memStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize persistent_memory tool: %w", err)
 	}
-	log.Debug("Tools: persistent user memory configured: %s", cfg.UserMemoryPath)
+	log.Debug("Tools: persistent user memory configured: %s", config.DefaultUserMemoryPath)
 
 	if err := registry.RegisterHandler("soul_memory", Handler(soulmemory.NewHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul_memory tool: %w", err)
 	}
-	log.Debug("Tools: soul memory configured: %s", cfg.SoulPath)
+	log.Debug("Tools: soul memory configured: %s", config.DefaultSoulPath)
 
 	return nil
 }

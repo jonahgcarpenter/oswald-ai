@@ -377,18 +377,15 @@ go build -o ./tmp/main ./cmd/agent/main.go
 | `PORT`                   | `8080`                   | WebSocket gateway port               |
 | `OLLAMA_URL`             | `http://localhost:11434` | Ollama API                           |
 | `OLLAMA_MODEL`           | *(required)*             | Ollama model name; startup fails if empty |
-| `SOUL_PATH`              | `config/soul.md`         | Path to the soul Markdown file       |
 | `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG API                          |
-| `TOOLS_CONFIG`           | `config/tools`           | Tool definitions directory           |
 | `DISCORD_TOKEN`          | empty                    | Enables Discord gateway              |
 | `MAX_ITERATIONS`         | `5`                      | Agentic loop cap                     |
 | `LOG_LEVEL`              | `info`                   | Logging verbosity                    |
 | `MEMORY_MAX_TURNS`       | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
 | `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
 | `MEMORY_DEBUG_DUMP_PATH` | empty                    | Unified debug snapshot for memory and gateway reply metadata |
-| `USER_MEMORY_PATH`       | `data/memory/users`      | Directory for persistent per-user Markdown memory files |
 
-Implementation lives in `internal/config/config.go` using `godotenv.Load()` plus `os.LookupEnv()`.
+Paths for the soul file, tool definitions, and persistent user memory are hardcoded in `internal/config/config.go`.
 
 ---
 
