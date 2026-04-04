@@ -7,7 +7,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
-) // Name returns the human-readable gateway name.
+)
+
+// Name returns the human-readable gateway name.
 func (wg *Gateway) Name() string {
 	return "Websocket"
 }

@@ -9,5 +9,6 @@ type Service interface {
 	// Start should block and run the gateway.
 	// Returning an error means it crashed or failed to start.
 	Start(b *broker.Broker) error
+	// Name returns the human-readable name of the gateway implementation.
 	Name() string
 }
