@@ -115,7 +115,7 @@ Flow:
 5. If the model emits tool calls:
    - execute each registered tool handler
    - append tool results as `tool` messages
-   - repeat until the model stops calling tools or `MAX_ITERATIONS` is reached
+   - repeat until the model stops calling tools, the request times out, or consecutive tool failures exhaust `MAX_TOOL_FAILURE_RETRIES`
 6. Persist the user prompt and final assistant response to memory (tool intermediaries excluded)
 7. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
 
@@ -152,8 +152,8 @@ Before each `/api/chat` call, the agent estimates the prompt size after TTL/max-
 
 Important runtime limits:
 
-- `MAX_ITERATIONS` defaults to `5`
-- total executed tool calls are capped by `maxIntelResults` in `internal/agent/agent.go`
+- `MAX_TOOL_FAILURE_RETRIES` defaults to `3`
+- successful tool calls are not capped per request; only consecutive tool execution failures are limited
 - overall request timeout is `3*time.Minute` in `Process()`
 
 ### Tools
@@ -328,8 +328,7 @@ Edit `config/soul.md` directly, or let the agent do it via the `soul_memory` too
 ### Web Search Configuration
 
 - SearXNG base URL comes from `SEARXNG_URL`
-- Tool-call iteration limit comes from `MAX_ITERATIONS`
-- tool-result cap is `maxIntelResults` in `internal/agent/agent.go`
+- consecutive tool failure retry limit comes from `MAX_TOOL_FAILURE_RETRIES`
 
 ---
 
@@ -379,7 +378,7 @@ go build -o ./tmp/main ./cmd/agent/main.go
 | `OLLAMA_MODEL`           | *(required)*             | Ollama model name; startup fails if empty |
 | `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG API                          |
 | `DISCORD_TOKEN`          | empty                    | Enables Discord gateway              |
-| `MAX_ITERATIONS`         | `5`                      | Agentic loop cap                     |
+| `MAX_TOOL_FAILURE_RETRIES` | `3`                    | Max consecutive tool execution failures before tools are disabled for the request |
 | `LOG_LEVEL`              | `info`                   | Logging verbosity                    |
 | `MEMORY_MAX_TURNS`       | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
 | `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |

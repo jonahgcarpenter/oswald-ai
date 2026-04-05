@@ -81,7 +81,7 @@ func main() {
 		cfg.OllamaModel,
 		soulStore,
 		budget,
-		cfg.MaxIterations,
+		cfg.MaxToolFailureRetries,
 		memoryStore,
 		cfg.PromptDebugPath,
 		log,

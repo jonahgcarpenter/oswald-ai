@@ -15,14 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 )
 
-const (
-	// maxIntelResults caps the total number of tool result payloads accumulated
-	// across all tool calls in a single Process() invocation, to protect the
-	// model's context window from bloat.
-	maxIntelResults = 5
-
-	compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
-)
+const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
 type StreamChunkType string
@@ -67,42 +60,42 @@ type AgentResponse struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient      ollama.Chatter
-	registry        *tools.Registry
-	memory          *memory.Store
-	budget          memory.ContextBudget
-	model           string
-	soul            *soulmemory.Store
-	summarizer      *OllamaSummarizer
-	promptDebugPath string // directory for per-request prompt debug dumps; empty disables
-	maxIterations   int
-	log             *config.Logger
+	chatClient            ollama.Chatter
+	registry              *tools.Registry
+	memory                *memory.Store
+	budget                memory.ContextBudget
+	model                 string
+	soul                  *soulmemory.Store
+	summarizer            *OllamaSummarizer
+	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
+	maxToolFailureRetries int
+	log                   *config.Logger
 }
 
 // NewAgent initializes the Agent with an Ollama chat client, tool registry, model name,
-// soul store, conversation memory store, iteration cap, and logger.
+// soul store, conversation memory store, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient ollama.Chatter,
 	registry *tools.Registry,
 	model string,
 	soul *soulmemory.Store,
 	budget memory.ContextBudget,
-	maxIterations int,
+	maxToolFailureRetries int,
 	memoryStore *memory.Store,
 	promptDebugPath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
-		chatClient:      chatClient,
-		registry:        registry,
-		memory:          memoryStore,
-		budget:          budget,
-		model:           model,
-		soul:            soul,
-		summarizer:      NewOllamaSummarizer(chatClient, model, log),
-		promptDebugPath: promptDebugPath,
-		maxIterations:   maxIterations,
-		log:             log,
+		chatClient:            chatClient,
+		registry:              registry,
+		memory:                memoryStore,
+		budget:                budget,
+		model:                 model,
+		soul:                  soul,
+		summarizer:            NewOllamaSummarizer(chatClient, model, log),
+		promptDebugPath:       promptDebugPath,
+		maxToolFailureRetries: maxToolFailureRetries,
+		log:                   log,
 	}
 }
 
@@ -201,8 +194,8 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
-// (up to maxIterations) before generating its final response. Thinking tokens,
-// content tokens, and agent status messages are streamed via streamCallback if provided.
+// before generating its final response. Thinking tokens, content tokens, and
+// agent status messages are streamed via streamCallback if provided.
 //
 // sessionKey identifies the conversation session for memory retrieval and
 // persistence. Passing an empty sessionKey disables memory for this request
@@ -317,9 +310,9 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
 
-	// totalToolCalls tracks how many tool executions have fired this request.
-	// Caps total tool results to protect the model's context window from bloat.
-	totalToolCalls := 0
+	// consecutiveToolFailures tracks back-to-back tool execution failures for
+	// this request. A successful tool call resets the counter.
+	consecutiveToolFailures := 0
 
 	// toolAnnotations collects brief notes about tools used this request.
 	// These are appended to the stored assistant message so future turns
@@ -344,10 +337,12 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	}
 
 	var lastResp *ollama.ChatResponse
+	toolFailureBudgetExhausted := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
-	// The loop exits when the model stops issuing tool calls or the iteration cap is hit.
-	for iteration := 1; iteration <= a.maxIterations; iteration++ {
+	// The loop exits when the model stops issuing tool calls, the request context
+	// expires, or consecutive tool execution failures exhaust the retry budget.
+	for iteration := 1; ; iteration++ {
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
@@ -370,9 +365,9 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				a.model, prune.EstimatedAfter, resp.PromptEvalCount)
 		}
 
-		a.log.Debug("Agentic loop iteration %d/%d: tool_calls=%d thinking_len=%d content_len=%d",
-			iteration, a.maxIterations, len(resp.Message.ToolCalls),
-			len(resp.Message.Thinking), len(resp.Message.Content))
+		a.log.Debug("Agentic loop iteration %d: tool_calls=%d thinking_len=%d content_len=%d failure_streak=%d",
+			iteration, len(resp.Message.ToolCalls),
+			len(resp.Message.Thinking), len(resp.Message.Content), consecutiveToolFailures)
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
@@ -396,23 +391,18 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 			var toolContent string
 
-			if totalToolCalls >= maxIntelResults {
-				// Cap reached — inform the model rather than silently dropping results.
-				a.log.Warn("Tool call cap (%d) reached, skipping %q", maxIntelResults, toolName)
-				toolContent = fmt.Sprintf("Tool call cap of %d reached. No further tool calls will be executed.", maxIntelResults)
+			result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
+			if execErr != nil {
+				// Fail gracefully: inject the error so the model can recover.
+				consecutiveToolFailures++
+				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
+				toolContent = fmt.Sprintf("Error: %v", execErr)
 			} else {
-				result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
-				if execErr != nil {
-					// Fail gracefully: inject the error so the model can recover.
-					a.log.Warn("Tool %q execution failed: %v", toolName, execErr)
-					toolContent = fmt.Sprintf("Error: %v", execErr)
-				} else {
-					totalToolCalls++
-					toolContent = result
-					a.log.Debug("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
-					// Record a brief annotation for history storage.
-					toolAnnotations = append(toolAnnotations, toolName)
-				}
+				consecutiveToolFailures = 0
+				toolContent = result
+				a.log.Debug("Tool %q executed successfully", toolName)
+				// Record a brief annotation for history storage.
+				toolAnnotations = append(toolAnnotations, toolName)
 			}
 
 			messages = append(messages, ollama.ChatMessage{
@@ -420,12 +410,37 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				ToolName: toolName,
 				Content:  toolContent,
 			})
+
+			if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
+				a.log.Warn("Agentic loop: stopping after %d consecutive tool execution failures", consecutiveToolFailures)
+				toolFailureBudgetExhausted = true
+				break
+			}
+		}
+
+		if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
+			break
 		}
 	}
 
-	// If the loop exited at the cap, log a warning.
-	if lastResp != nil && len(lastResp.Message.ToolCalls) > 0 {
-		a.log.Warn("Agentic loop: max iterations (%d) reached without final response", a.maxIterations)
+	if toolFailureBudgetExhausted {
+		accumulatedContent.Reset()
+		finalReq := req
+		finalReq.Messages = messages
+		finalReq.Tools = nil
+
+		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
+		if err != nil {
+			a.log.Error("Model %s failed while finishing after tool failures: %v", a.model, err)
+			return &AgentResponse{
+				Model:    a.model,
+				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
+				Error:    fmt.Sprintf("Model failed: %v", err),
+			}, nil
+		}
+
+		lastResp = resp
+		a.log.Debug("Agentic loop complete after disabling tools following %d consecutive tool failures", consecutiveToolFailures)
 	}
 
 	a.log.Debug("Response complete: model=%s", a.model)

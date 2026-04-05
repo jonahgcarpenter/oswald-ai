@@ -46,7 +46,7 @@ The model name and system prompt both live there, so behavior changes do not req
 | `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG base URL                                                                |
 | `WORKERS_CONFIG`         | `config/workers.yaml`    | Worker config path                                                              |
 | `DISCORD_TOKEN`          | empty                    | Enables Discord gateway when set                                                |
-| `MAX_ITERATIONS`         | `5`                      | Max tool-call iterations per request                                            |
+| `MAX_TOOL_FAILURE_RETRIES` | `3`                    | Max consecutive tool execution failures before tools are disabled for the request |
 | `LOG_LEVEL`              | `info`                   | `debug`, `info`, `warn`, `error`                                                |
 | `MEMORY_MAX_TURNS`       | `0`                      | Max retained memory turn pairs per session; `0` disables the cap                |
 | `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
