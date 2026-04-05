@@ -45,7 +45,7 @@ func Load() *Config {
 		WorkerPoolSize:  getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:        ParseLevel(getEnv("LOG_LEVEL", "info")),
 		MemoryMaxTurns:  getEnvInt("MEMORY_MAX_TURNS", 10),
-		MemoryMaxAge:    getEnvDuration("MEMORY_MAX_AGE", 0),
+		MemoryMaxAge:    getEnvDuration("MEMORY_MAX_AGE", 30*time.Minute),
 		PromptDebugPath: getEnv("PROMPT_DEBUG_PATH", ""),
 	}
 }
