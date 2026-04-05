@@ -20,6 +20,8 @@ const (
 	// across all tool calls in a single Process() invocation, to protect the
 	// model's context window from bloat.
 	maxIntelResults = 5
+
+	compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -68,7 +70,7 @@ type Agent struct {
 	chatClient      ollama.Chatter
 	registry        *tools.Registry
 	memory          *memory.Store
-	budget          ContextBudget
+	budget          memory.ContextBudget
 	model           string
 	soul            *soulmemory.Store
 	summarizer      *OllamaSummarizer
@@ -84,7 +86,7 @@ func NewAgent(
 	registry *tools.Registry,
 	model string,
 	soul *soulmemory.Store,
-	budget ContextBudget,
+	budget memory.ContextBudget,
 	maxIterations int,
 	memoryStore *memory.Store,
 	promptDebugPath string,
@@ -102,22 +104,6 @@ func NewAgent(
 		maxIterations:   maxIterations,
 		log:             log,
 	}
-}
-
-// msgsToTurns converts a flat interleaved user/assistant ChatMessage slice
-// (as returned by memory.History) back into a []memory.Turn slice suitable
-// for summarization. Messages must be in user/assistant pairs; odd-length
-// slices are truncated to the nearest complete pair.
-func msgsToTurns(msgs []ollama.ChatMessage) []memory.Turn {
-	n := (len(msgs) / 2) * 2 // round down to even
-	turns := make([]memory.Turn, 0, n/2)
-	for i := 0; i+1 < n; i += 2 {
-		turns = append(turns, memory.Turn{
-			User:      msgs[i],
-			Assistant: msgs[i+1],
-		})
-	}
-	return turns
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.
@@ -145,6 +131,72 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 		EvalDuration:       resp.EvalDuration / 1e6,
 		TokensPerSecond:    tps,
 	}
+}
+
+func makeCompactedTurn(summary string, now time.Time) memory.Turn {
+	return memory.Turn{
+		CreatedAt: now.UTC(),
+		User: ollama.ChatMessage{
+			Role:    "user",
+			Content: compactedHistoryUserPrompt,
+		},
+		Assistant: ollama.ChatMessage{
+			Role:    "assistant",
+			Content: summary,
+		},
+	}
+}
+
+func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turns []memory.Turn, userPrompt string) ([]memory.Turn, memory.PromptPruneResult, bool) {
+	tools := a.registry.OllamaTools()
+	currentTurns := append([]memory.Turn(nil), turns...)
+	persisted := false
+	result := memory.PromptPruneResult{
+		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, tools),
+	}
+	lastEstimate := result.EstimatedBefore
+
+	for len(currentTurns) > 0 {
+		history := memory.FlattenTurns(currentTurns)
+		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, tools)
+		lastEstimate = estimate
+		if estimate <= a.budget.PromptBudget() {
+			result.EstimatedAfter = estimate
+			return currentTurns, result, persisted
+		}
+
+		compacted := false
+		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
+			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
+			if err != nil {
+				a.log.Warn("Failed to compact %d turn(s) for prompt budget: %v", compactCount, err)
+				continue
+			}
+
+			replacement := makeCompactedTurn(summary, time.Now())
+			candidateTurns := make([]memory.Turn, 0, 1+len(currentTurns)-compactCount)
+			candidateTurns = append(candidateTurns, replacement)
+			candidateTurns = append(candidateTurns, currentTurns[compactCount:]...)
+
+			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, tools)
+			if candidateEstimate >= estimate && compactCount < len(currentTurns) {
+				continue
+			}
+
+			currentTurns = candidateTurns
+			persisted = true
+			result.RemovedPairs += compactCount
+			compacted = true
+			break
+		}
+
+		if !compacted {
+			break
+		}
+	}
+
+	result.EstimatedAfter = lastEstimate
+	return currentTurns, result, persisted
 }
 
 // Process handles the end-to-end agentic pipeline in a single loop.
@@ -202,53 +254,19 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 
-	// Retrieve conversation history for this session. If retention pruning
-	// removed turns, summarize them and persist the rolling summary so the
-	// model retains the gist of older context.
-	history, prunedTurns, existingSummary := a.memory.HistoryWithPruneInfo(sessionKey)
+	// Retrieve retained conversation turns for this session. TTL and max-turn
+	// pruning are applied destructively inside the store before history is used.
+	turns := a.memory.Turns(sessionKey)
 
-	if len(prunedTurns) > 0 {
-		a.log.Debug("Memory: %d turn(s) pruned from session %q; generating rolling summary", len(prunedTurns), sessionKey)
-		newSummary, sumErr := a.summarizer.Summarize(ctx, existingSummary, prunedTurns)
-		if sumErr != nil {
-			a.log.Warn("Failed to summarize pruned turns for session %q: %v", sessionKey, sumErr)
-		} else {
-			a.memory.SetSummary(sessionKey, newSummary)
-			existingSummary = newSummary
-		}
+	// If the estimated prompt would exceed the active model budget, destructively
+	// compact the oldest retained turns into a synthetic turn pair that remains
+	// in ordinary conversation history.
+	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, dynamicSystemPrompt, turns, userPrompt)
+	if compacted {
+		a.memory.ReplaceTurns(sessionKey, compactedTurns)
+		turns = compactedTurns
 	}
-
-	// If there is a rolling summary from prior pruned turns, inject it into
-	// the system prompt so the model has context beyond the active window.
-	if existingSummary != "" {
-		dynamicSystemPrompt += "\n\n## Earlier Conversation Summary\n" + existingSummary
-	}
-
-	// Trim the oldest turn pairs until the estimated prompt fits the active
-	// model's context budget.
-	trimmedHistory, prune := PruneHistoryToFit(a.budget, dynamicSystemPrompt, history, userPrompt, a.registry.OllamaTools())
-
-	// If context budget pruning removed additional pairs, summarize those too
-	// and merge them into the rolling summary.
-	if prune.RemovedPairs > 0 && len(history) >= prune.RemovedPairs*2 {
-		budgetPrunedMsgs := history[:prune.RemovedPairs*2]
-		budgetPrunedTurns := msgsToTurns(budgetPrunedMsgs)
-		a.log.Debug("Context budget: %d turn pair(s) pruned for budget; summarizing for session %q", prune.RemovedPairs, sessionKey)
-		mergedSummary, sumErr := a.summarizer.Summarize(ctx, existingSummary, budgetPrunedTurns)
-		if sumErr != nil {
-			a.log.Warn("Failed to summarize budget-pruned turns for session %q: %v", sessionKey, sumErr)
-		} else {
-			a.memory.SetSummary(sessionKey, mergedSummary)
-			// Update the system prompt to include the freshly merged summary
-			if existingSummary != mergedSummary {
-				idx := strings.Index(dynamicSystemPrompt, "\n\n## Earlier Conversation Summary\n")
-				if idx >= 0 {
-					dynamicSystemPrompt = dynamicSystemPrompt[:idx]
-				}
-				dynamicSystemPrompt += "\n\n## Earlier Conversation Summary\n" + mergedSummary
-			}
-		}
-	}
+	trimmedHistory := memory.FlattenTurns(turns)
 
 	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
@@ -275,15 +293,15 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		}
 	}
 
-	if len(history) > 0 {
-		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(history), sessionKey)
+	if len(trimmedHistory) > 0 {
+		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(trimmedHistory), sessionKey)
 	}
 	if prune.RemovedPairs > 0 {
-		a.log.Debug("Context budget: pruned %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
+		a.log.Debug("Context budget: compacted %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
 			prune.RemovedPairs, a.model, a.budget.PromptBudget(), prune.EstimatedBefore, prune.EstimatedAfter)
 	}
 	if prune.EstimatedAfter > a.budget.PromptBudget() {
-		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history pruning",
+		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history compaction",
 			a.model, prune.EstimatedAfter, a.budget.PromptBudget())
 	}
 

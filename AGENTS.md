@@ -108,7 +108,7 @@ Flow:
 2. Retrieve conversation history for the session from `internal/memory`
 3. Build the initial chat request with:
    - the current soul content (plus injected date/time)
-   - the retrieved conversation history (user/assistant turn pairs), first pruned by memory retention policy and then pruned to fit the active model's context budget
+   - the retrieved conversation history (user/assistant turn pairs), first pruned by memory retention policy and then compacted in-memory if needed to fit the active model's context budget
    - the current user prompt
    - all registered tools from the tool registry
 4. Send the request to Ollama via `internal/ollama`
@@ -128,18 +128,18 @@ Session state is managed by `internal/memory.Store`.
 - Session history is retained in memory until process exit, subject to optional TTL and max-turn retention limits
 - `MEMORY_MAX_TURNS` retains only the newest N stored turn pairs per session when set above `0`
 - `MEMORY_MAX_AGE` expires stored turn pairs older than the configured Go duration when set above `0`
-- History is pruned for retention in `internal/memory`, then pruned again at request time based on the active model's context budget
+- History is pruned for retention in `internal/memory`; if the retained history still exceeds the active prompt budget, the oldest retained prefix is compacted into a normal replacement turn pair and written back into memory with a fresh timestamp
 - An empty `SessionKey` disables memory for a request (stateless one-shot behaviour)
 
 ### Context Budgeting
 
-Before each `/api/chat` call, the agent trims the oldest stored turn pairs until the estimated prompt fits the active model's prompt budget.
+Before each `/api/chat` call, the agent estimates the prompt size after TTL/max-turn pruning. If the prompt would exceed budget, it compacts the oldest retained turn pairs into a single replacement turn pair that remains in ordinary chat history.
 
 - Model metadata is discovered from Ollama's `/api/show` endpoint at startup
 - `num_ctx` from the model parameters is preferred when available
 - Model metadata `*.context_length` is used as a fallback
 - Reserve values (`response_reserve`, `tool_reserve`, `safety_margin`) fall back to hardcoded package defaults when Ollama metadata provides no override
-- Prompt history is pruned dynamically per request; retention pruning inside `internal/memory` is permanent for expired/overflow turns
+- Prompt compaction is destructive: the compacted replacement turn pair is written back into `internal/memory`, gets a fresh TTL timestamp, and still counts toward `MEMORY_MAX_TURNS`
 
 **Hybrid Session Key Strategy (Discord gateway):**
 
@@ -209,8 +209,8 @@ There is no longer a generic provider abstraction in the codebase.
 | `cmd/agent/main.go`                         | Entrypoint: load config, bootstrap tools and gateways, start agent |
 | `internal/agent/agent.go`                   | Core agentic tool-calling loop and response assembly               |
 | `internal/config/config.go`                 | Environment config loading                                         |
-| `internal/memory/store.go`                  | In-memory conversation store with TTL/max-turn retention and history flattening |
-| `internal/memory/dump.go`                   | Shared JSON debug snapshot writer used by memory and Discord reply metadata |
+| `internal/memory/store.go`                  | In-memory conversation store with TTL/max-turn retention, destructive compaction, and history flattening |
+| `internal/debug/prompt.go`                  | Markdown prompt debug dump writer for request inspection |
 | `internal/ollama/client.go`                 | Ollama HTTP client with chat streaming and tool support            |
 | `internal/tools/registry.go`                | Generic tool registry and markdown parsing                         |
 | `internal/tools/bootstrap.go`               | Builtin tool bootstrap                                             |
@@ -355,8 +355,8 @@ Useful debug output includes:
 
 Set `PROMPT_DEBUG_PATH` to write a timestamped Markdown file for every request.
 
-- metadata: model, session, token budget, and pruning estimates
-- session history: retained conversation history before context-budget pruning
+- metadata: model, session, token budget, and compaction estimates
+- session history: retained conversation history after any in-memory compaction
 - final message array: the exact messages sent to Ollama
 - tool schemas: every tool definition included in the request
 

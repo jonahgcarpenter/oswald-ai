@@ -36,7 +36,7 @@ func main() {
 
 	llmClient := ollama.NewClient(cfg.OllamaURL, log)
 
-	budget, budgetErr := agent.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
+	budget, budgetErr := memory.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
 	if budgetErr != nil {
 		log.Warn("Failed to discover context budget for model %s: %v", cfg.OllamaModel, budgetErr)
 	}

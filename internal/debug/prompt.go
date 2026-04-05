@@ -52,7 +52,7 @@ func DumpPrompt(
 	fmt.Fprintf(&sb, "| Prompt budget | %d tokens |\n", promptBudget)
 	fmt.Fprintf(&sb, "| Estimated tokens (before pruning) | %d |\n", estimatedBefore)
 	fmt.Fprintf(&sb, "| Estimated tokens (after pruning) | %d |\n", estimatedAfter)
-	fmt.Fprintf(&sb, "| Turn pairs removed by budget pruning | %d |\n", removedPairs)
+	fmt.Fprintf(&sb, "| Turn pairs compacted by budget pressure | %d |\n", removedPairs)
 	sb.WriteString("\n---\n\n")
 	fmt.Fprintf(&sb, "## Actual Request Sent to Ollama (%d messages)\n\n", len(messages))
 	for i, msg := range messages {
