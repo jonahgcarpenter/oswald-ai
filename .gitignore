@@ -1,3 +1,7 @@
 # Golang
 tmp/ 
 .env
+
+# Users
+config/memory/
+config/accounts/

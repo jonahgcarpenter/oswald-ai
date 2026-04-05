@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -31,100 +32,45 @@ func NewClient(baseURL string, log *config.Logger) *Client {
 	}
 }
 
-// Generate sends a single-turn prompt to Ollama's /api/generate endpoint.
-// Deprecated: Use Chat instead. This endpoint lacks tool-calling support.
-func (c *Client) Generate(ctx context.Context, req Request, streamCallback func(string)) (*Response, error) {
-	endpoint := fmt.Sprintf("%s/api/generate", c.BaseURL)
+// Show retrieves model metadata from Ollama's /api/show endpoint.
+func (c *Client) Show(ctx context.Context, req ShowRequest) (*ShowResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/show", c.BaseURL)
 
-	ollamaReq := GenerateRequest{
-		Model:  req.Model,
-		Prompt: req.Prompt,
-		System: req.System,
-		Format: req.Format,
-		Stream: req.Stream,
-	}
-
-	payloadBytes, err := json.Marshal(ollamaReq)
+	payloadBytes, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal show request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create show request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("Ollama API request failed: %w", err)
+		return nil, fmt.Errorf("Ollama show API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var finalResponse Response
-	finalResponse.Model = req.Model
-
-	if req.Stream && streamCallback != nil {
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			var chunk GenerateResponse
-			if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-				c.log.Debug("Ollama stream: failed to parse chunk: %v | raw: %q", err, scanner.Text())
-				continue
-			}
-
-			streamCallback(chunk.Response)
-			finalResponse.Response += chunk.Response
-			finalResponse.Thinking += chunk.Thinking
-
-			if chunk.Done {
-				finalResponse.TotalDuration = chunk.TotalDuration
-				finalResponse.EvalDuration = chunk.EvalDuration
-				finalResponse.EvalCount = chunk.EvalCount
-				finalResponse.PromptEvalDuration = chunk.PromptEvalDuration
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			c.log.Warn("Ollama stream: scanner error: %v", err)
-		}
-
-		if finalResponse.Response == "" && finalResponse.Thinking != "" {
-			finalResponse.Response = finalResponse.Thinking
-		}
-		return &finalResponse, nil
-	}
-
 	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read show response body: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.log.Error("Ollama returned HTTP %d: %s", resp.StatusCode, string(rawBody))
-		return nil, fmt.Errorf("Ollama returned HTTP %d", resp.StatusCode)
+		c.log.Error("Ollama show returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+		return nil, fmt.Errorf("Ollama show returned HTTP %d", resp.StatusCode)
 	}
 
-	var ollamaResp GenerateResponse
-	if err := json.Unmarshal(rawBody, &ollamaResp); err != nil {
-		c.log.Error("Ollama response decode failed: %v | raw: %q", err, string(rawBody))
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	var showResp ShowResponse
+	if err := json.Unmarshal(rawBody, &showResp); err != nil {
+		c.log.Error("Ollama show response decode failed: %v | raw: %q", err, string(rawBody))
+		return nil, fmt.Errorf("failed to decode show response: %w", err)
 	}
 
-	response := ollamaResp.Response
-	if response == "" && ollamaResp.Thinking != "" {
-		response = ollamaResp.Thinking
-	}
-
-	return &Response{
-		Model:              ollamaResp.Model,
-		Response:           response,
-		Thinking:           ollamaResp.Thinking,
-		TotalDuration:      ollamaResp.TotalDuration,
-		LoadDuration:       ollamaResp.LoadDuration,
-		PromptEvalDuration: ollamaResp.PromptEvalDuration,
-		EvalDuration:       ollamaResp.EvalDuration,
-		EvalCount:          ollamaResp.EvalCount,
-	}, nil
+	showResp.Parameters = strings.TrimSpace(showResp.Parameters)
+	return &showResp, nil
 }
 
 // mapToOllamaMessages converts ChatMessage values to Ollama's internal chat message type.
@@ -300,6 +246,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	return &ChatResponse{
 		Model:              ollamaResp.Model,
 		Message:            msg,
+		PromptEvalCount:    ollamaResp.PromptEvalCount,
 		DoneReason:         ollamaResp.DoneReason,
 		TotalDuration:      ollamaResp.TotalDuration,
 		LoadDuration:       ollamaResp.LoadDuration,

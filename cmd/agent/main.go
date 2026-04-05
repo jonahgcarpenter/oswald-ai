@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 )
 
 func main() {
@@ -21,18 +26,10 @@ func main() {
 	log := config.NewLogger(cfg.LogLevel)
 	log.Debug("Log level: %s", cfg.LogLevel)
 
-	// Load worker agent registry (single GENERAL worker drives the agentic loop)
-	workers, err := agent.LoadWorkers(cfg.WorkersConfig)
-	if err != nil {
-		log.Fatal("Failed to load workers config: %v", err)
+	if cfg.OllamaModel == "" {
+		log.Fatal("Missing required OLLAMA_MODEL environment variable")
 	}
-
-	responseWorker := agent.FindWorker(workers, "GENERAL")
-	if responseWorker == nil {
-		log.Fatal("Workers config is missing required GENERAL worker entry")
-	}
-
-	log.Info("Worker model: %s", responseWorker.ResolveModel())
+	log.Info("Model: %s", cfg.OllamaModel)
 
 	if cfg.OllamaURL == "" {
 		log.Fatal("Missing required OLLAMA_URL configuration")
@@ -40,21 +37,58 @@ func main() {
 
 	llmClient := ollama.NewClient(cfg.OllamaURL, log)
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, log)
+	budget, budgetErr := memory.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
+	if budgetErr != nil {
+		log.Warn("Failed to discover context budget for model %s: %v", cfg.OllamaModel, budgetErr)
+	}
+	log.Info("Context budget: window=%d prompt_budget=%d source=%s", budget.ContextWindow, budget.PromptBudget(), budget.Source)
+
+	// The soul store is shared between the tool registry (so the agent can edit
+	// its soul via the soul_memory tool) and the agent itself (so it can read
+	// the current soul on every request as its system prompt).
+	soulStore := soulmemory.NewStore(config.DefaultSoulPath, log)
+	log.Debug("Soul file: %s", config.DefaultSoulPath)
+
+	// The user memory store is owned by the tool registry so the persistent_memory
+	// tool handler can remember, recall, and forget facts on behalf of the model.
+	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, log)
+	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
+
+	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, log)
+	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
+	log.Debug("Account links: %s", config.DefaultAccountLinkPath)
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, log)
 	if err != nil {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
 
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, log)
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, log)
 	if err != nil {
 		log.Fatal("Failed to initialize gateways: %v", err)
+	}
+
+	memoryStore := memory.NewStore(memory.Options{
+		MaxTurns:      cfg.MemoryMaxTurns,
+		MaxAge:        cfg.MemoryMaxAge,
+		ContextWindow: budget.ContextWindow,
+		PromptBudget:  budget.PromptBudget(),
+	}, log)
+	log.Debug("Memory: retaining in-process session history until restart (max_turns=%d max_age=%s context_window=%d prompt_budget=%d)", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
+
+	if cfg.PromptDebugPath != "" {
+		log.Info("Prompt debug dumps enabled at %s", cfg.PromptDebugPath)
 	}
 
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
-		responseWorker,
-		cfg.MaxIterations,
+		cfg.OllamaModel,
+		soulStore,
+		budget,
+		cfg.MaxToolFailureRetries,
+		memoryStore,
+		cfg.PromptDebugPath,
 		log,
 	)
 

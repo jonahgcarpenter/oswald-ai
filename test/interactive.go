@@ -51,13 +51,13 @@ func isStreamChunk(raw []byte) (interactiveStreamChunk, bool) {
 }
 
 // isFinalPayload returns true when the message is a completed AgentResponse
-// (has a non-empty "model" field).
+// (has a response, error, or non-empty "model" field).
 func isFinalPayload(raw []byte) (interactiveAgentResponse, bool) {
 	var resp interactiveAgentResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return resp, false
 	}
-	return resp, resp.Model != ""
+	return resp, resp.Model != "" || resp.Response != "" || resp.Error != ""
 }
 
 // connect establishes a WebSocket connection to the given URL, retrying on failure.
@@ -74,9 +74,11 @@ func connect(u url.URL) *websocket.Conn {
 // streams the model's response with color-coded thinking, content, and status chunks.
 func main() {
 	port := "8080"
+	userID := "interactive-test-user"
 	u := url.URL{Scheme: "ws", Host: "localhost:" + port, Path: "/ws"}
 
 	fmt.Printf("Oswald AI Interactive Client (%s)\n", u.String())
+	fmt.Printf("User ID: %s\n", userID)
 	fmt.Println("Type your message and press Enter. Ctrl+C to quit.")
 	fmt.Println()
 
@@ -108,7 +110,15 @@ func main() {
 			continue
 		}
 
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(prompt)); err != nil {
+		msg, err := json.Marshal(struct {
+			UserID string `json:"user_id"`
+			Prompt string `json:"prompt"`
+		}{UserID: userID, Prompt: prompt})
+		if err != nil {
+			fmt.Printf("\n%s[error] Failed to marshal message: %v%s\n", colorGray, err, colorReset)
+			continue
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 			fmt.Printf("\n%s[error] Failed to send message: %v%s\n", colorGray, err, colorReset)
 			// Reconnect and retry
 			conn.Close()
@@ -140,6 +150,11 @@ func main() {
 				if resp.Error != "" {
 					fmt.Printf("%s[error] %s%s\n\n", colorGray, resp.Error, colorReset)
 					break
+				}
+
+				if resp.Response != "" && !inContent {
+					fmt.Println(resp.Response)
+					fmt.Println()
 				}
 
 				// Compact metrics summary

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -11,8 +12,11 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 )
+
+const replyIndexTTL = time.Hour
 
 // Name returns the human-readable gateway name.
 func (dg *Gateway) Name() string {
@@ -23,6 +27,9 @@ func (dg *Gateway) Name() string {
 // It blocks forever, automatically reconnecting if the websocket drops.
 func (dg *Gateway) Start(b *broker.Broker) error {
 	dg.Broker = b
+	if dg.replyIndex == nil {
+		dg.replyIndex = make(map[string]replyContext)
+	}
 
 	for {
 		err := dg.connectAndListen()
@@ -36,6 +43,42 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 		dg.Log.Debug("Reconnecting to Discord Gateway in 5 seconds...")
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func (dg *Gateway) rememberReply(messageID string, ctx replyContext) {
+	if messageID == "" {
+		return
+	}
+
+	dg.replyMu.Lock()
+	dg.pruneReplyIndexLocked()
+	dg.replyIndex[messageID] = ctx
+	dg.replyMu.Unlock()
+}
+
+func (dg *Gateway) lookupReply(messageID string) (replyContext, bool) {
+	if messageID == "" {
+		return replyContext{}, false
+	}
+
+	dg.replyMu.Lock()
+	dg.pruneReplyIndexLocked()
+	ctx, ok := dg.replyIndex[messageID]
+	dg.replyMu.Unlock()
+
+	return ctx, ok
+}
+
+func (dg *Gateway) pruneReplyIndexLocked() int {
+	cutoff := time.Now().Add(-replyIndexTTL)
+	pruned := 0
+	for id, ctx := range dg.replyIndex {
+		if ctx.CreatedAt.Before(cutoff) {
+			delete(dg.replyIndex, id)
+			pruned++
+		}
+	}
+	return pruned
 }
 
 // connectAndListen manages a single Discord gateway session.
@@ -223,8 +266,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 		mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
 		isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
+		isAccountCommand := strings.HasPrefix(strings.TrimSpace(msg.Content), "/connect") || strings.HasPrefix(strings.TrimSpace(msg.Content), "/disconnect")
 
-		if !isReplyToBot && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
+		if !isReplyToBot && !isAccountCommand && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
 			return
 		}
 		replyToID = msg.ID
@@ -236,7 +280,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID) // nolint: errcheck
+		_, _ = dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
 		return
 	}
 
@@ -244,16 +288,71 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	prompt = re.ReplaceAllString(prompt, ":$1:")
 	prompt = resolveMentions(prompt, msg.Mentions)
 
-	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
-		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
-		prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
-			msg.ReferencedMessage.Author.Username,
-			quotedContent,
-			prompt,
-		)
+	// Compute the session key using the hybrid strategy:
+	//   DMs (no GuildID):      SenderID           — continuous per-user memory
+	//   Guild channels/threads: ChannelID:SenderID — per-user isolation, prevents cross-talk
+	var sessionKey string
+	if msg.GuildID == "" {
+		sessionKey = "discord:dm:" + msg.Author.ID
+	} else {
+		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
 
-	dg.Log.Debug("Discord request from %s: %q", msg.Author.Username, truncate(prompt, 100))
+	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
+	if normErr != nil {
+		dg.Log.Error("Discord account normalization error: %v", normErr)
+		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
+		return
+	}
+
+	canonicalUserID, err := dg.Links.EnsureAccount("discord", normalizedAuthorID, msg.Author.Username)
+	if err != nil {
+		dg.Log.Error("Discord account resolution error: %v", err)
+		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your account identity.", replyToID)
+		return
+	}
+
+	if commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, prompt); handled {
+		if commandErr != nil {
+			dg.Log.Error("Discord account command error: %v", commandErr)
+			commandResponse = "Failed to process account linking command."
+		}
+		_, _ = dg.sendMessage(msg.ChannelID, commandResponse, replyToID)
+		return
+	}
+
+	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
+		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
+
+		if msg.ReferencedMessage.Author.ID != dg.BotID {
+			dg.Log.Debug("Discord reply context: quoted non-bot message from %s in channel %s", msg.ReferencedMessage.Author.Username, msg.ChannelID)
+			prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
+				msg.ReferencedMessage.Author.Username,
+				quotedContent,
+				prompt,
+			)
+		} else {
+			replyCtx, ok := dg.lookupReply(msg.ReferencedMessage.ID)
+			switch {
+			case ok && replyCtx.SessionKey == sessionKey:
+				dg.Log.Debug("Discord reply context: same-session reply to Oswald message %s in session %s; using memory only", msg.ReferencedMessage.ID, sessionKey)
+			case ok && replyCtx.SessionKey != sessionKey:
+				dg.Log.Debug("Discord reply context: cross-session reply to Oswald message %s (from %s to %s); injecting quoted context", msg.ReferencedMessage.ID, replyCtx.SessionKey, sessionKey)
+				prompt = fmt.Sprintf("[Replying to Oswald's previous message in this channel: \"%s\"]\n%s",
+					quotedContent,
+					prompt,
+				)
+			default:
+				dg.Log.Debug("Discord reply context: unknown Oswald reply target %s; injecting quoted fallback context", msg.ReferencedMessage.ID)
+				prompt = fmt.Sprintf("[Replying to Oswald's previous message in this channel: \"%s\"]\n%s",
+					quotedContent,
+					prompt,
+				)
+			}
+		}
+	}
+
+	dg.Log.Debug("Discord request from %s (session=%s canonical=%s): %q", msg.Author.Username, sessionKey, canonicalUserID, truncate(prompt, 100))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)
@@ -276,8 +375,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	req := &broker.Request{
 		Channel:      "discord",
 		ChatID:       msg.ChannelID,
-		SenderID:     msg.Author.ID,
-		SessionKey:   msg.ChannelID,
+		SenderID:     canonicalUserID,
+		DisplayName:  msg.Author.Username,
+		SessionKey:   sessionKey,
 		Prompt:       prompt,
 		StreamFunc:   nil,
 		ResponseChan: make(chan broker.Result, 1),
@@ -287,13 +387,19 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	if result.Err != nil {
 		dg.Log.Error("Agent process error: %v", result.Err)
-		dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID) // nolint: errcheck
+		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID)
 		return
 	}
 
 	finalPayload := result.Response
 	responseText := finalPayload.Response
 	chunks := splitMessage(responseText, 2000)
+	originCtx := replyContext{
+		SessionKey: sessionKey,
+		ChannelID:  msg.ChannelID,
+		SenderID:   msg.Author.ID,
+		CreatedAt:  time.Now(),
+	}
 
 	dg.Log.Debug("Discord response to %s: %d chunk(s), %d chars, model: %s",
 		msg.Author.Username, len(chunks), len(responseText), finalPayload.Model)
@@ -304,9 +410,14 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			currentReplyID = replyToID
 		}
 
-		if err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID); err != nil {
+		sentMessageID, err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
+		if err != nil {
 			dg.Log.Error("Failed to send chunk %d to Discord: %v", i+1, err)
 			break
+		}
+
+		if i == 0 {
+			dg.rememberReply(sentMessageID, originCtx)
 		}
 	}
 }
@@ -335,8 +446,9 @@ func (dg *Gateway) sendTyping(channelID string) error {
 	return nil
 }
 
-// sendMessage posts a message to a Discord channel.
-func (dg *Gateway) sendMessage(channelID, content, replyToID string) error {
+// sendMessage posts a message to a Discord channel and returns the created
+// Discord message ID when available.
+func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, error) {
 	url := fmt.Sprintf("%s/channels/%s/messages", apiBaseURL, channelID)
 
 	payload := map[string]interface{}{
@@ -353,7 +465,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) error {
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	req.Header.Set("Authorization", "Bot "+dg.Token)
@@ -362,14 +474,25 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
 	}
-	return nil
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var created createMessageResponse
+	if err := json.Unmarshal(respBody, &created); err != nil {
+		return "", err
+	}
+
+	return created.ID, nil
 }
 
 // marshalJSON converts any value to a json.RawMessage, ignoring marshal errors.

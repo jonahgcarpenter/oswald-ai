@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 )
 
 // Name returns the human-readable gateway name.
@@ -17,7 +17,7 @@ func (wg *Gateway) Name() string {
 // Start initializes the HTTP server and registers the WebSocket handler.
 func (wg *Gateway) Start(b *broker.Broker) error {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handleConnections(w, r, b, wg.Log)
+		wg.handleConnections(w, r, b)
 	})
 
 	wg.Log.Info("Websocket server listening on port %s", wg.Port)
@@ -25,13 +25,17 @@ func (wg *Gateway) Start(b *broker.Broker) error {
 }
 
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
-func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker, log *config.Logger) {
+func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
+	log := wg.Log
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Error("Upgrader error: %v", err)
 		return
 	}
 	defer conn.Close()
+
+	// remoteAddr is used as the fallback identity for clients that send plain text.
+	remoteAddr := conn.RemoteAddr().String()
 
 	for {
 		messageType, message, err := conn.ReadMessage()
@@ -40,8 +44,57 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			break
 		}
 
-		userPrompt := string(message)
-		log.Debug("Websocket request: %q", truncate(userPrompt, 100))
+		// Attempt to decode a structured IncomingMessage. Fall back to treating
+		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
+		// clients keep working without modification.
+		var userPrompt, userID, displayName string
+		var incoming IncomingMessage
+		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && incoming.Prompt != "" {
+			userPrompt = incoming.Prompt
+			userID = incoming.UserID
+			displayName = incoming.DisplayName
+		} else {
+			userPrompt = string(message)
+			userID = remoteAddr
+		}
+
+		// Build the session key from the gateway identity while keeping
+		// persistent memory keyed separately by canonical user ID.
+		sessionIdentity := userID
+		if sessionIdentity == "" {
+			sessionIdentity = remoteAddr
+			userID = remoteAddr
+		}
+		normalizedUserID, normErr := accountlink.NormalizeIdentifier("websocket", userID)
+		if normErr != nil {
+			errorPayload := agent.AgentResponse{Error: normErr.Error()}
+			errBytes, _ := json.Marshal(errorPayload)
+			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
+			continue
+		}
+		sessionKey := "websocket:" + sessionIdentity
+
+		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
+		if err != nil {
+			log.Error("Websocket account resolution error: %v", err)
+			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
+			errBytes, _ := json.Marshal(errorPayload)
+			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
+			continue
+		}
+
+		if commandResponse, handled, commandErr := wg.Commands.Handle(canonicalUserID, userPrompt); handled {
+			if commandErr != nil {
+				log.Error("Websocket account command error: %v", commandErr)
+				commandResponse = "Failed to process account linking command."
+			}
+			payload := agent.AgentResponse{Response: commandResponse}
+			respBytes, _ := json.Marshal(payload)
+			conn.WriteMessage(messageType, respBytes) // nolint: errcheck
+			continue
+		}
+
+		log.Debug("Websocket request (session=%s sender=%s canonical=%s): %q", sessionKey, normalizedUserID, canonicalUserID, truncate(userPrompt, 100))
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
@@ -57,12 +110,12 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
-		// NOTE: This is fine since websocket is only used for testing locally
-		// But for any further implementation I will need to generate IDs here
 		req := &broker.Request{
 			Channel:      "websocket",
-			ChatID:       "",
-			SenderID:     "",
+			ChatID:       sessionKey,
+			SenderID:     canonicalUserID,
+			DisplayName:  displayName,
+			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
 			StreamFunc:   streamFunc,
 			ResponseChan: make(chan broker.Result, 1),

@@ -7,16 +7,15 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/debug"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 )
 
-const (
-	// maxIntelResults caps the total number of tool result payloads accumulated
-	// across all tool calls in a single Process() invocation, to protect the
-	// model's context window from bloat.
-	maxIntelResults = 5
-)
+const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
 type StreamChunkType string
@@ -61,40 +60,52 @@ type AgentResponse struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient    ollama.Chatter
-	registry      *tools.Registry
-	model         string
-	systemPrompt  string
-	maxIterations int
-	log           *config.Logger
+	chatClient            ollama.Chatter
+	registry              *tools.Registry
+	memory                *memory.Store
+	budget                memory.ContextBudget
+	model                 string
+	soul                  *soulmemory.Store
+	summarizer            *OllamaSummarizer
+	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
+	maxToolFailureRetries int
+	log                   *config.Logger
 }
 
-// NewAgent initializes the Agent with an Ollama chat client, tool registry, worker config,
-// iteration cap, and logger. The single worker drives the entire agentic loop.
+// NewAgent initializes the Agent with an Ollama chat client, tool registry, model name,
+// soul store, conversation memory store, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient ollama.Chatter,
 	registry *tools.Registry,
-	worker *WorkerAgent,
-	maxIterations int,
+	model string,
+	soul *soulmemory.Store,
+	budget memory.ContextBudget,
+	maxToolFailureRetries int,
+	memoryStore *memory.Store,
+	promptDebugPath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
-		chatClient:    chatClient,
-		registry:      registry,
-		model:         worker.ResolveModel(),
-		systemPrompt:  worker.SystemPrompt,
-		maxIterations: maxIterations,
-		log:           log,
+		chatClient:            chatClient,
+		registry:              registry,
+		memory:                memoryStore,
+		budget:                budget,
+		model:                 model,
+		soul:                  soul,
+		summarizer:            NewOllamaSummarizer(chatClient, model, log),
+		promptDebugPath:       promptDebugPath,
+		maxToolFailureRetries: maxToolFailureRetries,
+		log:                   log,
 	}
 }
 
-// truncate returns s shortened to at most max runes, appending "…" if cut.
+// truncate returns s shortened to at most max runes, appending "..." if cut.
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
 		return s
 	}
-	return string(r[:max]) + "…"
+	return string(r[:max]) + "..."
 }
 
 // mapMetrics converts an *ollama.ChatResponse into a *ModelMetrics summary for reporting.
@@ -115,29 +126,174 @@ func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
 	}
 }
 
+func makeCompactedTurn(summary string, now time.Time) memory.Turn {
+	return memory.Turn{
+		CreatedAt: now.UTC(),
+		User: ollama.ChatMessage{
+			Role:    "user",
+			Content: compactedHistoryUserPrompt,
+		},
+		Assistant: ollama.ChatMessage{
+			Role:    "assistant",
+			Content: summary,
+		},
+	}
+}
+
+func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turns []memory.Turn, userPrompt string) ([]memory.Turn, memory.PromptPruneResult, bool) {
+	tools := a.registry.OllamaTools()
+	currentTurns := append([]memory.Turn(nil), turns...)
+	persisted := false
+	result := memory.PromptPruneResult{
+		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, tools),
+	}
+	lastEstimate := result.EstimatedBefore
+
+	for len(currentTurns) > 0 {
+		history := memory.FlattenTurns(currentTurns)
+		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, tools)
+		lastEstimate = estimate
+		if estimate <= a.budget.PromptBudget() {
+			result.EstimatedAfter = estimate
+			return currentTurns, result, persisted
+		}
+
+		compacted := false
+		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
+			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
+			if err != nil {
+				a.log.Warn("Failed to compact %d turn(s) for prompt budget: %v", compactCount, err)
+				continue
+			}
+
+			replacement := makeCompactedTurn(summary, time.Now())
+			candidateTurns := make([]memory.Turn, 0, 1+len(currentTurns)-compactCount)
+			candidateTurns = append(candidateTurns, replacement)
+			candidateTurns = append(candidateTurns, currentTurns[compactCount:]...)
+
+			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, tools)
+			if candidateEstimate >= estimate && compactCount < len(currentTurns) {
+				continue
+			}
+
+			currentTurns = candidateTurns
+			persisted = true
+			result.RemovedPairs += compactCount
+			compacted = true
+			break
+		}
+
+		if !compacted {
+			break
+		}
+	}
+
+	result.EstimatedAfter = lastEstimate
+	return currentTurns, result, persisted
+}
+
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
-// (up to maxIterations) before generating its final response. Thinking tokens,
-// content tokens, and agent status messages are streamed via streamCallback if provided.
+// before generating its final response. Thinking tokens, content tokens, and
+// agent status messages are streamed via streamCallback if provided.
+//
+// sessionKey identifies the conversation session for memory retrieval and
+// persistence. Passing an empty sessionKey disables memory for this request
+// (stateless one-shot behaviour).
+//
+// senderID is the stable internal user identifier for the current request. It is
+// injected into the request context so that tools such as persistent_memory can
+// identify the user without needing the session key. An empty senderID disables
+// user-scoped tool behaviour.
+//
+// displayName is the human-readable name for the sender (e.g. a Discord username).
+// If non-empty it is injected into the system prompt so the model knows who it is
+// speaking with without requiring a tool call.
 //
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Processing request: %q", truncate(userPrompt, 100))
+func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	a.log.Debug("Processing request (session=%q sender=%q display=%q): %q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	// Inject the real-time date into the system prompt
-	dynamicSystemPrompt := fmt.Sprintf("%s\n\nCurrent Date and Time: %s",
-		a.systemPrompt,
-		time.Now().Format(time.RFC1123),
-	)
+	// Inject the sender ID into the context so tool handlers can identify
+	// which user this request belongs to without coupling to the session key.
+	ctx = toolctx.WithSenderID(ctx, senderID)
 
-	messages := []ollama.ChatMessage{
-		{Role: "system", Content: dynamicSystemPrompt},
-		{Role: "user", Content: userPrompt},
+	// Read the soul file fresh on every request so that any edits the agent
+	// made via the soul_memory tool take effect immediately.
+	soulContent, soulErr := a.soul.Read()
+	if soulErr != nil {
+		a.log.Warn("Failed to read soul file: %v", soulErr)
+	}
+
+	// Build the dynamic system prompt: soul + timestamp + speaker identity.
+	// User memory is not injected automatically — the model retrieves it via
+	// the persistent_memory tool when needed.
+	var promptParts []string
+	promptParts = append(promptParts, soulContent)
+	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
+
+	if displayName != "" {
+		promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s.", displayName))
+	} else if senderID != "" {
+		promptParts = append(promptParts, "## Current Speaker\nYou are speaking with a returning user.")
+	}
+
+	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
+
+	// Retrieve retained conversation turns for this session. TTL and max-turn
+	// pruning are applied destructively inside the store before history is used.
+	turns := a.memory.Turns(sessionKey)
+
+	// If the estimated prompt would exceed the active model budget, destructively
+	// compact the oldest retained turns into a synthetic turn pair that remains
+	// in ordinary conversation history.
+	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, dynamicSystemPrompt, turns, userPrompt)
+	if compacted {
+		a.memory.ReplaceTurns(sessionKey, compactedTurns)
+		turns = compactedTurns
+	}
+	trimmedHistory := memory.FlattenTurns(turns)
+
+	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
+	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
+	messages = append(messages, trimmedHistory...)
+	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt})
+
+	// Write a full prompt debug dump when PROMPT_DEBUG_PATH is set.
+	if a.promptDebugPath != "" {
+		if dumpErr := debug.DumpPrompt(
+			a.promptDebugPath,
+			sessionKey,
+			a.model,
+			messages,
+			a.registry.OllamaTools(),
+			a.budget.ContextWindow,
+			a.budget.PromptBudget(),
+			prune.EstimatedBefore,
+			prune.EstimatedAfter,
+			prune.RemovedPairs,
+		); dumpErr != nil {
+			a.log.Warn("Prompt debug: failed to write dump: %v", dumpErr)
+		} else {
+			a.log.Debug("Prompt debug: wrote dump to %s", a.promptDebugPath)
+		}
+	}
+
+	if len(trimmedHistory) > 0 {
+		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(trimmedHistory), sessionKey)
+	}
+	if prune.RemovedPairs > 0 {
+		a.log.Debug("Context budget: compacted %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
+			prune.RemovedPairs, a.model, a.budget.PromptBudget(), prune.EstimatedBefore, prune.EstimatedAfter)
+	}
+	if prune.EstimatedAfter > a.budget.PromptBudget() {
+		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history compaction",
+			a.model, prune.EstimatedAfter, a.budget.PromptBudget())
 	}
 
 	req := ollama.ChatRequest{
@@ -152,9 +308,14 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
 
-	// totalToolCalls tracks how many tool executions have fired this request.
-	// Caps total tool results to protect the model's context window from bloat.
-	totalToolCalls := 0
+	// consecutiveToolFailures tracks back-to-back tool execution failures for
+	// this request. A successful tool call resets the counter.
+	consecutiveToolFailures := 0
+
+	// toolAnnotations collects brief notes about tools used this request.
+	// These are appended to the stored assistant message so future turns
+	// show what tools were called without ballooning history size.
+	var toolAnnotations []string
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -174,10 +335,12 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	}
 
 	var lastResp *ollama.ChatResponse
+	toolFailureBudgetExhausted := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
-	// The loop exits when the model stops issuing tool calls or the iteration cap is hit.
-	for iteration := 1; iteration <= a.maxIterations; iteration++ {
+	// The loop exits when the model stops issuing tool calls, the request context
+	// expires, or consecutive tool execution failures exhaust the retry budget.
+	for iteration := 1; ; iteration++ {
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
@@ -195,10 +358,14 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 		}
 
 		lastResp = resp
+		if iteration == 1 && resp.PromptEvalCount > 0 {
+			a.log.Debug("Context budget: model=%s estimated_prompt_tokens=%d actual_prompt_tokens=%d",
+				a.model, prune.EstimatedAfter, resp.PromptEvalCount)
+		}
 
-		a.log.Debug("Agentic loop iteration %d/%d: tool_calls=%d thinking_len=%d content_len=%d",
-			iteration, a.maxIterations, len(resp.Message.ToolCalls),
-			len(resp.Message.Thinking), len(resp.Message.Content))
+		a.log.Debug("Agentic loop iteration %d: tool_calls=%d thinking_len=%d content_len=%d failure_streak=%d",
+			iteration, len(resp.Message.ToolCalls),
+			len(resp.Message.Thinking), len(resp.Message.Content), consecutiveToolFailures)
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
@@ -222,21 +389,18 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 
 			var toolContent string
 
-			if totalToolCalls >= maxIntelResults {
-				// Cap reached — inform the model rather than silently dropping results.
-				a.log.Warn("Tool call cap (%d) reached, skipping %q", maxIntelResults, toolName)
-				toolContent = fmt.Sprintf("Tool call cap of %d reached. No further tool calls will be executed.", maxIntelResults)
+			result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
+			if execErr != nil {
+				// Fail gracefully: inject the error so the model can recover.
+				consecutiveToolFailures++
+				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
+				toolContent = fmt.Sprintf("Error: %v", execErr)
 			} else {
-				result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
-				if execErr != nil {
-					// Fail gracefully: inject the error so the model can recover.
-					a.log.Warn("Tool %q execution failed: %v", toolName, execErr)
-					toolContent = fmt.Sprintf("Error: %v", execErr)
-				} else {
-					totalToolCalls++
-					toolContent = result
-					a.log.Debug("Tool %q executed successfully (total calls: %d)", toolName, totalToolCalls)
-				}
+				consecutiveToolFailures = 0
+				toolContent = result
+				a.log.Debug("Tool %q executed successfully", toolName)
+				// Record a brief annotation for history storage.
+				toolAnnotations = append(toolAnnotations, toolName)
 			}
 
 			messages = append(messages, ollama.ChatMessage{
@@ -244,12 +408,37 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 				ToolName: toolName,
 				Content:  toolContent,
 			})
+
+			if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
+				a.log.Warn("Agentic loop: stopping after %d consecutive tool execution failures", consecutiveToolFailures)
+				toolFailureBudgetExhausted = true
+				break
+			}
+		}
+
+		if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
+			break
 		}
 	}
 
-	// If the loop exited at the cap, log a warning.
-	if lastResp != nil && len(lastResp.Message.ToolCalls) > 0 {
-		a.log.Warn("Agentic loop: max iterations (%d) reached without final response", a.maxIterations)
+	if toolFailureBudgetExhausted {
+		accumulatedContent.Reset()
+		finalReq := req
+		finalReq.Messages = messages
+		finalReq.Tools = nil
+
+		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
+		if err != nil {
+			a.log.Error("Model %s failed while finishing after tool failures: %v", a.model, err)
+			return &AgentResponse{
+				Model:    a.model,
+				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
+				Error:    fmt.Sprintf("Model failed: %v", err),
+			}, nil
+		}
+
+		lastResp = resp
+		a.log.Debug("Agentic loop complete after disabling tools following %d consecutive tool failures", consecutiveToolFailures)
 	}
 
 	a.log.Debug("Response complete: model=%s", a.model)
@@ -265,6 +454,23 @@ func (a *Agent) Process(userPrompt string, streamCallback func(chunk StreamChunk
 	finalThinking := accumulatedThinking.String()
 	if finalThinking == "" && lastResp != nil {
 		finalThinking = lastResp.Message.Thinking
+	}
+
+	// Persist the user prompt and the assistant's final response to memory.
+	// Tool-call intermediaries are intentionally excluded to keep history lean —
+	// only the conversational exchange (not the internal reasoning steps) is retained.
+	// A brief tool-use annotation is appended to the assistant message so future
+	// turns show what tools were called without ballooning history size.
+	if finalContent != "" {
+		storedContent := finalContent
+		if len(toolAnnotations) > 0 {
+			storedContent += "\n\n---\n_Tools used: " + strings.Join(toolAnnotations, ", ") + "_"
+		}
+		a.memory.AppendTurn(
+			sessionKey,
+			ollama.ChatMessage{Role: "user", Content: userPrompt},
+			ollama.ChatMessage{Role: "assistant", Content: storedContent},
+		)
 	}
 
 	return &AgentResponse{
