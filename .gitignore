@@ -1,7 +1,6 @@
 # Golang
 tmp/ 
 .env
-config/memory/
 
-# Gemini export, might be useful
-IMPORT.md
+# User memories
+config/memory/

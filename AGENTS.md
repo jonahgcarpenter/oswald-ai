@@ -1,412 +1,378 @@
 # AGENTS.md — Oswald AI Developer Reference
 
-This document captures the current structure and conventions for working on Oswald AI.
-
----
+This file is the internal reference for how Oswald AI works today.
 
 ## Project Overview
 
-Oswald AI is a pure Go application.
-It runs a single agentic chat loop on top of Ollama, exposes that loop through Discord and a local WebSocket gateway, and supports builtin tools such as web search.
+Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
+It exposes that loop through Discord and a local WebSocket gateway and supports three builtin tools:
+
+- `web_search`
+- `persistent_memory`
+- `soul_memory`
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
-Current architecture layers:
+## Runtime Architecture
 
-1. **Gateway bootstrap** — shared gateway interface + startup wiring in `internal/gateway/`
-2. **Gateway implementations** — Discord and local WebSocket in `internal/gateway/discord/` and `internal/gateway/websocket/`
-3. **Agent/Orchestration** — single tool-calling loop in `internal/agent/`
-4. **Three-tier Memory Model** — soul identity, per-user persistent facts, and in-session conversation history (see below)
-5. **Tools** — generic registry/bootstrap in `internal/tools/`, tool-specific logic in subpackages; context key helpers in `internal/tools/toolctx/`
-6. **LLM Client** — Ollama-only client and schema in `internal/ollama/`
+Current layers:
 
----
+1. `cmd/agent/main.go` — startup wiring
+2. `internal/gateway/` — gateway bootstrap and implementations
+3. `internal/broker/` — request queue and worker pool
+4. `internal/agent/` — iterative tool-calling agent loop
+5. `internal/memory/` — in-process conversation retention and compaction
+6. `internal/tools/` — tool registry, schemas, and builtin handlers
+7. `internal/ollama/` — Ollama client and request/response schema
 
-## Three-Tier Memory Model
+## Startup Flow
 
-Oswald maintains three distinct layers of memory, each serving a different question:
+`cmd/agent/main.go` performs startup in this order:
 
-| Layer | Storage | Answers | Mutable by agent |
-| ----- | ------- | ------- | ---------------- |
-| **Soul** | `config/soul.md` (disk) | Who is Oswald? (identity, origin, personality, directives) | Yes — via `soul_memory` tool |
-| **User memory** | `data/memory/users/<id>.md` (disk) | Who is this user? (name, preferences, facts they've stated) | Yes — via `persistent_memory` tool |
-| **Chat history** | In-process memory store | What is this conversation about? | Implicitly (turn pairs appended each request) |
+1. Load environment config
+2. Create the shared logger
+3. Create the Ollama client
+4. Discover context budget from Ollama `/api/show`
+5. Create the soul store and persistent user-memory store
+6. Load tool schemas from `config/tools/*.md` and register builtin handlers
+7. Build enabled gateways from config
+8. Create the in-process conversation memory store
+9. Create the agent
+10. Start the broker worker pool
+11. Start each gateway in its own goroutine
+12. Wait for shutdown signal and drain the broker
 
-The soul file is read fresh on every request, so edits via the `soul_memory` tool take effect on the next message without a restart.
+## Request Lifecycle
 
----
+Every request follows the same high-level path:
 
-## Build / Run / Dev Commands
+1. A gateway receives user input
+2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`
+3. The gateway submits a `broker.Request`
+4. A broker worker calls `(*Agent).Process()`
+5. The agent builds the prompt, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+6. The final response is returned to the originating gateway
+7. The gateway sends the response back to the client or Discord channel
 
-```bash
-# Build binary
-go build -o ./tmp/main ./cmd/agent/main.go
+The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
-# Run directly
-go run ./cmd/agent/main.go
+## Broker
 
-# Dev mode with hot-reload (requires `air` installed)
-air
+The broker lives in `internal/broker/` and sits between gateways and the agent.
 
-# Format all Go code
-gofmt -w .
+- Requests are queued through a shared buffered channel
+- A fixed worker pool limits concurrent `Process()` calls
+- If the queue is full, the broker returns an immediate fallback response instead of blocking forever
+- Shutdown closes the queue and waits for in-flight work to finish
 
-# Vet non-test packages
-go list ./... | grep -v '/test$' | xargs go vet
+Relevant config:
 
-# Tidy module dependencies
-go mod tidy
+- `WORKER_POOL_SIZE` default: `1`
 
-# Build Docker image
-docker build -t oswald-ai .
-```
+## Agent Flow
 
-The repo contains standalone integration programs in `test/`, so `go vet ./...` and `go test ./...` are not the most useful verification commands for day-to-day work.
+The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`.
 
----
+Per request it does the following:
 
-## Testing
+1. Create a request-scoped timeout of `3*time.Minute`
+2. Inject `SenderID` into context so tools can identify the current user
+3. Read `config/soul.md` fresh from disk
+4. Build the dynamic system prompt from:
+   - soul content
+   - current date and time
+   - current speaker identity when available
+5. Load retained session turns from `internal/memory`
+6. Compact older turns if the estimated prompt exceeds the active model budget
+7. Build the Ollama message array: system prompt, retained history, current user prompt
+8. Optionally write a prompt debug dump when `PROMPT_DEBUG_PATH` is set
+9. Call Ollama with all registered tools available
+10. If the model emits tool calls:
+    - execute each tool handler
+    - append tool results as `tool` messages
+    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
+11. If tool failures exhaust the retry budget, make one final model call with tools disabled
+12. Persist only the final user message and final assistant reply to session memory
+13. Return the final `AgentResponse`
 
-There are no `*_test.go` files yet.
-Integration tests are standalone `package main` programs in `test/`:
+Streaming behavior:
 
-```bash
-# Start server first
-go run ./cmd/agent/main.go
+- WebSocket clients can receive `thinking`, `content`, and `status` chunks while the request is running
+- Discord does not stream token-by-token; it waits for the final response
 
-# Separate terminal
-go run ./test/ttft.go
+## Three-Layer Memory Model
 
-# Separate terminal
-go run ./test/interactive.go
+Oswald keeps three distinct memory layers.
 
-# Separate terminal
-go run ./test/memory.go
-```
+| Layer | Storage | Purpose | Mutable by agent |
+| --- | --- | --- | --- |
+| Soul memory | `config/soul.md` | Identity, directives, personality | Yes |
+| Persistent user memory | `config/memory/users/<id>.md` | Facts about a user that survive restart | Yes |
+| Session chat memory | In-process only | Conversation history for the active session | Implicitly |
 
-These integration programs connect to `ws://localhost:8080/ws` and require Ollama to be reachable.
+### Soul Memory
 
-| File                  | Purpose                                               |
-| --------------------- | ----------------------------------------------------- |
-| `test/ttft.go`        | Benchmarks time to first token for streamed responses |
-| `test/interactive.go` | Interactive prompting environment for testing         |
-| `test/memory.go`      | Exercises TTL, max-turn retention, and context pruning via debug dumps |
+- Stored in `config/soul.md`
+- Read fresh on every request
+- Edited through the `soul_memory` tool
+- Changes take effect on the next request without restart
 
-When adding new integration checks, keep using the same standalone `package main` pattern inside `test/`.
+### Persistent User Memory
 
----
+- Stored in `config/memory/users/<id>.md`
+- Managed by the `persistent_memory` tool
+- Organized into categories: `identity`, `preferences`, `context`, `notes`
+- Uses per-user locking so different users can be updated in parallel safely
+- Older flat files are migrated to categorized markdown on first recall or write
 
-## Code Architecture
+### Session Chat Memory
 
-### Single Agentic Loop
+- Stored only in memory until process exit
+- Keyed by a gateway-provided `SessionKey`
+- Stores only final user/assistant turn pairs
+- Tool messages and intermediate reasoning are intentionally not persisted
 
-The core runtime path is `(*Agent).Process()` in `internal/agent/agent.go`.
+Retention behavior:
 
-Flow:
+- `MEMORY_MAX_TURNS` keeps only the newest N turn pairs when set above `0`
+- `MEMORY_MAX_AGE` expires turn pairs older than the configured Go duration when set above `0`
+- Pruning is destructive inside the store
 
-1. Read `config/soul.md` fresh via the soul store — this becomes the system prompt
-2. Retrieve conversation history for the session from `internal/memory`
-3. Build the initial chat request with:
-   - the current soul content (plus injected date/time)
-   - the retrieved conversation history (user/assistant turn pairs), first pruned by memory retention policy and then compacted in-memory if needed to fit the active model's context budget
-   - the current user prompt
-   - all registered tools from the tool registry
-4. Send the request to Ollama via `internal/ollama`
-5. If the model emits tool calls:
-   - execute each registered tool handler
-   - append tool results as `tool` messages
-   - repeat until the model stops calling tools, the request times out, or consecutive tool failures exhaust `MAX_TOOL_FAILURE_RETRIES`
-6. Persist the user prompt and final assistant response to memory (tool intermediaries excluded)
-7. Return the final `AgentResponse`, including optional streamed thinking/content chunks and model metrics
+Prompt-budget behavior:
 
-### Conversation Memory
+- The agent estimates prompt size before calling Ollama
+- If retained history would exceed budget, the oldest turns are summarized into a synthetic replacement turn
+- That compacted turn is written back into session memory and gets a fresh timestamp
+- Compaction is destructive and still counts toward `MEMORY_MAX_TURNS`
 
-Session state is managed by `internal/memory.Store`.
+## Context Budget Discovery
 
-- Each session is identified by a `SessionKey` string set at the gateway level
-- Only user and assistant final messages are stored — tool call intermediaries are excluded to keep history lean
-- Session history is retained in memory until process exit, subject to optional TTL and max-turn retention limits
-- `MEMORY_MAX_TURNS` retains only the newest N stored turn pairs per session when set above `0`
-- `MEMORY_MAX_AGE` expires stored turn pairs older than the configured Go duration when set above `0`
-- History is pruned for retention in `internal/memory`; if the retained history still exceeds the active prompt budget, the oldest retained prefix is compacted into a normal replacement turn pair and written back into memory with a fresh timestamp
-- An empty `SessionKey` disables memory for a request (stateless one-shot behaviour)
+Context budgeting lives in `internal/memory/budget.go`.
 
-### Context Budgeting
+- At startup the app queries Ollama `/api/show`
+- `num_ctx` from model parameters is preferred
+- `*.context_length` from model metadata is the fallback
+- If discovery fails, package defaults are used
 
-Before each `/api/chat` call, the agent estimates the prompt size after TTL/max-turn pruning. If the prompt would exceed budget, it compacts the oldest retained turn pairs into a single replacement turn pair that remains in ordinary chat history.
+The prompt budget is the context window minus reserves for:
 
-- Model metadata is discovered from Ollama's `/api/show` endpoint at startup
-- `num_ctx` from the model parameters is preferred when available
-- Model metadata `*.context_length` is used as a fallback
-- Reserve values (`response_reserve`, `tool_reserve`, `safety_margin`) fall back to hardcoded package defaults when Ollama metadata provides no override
-- Prompt compaction is destructive: the compacted replacement turn pair is written back into `internal/memory`, gets a fresh TTL timestamp, and still counts toward `MEMORY_MAX_TURNS`
+- response generation
+- tool overhead
+- safety margin
 
-**Hybrid Session Key Strategy (Discord gateway):**
+## Gateways
 
-| Context | Session Key | Behaviour |
-| ------- | ----------- | --------- |
-| DM | `SenderID` | Continuous per-user memory across all DMs |
-| Guild channel / thread | `ChannelID:SenderID` | Per-user isolation; prevents cross-talk between users in the same channel |
+Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 
-**WebSocket gateway:** uses the connection's remote address as the session key, giving each connected client its own conversation memory for the connection lifetime.
+- WebSocket is always enabled
+- Discord is enabled only when `DISCORD_TOKEN` is set
 
-Important runtime limits:
+### WebSocket Gateway
 
-- `MAX_TOOL_FAILURE_RETRIES` defaults to `3`
-- successful tool calls are not capped per request; only consecutive tool execution failures are limited
-- overall request timeout is `3*time.Minute` in `Process()`
+Files:
 
-### Tools
+- `internal/gateway/websocket/gateway.go`
+- `internal/gateway/websocket/types.go`
 
-Tools are split into two layers:
+Behavior:
 
-- `internal/tools/`
-  - generic registry
-  - markdown parsing
-  - bootstrap wiring
-- `internal/tools/<toolname>/`
-  - tool-specific logic
-  - external API clients
-  - handler creation
+- Listens on `/ws`
+- Accepts either plain text or JSON input
+- JSON input fields:
+  - `user_id`
+  - `display_name`
+  - `prompt`
+- If plain text is sent, the remote address is used as fallback identity
+- If `user_id` is present, it becomes the primary session key
+- Streams typed chunks during generation, then sends a final JSON response payload
+
+### Discord Gateway
+
+Files:
+
+- `internal/gateway/discord/gateway.go`
+- `internal/gateway/discord/types.go`
+
+Behavior:
+
+- Maintains a reconnecting Discord Gateway websocket session
+- Sends heartbeats and identifies with the configured bot token
+- Ignores bot-authored messages
+- In guilds, only responds to mentions or direct replies to the bot
+- In DMs, responds to any message
+- Resolves Discord mentions into readable `@username` text
+- Sends typing indicators while the request is running
+- Splits long replies to stay under Discord's 2000-character limit
+
+Discord session keys use a hybrid strategy:
+
+- DM: `SenderID`
+- Guild channel or thread: `ChannelID:SenderID`
+
+This prevents cross-talk between users in the same Discord channel while preserving continuity in DMs.
+
+Reply handling:
+
+- Replies to non-bot messages inject quoted context into the prompt
+- Replies to Oswald messages try to reuse the same session when possible
+- A short-lived reply index tracks which session a prior Oswald message came from
+
+## Tools
+
+Tools are split into schema and runtime layers.
+
+- Schemas are loaded from `config/tools/*.md`
+- Runtime handlers are wired in `internal/tools/bootstrap.go`
 
 Current builtin tools:
 
-- `web_search` in `internal/tools/websearch/`
-- `persistent_memory` in `internal/tools/usermemory/`
-- `soul_memory` in `internal/tools/soulmemory/`
+- `web_search` — SearXNG-backed search
+- `persistent_memory` — remember, recall, and forget user facts
+- `soul_memory` — read, write, or append to the soul file
 
-Tool definitions are loaded from `config/tools/*.md`.
+### Tool Registry
 
-### Gateways
+The registry:
 
-Gateway structure is now:
+- loads markdown specs from disk
+- converts them into Ollama tool schemas
+- maps tool names to handlers
+- executes handlers when the model issues tool calls
 
-- `internal/gateway/gateway.go` — shared `Service` interface
-- `internal/gateway/bootstrap.go` — config-based gateway assembly
-- `internal/gateway/discord/` — Discord gateway implementation
-- `internal/gateway/websocket/` — local WebSocket gateway implementation
+### Tool Failure Handling
 
-`cmd/agent/main.go` should only depend on the root `internal/gateway` package, not concrete gateway subpackages.
+- Tool execution errors are converted into tool-response messages so the model can recover
+- Consecutive failures are tracked per request
+- Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
 
-### Ollama
+## Ollama Integration
 
-Ollama is the only LLM integration in this project.
-
-Relevant files:
+Files:
 
 - `internal/ollama/client.go`
 - `internal/ollama/schema.go`
 - `internal/ollama/types.go`
 
-There is no longer a generic provider abstraction in the codebase.
+Notes:
 
----
+- Ollama is the only model backend
+- `/api/show` is used at startup for context-budget discovery
+- `/api/chat` is used for normal requests, tool calling, and streaming
+- The client maps between internal app types and Ollama's wire format
+- Streaming responses accumulate both `thinking` and visible content
 
-## Key Files & Responsibilities
+## Prompt Debug Dumps
 
-| File                                        | Purpose                                                            |
-| ------------------------------------------- | ------------------------------------------------------------------ |
-| `cmd/agent/main.go`                         | Entrypoint: load config, bootstrap tools and gateways, start agent |
-| `internal/agent/agent.go`                   | Core agentic tool-calling loop and response assembly               |
-| `internal/config/config.go`                 | Environment config loading                                         |
-| `internal/memory/store.go`                  | In-memory conversation store with TTL/max-turn retention, destructive compaction, and history flattening |
-| `internal/debug/prompt.go`                  | Markdown prompt debug dump writer for request inspection |
-| `internal/ollama/client.go`                 | Ollama HTTP client with chat streaming and tool support            |
-| `internal/tools/registry.go`                | Generic tool registry and markdown parsing                         |
-| `internal/tools/bootstrap.go`               | Builtin tool bootstrap                                             |
-| `internal/tools/websearch/client.go`        | SearXNG-backed web search client                                   |
-| `internal/tools/websearch/websearch.go`     | Web search handler + shared search types                           |
-| `internal/tools/usermemory/store.go`        | Persistent per-user Markdown file store with per-user locking      |
-| `internal/tools/usermemory/usermemory.go`   | `persistent_memory` tool handler (remember / recall / forget)      |
-| `internal/tools/soulmemory/store.go`        | Single-file soul store with RWMutex for safe concurrent access     |
-| `internal/tools/soulmemory/soulmemory.go`   | `soul_memory` tool handler (read / write / append)                 |
-| `internal/tools/toolctx/toolctx.go`         | Context key helpers for sender ID injection into tool handlers     |
-| `internal/gateway/bootstrap.go`             | Enabled gateway assembly from config                               |
-| `internal/gateway/discord/gateway.go`       | Discord runtime behavior                                           |
-| `internal/gateway/discord/types.go`         | Discord constants and payload structs                              |
-| `internal/gateway/websocket/gateway.go`     | Local WebSocket runtime behavior                                   |
-| `internal/gateway/websocket/types.go`       | WebSocket gateway shared types including `IncomingMessage`         |
-| `config/soul.md`                            | Agent identity and personality (system prompt); editable at runtime |
-| `config/tools/*.md`                         | Tool schemas exposed to the model                                  |
+Set `PROMPT_DEBUG_PATH` to enable per-request markdown debug dumps.
 
----
+Each dump includes:
 
-## Code Style Guidelines
+- model and session metadata
+- estimated token counts before and after pruning
+- number of compacted turn pairs
+- the exact message array sent to Ollama
+- the tool schemas included in the request
 
-### Formatting
+Implementation: `internal/debug/prompt.go`
 
-- Use `gofmt`
-- Use tabs as enforced by `gofmt`
-- Run scoped vet for normal verification: `go list ./... | grep -v '/test$' | xargs go vet`
-
-### Import Organization
-
-Use three import groups separated by blank lines:
-
-1. stdlib
-2. third-party
-3. internal packages
-
-### Naming Conventions
-
-| Element                  | Convention                       | Example                                        |
-| ------------------------ | -------------------------------- | ---------------------------------------------- |
-| Packages                 | short, lowercase, no underscores | `agent`, `gateway`, `ollama`, `websearch`      |
-| Exported types           | `PascalCase`                     | `AgentResponse`, `ModelMetrics`, `Registry`    |
-| Unexported types         | `camelCase`                      | `workerFile`                                   |
-| Interfaces               | semantic `PascalCase`            | `Service`, `Searcher`, `Chatter`               |
-| Exported funcs/methods   | `PascalCase`                     | `NewAgent`, `Process`, `NewRegistryFromConfig` |
-| Unexported funcs/methods | `camelCase`                      | `connectAndListen`, `registerBuiltins`         |
-
-Constructors should use `NewX` and generally return pointers.
-
-### Error Handling
-
-Use standard Go error handling and wrap with `%w` when adding context:
-
-```go
-conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
-if err != nil {
-    return fmt.Errorf("failed to dial Discord Gateway: %w", err)
-}
-```
-
-- Startup failures: `log.Fatal` in `main.go`
-- Recoverable runtime problems: logger `Warn` / `Error`
-- Avoid `panic` for expected error paths
-
-### Logging Conventions
-
-Logging levels are intentionally opinionated:
-
-- `Debug` — noisy by design; request details, tool execution, iteration state, connection churn
-- `Info` — production-facing operational milestones; startup, enabled tools, enabled gateways, selected model
-- `Warn` — degraded but recoverable behavior; skipped work, retries, parse failures, tool failures, soul file modifications
-- `Error` — request or runtime failures that prevented intended behavior
-
-Do not put per-request or per-token chatter at `Info` level.
-
-### Concurrency
-
-- Use goroutines for long-lived gateway loops, Discord heartbeats, and typing indicators
-- Pass loop variables into goroutine closures explicitly
-- Use `chan struct{}` for lightweight lifecycle signaling
-- Use `chan os.Signal` in `main.go` for shutdown handling
-
-### Comments
-
-- Exported types and funcs need doc comments
-- Explain intent and constraints, not syntax
-- Prefer comments that explain **why**
-
----
-
-## Project-Specific Patterns
-
-### Adding a New Tool
-
-1. Add a markdown tool schema in `config/tools/<name>.md`
-2. Create `internal/tools/<name>/` if the tool needs runtime logic
-3. Add handler wiring in `internal/tools/bootstrap.go`
-4. Keep generic registry logic in `internal/tools/`; keep tool-specific code in the tool subpackage
-
-### Adding a New Gateway
-
-1. Create a new implementation package under `internal/gateway/<name>/`
-2. Implement the `gateway.Service` interface from `internal/gateway/gateway.go`
-3. Wire it in `internal/gateway/bootstrap.go`
-4. Do not wire concrete gateways directly in `cmd/agent/main.go`
-
-### Changing the Model
-
-Set the `OLLAMA_MODEL` environment variable. The model name is passed directly to Ollama — any model available in your local Ollama instance can be used.
-
-### Changing Oswald's Personality
-
-Edit `config/soul.md` directly, or let the agent do it via the `soul_memory` tool. The file is read fresh on every request, so changes take effect immediately without a restart.
-
-### Web Search Configuration
-
-- SearXNG base URL comes from `SEARXNG_URL`
-- consecutive tool failure retry limit comes from `MAX_TOOL_FAILURE_RETRIES`
-
----
-
-## Debugging Tips
-
-### Enable Debug Logging
+## Build, Run, and Verification
 
 ```bash
-LOG_LEVEL=debug go run ./cmd/agent/main.go
-```
-
-Useful debug output includes:
-
-- request processing
-- memory retention pruning and context-budget pruning
-- tool execution
-- agentic loop iteration counts
-- websocket and Discord request handling
-- web search query execution
-- soul file read/write operations
-
-### Prompt Debug Dumps
-
-Set `PROMPT_DEBUG_PATH` to write a timestamped Markdown file for every request.
-
-- metadata: model, session, token budget, and compaction estimates
-- session history: retained conversation history after any in-memory compaction
-- final message array: the exact messages sent to Ollama
-- tool schemas: every tool definition included in the request
-
-### Common Verification Commands
-
-```bash
+go run ./cmd/agent/main.go
+go build -o ./tmp/main ./cmd/agent/main.go
 gofmt -w .
 go list ./... | grep -v '/test$' | xargs go vet
-go build -o ./tmp/main ./cmd/agent/main.go
 ```
 
----
+There are no `*_test.go` tests yet. Integration checks are standalone programs in `test/` and expect the server to already be running.
 
-## Environment Configuration
+```bash
+go run ./test/ttft.go
+go run ./test/interactive.go
+go run ./test/memory-ttl.go
+go run ./test/memory-max_turns.go
+go run ./test/memory-compaction.go
+```
 
-| Variable                 | Default                  | Purpose                              |
-| ------------------------ | ------------------------ | ------------------------------------ |
-| `PORT`                   | `8080`                   | WebSocket gateway port               |
-| `OLLAMA_URL`             | `http://localhost:11434` | Ollama API                           |
-| `OLLAMA_MODEL`           | *(required)*             | Ollama model name; startup fails if empty |
-| `SEARXNG_URL`            | `http://localhost:8888`  | SearXNG API                          |
-| `DISCORD_TOKEN`          | empty                    | Enables Discord gateway              |
-| `MAX_TOOL_FAILURE_RETRIES` | `3`                    | Max consecutive tool execution failures before tools are disabled for the request |
-| `LOG_LEVEL`              | `info`                   | Logging verbosity                    |
-| `MEMORY_MAX_TURNS`       | `10`                     | Max retained memory turn pairs per session; `0` disables the cap |
-| `MEMORY_MAX_AGE`         | `0`                      | Max retained memory age as Go duration (for example `24h`); `0` disables expiry |
-| `PROMPT_DEBUG_PATH`      | empty                    | Directory for per-request Markdown prompt dumps; each request writes a timestamped `.md` file showing retained session history, the final message array, tool schemas, and context budget |
+These memory checks are easiest to understand when the server runs with a small retention budget and prompt debug dumps enabled.
 
-Paths for the soul file, tool definitions, and persistent user memory are hardcoded in `internal/config/config.go`.
+Example:
 
----
+```bash
+MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run ./cmd/agent/main.go
+```
 
-## Dependencies
+## Environment Variables
 
-| Package                        | Purpose                                             |
-| ------------------------------ | --------------------------------------------------- |
-| `github.com/gorilla/websocket` | Discord WebSocket client and local WebSocket server |
-| `github.com/joho/godotenv`     | `.env` loading                                      |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `8080` | WebSocket gateway port |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
+| `OLLAMA_MODEL` | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama |
+| `SEARXNG_URL` | `http://localhost:8888` | SearXNG API base URL |
+| `DISCORD_TOKEN` | empty | Enables Discord gateway |
+| `WORKER_POOL_SIZE` | `1` | Broker worker count |
+| `MAX_TOOL_FAILURE_RETRIES` | `3` | Max consecutive tool failures before disabling tools for the request |
+| `LOG_LEVEL` | `info` | Logging verbosity |
+| `MEMORY_MAX_TURNS` | `10` | Max retained session turn pairs; `0` disables the cap |
+| `MEMORY_MAX_AGE` | `30m` | Max retained session age; `0` disables expiry |
+| `PROMPT_DEBUG_PATH` | empty | Directory for per-request prompt markdown dumps |
 
-After dependency changes, run `go mod tidy`.
+## Key Files
 
----
+| File | Purpose |
+| --- | --- |
+| `cmd/agent/main.go` | Startup wiring and shutdown |
+| `internal/agent/agent.go` | Main agent loop |
+| `internal/agent/summarize.go` | History compaction summarizer |
+| `internal/broker/broker.go` | Request queue and worker pool |
+| `internal/memory/store.go` | Session memory retention |
+| `internal/memory/budget.go` | Context budget discovery |
+| `internal/ollama/client.go` | Ollama HTTP client |
+| `internal/tools/registry.go` | Tool schema loading and execution |
+| `internal/tools/bootstrap.go` | Builtin tool wiring |
+| `internal/tools/usermemory/store.go` | Persistent per-user memory store |
+| `internal/tools/soulmemory/store.go` | Soul file store |
+| `internal/gateway/websocket/gateway.go` | WebSocket transport |
+| `internal/gateway/discord/gateway.go` | Discord transport |
+| `internal/debug/prompt.go` | Prompt debug dump writer |
+
+## Code Style
+
+- Use `gofmt`
+- Keep imports grouped as stdlib, third-party, internal
+- Use `%w` when wrapping errors
+- Use `log.Fatal` only for startup failures in `main.go`
+- Prefer `Warn` and `Error` for degraded runtime behavior instead of `panic`
+- Exported types and functions should have doc comments
+
+## Extension Patterns
+
+### Adding a Tool
+
+1. Add a schema file to `config/tools/<name>.md`
+2. Add runtime code under `internal/tools/<name>/` if needed
+3. Register the handler in `internal/tools/bootstrap.go`
+
+### Adding a Gateway
+
+1. Create `internal/gateway/<name>/`
+2. Implement `gateway.Service`
+3. Wire it in `internal/gateway/bootstrap.go`
+4. Do not import concrete gateway packages directly in `cmd/agent/main.go`
+
+### Changing Personality
+
+- Edit `config/soul.md` directly, or
+- let the agent update it through the `soul_memory` tool
+
+Changes apply on the next request because the soul file is read fresh each time.
 
 ## Known Limitations
 
-- No persistent conversation history (conversation memory is in-process only; restarts clear all sessions — per-user fact memory via `persistent_memory` tool and soul identity via `soul_memory` tool both survive restarts)
-- No session resumption for Discord reconnects
-- WebSocket API has no authentication layer
-- Three builtin tools: `web_search`, `persistent_memory`, and `soul_memory`
-- Ollama is the only model backend
+- Session chat history is in-process only and does not survive restart
+- WebSocket gateway has no authentication layer
+- Only three builtin tools ship today
+- Ollama is the only LLM backend
 
----
-
-**Oswald AI** — a local Go agent with tools, gateways, and no patience.
+Oswald AI is a local Go agent with tools, gateways, and just enough memory to be useful.
