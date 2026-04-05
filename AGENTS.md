@@ -124,6 +124,14 @@ Oswald keeps three distinct memory layers.
 - Organized into categories: `identity`, `preferences`, `context`, `notes`
 - Uses per-user locking so different users can be updated in parallel safely
 - Older flat files are migrated to categorized markdown on first recall or write
+- `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
+
+### Account Links
+
+- Stored in `config/accounts/links.json`
+- Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
+- Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
+- `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
 
 ### Session Chat Memory
 

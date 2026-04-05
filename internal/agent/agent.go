@@ -201,10 +201,10 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // persistence. Passing an empty sessionKey disables memory for this request
 // (stateless one-shot behaviour).
 //
-// senderID is the stable user identifier from the originating gateway (e.g. a
-// Discord user ID or WebSocket user ID). It is injected into the request context
-// so that tools such as persistent_memory can identify the user without needing
-// the session key. An empty senderID disables user-scoped tool behaviour.
+// senderID is the stable internal user identifier for the current request. It is
+// injected into the request context so that tools such as persistent_memory can
+// identify the user without needing the session key. An empty senderID disables
+// user-scoped tool behaviour.
 //
 // displayName is the human-readable name for the sender (e.g. a Discord username).
 // If non-empty it is injected into the system prompt so the model knows who it is
@@ -237,12 +237,10 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	promptParts = append(promptParts, soulContent)
 	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
 
-	if senderID != "" {
-		if displayName != "" {
-			promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s (ID: %s).", displayName, senderID))
-		} else {
-			promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with user ID: %s.", senderID))
-		}
+	if displayName != "" {
+		promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s.", displayName))
+	} else if senderID != "" {
+		promptParts = append(promptParts, "## Current Speaker\nYou are speaking with a returning user.")
 	}
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")

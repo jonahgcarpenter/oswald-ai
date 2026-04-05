@@ -51,13 +51,13 @@ func isStreamChunk(raw []byte) (interactiveStreamChunk, bool) {
 }
 
 // isFinalPayload returns true when the message is a completed AgentResponse
-// (has a non-empty "model" field).
+// (has a response, error, or non-empty "model" field).
 func isFinalPayload(raw []byte) (interactiveAgentResponse, bool) {
 	var resp interactiveAgentResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return resp, false
 	}
-	return resp, resp.Model != ""
+	return resp, resp.Model != "" || resp.Response != "" || resp.Error != ""
 }
 
 // connect establishes a WebSocket connection to the given URL, retrying on failure.
@@ -150,6 +150,11 @@ func main() {
 				if resp.Error != "" {
 					fmt.Printf("%s[error] %s%s\n\n", colorGray, resp.Error, colorReset)
 					break
+				}
+
+				if resp.Response != "" && !inContent {
+					fmt.Println(resp.Response)
+					fmt.Println()
 				}
 
 				// Compact metrics summary

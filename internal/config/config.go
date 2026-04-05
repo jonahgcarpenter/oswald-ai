@@ -24,9 +24,10 @@ type Config struct {
 }
 
 const (
-	DefaultSoulPath       = "config/soul.md"
-	DefaultToolsConfigDir = "config/tools"
-	DefaultUserMemoryPath = "config/memory/users"
+	DefaultSoulPath        = "config/soul.md"
+	DefaultToolsConfigDir  = "config/tools"
+	DefaultUserMemoryPath  = "config/memory/users"
+	DefaultAccountLinkPath = "config/accounts/links.json"
 )
 
 // Load reads configuration from environment variables, with .env file support.

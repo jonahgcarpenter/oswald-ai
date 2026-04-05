@@ -2,5 +2,6 @@
 tmp/ 
 .env
 
-# User memories
+# Users
 config/memory/
+config/accounts/

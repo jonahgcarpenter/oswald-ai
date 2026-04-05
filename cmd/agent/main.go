@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -53,12 +54,16 @@ func main() {
 	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, log)
 	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
 
+	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, log)
+	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
+	log.Debug("Account links: %s", config.DefaultAccountLinkPath)
+
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, log)
 	if err != nil {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
 
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, log)
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, log)
 	if err != nil {
 		log.Fatal("Failed to initialize gateways: %v", err)
 	}

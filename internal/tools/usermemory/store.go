@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -215,6 +216,56 @@ func (s *Store) WriteFull(userID, content string) error {
 	return nil
 }
 
+// MergeUsers merges the persistent memory file for loserUserID into winnerUserID.
+// Statement lines are de-duplicated case-insensitively, preserving the winner's
+// existing entry when a duplicate exists in both files.
+func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
+	if winnerUserID == "" || loserUserID == "" || winnerUserID == loserUserID {
+		return nil
+	}
+
+	firstID, secondID := winnerUserID, loserUserID
+	if firstID > secondID {
+		firstID, secondID = secondID, firstID
+	}
+
+	firstLock := s.lockFor(firstID)
+	secondLock := s.lockFor(secondID)
+	firstLock.Lock()
+	secondLock.Lock()
+	defer secondLock.Unlock()
+	defer firstLock.Unlock()
+
+	winnerPath := s.filePath(winnerUserID)
+	loserPath := s.filePath(loserUserID)
+
+	winnerRaw, err := os.ReadFile(winnerPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read user memory for %q: %w", winnerUserID, err)
+	}
+	loserRaw, err := os.ReadFile(loserPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read user memory for %q: %w", loserUserID, err)
+	}
+
+	merged := mergeCategorizedContent(string(winnerRaw), string(loserRaw))
+	if strings.TrimSpace(merged) != "" && strings.TrimSpace(merged) != "# User Memory" {
+		if err := os.MkdirAll(filepath.Dir(winnerPath), 0o755); err != nil {
+			return fmt.Errorf("failed to create memory directory: %w", err)
+		}
+		if err := os.WriteFile(winnerPath, []byte(merged), 0o644); err != nil {
+			return fmt.Errorf("failed to write merged user memory for %q: %w", winnerUserID, err)
+		}
+	}
+
+	if err := os.Remove(loserPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove merged user memory for %q: %w", loserUserID, err)
+	}
+
+	s.log.Debug("UserMemory: merged user memory from %q into %q", loserUserID, winnerUserID)
+	return nil
+}
+
 // normalizeCategory maps an input category string to a valid lowercase category name.
 // Falls back to defaultCategory if the input does not match any known category.
 func normalizeCategory(cat string) string {
@@ -394,4 +445,45 @@ func deleteCategorizedEntry(content, statement string) string {
 		}
 	}
 	return serializeSections(sections)
+}
+
+func mergeCategorizedContent(primary, secondary string) string {
+	primarySections := parseSections(migrateIfNeeded(primary))
+	secondarySections := parseSections(migrateIfNeeded(secondary))
+	mergedSections := make(map[string]string, len(ValidCategories))
+
+	for _, cat := range ValidCategories {
+		entries := make([]string, 0)
+		seen := make(map[string]struct{})
+
+		for _, block := range parseEntries(primarySections[cat]) {
+			statement := strings.ToLower(statementOf(block))
+			if _, ok := seen[statement]; ok {
+				continue
+			}
+			seen[statement] = struct{}{}
+			entries = append(entries, strings.TrimSpace(block))
+		}
+		for _, block := range parseEntries(secondarySections[cat]) {
+			statement := strings.ToLower(statementOf(block))
+			if _, ok := seen[statement]; ok {
+				continue
+			}
+			seen[statement] = struct{}{}
+			entries = append(entries, strings.TrimSpace(block))
+		}
+
+		if len(entries) == 0 {
+			continue
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			return strings.ToLower(statementOf(entries[i])) < strings.ToLower(statementOf(entries[j]))
+		})
+		mergedSections[cat] = strings.Join(entries, "\n\n") + "\n"
+	}
+
+	if len(mergedSections) == 0 {
+		return ""
+	}
+	return serializeSections(mergedSections)
 }

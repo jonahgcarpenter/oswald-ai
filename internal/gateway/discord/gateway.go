@@ -12,6 +12,7 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 )
 
@@ -265,8 +266,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 		mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
 		isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
+		isAccountCommand := strings.HasPrefix(strings.TrimSpace(msg.Content), "/connect") || strings.HasPrefix(strings.TrimSpace(msg.Content), "/disconnect")
 
-		if !isReplyToBot && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
+		if !isReplyToBot && !isAccountCommand && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
 			return
 		}
 		replyToID = msg.ID
@@ -291,9 +293,32 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	//   Guild channels/threads: ChannelID:SenderID — per-user isolation, prevents cross-talk
 	var sessionKey string
 	if msg.GuildID == "" {
-		sessionKey = msg.Author.ID
+		sessionKey = "discord:dm:" + msg.Author.ID
 	} else {
-		sessionKey = msg.ChannelID + ":" + msg.Author.ID
+		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
+	}
+
+	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
+	if normErr != nil {
+		dg.Log.Error("Discord account normalization error: %v", normErr)
+		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
+		return
+	}
+
+	canonicalUserID, err := dg.Links.EnsureAccount("discord", normalizedAuthorID, msg.Author.Username)
+	if err != nil {
+		dg.Log.Error("Discord account resolution error: %v", err)
+		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your account identity.", replyToID)
+		return
+	}
+
+	if commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, prompt); handled {
+		if commandErr != nil {
+			dg.Log.Error("Discord account command error: %v", commandErr)
+			commandResponse = "Failed to process account linking command."
+		}
+		_, _ = dg.sendMessage(msg.ChannelID, commandResponse, replyToID)
+		return
 	}
 
 	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
@@ -327,7 +352,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		}
 	}
 
-	dg.Log.Debug("Discord request from %s (session=%s): %q", msg.Author.Username, sessionKey, truncate(prompt, 100))
+	dg.Log.Debug("Discord request from %s (session=%s canonical=%s): %q", msg.Author.Username, sessionKey, canonicalUserID, truncate(prompt, 100))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)
@@ -350,7 +375,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	req := &broker.Request{
 		Channel:      "discord",
 		ChatID:       msg.ChannelID,
-		SenderID:     msg.Author.ID,
+		SenderID:     canonicalUserID,
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,

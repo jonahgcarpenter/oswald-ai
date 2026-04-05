@@ -3,24 +3,29 @@ package gateway
 import (
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	localws "github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, commands *accountlink.CommandHandler, log *config.Logger) ([]Service, error) {
 	services := []Service{
 		&localws.Gateway{
-			Port: cfg.Port,
-			Log:  log,
+			Port:     cfg.Port,
+			Links:    links,
+			Commands: commands,
+			Log:      log,
 		},
 	}
 
 	if cfg.DiscordToken != "" {
 		services = append(services, &discord.Gateway{
-			Token: cfg.DiscordToken,
-			Log:   log,
+			Token:    cfg.DiscordToken,
+			Links:    links,
+			Commands: commands,
+			Log:      log,
 		})
 	}
 

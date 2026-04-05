@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
@@ -80,6 +81,8 @@ type Gateway struct {
 	Token      string
 	BotID      string
 	Broker     *broker.Broker
+	Links      *accountlink.Service
+	Commands   *accountlink.CommandHandler
 	Log        *config.Logger
 	replyMu    sync.RWMutex
 	replyIndex map[string]replyContext

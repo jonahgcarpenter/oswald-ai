@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 // Name returns the human-readable gateway name.
@@ -17,7 +17,7 @@ func (wg *Gateway) Name() string {
 // Start initializes the HTTP server and registers the WebSocket handler.
 func (wg *Gateway) Start(b *broker.Broker) error {
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handleConnections(w, r, b, wg.Log)
+		wg.handleConnections(w, r, b)
 	})
 
 	wg.Log.Info("Websocket server listening on port %s", wg.Port)
@@ -25,7 +25,8 @@ func (wg *Gateway) Start(b *broker.Broker) error {
 }
 
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
-func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker, log *config.Logger) {
+func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
+	log := wg.Log
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Error("Upgrader error: %v", err)
@@ -57,16 +58,43 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 			userID = remoteAddr
 		}
 
-		// Build the session key from the user ID for persistent per-user
-		// conversation memory. Fall back to the remote address if no user ID
-		// was provided so anonymous connections still get session isolation.
-		sessionKey := userID
-		if sessionKey == "" {
-			sessionKey = remoteAddr
+		// Build the session key from the gateway identity while keeping
+		// persistent memory keyed separately by canonical user ID.
+		sessionIdentity := userID
+		if sessionIdentity == "" {
+			sessionIdentity = remoteAddr
 			userID = remoteAddr
 		}
+		normalizedUserID, normErr := accountlink.NormalizeIdentifier("websocket", userID)
+		if normErr != nil {
+			errorPayload := agent.AgentResponse{Error: normErr.Error()}
+			errBytes, _ := json.Marshal(errorPayload)
+			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
+			continue
+		}
+		sessionKey := "websocket:" + sessionIdentity
 
-		log.Debug("Websocket request (session=%s sender=%s): %q", sessionKey, userID, truncate(userPrompt, 100))
+		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
+		if err != nil {
+			log.Error("Websocket account resolution error: %v", err)
+			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
+			errBytes, _ := json.Marshal(errorPayload)
+			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
+			continue
+		}
+
+		if commandResponse, handled, commandErr := wg.Commands.Handle(canonicalUserID, userPrompt); handled {
+			if commandErr != nil {
+				log.Error("Websocket account command error: %v", commandErr)
+				commandResponse = "Failed to process account linking command."
+			}
+			payload := agent.AgentResponse{Response: commandResponse}
+			respBytes, _ := json.Marshal(payload)
+			conn.WriteMessage(messageType, respBytes) // nolint: errcheck
+			continue
+		}
+
+		log.Debug("Websocket request (session=%s sender=%s canonical=%s): %q", sessionKey, normalizedUserID, canonicalUserID, truncate(userPrompt, 100))
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
@@ -85,7 +113,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker,
 		req := &broker.Request{
 			Channel:      "websocket",
 			ChatID:       sessionKey,
-			SenderID:     userID,
+			SenderID:     canonicalUserID,
 			DisplayName:  displayName,
 			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
