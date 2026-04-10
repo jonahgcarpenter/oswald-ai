@@ -136,8 +136,22 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	if isGroup {
 		prompt = strings.TrimSpace(mentionRE.ReplaceAllString(prompt, ""))
 	}
+
+	stopTyping := make(chan struct{})
+	typingStopped := false
+	stopTypingNow := func() {
+		if typingStopped {
+			return
+		}
+		typingStopped = true
+		close(stopTyping)
+	}
+	defer stopTypingNow()
+	go g.typingLoop(chat.GUID, stopTyping)
+
 	if prompt == "" {
 		responseText := "What do you want idiot."
+		stopTypingNow()
 		messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
 		if err != nil {
 			g.Log.Error("iMessage empty prompt response send failed: %v", err)
@@ -151,15 +165,12 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
 	g.Log.Debug("iMessage request from %s (session=%s canonical=%s): %q", normalizedSenderID, sessionKey, canonicalUserID, truncate(prompt, 100))
 
-	stopTyping := make(chan struct{})
-	defer close(stopTyping)
-	go g.typingLoop(chat.GUID, stopTyping)
-
 	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
 			g.Log.Error("iMessage account command error: %v", commandErr)
 			commandResponse = "Failed to process account linking command."
 		}
+		stopTypingNow()
 		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, "", 0)
 		if err != nil {
 			g.Log.Error("iMessage command response send failed: %v", err)
@@ -194,6 +205,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
+	stopTypingNow()
 	messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
 	if err != nil {
 		g.Log.Error("iMessage send failed for chat %s: %v", chat.GUID, err)
