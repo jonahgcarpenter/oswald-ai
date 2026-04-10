@@ -49,14 +49,12 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	// TEMPORARY: Log raw webhook for debugging
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		g.Log.Warn("iMessage webhook read failed: %v", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// g.Log.Debug("iMessage webhook received: %s", string(body))
 
 	var event webhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
@@ -68,12 +66,12 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimSpace(strings.ToLower(event.Type)) {
 	case "new-message":
 		if event.Data.IsFromMe {
-			g.Log.Debug("Ignoring self-message (isFromMe=true)")
+			g.Log.Debug("iMessage webhook ignored: self-message (isFromMe=true)")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if strings.TrimSpace(event.Data.Text) == "" {
-			g.Log.Debug("Ignoring message with empty text content")
+			g.Log.Debug("iMessage webhook ignored: empty text content")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -82,6 +80,7 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "typing-indicator":
 		w.WriteHeader(http.StatusNoContent)
 	default:
+		g.Log.Debug("iMessage webhook ignored: unsupported event type %q", event.Type)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -191,7 +190,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		responseText = strings.TrimSpace(result.Response.Response)
 	}
 	if responseText == "" {
-		g.Log.Debug("iMessage response empty for chat %s", chat.GUID)
+		g.Log.Debug("iMessage agent returned empty response for chat %s", chat.GUID)
 		return
 	}
 
@@ -211,7 +210,9 @@ func (g *Gateway) sessionKey(chat messageChat, normalizedSenderID string) string
 }
 
 func (g *Gateway) typingLoop(chatGUID string, stop <-chan struct{}) {
-	_ = g.startTyping(chatGUID)
+	if err := g.startTyping(chatGUID); err != nil {
+		g.Log.Debug("iMessage start typing failed for chat %s: %v", chatGUID, err)
+	}
 	ticker := time.NewTicker(9 * time.Second)
 	defer ticker.Stop()
 	defer func() {
@@ -223,7 +224,9 @@ func (g *Gateway) typingLoop(chatGUID string, stop <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
-			_ = g.startTyping(chatGUID)
+			if err := g.startTyping(chatGUID); err != nil {
+				g.Log.Debug("iMessage keepalive typing failed for chat %s: %v", chatGUID, err)
+			}
 		case <-stop:
 			return
 		}
@@ -267,7 +270,7 @@ func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, part
 	if defaultSendMethod == fallbackSendMethod {
 		return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
 	}
-	g.Log.Warn("iMessage %s send failed; retrying with %s", defaultSendMethod, fallbackSendMethod)
+	g.Log.Warn("iMessage %s send failed for chat %s: %v; retrying with %s", defaultSendMethod, chatGUID, err, fallbackSendMethod)
 	return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
 }
 
