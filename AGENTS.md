@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord and a local WebSocket gateway and supports three builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports three builtin tools:
 
 - `web_search`
 - `persistent_memory`
@@ -52,7 +52,7 @@ Every request follows the same high-level path:
 4. A broker worker calls `(*Agent).Process()`
 5. The agent builds the prompt, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
 6. The final response is returned to the originating gateway
-7. The gateway sends the response back to the client or Discord channel
+7. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -99,6 +99,7 @@ Streaming behavior:
 
 - WebSocket clients can receive `thinking`, `content`, and `status` chunks while the request is running
 - Discord does not stream token-by-token; it waits for the final response
+- iMessage does not stream token-by-token; it waits for the final response
 
 ## Three-Layer Memory Model
 
@@ -174,6 +175,7 @@ Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 
 - WebSocket is always enabled
 - Discord is enabled only when `DISCORD_TOKEN` is set
+- iMessage is enabled only when both `BLUEBUBBLES_URL` and `BLUEBUBBLES_PASSWORD` are set
 
 ### WebSocket Gateway
 
@@ -224,6 +226,36 @@ Reply handling:
 - Replies to non-bot messages inject quoted context into the prompt
 - Replies to Oswald messages try to reuse the same session when possible
 - A short-lived reply index tracks which session a prior Oswald message came from
+
+### iMessage Gateway
+
+Files:
+
+- `internal/gateway/imessage/gateway.go`
+- `internal/gateway/imessage/types.go`
+
+Behavior:
+
+- Listens for BlueBubbles webhook events on a dedicated HTTP port and path
+- Ignores self-authored messages and empty-text webhook payloads
+- Normalizes iMessage handles into canonical phone-number or email identifiers
+- Resolves account links using contact display names when available, with identifier fallback
+- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
+- Sends typing indicators and replies back through the BlueBubbles REST API
+- Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
+
+iMessage session keys use a hybrid strategy:
+
+- DM: `imessage:dm:<normalized-sender-id>`
+- Group chat: `imessage:<chat-guid>:<normalized-sender-id>`
+
+This preserves per-user continuity in direct chats while avoiding cross-talk inside group conversations.
+
+Reply handling:
+
+- Replies to non-bot messages inject quoted context into the prompt
+- Replies to Oswald messages reuse session memory when the reply stays in the same session
+- Cross-session replies to prior Oswald messages inject quoted fallback context when needed
 
 ## Tools
 
@@ -300,6 +332,7 @@ go run ./test/interactive.go
 go run ./test/memory-ttl.go
 go run ./test/memory-max_turns.go
 go run ./test/memory-compaction.go
+go run ./test/queueing.go
 ```
 
 These memory checks are easiest to understand when the server runs with a small retention budget and prompt debug dumps enabled.
@@ -315,6 +348,10 @@ MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | WebSocket gateway port |
+| `IMESSAGE_PORT` | `8090` | HTTP port for the iMessage BlueBubbles webhook listener |
+| `IMESSAGE_WEBHOOK_PATH` | `/imessage/webhook` | HTTP path for incoming BlueBubbles webhooks |
+| `BLUEBUBBLES_URL` | empty | BlueBubbles server base URL; enables iMessage when paired with password |
+| `BLUEBUBBLES_PASSWORD` | empty | BlueBubbles server password/token used for iMessage REST API auth |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
 | `OLLAMA_MODEL` | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama |
 | `SEARXNG_URL` | `http://localhost:8888` | SearXNG API base URL |
@@ -341,8 +378,10 @@ MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run
 | `internal/tools/bootstrap.go` | Builtin tool wiring |
 | `internal/tools/usermemory/store.go` | Persistent per-user memory store |
 | `internal/tools/soulmemory/store.go` | Soul file store |
+| `internal/accountlink/store.go` | Canonical account link store |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport |
 | `internal/gateway/discord/gateway.go` | Discord transport |
+| `internal/gateway/imessage/gateway.go` | iMessage BlueBubbles transport |
 | `internal/debug/prompt.go` | Prompt debug dump writer |
 
 ## Code Style
@@ -382,5 +421,11 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only three builtin tools ship today
 - Ollama is the only LLM backend
+
+Account-linking note:
+
+- `config/accounts/links.json` stores canonical users and linked external accounts
+- iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
+- iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 
 Oswald AI is a local Go agent with tools, gateways, and just enough memory to be useful.
