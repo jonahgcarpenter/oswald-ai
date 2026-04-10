@@ -20,7 +20,7 @@ const (
 	messageIndexTTL    = time.Hour
 )
 
-var mentionRE = regexp.MustCompile(`(?i)@oswald\b`)
+var mentionRE = regexp.MustCompile(`@?Oswald\b`)
 
 // Gateway receives BlueBubbles webhooks and sends replies via its REST API.
 type Gateway struct {

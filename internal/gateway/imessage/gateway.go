@@ -67,7 +67,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimSpace(strings.ToLower(event.Type)) {
 	case "new-message":
 		if event.Data.IsFromMe {
-			g.Log.Debug("iMessage webhook ignored: self-message (isFromMe=true)")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -81,7 +80,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	case "typing-indicator":
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		g.Log.Debug("iMessage webhook ignored: unsupported event type %q", event.Type)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -100,7 +98,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, msg.accountDisplayName(normalizedSenderID))
+	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, normalizedSenderID)
 	if err != nil {
 		g.Log.Error("iMessage account resolution error: %v", err)
 		return
@@ -131,7 +129,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	isAccountCommand := isAccountCommand(prompt)
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
 	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
-		g.Log.Debug("iMessage group message ignored without @oswald mention in chat %s", chat.GUID)
+		g.Log.Debug("iMessage group message ignored without @oswald mention in chat %s: raw=%+v", chat.GUID, msg)
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
 		return
 	}
@@ -151,7 +149,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
-	g.Log.Debug("iMessage request from %s (session=%s canonical=%s): %q", msg.displayName(), sessionKey, canonicalUserID, truncate(prompt, 100))
+	g.Log.Debug("iMessage request from %s (session=%s canonical=%s): %q", normalizedSenderID, sessionKey, canonicalUserID, truncate(prompt, 100))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)
@@ -175,7 +173,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		Channel:      "imessage",
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
-		DisplayName:  msg.accountDisplayName(normalizedSenderID),
+		DisplayName:  normalizedSenderID,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
 		StreamFunc:   nil,
@@ -349,7 +347,7 @@ func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normali
 		SessionKey:  sessionKey,
 		ChatGUID:    msg.primaryChat().GUID,
 		SenderID:    normalizedSenderID,
-		DisplayName: msg.displayName(),
+		DisplayName: normalizedSenderID,
 		Text:        strings.TrimSpace(msg.Text),
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
@@ -408,31 +406,6 @@ func (m webhookMessage) primaryChat() messageChat {
 		return messageChat{}
 	}
 	return m.Chats[0]
-}
-
-// displayName returns the best human-readable label for the inbound message sender.
-func (m webhookMessage) displayName() string {
-	if chat := m.primaryChat(); chat.DisplayName != "" {
-		return chat.DisplayName
-	}
-	if m.GroupTitle != "" {
-		return m.GroupTitle
-	}
-	if m.Handle.Address != "" {
-		return m.Handle.Address
-	}
-	return "iMessage"
-}
-
-// accountDisplayName returns the preferred account display name with identifier fallback.
-func (m webhookMessage) accountDisplayName(fallback string) string {
-	if chat := m.primaryChat(); chat.DisplayName != "" {
-		return chat.DisplayName
-	}
-	if fallback != "" {
-		return fallback
-	}
-	return m.displayName()
 }
 
 // replyTargetGUID returns the GUID of the message this inbound message references.
