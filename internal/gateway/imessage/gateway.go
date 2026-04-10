@@ -99,7 +99,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, msg.accountDisplayName())
+	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, msg.accountDisplayName(normalizedSenderID))
 	if err != nil {
 		g.Log.Error("iMessage account resolution error: %v", err)
 		return
@@ -174,7 +174,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		Channel:      "imessage",
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
-		DisplayName:  msg.accountDisplayName(),
+		DisplayName:  msg.accountDisplayName(normalizedSenderID),
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
 		StreamFunc:   nil,
@@ -404,12 +404,12 @@ func (m webhookMessage) displayName() string {
 	return "iMessage"
 }
 
-func (m webhookMessage) accountDisplayName() string {
+func (m webhookMessage) accountDisplayName(fallback string) string {
 	if chat := m.primaryChat(); chat.DisplayName != "" {
 		return chat.DisplayName
 	}
-	if m.GroupTitle != "" {
-		return m.GroupTitle
+	if fallback != "" {
+		return fallback
 	}
 	return m.displayName()
 }
