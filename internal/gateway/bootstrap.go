@@ -6,6 +6,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	localws "github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
 )
 
@@ -26,6 +27,18 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 			Links:    links,
 			Commands: commands,
 			Log:      log,
+		})
+	}
+
+	if cfg.BlueBubblesURL != "" && cfg.BlueBubblesPassword != "" {
+		services = append(services, &imessage.Gateway{
+			Port:                cfg.IMessagePort,
+			WebhookPath:         cfg.IMessageWebhookPath,
+			BlueBubblesURL:      cfg.BlueBubblesURL,
+			BlueBubblesPassword: cfg.BlueBubblesPassword,
+			Links:               links,
+			Commands:            commands,
+			Log:                 log,
 		})
 	}
 

@@ -2,6 +2,7 @@ package accountlink
 
 import (
 	"fmt"
+	"net/mail"
 	"regexp"
 	"strings"
 )
@@ -31,7 +32,7 @@ var SupportedGateways = []GatewayOption{
 	{
 		Key:               "imessage",
 		Label:             "iMessage",
-		IdentifierPrompt:  "Enter the iMessage phone number to link.",
+		IdentifierPrompt:  "Enter the iMessage phone number or email to link.",
 		IdentifierExample: "+15551234567",
 	},
 }
@@ -76,6 +77,20 @@ func NormalizeIdentifier(gateway, identifier string) (string, error) {
 		}
 		return identifier, nil
 	case "imessage":
+		if strings.HasPrefix(strings.ToLower(identifier), "urn:") {
+			return strings.ToLower(identifier), nil
+		}
+		if strings.Contains(identifier, "@") {
+			addr, err := mail.ParseAddress(identifier)
+			if err != nil {
+				return "", fmt.Errorf("iMessage email addresses must be valid")
+			}
+			email := strings.ToLower(strings.TrimSpace(addr.Address))
+			if email == "" {
+				return "", fmt.Errorf("iMessage email addresses must be valid")
+			}
+			return email, nil
+		}
 		identifier = strings.ReplaceAll(identifier, " ", "")
 		identifier = strings.ReplaceAll(identifier, "-", "")
 		identifier = strings.ReplaceAll(identifier, "(", "")

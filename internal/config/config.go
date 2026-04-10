@@ -11,6 +11,10 @@ import (
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
 	Port                  string        // HTTP port for the WebSocket gateway (default: "8080")
+	IMessagePort          string        // HTTP port for the BlueBubbles webhook listener (default: "8090")
+	IMessageWebhookPath   string        // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
+	BlueBubblesURL        string        // BlueBubbles server base URL; iMessage gateway disabled if empty
+	BlueBubblesPassword   string        // BlueBubbles server password/token for REST API auth
 	OllamaURL             string        // Ollama API base URL (default: "http://localhost:11434")
 	OllamaModel           string        // Ollama model name; required — startup fails if empty
 	DiscordToken          string        // Discord bot token; Discord gateway disabled if empty
@@ -38,6 +42,10 @@ func Load() *Config {
 
 	return &Config{
 		Port:                  getEnv("PORT", "8080"),
+		IMessagePort:          getEnv("IMESSAGE_PORT", "8090"),
+		IMessageWebhookPath:   getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
+		BlueBubblesURL:        getEnv("BLUEBUBBLES_URL", ""),
+		BlueBubblesPassword:   getEnv("BLUEBUBBLES_PASSWORD", ""),
 		OllamaURL:             getEnv("OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:           getEnv("OLLAMA_MODEL", "jaahas/qwen3.5-uncensored:4b"),
 		DiscordToken:          getEnv("DISCORD_TOKEN", ""),
