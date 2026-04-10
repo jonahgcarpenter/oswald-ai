@@ -41,6 +41,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	return http.ListenAndServe(":"+g.Port, mux)
 }
 
+// handleWebhook validates and dispatches incoming BlueBubbles webhook events.
 func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -85,6 +86,7 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
 func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	chat := msg.primaryChat()
 	if chat.GUID == "" || strings.TrimSpace(msg.Text) == "" || strings.TrimSpace(msg.Handle.Address) == "" {
@@ -202,6 +204,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
 }
 
+// sessionKey returns the session identifier for a direct or group iMessage chat.
 func (g *Gateway) sessionKey(chat messageChat, normalizedSenderID string) string {
 	if chat.Style == chatStyleDirect {
 		return "imessage:dm:" + normalizedSenderID
@@ -209,6 +212,7 @@ func (g *Gateway) sessionKey(chat messageChat, normalizedSenderID string) string
 	return "imessage:" + chat.GUID + ":" + normalizedSenderID
 }
 
+// typingLoop keeps the remote chat typing indicator alive until stop is closed.
 func (g *Gateway) typingLoop(chatGUID string, stop <-chan struct{}) {
 	if err := g.startTyping(chatGUID); err != nil {
 		g.Log.Debug("iMessage start typing failed for chat %s: %v", chatGUID, err)
@@ -233,14 +237,17 @@ func (g *Gateway) typingLoop(chatGUID string, stop <-chan struct{}) {
 	}
 }
 
+// startTyping enables the typing indicator for the given chat.
 func (g *Gateway) startTyping(chatGUID string) error {
 	return g.sendTypingRequest(http.MethodPost, chatGUID)
 }
 
+// stopTyping disables the typing indicator for the given chat.
 func (g *Gateway) stopTyping(chatGUID string) error {
 	return g.sendTypingRequest(http.MethodDelete, chatGUID)
 }
 
+// sendTypingRequest sends a BlueBubbles typing request for the given chat.
 func (g *Gateway) sendTypingRequest(method, chatGUID string) error {
 	// BlueBubbles expects the raw chat GUID, not URL-encoded
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/chat/"+chatGUID+"/typing", g.BlueBubblesPassword)
@@ -262,6 +269,7 @@ func (g *Gateway) sendTypingRequest(method, chatGUID string) error {
 	return nil
 }
 
+// sendTextReply sends a text reply, retrying with the fallback method if needed.
 func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, partIndex int) (string, error) {
 	messageGUID, err := g.sendText(chatGUID, text, selectedMessageGUID, partIndex, defaultSendMethod)
 	if err == nil {
@@ -274,6 +282,7 @@ func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, part
 	return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
 }
 
+// sendText posts a text message to BlueBubbles and returns the created message GUID.
 func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex int, method string) (string, error) {
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/text", g.BlueBubblesPassword)
 	if err != nil {
@@ -318,6 +327,7 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 	return result.Data.GUID, nil
 }
 
+// buildBlueBubblesEndpoint constructs an authenticated BlueBubbles REST endpoint.
 func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
@@ -330,6 +340,7 @@ func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	return parsed.String(), nil
 }
 
+// rememberInboundMessage caches inbound message context for reply reconstruction.
 func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normalizedSenderID string) {
 	if msg.GUID == "" {
 		return
@@ -345,6 +356,7 @@ func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normali
 	})
 }
 
+// rememberBotMessage caches bot-authored message context for reply reconstruction.
 func (g *Gateway) rememberBotMessage(messageGUID, sessionKey, chatGUID, senderID, text string) {
 	g.rememberMessage(messageGUID, messageContext{
 		SessionKey:  sessionKey,
@@ -357,6 +369,7 @@ func (g *Gateway) rememberBotMessage(messageGUID, sessionKey, chatGUID, senderID
 	})
 }
 
+// rememberMessage stores reply context in the in-memory message index.
 func (g *Gateway) rememberMessage(messageGUID string, ctx messageContext) {
 	if messageGUID == "" {
 		return
@@ -367,6 +380,7 @@ func (g *Gateway) rememberMessage(messageGUID string, ctx messageContext) {
 	g.messageIndex[messageGUID] = ctx
 }
 
+// lookupMessage returns cached reply context for a prior message GUID.
 func (g *Gateway) lookupMessage(messageGUID string) (messageContext, bool) {
 	if messageGUID == "" {
 		return messageContext{}, false
@@ -378,6 +392,7 @@ func (g *Gateway) lookupMessage(messageGUID string) (messageContext, bool) {
 	return ctx, ok
 }
 
+// pruneMessageIndexLocked removes expired entries from the in-memory message index.
 func (g *Gateway) pruneMessageIndexLocked() {
 	cutoff := time.Now().Add(-messageIndexTTL)
 	for guid, ctx := range g.messageIndex {
@@ -387,6 +402,7 @@ func (g *Gateway) pruneMessageIndexLocked() {
 	}
 }
 
+// primaryChat returns the first chat attached to the webhook payload.
 func (m webhookMessage) primaryChat() messageChat {
 	if len(m.Chats) == 0 {
 		return messageChat{}
@@ -394,6 +410,7 @@ func (m webhookMessage) primaryChat() messageChat {
 	return m.Chats[0]
 }
 
+// displayName returns the best human-readable label for the inbound message sender.
 func (m webhookMessage) displayName() string {
 	if chat := m.primaryChat(); chat.DisplayName != "" {
 		return chat.DisplayName
@@ -407,6 +424,7 @@ func (m webhookMessage) displayName() string {
 	return "iMessage"
 }
 
+// accountDisplayName returns the preferred account display name with identifier fallback.
 func (m webhookMessage) accountDisplayName(fallback string) string {
 	if chat := m.primaryChat(); chat.DisplayName != "" {
 		return chat.DisplayName
@@ -417,6 +435,7 @@ func (m webhookMessage) accountDisplayName(fallback string) string {
 	return m.displayName()
 }
 
+// replyTargetGUID returns the GUID of the message this inbound message references.
 func (m webhookMessage) replyTargetGUID() string {
 	if m.ThreadOriginatorGUID != "" {
 		return m.ThreadOriginatorGUID
@@ -427,15 +446,18 @@ func (m webhookMessage) replyTargetGUID() string {
 	return ""
 }
 
+// isAccountCommand reports whether input is an account-link management command.
 func isAccountCommand(input string) bool {
 	trimmed := strings.TrimSpace(input)
 	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
 }
 
+// newTempGUID returns a temporary GUID for outbound BlueBubbles send requests.
 func newTempGUID() string {
 	return fmt.Sprintf("oswald-%d", time.Now().UnixNano())
 }
 
+// truncate returns s shortened to at most max runes, appending "..." if cut.
 func truncate(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
