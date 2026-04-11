@@ -164,21 +164,13 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		prompt = strings.TrimSpace(mentionRE.ReplaceAllString(prompt, ""))
 	}
 
-	stopTyping := make(chan struct{})
-	typingStopped := false
-	stopTypingNow := func() {
-		if typingStopped {
-			return
-		}
-		typingStopped = true
-		close(stopTyping)
+	g.Log.Debug("Sending typing indicator for chat %s", chat.GUID)
+	if err := g.startTyping(chat.GUID); err != nil {
+		g.Log.Debug("iMessage start typing failed for chat %s: %v", chat.GUID, err)
 	}
-	defer stopTypingNow()
-	go g.typingLoop(chat.GUID, stopTyping)
 
 	if prompt == "" && len(images) == 0 {
 		responseText := "What do you want idiot."
-		stopTypingNow()
 		messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
 		if err != nil {
 			g.Log.Error("iMessage empty prompt response send failed: %v", err)
@@ -197,7 +189,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			g.Log.Error("iMessage account command error: %v", commandErr)
 			commandResponse = "Failed to process account linking command."
 		}
-		stopTypingNow()
 		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, "", 0)
 		if err != nil {
 			g.Log.Error("iMessage command response send failed: %v", err)
@@ -233,7 +224,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	stopTypingNow()
 	messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
 	if err != nil {
 		g.Log.Error("iMessage send failed for chat %s: %v", chat.GUID, err)
@@ -430,49 +420,19 @@ func (g *Gateway) sessionKey(chat messageChat, normalizedSenderID string) string
 	return "imessage:" + chat.GUID + ":" + normalizedSenderID
 }
 
-// typingLoop keeps the remote chat typing indicator alive until stop is closed.
-func (g *Gateway) typingLoop(chatGUID string, stop <-chan struct{}) {
-	if err := g.startTyping(chatGUID); err != nil {
-		g.Log.Debug("iMessage start typing failed for chat %s: %v", chatGUID, err)
-	}
-	ticker := time.NewTicker(9 * time.Second)
-	defer ticker.Stop()
-	defer func() {
-		if err := g.stopTyping(chatGUID); err != nil {
-			g.Log.Debug("iMessage stop typing failed for chat %s: %v", chatGUID, err)
-		}
-	}()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := g.startTyping(chatGUID); err != nil {
-				g.Log.Debug("iMessage keepalive typing failed for chat %s: %v", chatGUID, err)
-			}
-		case <-stop:
-			return
-		}
-	}
-}
-
 // startTyping enables the typing indicator for the given chat.
 func (g *Gateway) startTyping(chatGUID string) error {
-	return g.sendTypingRequest(http.MethodPost, chatGUID)
-}
-
-// stopTyping disables the typing indicator for the given chat.
-func (g *Gateway) stopTyping(chatGUID string) error {
-	return g.sendTypingRequest(http.MethodDelete, chatGUID)
+	return g.sendTypingRequest(chatGUID)
 }
 
 // sendTypingRequest sends a BlueBubbles typing request for the given chat.
-func (g *Gateway) sendTypingRequest(method, chatGUID string) error {
+func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	// BlueBubbles expects the raw chat GUID, not URL-encoded
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/chat/"+chatGUID+"/typing", g.BlueBubblesPassword)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(method, endpoint, nil)
+	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("build BlueBubbles typing request: %w", err)
 	}
