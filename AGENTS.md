@@ -5,11 +5,13 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord and a local WebSocket gateway and supports three builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports three builtin tools:
 
 - `web_search`
 - `persistent_memory`
 - `soul_memory`
+
+Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
@@ -47,12 +49,12 @@ Current layers:
 Every request follows the same high-level path:
 
 1. A gateway receives user input
-2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`
+2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`, and may attach current-turn images
 3. The gateway submits a `broker.Request`
 4. A broker worker calls `(*Agent).Process()`
-5. The agent builds the prompt, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+5. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
 6. The final response is returned to the originating gateway
-7. The gateway sends the response back to the client or Discord channel
+7. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -84,7 +86,7 @@ Per request it does the following:
    - current speaker identity when available
 5. Load retained session turns from `internal/memory`
 6. Compact older turns if the estimated prompt exceeds the active model budget
-7. Build the Ollama message array: system prompt, retained history, current user prompt
+7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
 8. Optionally write a prompt debug dump when `PROMPT_DEBUG_PATH` is set
 9. Call Ollama with all registered tools available
 10. If the model emits tool calls:
@@ -95,10 +97,18 @@ Per request it does the following:
 12. Persist only the final user message and final assistant reply to session memory
 13. Return the final `AgentResponse`
 
+Multimodal request notes:
+
+- Images are attached only to the current user turn; they are not replayed into future turns
+- Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
+- Prompt debug dumps include image counts and metadata, not base64 payloads
+- Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
+
 Streaming behavior:
 
 - WebSocket clients can receive `thinking`, `content`, and `status` chunks while the request is running
 - Discord does not stream token-by-token; it waits for the final response
+- iMessage does not stream token-by-token; it waits for the final response
 
 ## Three-Layer Memory Model
 
@@ -174,6 +184,7 @@ Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 
 - WebSocket is always enabled
 - Discord is enabled only when `DISCORD_TOKEN` is set
+- iMessage is enabled only when both `BLUEBUBBLES_URL` and `BLUEBUBBLES_PASSWORD` are set
 
 ### WebSocket Gateway
 
@@ -190,9 +201,18 @@ Behavior:
   - `user_id`
   - `display_name`
   - `prompt`
+  - `images`
 - If plain text is sent, the remote address is used as fallback identity
 - If `user_id` is present, it becomes the primary session key
+- Supports text-only, image-only, and text-plus-image JSON requests
+- Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
+
+WebSocket image payloads use the shape:
+
+- `mime_type`
+- `data` (base64-encoded image bytes)
+- `source` (optional filename/label)
 
 ### Discord Gateway
 
@@ -209,8 +229,11 @@ Behavior:
 - In guilds, only responds to mentions or direct replies to the bot
 - In DMs, responds to any message
 - Resolves Discord mentions into readable `@username` text
+- Downloads supported image attachments from incoming messages and includes them on the current user turn
+- Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators while the request is running
 - Splits long replies to stay under Discord's 2000-character limit
+- Supports text-only, image-only, and text-plus-image messages
 
 Discord session keys use a hybrid strategy:
 
@@ -224,6 +247,39 @@ Reply handling:
 - Replies to non-bot messages inject quoted context into the prompt
 - Replies to Oswald messages try to reuse the same session when possible
 - A short-lived reply index tracks which session a prior Oswald message came from
+
+### iMessage Gateway
+
+Files:
+
+- `internal/gateway/imessage/gateway.go`
+- `internal/gateway/imessage/types.go`
+
+Behavior:
+
+- Listens for BlueBubbles webhook events on a dedicated HTTP port and path
+- Ignores self-authored messages and payloads with neither text nor attachments
+- Normalizes iMessage handles into canonical phone-number or email identifiers
+- Resolves account links using contact display names when available, with identifier fallback
+- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
+- Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
+- Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
+- Sends typing indicators and replies back through the BlueBubbles REST API
+- Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
+- Supports text-only, image-only, and text-plus-image messages
+
+iMessage session keys use a hybrid strategy:
+
+- DM: `imessage:dm:<normalized-sender-id>`
+- Group chat: `imessage:<chat-guid>:<normalized-sender-id>`
+
+This preserves per-user continuity in direct chats while avoiding cross-talk inside group conversations.
+
+Reply handling:
+
+- Replies to non-bot messages inject quoted context into the prompt
+- Replies to Oswald messages reuse session memory when the reply stays in the same session
+- Cross-session replies to prior Oswald messages inject quoted fallback context when needed
 
 ## Tools
 
@@ -268,6 +324,22 @@ Notes:
 - `/api/chat` is used for normal requests, tool calling, and streaming
 - The client maps between internal app types and Ollama's wire format
 - Streaming responses accumulate both `thinking` and visible content
+- Current-turn images are sent to Ollama on the user message `images` field when provided by a gateway
+
+## Image Validation
+
+Image validation is centralized in `internal/media/images.go`.
+
+- Supported MIME types:
+  - `image/jpeg`
+  - `image/png`
+  - `image/webp`
+- Maximum images per request: `4`
+- Maximum size per image: `10 MiB`
+- WebSocket validates the declared MIME type and base64 payload supplied by the client
+- Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type` and content sniffing
+- BlueBubbles commonly converts HEIC camera images to JPEG before Oswald receives them, so explicit HEIC support is not currently required
+- Any attachment that fails these checks is treated as an unsupported file and surfaced to the model via a short prompt note rather than a hard request failure
 
 ## Prompt Debug Dumps
 
@@ -297,10 +369,14 @@ There are no `*_test.go` tests yet. Integration checks are standalone programs i
 ```bash
 go run ./test/ttft.go
 go run ./test/interactive.go
+go run ./test/media.go -file /path/to/image.jpg
 go run ./test/memory-ttl.go
 go run ./test/memory-max_turns.go
 go run ./test/memory-compaction.go
+go run ./test/queueing.go
 ```
+
+`test/media.go` exercises WebSocket media flows including image+text, image-only, oversized images, too many images, and unsupported/non-image attachments.
 
 These memory checks are easiest to understand when the server runs with a small retention budget and prompt debug dumps enabled.
 
@@ -315,6 +391,10 @@ MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8080` | WebSocket gateway port |
+| `IMESSAGE_PORT` | `8090` | HTTP port for the iMessage BlueBubbles webhook listener |
+| `IMESSAGE_WEBHOOK_PATH` | `/imessage/webhook` | HTTP path for incoming BlueBubbles webhooks |
+| `BLUEBUBBLES_URL` | empty | BlueBubbles server base URL; enables iMessage when paired with password |
+| `BLUEBUBBLES_PASSWORD` | empty | BlueBubbles server password/token used for iMessage REST API auth |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
 | `OLLAMA_MODEL` | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama |
 | `SEARXNG_URL` | `http://localhost:8888` | SearXNG API base URL |
@@ -341,8 +421,10 @@ MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run
 | `internal/tools/bootstrap.go` | Builtin tool wiring |
 | `internal/tools/usermemory/store.go` | Persistent per-user memory store |
 | `internal/tools/soulmemory/store.go` | Soul file store |
+| `internal/accountlink/store.go` | Canonical account link store |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport |
 | `internal/gateway/discord/gateway.go` | Discord transport |
+| `internal/gateway/imessage/gateway.go` | iMessage BlueBubbles transport |
 | `internal/debug/prompt.go` | Prompt debug dump writer |
 
 ## Code Style
@@ -382,5 +464,11 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only three builtin tools ship today
 - Ollama is the only LLM backend
+
+Account-linking note:
+
+- `config/accounts/links.json` stores canonical users and linked external accounts
+- iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
+- iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 
 Oswald AI is a local Go agent with tools, gateways, and just enough memory to be useful.

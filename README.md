@@ -10,7 +10,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 ## Features
 
 - Iterative tool-calling agent loop on top of Ollama
-- Discord gateway and local WebSocket gateway
+- iMessage, Discord, and WebSocket gateway
 - Builtin `web_search`, `persistent_memory`, and `soul_memory` tools
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
@@ -22,24 +22,29 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Ollama running locally, default `http://localhost:11434`
 - SearXNG running locally, default `http://localhost:8888`, if you want web search
 - Optional Discord bot token for the Discord gateway
+- Optional BlueBubbles server for the iMessage gateway
 
 ## Configuration
 
 ### Environment variables:
 
-| Variable                   | Default                        | Purpose                                        |
-| -------------------------- | ------------------------------ | ---------------------------------------------- |
-| `OLLAMA_MODEL`             | `jaahas/qwen3.5-uncensored:4b` | Ollama model name                              |
-| `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                            |
-| `PORT`                     | `8080`                         | WebSocket gateway port                         |
-| `DISCORD_TOKEN`            | empty                          | Enables Discord gateway when set               |
-| `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG base URL                               |
-| `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                            |
-| `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Consecutive tool failure limit per request     |
-| `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables  |
-| `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables         |
-| `PROMPT_DEBUG_PATH`        | empty                          | Writes per-request prompt debug markdown dumps |
-| `LOG_LEVEL`                | `info`                         | Log verbosity                                  |
+| Variable                   | Default                        | Purpose                                         |
+| -------------------------- | ------------------------------ | ----------------------------------------------- |
+| `OLLAMA_MODEL`             | `jaahas/qwen3.5-uncensored:4b` | Ollama model name                               |
+| `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                             |
+| `PORT`                     | `8080`                         | WebSocket gateway port                          |
+| `DISCORD_TOKEN`            | empty                          | Enables Discord gateway when set                |
+| `BLUE_BUBBLES_URL`         | empty                          | Enables iMessage gateway when set               |
+| `BLUE_BUBBLES_PASSWORD`    | empty                          | Enables iMessage gateway when set               |
+| `IMESSAGE_PORT`            | `8090`                         | The port listening for BlueBubbles webhooks     |
+| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`            | The endpoint listening for BlueBubbles webhooks |
+| `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG base URL                                |
+| `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                             |
+| `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Consecutive tool failure limit per request      |
+| `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables   |
+| `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables          |
+| `PROMPT_DEBUG_PATH`        | empty                          | Writes per-request prompt debug markdown dumps  |
+| `LOG_LEVEL`                | `info`                         | Log verbosity                                   |
 
 ## Memory
 
@@ -53,9 +58,9 @@ Oswald uses three memory layers:
 
 ## Usage
 
-### Discord Bot
+### Discord/iMessage Bot
 
-#### In Server Channels
+#### In Server Channels or Group Chats
 
 Mention the bot to get a response:
 
@@ -103,7 +108,8 @@ What is Bitcoins current price?
 - [x] Uncensored tool calling model
 - [x] Multi-gateway response routing and queuing
 - [x] Persistent conversation history (multi-user context)
-- [ ] Support for images, files, and URLs to search in a prompt
+- [x] Support for images
+- [ ] Support for files
 - [ ] STT & TTS support
 
 ## License

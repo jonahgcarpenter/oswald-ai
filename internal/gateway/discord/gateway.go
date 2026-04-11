@@ -14,6 +14,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 const replyIndexTTL = time.Hour
@@ -261,6 +263,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	replyToID := ""
 	prompt := msg.Content
+	images, unsupported := dg.loadImages(msg.Attachments)
 
 	if msg.GuildID != "" {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
@@ -279,7 +282,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}
 
 	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
+	prompt = media.AugmentPromptWithUnsupportedFiles(prompt, unsupported)
+	if prompt == "" && len(images) == 0 {
 		_, _ = dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
 		return
 	}
@@ -379,6 +383,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
+		Images:       images,
 		StreamFunc:   nil,
 		ResponseChan: make(chan broker.Result, 1),
 	}
@@ -420,6 +425,90 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			dg.rememberReply(sentMessageID, originCtx)
 		}
 	}
+}
+
+func (dg *Gateway) loadImages(attachments []struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int    `json:"size,omitempty"`
+	URL         string `json:"url,omitempty"`
+	ProxyURL    string `json:"proxy_url,omitempty"`
+}) ([]ollama.InputImage, []string) {
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+
+	images := make([]ollama.InputImage, 0, len(attachments))
+	unsupported := make([]string, 0)
+	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
+		if len(images) >= media.MaxImagesPerRequest {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if !media.SupportsMIMEType(attachment.ContentType) && attachment.ContentType != "" {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if attachment.Size > media.MaxImageBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+
+		image, err := dg.fetchAttachmentImage(attachment.URL, attachment.Filename)
+		if err != nil {
+			dg.Log.Warn("Discord attachment rejected for %q: %v", attachment.Filename, err)
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if image.Data == "" {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		images = append(images, image)
+	}
+
+	if len(images) == 0 {
+		return nil, unsupported
+	}
+	return images, unsupported
+}
+
+func (dg *Gateway) fetchAttachmentImage(rawURL, filename string) (ollama.InputImage, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return ollama.InputImage{}, nil
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ollama.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("read attachment %q: %w", filename, err)
+	}
+	if len(body) > media.MaxImageBytes {
+		return ollama.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
+	}
+
+	mimeType := media.DetectMIMEType(resp.Header, body)
+	if mimeType == "" {
+		return ollama.InputImage{}, nil
+	}
+
+	image, err := media.BuildInputImageFromBytes(mimeType, body, filename)
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
+	}
+	return image, nil
 }
 
 // sendTyping posts a typing indicator to Discord.

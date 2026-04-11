@@ -27,9 +27,17 @@ type Gateway struct {
 // fallback behaviour: the raw text is used as the prompt and the connection's
 // remote address is used as both the user ID and session key.
 type IncomingMessage struct {
-	UserID      string `json:"user_id"`
-	DisplayName string `json:"display_name"`
-	Prompt      string `json:"prompt"`
+	UserID      string          `json:"user_id"`
+	DisplayName string          `json:"display_name"`
+	Prompt      string          `json:"prompt"`
+	Images      []IncomingImage `json:"images,omitempty"`
+}
+
+// IncomingImage is a base64-encoded image sent over the WebSocket connection.
+type IncomingImage struct {
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"`
+	Source   string `json:"source,omitempty"`
 }
 
 var upgrader = gorilla.Upgrader{

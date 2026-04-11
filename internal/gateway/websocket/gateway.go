@@ -7,6 +7,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 // Name returns the human-readable gateway name.
@@ -48,11 +50,15 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
 		// clients keep working without modification.
 		var userPrompt, userID, displayName string
+		var userImages []ollama.InputImage
 		var incoming IncomingMessage
-		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && incoming.Prompt != "" {
+		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
 			displayName = incoming.DisplayName
+			images, unsupported := decodeIncomingImages(incoming.Images)
+			userImages = images
+			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
 			userPrompt = string(message)
 			userID = remoteAddr
@@ -117,6 +123,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			DisplayName:  displayName,
 			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
+			Images:       userImages,
 			StreamFunc:   streamFunc,
 			ResponseChan: make(chan broker.Result, 1),
 		}
@@ -143,6 +150,28 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			break
 		}
 	}
+}
+
+func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+
+	validated := make([]ollama.InputImage, 0, len(images))
+	unsupported := make([]string, 0)
+	for _, image := range images {
+		if len(validated) >= media.MaxImagesPerRequest {
+			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
+			continue
+		}
+		inputImage, err := media.BuildInputImage(image.MimeType, image.Data, image.Source)
+		if err != nil {
+			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
+			continue
+		}
+		validated = append(validated, inputImage)
+	}
+	return validated, unsupported
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.
