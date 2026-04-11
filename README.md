@@ -108,7 +108,8 @@ What is Bitcoins current price?
 - [x] Uncensored tool calling model
 - [x] Multi-gateway response routing and queuing
 - [x] Persistent conversation history (multi-user context)
-- [ ] Support for images, files, and URLs to search in a prompt
+- [x] Support for images
+- [ ] Support for files
 - [ ] STT & TTS support
 
 ## License
