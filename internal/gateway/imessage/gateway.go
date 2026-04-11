@@ -156,7 +156,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	isAccountCommand := isAccountCommand(prompt)
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
 	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
-		g.Log.Debug("iMessage group message ignored without @oswald mention in chat %s: raw=%+v", chat.GUID, msg)
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
 	}
@@ -164,7 +163,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		prompt = strings.TrimSpace(mentionRE.ReplaceAllString(prompt, ""))
 	}
 
-	g.Log.Debug("Sending typing indicator for chat %s", chat.GUID)
 	if err := g.startTyping(chat.GUID); err != nil {
 		g.Log.Debug("iMessage start typing failed for chat %s: %v", chat.GUID, err)
 	}
