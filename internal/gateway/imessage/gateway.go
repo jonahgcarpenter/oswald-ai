@@ -68,9 +68,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch strings.TrimSpace(strings.ToLower(event.Type)) {
 	case "new-message":
-		if shouldDebugImageWebhook(event.Data, body) {
-			g.Log.Debug("iMessage image-debug webhook payload: %s", truncateForLog(string(body), 4000))
-		}
 		if event.Data.IsFromMe {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -91,30 +88,6 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 func hasMessageContent(msg webhookMessage) bool {
 	return strings.TrimSpace(msg.Text) != "" || len(msg.Attachments) > 0
-}
-
-func shouldDebugImageWebhook(msg webhookMessage, body []byte) bool {
-	if strings.TrimSpace(msg.Text) == "" {
-		return true
-	}
-	if msg.AssociatedMessageType != "" || msg.AssociatedMessageGUID != "" {
-		return true
-	}
-	raw := strings.ToLower(string(body))
-	for _, marker := range []string{"attachment", "attachments", "image", "images", "photo", "mime", "file", "heic", "png", "jpeg", "jpg", "webp"} {
-		if strings.Contains(raw, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-func truncateForLog(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "..."
 }
 
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.

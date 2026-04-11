@@ -11,6 +11,8 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `persistent_memory`
 - `soul_memory`
 
+Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
+
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
 ## Runtime Architecture
@@ -47,10 +49,10 @@ Current layers:
 Every request follows the same high-level path:
 
 1. A gateway receives user input
-2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`
+2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`, and may attach current-turn images
 3. The gateway submits a `broker.Request`
 4. A broker worker calls `(*Agent).Process()`
-5. The agent builds the prompt, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+5. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
 6. The final response is returned to the originating gateway
 7. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
@@ -84,7 +86,7 @@ Per request it does the following:
    - current speaker identity when available
 5. Load retained session turns from `internal/memory`
 6. Compact older turns if the estimated prompt exceeds the active model budget
-7. Build the Ollama message array: system prompt, retained history, current user prompt
+7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
 8. Optionally write a prompt debug dump when `PROMPT_DEBUG_PATH` is set
 9. Call Ollama with all registered tools available
 10. If the model emits tool calls:
@@ -94,6 +96,12 @@ Per request it does the following:
 11. If tool failures exhaust the retry budget, make one final model call with tools disabled
 12. Persist only the final user message and final assistant reply to session memory
 13. Return the final `AgentResponse`
+
+Multimodal request notes:
+
+- Images are attached only to the current user turn; they are not replayed into future turns
+- Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
+- Prompt debug dumps include image counts and metadata, not base64 payloads
 
 Streaming behavior:
 
@@ -192,9 +200,17 @@ Behavior:
   - `user_id`
   - `display_name`
   - `prompt`
+  - `images`
 - If plain text is sent, the remote address is used as fallback identity
 - If `user_id` is present, it becomes the primary session key
+- Supports text-only, image-only, and text-plus-image JSON requests
 - Streams typed chunks during generation, then sends a final JSON response payload
+
+WebSocket image payloads use the shape:
+
+- `mime_type`
+- `data` (base64-encoded image bytes)
+- `source` (optional filename/label)
 
 ### Discord Gateway
 
@@ -211,8 +227,10 @@ Behavior:
 - In guilds, only responds to mentions or direct replies to the bot
 - In DMs, responds to any message
 - Resolves Discord mentions into readable `@username` text
+- Downloads supported image attachments from incoming messages and includes them on the current user turn
 - Sends typing indicators while the request is running
 - Splits long replies to stay under Discord's 2000-character limit
+- Supports text-only, image-only, and text-plus-image messages
 
 Discord session keys use a hybrid strategy:
 
@@ -237,12 +255,14 @@ Files:
 Behavior:
 
 - Listens for BlueBubbles webhook events on a dedicated HTTP port and path
-- Ignores self-authored messages and empty-text webhook payloads
+- Ignores self-authored messages and payloads with neither text nor attachments
 - Normalizes iMessage handles into canonical phone-number or email identifiers
 - Resolves account links using contact display names when available, with identifier fallback
 - In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
+- Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
 - Sends typing indicators and replies back through the BlueBubbles REST API
 - Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
+- Supports text-only, image-only, and text-plus-image messages
 
 iMessage session keys use a hybrid strategy:
 
@@ -300,6 +320,21 @@ Notes:
 - `/api/chat` is used for normal requests, tool calling, and streaming
 - The client maps between internal app types and Ollama's wire format
 - Streaming responses accumulate both `thinking` and visible content
+- Current-turn images are sent to Ollama on the user message `images` field when provided by a gateway
+
+## Image Validation
+
+Image validation is centralized in `internal/media/images.go`.
+
+- Supported MIME types:
+  - `image/jpeg`
+  - `image/png`
+  - `image/webp`
+- Maximum images per request: `4`
+- Maximum size per image: `10 MiB`
+- WebSocket validates the declared MIME type and base64 payload supplied by the client
+- Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type` and content sniffing
+- BlueBubbles commonly converts HEIC camera images to JPEG before Oswald receives them, so explicit HEIC support is not currently required
 
 ## Prompt Debug Dumps
 
@@ -329,6 +364,7 @@ There are no `*_test.go` tests yet. Integration checks are standalone programs i
 ```bash
 go run ./test/ttft.go
 go run ./test/interactive.go
+go run ./test/image.go -file /path/to/image.jpg
 go run ./test/memory-ttl.go
 go run ./test/memory-max_turns.go
 go run ./test/memory-compaction.go
