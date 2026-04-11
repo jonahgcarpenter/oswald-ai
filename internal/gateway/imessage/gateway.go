@@ -75,8 +75,8 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if strings.TrimSpace(event.Data.Text) == "" {
-			g.Log.Debug("iMessage webhook ignored: empty text content (guid=%s associated_type=%s)", event.Data.GUID, event.Data.AssociatedMessageType)
+		if !hasMessageContent(event.Data) {
+			g.Log.Debug("iMessage webhook ignored: no text or attachments (guid=%s associated_type=%s)", event.Data.GUID, event.Data.AssociatedMessageType)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -87,6 +87,10 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func hasMessageContent(msg webhookMessage) bool {
+	return strings.TrimSpace(msg.Text) != "" || len(msg.Attachments) > 0
 }
 
 func shouldDebugImageWebhook(msg webhookMessage, body []byte) bool {
