@@ -2,7 +2,6 @@ package websocket
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
@@ -57,14 +56,9 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
 			displayName = incoming.DisplayName
-			images, imageErr := decodeIncomingImages(incoming.Images)
-			if imageErr != nil {
-				errorPayload := agent.AgentResponse{Error: imageErr.Error()}
-				errBytes, _ := json.Marshal(errorPayload)
-				conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-				continue
-			}
+			images, unsupported := decodeIncomingImages(incoming.Images)
 			userImages = images
+			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
 			userPrompt = string(message)
 			userID = remoteAddr
@@ -158,23 +152,26 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	}
 }
 
-func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, error) {
+func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
 	if len(images) == 0 {
 		return nil, nil
 	}
-	if len(images) > media.MaxImagesPerRequest {
-		return nil, fmt.Errorf("too many images: got %d, max %d", len(images), media.MaxImagesPerRequest)
-	}
 
 	validated := make([]ollama.InputImage, 0, len(images))
-	for i, image := range images {
+	unsupported := make([]string, 0)
+	for _, image := range images {
+		if len(validated) >= media.MaxImagesPerRequest {
+			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
+			continue
+		}
 		inputImage, err := media.BuildInputImage(image.MimeType, image.Data, image.Source)
 		if err != nil {
-			return nil, fmt.Errorf("image %d rejected: %w", i+1, err)
+			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
+			continue
 		}
 		validated = append(validated, inputImage)
 	}
-	return validated, nil
+	return validated, unsupported
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.

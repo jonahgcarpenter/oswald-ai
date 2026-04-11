@@ -97,13 +97,16 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		g.Log.Warn("iMessage webhook ignored: incomplete message payload")
 		return
 	}
-	images, imageErr := g.loadImages(msg.Attachments)
-	if imageErr != nil {
-		g.Log.Error("iMessage attachment handling failed for chat %s: %v", chat.GUID, imageErr)
-		return
-	}
+	images, unsupported := g.loadImages(msg.Attachments)
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
-		g.Log.Warn("iMessage webhook ignored: incomplete message payload")
+		if len(unsupported) == 0 {
+			g.Log.Warn("iMessage webhook ignored: incomplete message payload")
+			return
+		}
+	}
+
+	prompt := media.AugmentPromptWithUnsupportedFiles(strings.TrimSpace(msg.Text), unsupported)
+	if prompt == "" && len(images) == 0 {
 		return
 	}
 
@@ -120,7 +123,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
-	prompt := strings.TrimSpace(msg.Text)
+	prompt = strings.TrimSpace(prompt)
 	replyGUID := msg.replyTargetGUID()
 	isReplyToBot := false
 	if replyGUID != "" {
@@ -230,37 +233,45 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
 }
 
-func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, error) {
+func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []string) {
 	if len(attachments) == 0 {
 		return nil, nil
 	}
 
 	images := make([]ollama.InputImage, 0, len(attachments))
+	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
 		if len(images) >= media.MaxImagesPerRequest {
-			break
+			unsupported = append(unsupported, label)
+			continue
 		}
 		if !media.SupportsMIMEType(attachment.MimeType) && attachment.MimeType != "" {
+			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.TotalBytes > media.MaxImageBytes {
-			return nil, fmt.Errorf("attachment %q exceeds %d bytes", attachment.TransferName, media.MaxImageBytes)
+			unsupported = append(unsupported, label)
+			continue
 		}
 
 		image, err := g.fetchAttachmentImage(attachment)
 		if err != nil {
-			return nil, err
+			g.Log.Warn("iMessage attachment rejected for %q: %v", attachment.TransferName, err)
+			unsupported = append(unsupported, label)
+			continue
 		}
 		if image.Data == "" {
+			unsupported = append(unsupported, label)
 			continue
 		}
 		images = append(images, image)
 	}
 
 	if len(images) == 0 {
-		return nil, nil
+		return nil, unsupported
 	}
-	return images, nil
+	return images, unsupported
 }
 
 func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage, error) {

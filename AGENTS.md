@@ -102,6 +102,7 @@ Multimodal request notes:
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
 - Prompt debug dumps include image counts and metadata, not base64 payloads
+- Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 
 Streaming behavior:
 
@@ -204,6 +205,7 @@ Behavior:
 - If plain text is sent, the remote address is used as fallback identity
 - If `user_id` is present, it becomes the primary session key
 - Supports text-only, image-only, and text-plus-image JSON requests
+- Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
 
 WebSocket image payloads use the shape:
@@ -228,6 +230,7 @@ Behavior:
 - In DMs, responds to any message
 - Resolves Discord mentions into readable `@username` text
 - Downloads supported image attachments from incoming messages and includes them on the current user turn
+- Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators while the request is running
 - Splits long replies to stay under Discord's 2000-character limit
 - Supports text-only, image-only, and text-plus-image messages
@@ -260,6 +263,7 @@ Behavior:
 - Resolves account links using contact display names when available, with identifier fallback
 - In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
 - Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
+- Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators and replies back through the BlueBubbles REST API
 - Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
 - Supports text-only, image-only, and text-plus-image messages
@@ -335,6 +339,7 @@ Image validation is centralized in `internal/media/images.go`.
 - WebSocket validates the declared MIME type and base64 payload supplied by the client
 - Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type` and content sniffing
 - BlueBubbles commonly converts HEIC camera images to JPEG before Oswald receives them, so explicit HEIC support is not currently required
+- Any attachment that fails these checks is treated as an unsupported file and surfaced to the model via a short prompt note rather than a hard request failure
 
 ## Prompt Debug Dumps
 
@@ -364,12 +369,14 @@ There are no `*_test.go` tests yet. Integration checks are standalone programs i
 ```bash
 go run ./test/ttft.go
 go run ./test/interactive.go
-go run ./test/image.go -file /path/to/image.jpg
+go run ./test/media.go -file /path/to/image.jpg
 go run ./test/memory-ttl.go
 go run ./test/memory-max_turns.go
 go run ./test/memory-compaction.go
 go run ./test/queueing.go
 ```
+
+`test/media.go` exercises WebSocket media flows including image+text, image-only, oversized images, too many images, and unsupported/non-image attachments.
 
 These memory checks are easiest to understand when the server runs with a small retention budget and prompt debug dumps enabled.
 

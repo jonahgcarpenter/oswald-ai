@@ -263,12 +263,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	replyToID := ""
 	prompt := msg.Content
-	images, imageErr := dg.loadImages(msg.Attachments)
-	if imageErr != nil {
-		dg.Log.Warn("Discord image handling failed for message %s: %v", msg.ID, imageErr)
-		_, _ = dg.sendMessage(msg.ChannelID, fmt.Sprintf("Sorry, I could not use those image attachments: %v", imageErr), replyToID)
-		return
-	}
+	images, unsupported := dg.loadImages(msg.Attachments)
 
 	if msg.GuildID != "" {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
@@ -287,6 +282,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}
 
 	prompt = strings.TrimSpace(prompt)
+	prompt = media.AugmentPromptWithUnsupportedFiles(prompt, unsupported)
 	if prompt == "" && len(images) == 0 {
 		_, _ = dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
 		return
@@ -438,37 +434,45 @@ func (dg *Gateway) loadImages(attachments []struct {
 	Size        int    `json:"size,omitempty"`
 	URL         string `json:"url,omitempty"`
 	ProxyURL    string `json:"proxy_url,omitempty"`
-}) ([]ollama.InputImage, error) {
+}) ([]ollama.InputImage, []string) {
 	if len(attachments) == 0 {
 		return nil, nil
 	}
 
 	images := make([]ollama.InputImage, 0, len(attachments))
+	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
 		if len(images) >= media.MaxImagesPerRequest {
-			break
+			unsupported = append(unsupported, label)
+			continue
 		}
 		if !media.SupportsMIMEType(attachment.ContentType) && attachment.ContentType != "" {
+			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.Size > media.MaxImageBytes {
-			return nil, fmt.Errorf("attachment %q exceeds %d bytes", attachment.Filename, media.MaxImageBytes)
+			unsupported = append(unsupported, label)
+			continue
 		}
 
 		image, err := dg.fetchAttachmentImage(attachment.URL, attachment.Filename)
 		if err != nil {
-			return nil, err
+			dg.Log.Warn("Discord attachment rejected for %q: %v", attachment.Filename, err)
+			unsupported = append(unsupported, label)
+			continue
 		}
 		if image.Data == "" {
+			unsupported = append(unsupported, label)
 			continue
 		}
 		images = append(images, image)
 	}
 
 	if len(images) == 0 {
-		return nil, nil
+		return nil, unsupported
 	}
-	return images, nil
+	return images, unsupported
 }
 
 func (dg *Gateway) fetchAttachmentImage(rawURL, filename string) (ollama.InputImage, error) {
