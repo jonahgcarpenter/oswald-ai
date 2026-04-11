@@ -12,6 +12,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 // Name returns the human-readable gateway name.
@@ -66,12 +68,15 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch strings.TrimSpace(strings.ToLower(event.Type)) {
 	case "new-message":
+		if shouldDebugImageWebhook(event.Data, body) {
+			g.Log.Debug("iMessage image-debug webhook payload: %s", truncateForLog(string(body), 4000))
+		}
 		if event.Data.IsFromMe {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if strings.TrimSpace(event.Data.Text) == "" {
-			g.Log.Debug("iMessage webhook ignored: empty text content")
+			g.Log.Debug("iMessage webhook ignored: empty text content (guid=%s associated_type=%s)", event.Data.GUID, event.Data.AssociatedMessageType)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -84,10 +89,43 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func shouldDebugImageWebhook(msg webhookMessage, body []byte) bool {
+	if strings.TrimSpace(msg.Text) == "" {
+		return true
+	}
+	if msg.AssociatedMessageType != "" || msg.AssociatedMessageGUID != "" {
+		return true
+	}
+	raw := strings.ToLower(string(body))
+	for _, marker := range []string{"attachment", "attachments", "image", "images", "photo", "mime", "file", "heic", "png", "jpeg", "jpg", "webp"} {
+		if strings.Contains(raw, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateForLog(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "..."
+}
+
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
 func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	chat := msg.primaryChat()
-	if chat.GUID == "" || strings.TrimSpace(msg.Text) == "" || strings.TrimSpace(msg.Handle.Address) == "" {
+	if chat.GUID == "" || strings.TrimSpace(msg.Handle.Address) == "" {
+		g.Log.Warn("iMessage webhook ignored: incomplete message payload")
+		return
+	}
+	images, imageErr := g.loadImages(msg.Attachments)
+	if imageErr != nil {
+		g.Log.Error("iMessage attachment handling failed for chat %s: %v", chat.GUID, imageErr)
+		return
+	}
+	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		g.Log.Warn("iMessage webhook ignored: incomplete message payload")
 		return
 	}
@@ -149,7 +187,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	defer stopTypingNow()
 	go g.typingLoop(chat.GUID, stopTyping)
 
-	if prompt == "" {
+	if prompt == "" && len(images) == 0 {
 		responseText := "What do you want idiot."
 		stopTypingNow()
 		messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
@@ -163,7 +201,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
-	g.Log.Debug("iMessage request from %s (session=%s canonical=%s): %q", normalizedSenderID, sessionKey, canonicalUserID, truncate(prompt, 100))
+	g.Log.Debug("iMessage request from %s (session=%s canonical=%s images=%d): %q", normalizedSenderID, sessionKey, canonicalUserID, len(images), truncate(prompt, 100))
 
 	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
@@ -187,6 +225,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		DisplayName:  normalizedSenderID,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
+		Images:       images,
 		StreamFunc:   nil,
 		ResponseChan: make(chan broker.Result, 1),
 	}
@@ -212,6 +251,87 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
+}
+
+func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, error) {
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+
+	images := make([]ollama.InputImage, 0, len(attachments))
+	for _, attachment := range attachments {
+		if len(images) >= media.MaxImagesPerRequest {
+			break
+		}
+		if !media.SupportsMIMEType(attachment.MimeType) && attachment.MimeType != "" {
+			continue
+		}
+		if attachment.TotalBytes > media.MaxImageBytes {
+			return nil, fmt.Errorf("attachment %q exceeds %d bytes", attachment.TransferName, media.MaxImageBytes)
+		}
+
+		image, err := g.fetchAttachmentImage(attachment)
+		if err != nil {
+			return nil, err
+		}
+		if image.Data == "" {
+			continue
+		}
+		images = append(images, image)
+	}
+
+	if len(images) == 0 {
+		return nil, nil
+	}
+	return images, nil
+}
+
+func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage, error) {
+	if strings.TrimSpace(attachment.GUID) == "" {
+		return ollama.InputImage{}, nil
+	}
+
+	endpoint, err := buildBlueBubblesAttachmentEndpoint(g.BlueBubblesURL, attachment.GUID, g.BlueBubblesPassword)
+	if err != nil {
+		return ollama.InputImage{}, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("build BlueBubbles attachment request: %w", err)
+	}
+
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("download BlueBubbles attachment %q: %w", attachment.TransferName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ollama.InputImage{}, fmt.Errorf("download BlueBubbles attachment %q failed with status %d", attachment.TransferName, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("read BlueBubbles attachment %q: %w", attachment.TransferName, err)
+	}
+	if len(body) > media.MaxImageBytes {
+		return ollama.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", attachment.TransferName, media.MaxImageBytes)
+	}
+
+	mimeType := media.DetectMIMEType(resp.Header, body)
+	if mimeType == "" && media.SupportsMIMEType(attachment.MimeType) {
+		mimeType = attachment.MimeType
+	}
+	if mimeType == "" {
+		return ollama.InputImage{}, nil
+	}
+
+	image, err := media.BuildInputImageFromBytes(mimeType, body, attachment.TransferName)
+	if err != nil {
+		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", attachment.TransferName, err)
+	}
+	return image, nil
 }
 
 // sessionKey returns the session identifier for a direct or group iMessage chat.
@@ -346,6 +466,21 @@ func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + path
 	query := parsed.Query()
 	query.Set("guid", password)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string) (string, error) {
+	endpoint, err := buildBlueBubblesEndpoint(baseURL, "/api/v1/attachment/"+attachmentGUID+"/download", password)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("parse BlueBubbles attachment URL: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("original", "true")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

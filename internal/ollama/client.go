@@ -80,6 +80,7 @@ func mapToOllamaMessages(msgs []ChatMessage) []ollamaMessage {
 		cm := ollamaMessage{
 			Role:     m.Role,
 			Content:  m.Content,
+			Images:   append([]string(nil), m.Images...),
 			Thinking: m.Thinking,
 			ToolName: m.ToolName,
 		}
@@ -132,6 +133,7 @@ func mapFromOllamaMessage(m ollamaMessage) ChatMessage {
 	msg := ChatMessage{
 		Role:     m.Role,
 		Content:  m.Content,
+		Images:   append([]string(nil), m.Images...),
 		Thinking: m.Thinking,
 		ToolName: m.ToolName,
 	}

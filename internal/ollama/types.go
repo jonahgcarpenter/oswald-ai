@@ -20,6 +20,7 @@ type ollamaToolCall struct {
 type ollamaMessage struct {
 	Role      string           `json:"role"`
 	Content   string           `json:"content"`
+	Images    []string         `json:"images,omitempty"`
 	Thinking  string           `json:"thinking,omitempty"`
 	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 	ToolName  string           `json:"tool_name,omitempty"`

@@ -48,6 +48,7 @@ type webhookMessage struct {
 	Text                  string        `json:"text"`
 	IsFromMe              bool          `json:"isFromMe"`
 	Handle                messageHandle `json:"handle"`
+	Attachments           []attachment  `json:"attachments"`
 	GroupTitle            string        `json:"groupTitle"`
 	AssociatedMessageGUID string        `json:"associatedMessageGuid"`
 	AssociatedMessageType string        `json:"associatedMessageType"`
@@ -60,6 +61,16 @@ type webhookMessage struct {
 	DateDelivered         *int64        `json:"dateDelivered"`
 	DateEdited            *int64        `json:"dateEdited"`
 	DateRetracted         *int64        `json:"dateRetracted"`
+}
+
+type attachment struct {
+	GUID         string `json:"guid"`
+	UTI          string `json:"uti"`
+	MimeType     string `json:"mimeType"`
+	TransferName string `json:"transferName"`
+	TotalBytes   int    `json:"totalBytes"`
+	Height       int    `json:"height"`
+	Width        int    `json:"width"`
 }
 
 type messageHandle struct {

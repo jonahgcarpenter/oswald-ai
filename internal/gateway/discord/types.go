@@ -52,6 +52,14 @@ type MessageCreate struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 	} `json:"mentions,omitempty"`
+	Attachments []struct {
+		ID          string `json:"id"`
+		Filename    string `json:"filename"`
+		ContentType string `json:"content_type,omitempty"`
+		Size        int    `json:"size,omitempty"`
+		URL         string `json:"url,omitempty"`
+		ProxyURL    string `json:"proxy_url,omitempty"`
+	} `json:"attachments,omitempty"`
 	ReferencedMessage *struct {
 		ID      string `json:"id"`
 		Content string `json:"content"`

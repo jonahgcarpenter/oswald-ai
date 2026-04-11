@@ -13,10 +13,19 @@ type ToolCall struct {
 	Function ToolFunction `json:"function"`
 }
 
+// InputImage is a validated image payload attached to a user request.
+// Data must contain the base64-encoded image bytes expected by Ollama.
+type InputImage struct {
+	MimeType string `json:"mime_type,omitempty"`
+	Data     string `json:"data"`
+	Source   string `json:"source,omitempty"`
+}
+
 // ChatMessage is a single turn in a conversation (system, user, assistant, or tool).
 type ChatMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
+	Images    []string   `json:"images,omitempty"`
 	Thinking  string     `json:"thinking,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	ToolName  string     `json:"tool_name,omitempty"`

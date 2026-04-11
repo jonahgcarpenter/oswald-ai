@@ -5,6 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 const (
@@ -24,6 +25,7 @@ type Request struct {
 	DisplayName  string                  // Human-readable display name for the sender (optional)
 	SessionKey   string                  // Unique conversation context key
 	Prompt       string                  // The user's message text
+	Images       []ollama.InputImage     // Optional: current-turn image attachments for multimodal models
 	StreamFunc   func(agent.StreamChunk) // Optional: streaming callback (nil for non-streaming gateways)
 	ResponseChan chan Result             // Broker writes the final result here; must be buffered(1)
 }
@@ -112,7 +114,7 @@ func (b *Broker) runWorker(id int) {
 	for req := range b.requests {
 		b.log.Debug("Broker worker %d: processing request from %s (chatID=%s)", id, req.Channel, req.ChatID)
 
-		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.StreamFunc)
+		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
 
 		req.ResponseChan <- Result{
 			Response: resp,

@@ -2,11 +2,14 @@ package websocket
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 // Name returns the human-readable gateway name.
@@ -48,11 +51,20 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
 		// clients keep working without modification.
 		var userPrompt, userID, displayName string
+		var userImages []ollama.InputImage
 		var incoming IncomingMessage
-		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && incoming.Prompt != "" {
+		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
 			displayName = incoming.DisplayName
+			images, imageErr := decodeIncomingImages(incoming.Images)
+			if imageErr != nil {
+				errorPayload := agent.AgentResponse{Error: imageErr.Error()}
+				errBytes, _ := json.Marshal(errorPayload)
+				conn.WriteMessage(messageType, errBytes) // nolint: errcheck
+				continue
+			}
+			userImages = images
 		} else {
 			userPrompt = string(message)
 			userID = remoteAddr
@@ -117,6 +129,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			DisplayName:  displayName,
 			SessionKey:   sessionKey,
 			Prompt:       userPrompt,
+			Images:       userImages,
 			StreamFunc:   streamFunc,
 			ResponseChan: make(chan broker.Result, 1),
 		}
@@ -143,6 +156,25 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			break
 		}
 	}
+}
+
+func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	if len(images) > media.MaxImagesPerRequest {
+		return nil, fmt.Errorf("too many images: got %d, max %d", len(images), media.MaxImagesPerRequest)
+	}
+
+	validated := make([]ollama.InputImage, 0, len(images))
+	for i, image := range images {
+		inputImage, err := media.BuildInputImage(image.MimeType, image.Data, image.Source)
+		if err != nil {
+			return nil, fmt.Errorf("image %d rejected: %w", i+1, err)
+		}
+		validated = append(validated, inputImage)
+	}
+	return validated, nil
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.

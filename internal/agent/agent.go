@@ -140,18 +140,18 @@ func makeCompactedTurn(summary string, now time.Time) memory.Turn {
 	}
 }
 
-func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turns []memory.Turn, userPrompt string) ([]memory.Turn, memory.PromptPruneResult, bool) {
+func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
 	tools := a.registry.OllamaTools()
 	currentTurns := append([]memory.Turn(nil), turns...)
 	persisted := false
 	result := memory.PromptPruneResult{
-		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, tools),
+		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, len(userImages), tools),
 	}
 	lastEstimate := result.EstimatedBefore
 
 	for len(currentTurns) > 0 {
 		history := memory.FlattenTurns(currentTurns)
-		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, tools)
+		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, len(userImages), tools)
 		lastEstimate = estimate
 		if estimate <= a.budget.PromptBudget() {
 			result.EstimatedAfter = estimate
@@ -171,7 +171,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 			candidateTurns = append(candidateTurns, replacement)
 			candidateTurns = append(candidateTurns, currentTurns[compactCount:]...)
 
-			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, tools)
+			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, len(userImages), tools)
 			if candidateEstimate >= estimate && compactCount < len(currentTurns) {
 				continue
 			}
@@ -213,7 +213,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
 	a.log.Debug("Processing request (session=%q sender=%q display=%q): %q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -252,17 +252,22 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// If the estimated prompt would exceed the active model budget, destructively
 	// compact the oldest retained turns into a synthetic turn pair that remains
 	// in ordinary conversation history.
-	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, dynamicSystemPrompt, turns, userPrompt)
+	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, dynamicSystemPrompt, turns, userPrompt, userImages)
 	if compacted {
 		a.memory.ReplaceTurns(sessionKey, compactedTurns)
 		turns = compactedTurns
 	}
 	trimmedHistory := memory.FlattenTurns(turns)
 
+	messageImages := make([]string, 0, len(userImages))
+	for _, image := range userImages {
+		messageImages = append(messageImages, image.Data)
+	}
+
 	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
 	messages = append(messages, trimmedHistory...)
-	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt})
+	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
 	// Write a full prompt debug dump when PROMPT_DEBUG_PATH is set.
 	if a.promptDebugPath != "" {
@@ -277,6 +282,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			prune.EstimatedBefore,
 			prune.EstimatedAfter,
 			prune.RemovedPairs,
+			userImages,
 		); dumpErr != nil {
 			a.log.Warn("Prompt debug: failed to write dump: %v", dumpErr)
 		} else {
@@ -466,9 +472,13 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		if len(toolAnnotations) > 0 {
 			storedContent += "\n\n---\n_Tools used: " + strings.Join(toolAnnotations, ", ") + "_"
 		}
+		userMemoryContent := userPrompt
+		if len(userImages) > 0 {
+			userMemoryContent = strings.TrimSpace(userMemoryContent + fmt.Sprintf("\n\n[Attached %d image(s)]", len(userImages)))
+		}
 		a.memory.AppendTurn(
 			sessionKey,
-			ollama.ChatMessage{Role: "user", Content: userPrompt},
+			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
 			ollama.ChatMessage{Role: "assistant", Content: storedContent},
 		)
 	}

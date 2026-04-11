@@ -7,6 +7,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
+const imageTokenEstimate = 768
+
 // PromptPruneResult reports how much retained history was removed by
 // request-time compaction to satisfy the active model budget.
 type PromptPruneResult struct {
@@ -77,29 +79,29 @@ func PruneTurns(now time.Time, turns []Turn, opts Options) RetentionResult {
 // PruneHistoryToFit applies request-time prompt compaction. It trims the
 // oldest retained user/assistant pairs from retained history until the
 // estimated request fits within the active prompt budget.
-func PruneHistoryToFit(budget ContextBudget, systemPrompt string, history []ollama.ChatMessage, userPrompt string, tools []ollama.Tool) ([]ollama.ChatMessage, PromptPruneResult) {
+func PruneHistoryToFit(budget ContextBudget, systemPrompt string, history []ollama.ChatMessage, userPrompt string, userImageCount int, tools []ollama.Tool) ([]ollama.ChatMessage, PromptPruneResult) {
 	trimmed := append([]ollama.ChatMessage(nil), history...)
 	result := PromptPruneResult{
-		EstimatedBefore: EstimatePromptTokens(systemPrompt, history, userPrompt, tools),
+		EstimatedBefore: EstimatePromptTokens(systemPrompt, history, userPrompt, userImageCount, tools),
 	}
 
-	for len(trimmed) >= 2 && EstimatePromptTokens(systemPrompt, trimmed, userPrompt, tools) > budget.PromptBudget() {
+	for len(trimmed) >= 2 && EstimatePromptTokens(systemPrompt, trimmed, userPrompt, userImageCount, tools) > budget.PromptBudget() {
 		trimmed = trimmed[2:]
 		result.RemovedPairs++
 	}
 
-	result.EstimatedAfter = EstimatePromptTokens(systemPrompt, trimmed, userPrompt, tools)
+	result.EstimatedAfter = EstimatePromptTokens(systemPrompt, trimmed, userPrompt, userImageCount, tools)
 	return trimmed, result
 }
 
 // EstimatePromptTokens provides the shared token estimate used by both the
 // agent and request-time compaction logic.
-func EstimatePromptTokens(systemPrompt string, history []ollama.ChatMessage, userPrompt string, tools []ollama.Tool) int {
+func EstimatePromptTokens(systemPrompt string, history []ollama.ChatMessage, userPrompt string, userImageCount int, tools []ollama.Tool) int {
 	total := estimateMessageTokens(ollama.ChatMessage{Role: "system", Content: systemPrompt})
 	for _, msg := range history {
 		total += estimateMessageTokens(msg)
 	}
-	total += estimateMessageTokens(ollama.ChatMessage{Role: "user", Content: userPrompt})
+	total += estimateMessageTokens(ollama.ChatMessage{Role: "user", Content: userPrompt, Images: make([]string, userImageCount)})
 	total += estimateToolTokens(tools)
 	return total
 }
@@ -112,7 +114,7 @@ func estimateMessageTokens(msg ollama.ChatMessage) int {
 			contentLen += len(encoded)
 		}
 	}
-	return contentLen/4 + messageTokenOverhead
+	return contentLen/4 + messageTokenOverhead + len(msg.Images)*imageTokenEstimate
 }
 
 func estimateToolTokens(tools []ollama.Tool) int {

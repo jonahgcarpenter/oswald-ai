@@ -24,6 +24,7 @@ func DumpPrompt(
 	estimatedBefore int,
 	estimatedAfter int,
 	removedPairs int,
+	requestImages []ollama.InputImage,
 ) error {
 	if dir == "" {
 		return nil
@@ -53,6 +54,7 @@ func DumpPrompt(
 	fmt.Fprintf(&sb, "| Estimated tokens (before pruning) | %d |\n", estimatedBefore)
 	fmt.Fprintf(&sb, "| Estimated tokens (after pruning) | %d |\n", estimatedAfter)
 	fmt.Fprintf(&sb, "| Turn pairs compacted by budget pressure | %d |\n", removedPairs)
+	fmt.Fprintf(&sb, "| Current request images | %d |\n", len(requestImages))
 	sb.WriteString("\n---\n\n")
 	fmt.Fprintf(&sb, "## Actual Request Sent to Ollama (%d messages)\n\n", len(messages))
 	for i, msg := range messages {
@@ -69,6 +71,10 @@ func DumpPrompt(
 				sb.WriteString("\n")
 			}
 			sb.WriteString("```\n\n")
+		}
+
+		if len(msg.Images) > 0 {
+			fmt.Fprintf(&sb, "**Images:** %d attached\n\n", len(msg.Images))
 		}
 
 		if msg.Thinking != "" {
@@ -89,6 +95,14 @@ func DumpPrompt(
 		}
 
 		sb.WriteString("---\n\n")
+	}
+
+	if len(requestImages) > 0 {
+		fmt.Fprintf(&sb, "## Request Images (%d)\n\n", len(requestImages))
+		for i, image := range requestImages {
+			fmt.Fprintf(&sb, "- [%d] mime=`%s` source=`%s`\n", i+1, image.MimeType, image.Source)
+		}
+		sb.WriteString("\n")
 	}
 
 	if len(tools) > 0 {
