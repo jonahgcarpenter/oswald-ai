@@ -18,6 +18,7 @@ const (
 	defaultSendMethod  = "private-api"
 	fallbackSendMethod = "apple-script"
 	messageIndexTTL    = time.Hour
+	contactCacheTTL    = 6 * time.Hour
 )
 
 var mentionRE = regexp.MustCompile(`@?Oswald\b`)
@@ -35,6 +36,8 @@ type Gateway struct {
 	HTTPClient          *http.Client
 	messageMu           sync.RWMutex
 	messageIndex        map[string]messageContext
+	contactMu           sync.RWMutex
+	contactNames        map[string]contactNameCacheEntry
 }
 
 type webhookEvent struct {
@@ -44,44 +47,30 @@ type webhookEvent struct {
 
 type webhookMessage struct {
 	GUID                  string        `json:"guid"`
-	TempGUID              string        `json:"tempGuid"`
 	Text                  string        `json:"text"`
 	IsFromMe              bool          `json:"isFromMe"`
 	Handle                messageHandle `json:"handle"`
 	Attachments           []attachment  `json:"attachments"`
-	GroupTitle            string        `json:"groupTitle"`
-	AssociatedMessageGUID string        `json:"associatedMessageGuid"`
 	AssociatedMessageType string        `json:"associatedMessageType"`
 	ReplyToGUID           string        `json:"replyToGuid"`
 	ThreadOriginatorGUID  string        `json:"threadOriginatorGuid"`
-	ThreadOriginatorPart  int           `json:"threadOriginatorPart"`
 	Chats                 []messageChat `json:"chats"`
-	DateCreated           int64         `json:"dateCreated"`
-	DateRead              *int64        `json:"dateRead"`
-	DateDelivered         *int64        `json:"dateDelivered"`
-	DateEdited            *int64        `json:"dateEdited"`
-	DateRetracted         *int64        `json:"dateRetracted"`
 }
 
 type attachment struct {
 	GUID         string `json:"guid"`
-	UTI          string `json:"uti"`
 	MimeType     string `json:"mimeType"`
 	TransferName string `json:"transferName"`
 	TotalBytes   int    `json:"totalBytes"`
-	Height       int    `json:"height"`
-	Width        int    `json:"width"`
 }
 
 type messageHandle struct {
 	Address string `json:"address"`
-	Service string `json:"service"`
 }
 
 type messageChat struct {
-	GUID        string `json:"guid"`
-	DisplayName string `json:"displayName"`
-	Style       int    `json:"style"`
+	GUID  string `json:"guid"`
+	Style int    `json:"style"`
 }
 
 type sendTextRequest struct {
@@ -94,16 +83,32 @@ type sendTextRequest struct {
 }
 
 type sendTextResponse struct {
-	Status  int    `json:"status"`
-	Message string `json:"message"`
-	Data    struct {
-		GUID     string `json:"guid"`
-		TempGUID string `json:"tempGuid"`
+	Data struct {
+		GUID string `json:"guid"`
 	} `json:"data"`
 	Error *struct {
-		Type  string `json:"type"`
 		Error string `json:"error"`
 	} `json:"error,omitempty"`
+}
+
+type contactQueryRequest struct {
+	Addresses []string `json:"addresses"`
+}
+
+type contactQueryResponse struct {
+	Data []contactRecord `json:"data"`
+}
+
+type contactRecord struct {
+	DisplayName string `json:"displayName"`
+	FirstName   string `json:"firstName"`
+	LastName    string `json:"lastName"`
+	Nickname    string `json:"nickname"`
+}
+
+type contactNameCacheEntry struct {
+	DisplayName string
+	ExpiresAt   time.Time
 }
 
 type messageContext struct {

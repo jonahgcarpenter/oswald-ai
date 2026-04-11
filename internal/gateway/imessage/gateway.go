@@ -27,6 +27,9 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if g.messageIndex == nil {
 		g.messageIndex = make(map[string]messageContext)
 	}
+	if g.contactNames == nil {
+		g.contactNames = make(map[string]contactNameCacheEntry)
+	}
 
 	path := strings.TrimSpace(g.WebhookPath)
 	if path == "" {
@@ -115,8 +118,14 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		g.Log.Error("iMessage identifier normalization error: %v", err)
 		return
 	}
+	displayName := normalizedSenderID
+	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
+		g.Log.Debug("iMessage contact lookup failed for %s: %v", normalizedSenderID, err)
+	} else if resolvedName != "" {
+		displayName = resolvedName
+	}
 
-	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, normalizedSenderID)
+	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, displayName)
 	if err != nil {
 		g.Log.Error("iMessage account resolution error: %v", err)
 		return
@@ -148,7 +157,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
 	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
 		g.Log.Debug("iMessage group message ignored without @oswald mention in chat %s: raw=%+v", chat.GUID, msg)
-		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
+		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
 	}
 	if isGroup {
@@ -176,11 +185,11 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		} else {
 			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
 		}
-		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
+		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
 	}
 
-	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID)
+	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 	g.Log.Debug("iMessage request from %s (session=%s canonical=%s images=%d): %q", normalizedSenderID, sessionKey, canonicalUserID, len(images), truncate(prompt, 100))
 
 	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
@@ -202,7 +211,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		Channel:      "imessage",
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
-		DisplayName:  normalizedSenderID,
+		DisplayName:  displayName,
 		SessionKey:   sessionKey,
 		Prompt:       prompt,
 		Images:       images,
@@ -231,6 +240,97 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
+}
+
+func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, error) {
+	if normalizedSenderID == "" {
+		return "", nil
+	}
+
+	if cachedName, ok := g.cachedContactDisplayName(normalizedSenderID); ok {
+		return cachedName, nil
+	}
+
+	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/contact/query", g.BlueBubblesPassword)
+	if err != nil {
+		return "", err
+	}
+
+	payload, err := json.Marshal(contactQueryRequest{Addresses: []string{normalizedSenderID}})
+	if err != nil {
+		return "", fmt.Errorf("marshal BlueBubbles contact query: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("build BlueBubbles contact query request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("send BlueBubbles contact query: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("BlueBubbles contact query failed with status %d", resp.StatusCode)
+	}
+
+	var result contactQueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode BlueBubbles contact query response: %w", err)
+	}
+
+	name := chooseContactDisplayName(result.Data)
+	g.cacheContactDisplayName(normalizedSenderID, name)
+	return name, nil
+}
+
+func chooseContactDisplayName(contacts []contactRecord) string {
+	for _, contact := range contacts {
+		if name := strings.TrimSpace(contact.DisplayName); name != "" {
+			return name
+		}
+		fullName := strings.TrimSpace(strings.TrimSpace(contact.FirstName) + " " + strings.TrimSpace(contact.LastName))
+		if fullName != "" {
+			return fullName
+		}
+		if nickname := strings.TrimSpace(contact.Nickname); nickname != "" {
+			return nickname
+		}
+	}
+	return ""
+}
+
+func (g *Gateway) cachedContactDisplayName(normalizedSenderID string) (string, bool) {
+	g.contactMu.Lock()
+	defer g.contactMu.Unlock()
+	g.pruneContactNamesLocked()
+	entry, ok := g.contactNames[normalizedSenderID]
+	if !ok {
+		return "", false
+	}
+	return entry.DisplayName, true
+}
+
+func (g *Gateway) cacheContactDisplayName(normalizedSenderID, displayName string) {
+	g.contactMu.Lock()
+	defer g.contactMu.Unlock()
+	g.pruneContactNamesLocked()
+	g.contactNames[normalizedSenderID] = contactNameCacheEntry{
+		DisplayName: displayName,
+		ExpiresAt:   time.Now().Add(contactCacheTTL),
+	}
+}
+
+func (g *Gateway) pruneContactNamesLocked() {
+	now := time.Now()
+	for senderID, entry := range g.contactNames {
+		if !entry.ExpiresAt.After(now) {
+			delete(g.contactNames, senderID)
+		}
+	}
 }
 
 func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []string) {
@@ -474,7 +574,7 @@ func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string
 }
 
 // rememberInboundMessage caches inbound message context for reply reconstruction.
-func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normalizedSenderID string) {
+func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normalizedSenderID, displayName string) {
 	if msg.GUID == "" {
 		return
 	}
@@ -482,7 +582,7 @@ func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normali
 		SessionKey:  sessionKey,
 		ChatGUID:    msg.primaryChat().GUID,
 		SenderID:    normalizedSenderID,
-		DisplayName: normalizedSenderID,
+		DisplayName: displayName,
 		Text:        strings.TrimSpace(msg.Text),
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
