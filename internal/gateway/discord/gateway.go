@@ -325,34 +325,34 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		return
 	}
 
-	if msg.ReferencedMessage != nil && msg.ReferencedMessage.Content != "" {
+	if msg.ReferencedMessage != nil {
+		replyName := strings.TrimSpace(msg.ReferencedMessage.Author.Username)
+		if replyName == "" && msg.ReferencedMessage.Author.ID == dg.BotID {
+			replyName = "Oswald"
+		}
 		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
 
-		if msg.ReferencedMessage.Author.ID != dg.BotID {
-			dg.Log.Debug("Discord reply context: quoted non-bot message from %s in channel %s", msg.ReferencedMessage.Author.Username, msg.ChannelID)
+		switch {
+		case strings.TrimSpace(quotedContent) != "" && replyName != "":
+			if msg.ReferencedMessage.Author.ID == dg.BotID {
+				dg.Log.Debug("Discord reply context: quoted Oswald message %s in channel %s", msg.ReferencedMessage.ID, msg.ChannelID)
+			} else {
+				dg.Log.Debug("Discord reply context: quoted non-bot message from %s in channel %s", replyName, msg.ChannelID)
+			}
 			prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
-				msg.ReferencedMessage.Author.Username,
+				replyName,
 				quotedContent,
 				prompt,
 			)
-		} else {
-			replyCtx, ok := dg.lookupReply(msg.ReferencedMessage.ID)
-			switch {
-			case ok && replyCtx.SessionKey == sessionKey:
-				dg.Log.Debug("Discord reply context: same-session reply to Oswald message %s in session %s; using memory only", msg.ReferencedMessage.ID, sessionKey)
-			case ok && replyCtx.SessionKey != sessionKey:
-				dg.Log.Debug("Discord reply context: cross-session reply to Oswald message %s (from %s to %s); injecting quoted context", msg.ReferencedMessage.ID, replyCtx.SessionKey, sessionKey)
-				prompt = fmt.Sprintf("[Replying to Oswald's previous message in this channel: \"%s\"]\n%s",
-					quotedContent,
-					prompt,
-				)
-			default:
-				dg.Log.Debug("Discord reply context: unknown Oswald reply target %s; injecting quoted fallback context", msg.ReferencedMessage.ID)
-				prompt = fmt.Sprintf("[Replying to Oswald's previous message in this channel: \"%s\"]\n%s",
-					quotedContent,
-					prompt,
-				)
-			}
+		case replyName != "":
+			dg.Log.Debug("Discord reply context: referenced message from %s is unavailable in channel %s", replyName, msg.ChannelID)
+			prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s",
+				replyName,
+				prompt,
+			)
+		default:
+			dg.Log.Debug("Discord reply context: referenced message is unavailable in channel %s", msg.ChannelID)
+			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
 	}
 

@@ -138,18 +138,28 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupMessage(replyGUID); ok {
 			isReplyToBot = replyCtx.IsFromBot
+			replyName := strings.TrimSpace(replyCtx.DisplayName)
+			if replyName == "" && replyCtx.IsFromBot {
+				replyName = "Oswald"
+			}
 			switch {
-			case replyCtx.IsFromBot && replyCtx.SessionKey == sessionKey:
-				g.Log.Debug("iMessage reply context: same-session reply to Oswald message %s in session %s; using memory only", replyGUID, sessionKey)
-			case replyCtx.IsFromBot && replyCtx.SessionKey != sessionKey:
-				g.Log.Debug("iMessage reply context: cross-session reply to Oswald message %s (from %s to %s); injecting quoted context", replyGUID, replyCtx.SessionKey, sessionKey)
-				prompt = fmt.Sprintf("[Replying to Oswald's previous message in this chat: %q]\n%s", replyCtx.Text, prompt)
-			case !replyCtx.IsFromBot:
-				g.Log.Debug("iMessage reply context: quoted non-bot message from %s in chat %s", replyCtx.DisplayName, chat.GUID)
-				prompt = fmt.Sprintf("[Replying to %s: %q]\n%s", replyCtx.DisplayName, replyCtx.Text, prompt)
+			case strings.TrimSpace(replyCtx.Text) != "" && replyName != "":
+				if replyCtx.IsFromBot {
+					g.Log.Debug("iMessage reply context: quoted Oswald message %s in chat %s", replyGUID, chat.GUID)
+				} else {
+					g.Log.Debug("iMessage reply context: quoted non-bot message from %s in chat %s", replyName, chat.GUID)
+				}
+				prompt = fmt.Sprintf("[Replying to %s: %q]\n%s", replyName, replyCtx.Text, prompt)
+			case replyName != "":
+				g.Log.Debug("iMessage reply context: referenced message from %s is unavailable in chat %s", replyName, chat.GUID)
+				prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s", replyName, prompt)
+			default:
+				g.Log.Debug("iMessage reply context: referenced message %s is unavailable in chat %s", replyGUID, chat.GUID)
+				prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 			}
 		} else {
 			g.Log.Debug("iMessage reply context: unknown reply target %s; no cached context available", replyGUID)
+			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
 	}
 
