@@ -155,6 +155,10 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	isAccountCommand := isAccountCommand(prompt)
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
+	selectedMessageGUID := ""
+	if isGroup {
+		selectedMessageGUID = msg.GUID
+	}
 	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
@@ -169,7 +173,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	if prompt == "" && len(images) == 0 {
 		responseText := "What do you want idiot."
-		messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
+		messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 		if err != nil {
 			g.Log.Error("iMessage empty prompt response send failed: %v", err)
 		} else {
@@ -187,7 +191,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			g.Log.Error("iMessage account command error: %v", commandErr)
 			commandResponse = "Failed to process account linking command."
 		}
-		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, "", 0)
+		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, selectedMessageGUID, 0)
 		if err != nil {
 			g.Log.Error("iMessage command response send failed: %v", err)
 		} else {
@@ -222,7 +226,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	messageGUID, err := g.sendTextReply(chat.GUID, responseText, "", 0)
+	messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 	if err != nil {
 		g.Log.Error("iMessage send failed for chat %s: %v", chat.GUID, err)
 		return
