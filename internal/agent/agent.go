@@ -239,12 +239,12 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// the persistent_memory tool when needed.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
-	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
 
 	if speakerLine := a.currentSpeakerLine(senderID); speakerLine != "" {
-		promptParts = append(promptParts, "## Current Speaker\n"+speakerLine)
+		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
 	}
 	promptParts = append(promptParts, a.userMemoryPromptSections(senderID)...)
+	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 
