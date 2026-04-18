@@ -65,6 +65,9 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 				return "", err
 			}
 		}
+		if err := s.memories.SyncSpeakerIntro(canonicalID, FormatSpeakerLine(user.Accounts)); err != nil {
+			return "", err
+		}
 		return canonicalID, nil
 	}
 
@@ -87,6 +90,9 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 	data.AccountIndex[key] = canonicalID
 
 	if err := s.saveLocked(data); err != nil {
+		return "", err
+	}
+	if err := s.memories.SyncSpeakerIntro(canonicalID, FormatSpeakerLine(data.Users[canonicalID].Accounts)); err != nil {
 		return "", err
 	}
 
@@ -225,6 +231,9 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 		if err := s.saveLocked(data); err != nil {
 			return LinkResult{}, err
 		}
+		if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(mergedUser.Accounts)); err != nil {
+			return LinkResult{}, err
+		}
 
 		linkedAccount, _ := findAccount(mergedUser.Accounts, gateway, identifier)
 		return LinkResult{
@@ -247,6 +256,9 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 	data.AccountIndex[key] = canonicalUserID
 
 	if err := s.saveLocked(data); err != nil {
+		return LinkResult{}, err
+	}
+	if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(current.Accounts)); err != nil {
 		return LinkResult{}, err
 	}
 
@@ -294,7 +306,10 @@ func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string)
 	data.Users[canonicalUserID] = user
 	delete(data.AccountIndex, key)
 
-	return s.saveLocked(data)
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	return s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(user.Accounts))
 }
 
 func (s *Service) loadLocked() (fileData, error) {

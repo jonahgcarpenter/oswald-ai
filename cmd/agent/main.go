@@ -87,7 +87,6 @@ func main() {
 		cfg.OllamaModel,
 		soulStore,
 		userMemStore,
-		accountLinkService,
 		budget,
 		cfg.MaxToolFailureRetries,
 		memoryStore,

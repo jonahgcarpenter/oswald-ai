@@ -117,6 +117,40 @@ func (s *Store) ReadIntro(userID string) (string, error) {
 	return intro, nil
 }
 
+// SyncSpeakerIntro creates or updates the user's memory file so its intro block
+// mirrors the supplied speaker line while preserving any existing sections.
+func (s *Store) SyncSpeakerIntro(userID, intro string) error {
+	l := s.lockFor(userID)
+	l.Lock()
+	defer l.Unlock()
+
+	path := s.filePath(userID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create memory directory: %w", err)
+	}
+
+	var existing string
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to read user memory for %q: %w", userID, err)
+	}
+	if err == nil {
+		existing = migrateIfNeeded(string(data))
+	}
+
+	parsed := parseMemory(existing)
+	updated := serializeMemory(strings.TrimSpace(intro), parsed.Sections)
+	if strings.TrimSpace(updated) == strings.TrimSpace(existing) {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
+	}
+
+	s.log.Debug("UserMemory: synced speaker intro for user=%q", userID)
+	return nil
+}
+
 // Set stores a new fact or replaces an existing one whose statement matches,
 // within the given category section. If category is empty, defaultCategory is used.
 // Each entry is written as:
@@ -291,12 +325,6 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	}
 
 	merged := mergeCategorizedContent(string(winnerRaw), string(loserRaw))
-	if strings.TrimSpace(merged) != "" {
-		merged, err = s.withSpeakerIntro(winnerUserID, merged)
-		if err != nil {
-			return err
-		}
-	}
 	if strings.TrimSpace(merged) != "" && strings.TrimSpace(merged) != "# User Memory" {
 		if err := os.MkdirAll(filepath.Dir(winnerPath), 0o755); err != nil {
 			return fmt.Errorf("failed to create memory directory: %w", err)

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/debug"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
@@ -69,7 +68,6 @@ type Agent struct {
 	model                 string
 	soul                  *soulmemory.Store
 	userMemory            *usermemory.Store
-	accountLinks          *accountlink.Service
 	summarizer            *OllamaSummarizer
 	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
 	maxToolFailureRetries int
@@ -84,7 +82,6 @@ func NewAgent(
 	model string,
 	soul *soulmemory.Store,
 	userMemory *usermemory.Store,
-	accountLinks *accountlink.Service,
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
 	memoryStore *memory.Store,
@@ -99,7 +96,6 @@ func NewAgent(
 		model:                 model,
 		soul:                  soul,
 		userMemory:            userMemory,
-		accountLinks:          accountLinks,
 		summarizer:            NewOllamaSummarizer(chatClient, model, log),
 		promptDebugPath:       promptDebugPath,
 		maxToolFailureRetries: maxToolFailureRetries,
@@ -510,15 +506,6 @@ func (a *Agent) currentSpeakerLine(senderID string) string {
 		} else if strings.TrimSpace(intro) != "" {
 			return strings.TrimSpace(intro)
 		}
-	}
-
-	if a.accountLinks != nil {
-		line, err := a.accountLinks.SpeakerLine(senderID)
-		if err != nil {
-			a.log.Warn("Failed to resolve speaker line for %q: %v", senderID, err)
-			return ""
-		}
-		return strings.TrimSpace(line)
 	}
 
 	return ""
