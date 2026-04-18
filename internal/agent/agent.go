@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/debug"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
@@ -13,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 )
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
@@ -66,6 +68,8 @@ type Agent struct {
 	budget                memory.ContextBudget
 	model                 string
 	soul                  *soulmemory.Store
+	userMemory            *usermemory.Store
+	accountLinks          *accountlink.Service
 	summarizer            *OllamaSummarizer
 	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
 	maxToolFailureRetries int
@@ -79,6 +83,8 @@ func NewAgent(
 	registry *tools.Registry,
 	model string,
 	soul *soulmemory.Store,
+	userMemory *usermemory.Store,
+	accountLinks *accountlink.Service,
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
 	memoryStore *memory.Store,
@@ -92,6 +98,8 @@ func NewAgent(
 		budget:                budget,
 		model:                 model,
 		soul:                  soul,
+		userMemory:            userMemory,
+		accountLinks:          accountLinks,
 		summarizer:            NewOllamaSummarizer(chatClient, model, log),
 		promptDebugPath:       promptDebugPath,
 		maxToolFailureRetries: maxToolFailureRetries,
@@ -206,9 +214,9 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // identify the user without needing the session key. An empty senderID disables
 // user-scoped tool behaviour.
 //
-// displayName is the human-readable name for the sender (e.g. a Discord username).
-// If non-empty it is injected into the system prompt so the model knows who it is
-// speaking with without requiring a tool call.
+// displayName is the human-readable name supplied by the active gateway.
+// The agent prefers the persistent-memory intro and canonical account links for
+// speaker identity, but keeps this argument for request logging.
 //
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
@@ -237,11 +245,10 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	promptParts = append(promptParts, soulContent)
 	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
 
-	if displayName != "" {
-		promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s.", displayName))
-	} else if senderID != "" {
-		promptParts = append(promptParts, "## Current Speaker\nYou are speaking with a returning user.")
+	if speakerLine := a.currentSpeakerLine(senderID); speakerLine != "" {
+		promptParts = append(promptParts, "## Current Speaker\n"+speakerLine)
 	}
+	promptParts = append(promptParts, a.userMemoryPromptSections(senderID)...)
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 
@@ -489,4 +496,74 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		Thinking: finalThinking,
 		Metrics:  mapMetrics(lastResp),
 	}, nil
+}
+
+func (a *Agent) currentSpeakerLine(senderID string) string {
+	if senderID == "" {
+		return ""
+	}
+
+	if a.userMemory != nil {
+		intro, err := a.userMemory.ReadIntro(senderID)
+		if err != nil {
+			a.log.Warn("Failed to read user memory intro for %q: %v", senderID, err)
+		} else if strings.TrimSpace(intro) != "" {
+			return strings.TrimSpace(intro)
+		}
+	}
+
+	if a.accountLinks != nil {
+		line, err := a.accountLinks.SpeakerLine(senderID)
+		if err != nil {
+			a.log.Warn("Failed to resolve speaker line for %q: %v", senderID, err)
+			return ""
+		}
+		return strings.TrimSpace(line)
+	}
+
+	return ""
+}
+
+func (a *Agent) userMemoryPromptSections(senderID string) []string {
+	if senderID == "" || a.userMemory == nil {
+		return nil
+	}
+
+	sections := make([]string, 0, 2)
+	if identity := a.userMemoryPromptSection(senderID, "identity", "## User Identity Memory"); identity != "" {
+		sections = append(sections, identity)
+	}
+	if systemRules := a.userMemoryPromptSection(senderID, "system_rules", "## User System Rules"); systemRules != "" {
+		sections = append(sections, systemRules)
+	}
+	return sections
+}
+
+func (a *Agent) userMemoryPromptSection(senderID, category, heading string) string {
+	content, err := a.userMemory.ReadCategory(senderID, category)
+	if err != nil {
+		a.log.Warn("Failed to read user memory category %q for %q: %v", category, senderID, err)
+		return ""
+	}
+	body := stripMarkdownHeading(content)
+	if body == "" {
+		return ""
+	}
+	return heading + "\n" + body
+}
+
+func stripMarkdownHeading(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if strings.HasPrefix(lines[0], "## ") {
+		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+	return content
 }

@@ -5,6 +5,10 @@
 Manage persistent long-term memory about the current user. This memory survives
 restarts and is unique to each user across all conversations.
 
+Full recall may include a system-managed speaker identity line at the top of
+the file before any category headings. Do not try to rewrite that line with
+tool calls; it is maintained automatically from linked accounts.
+
 Use this to store, retrieve, or remove facts the user explicitly shares, OR to
 record synthesized insights based on sustained, consistent patterns in the user's
 prompts over time. Never make baseless assumptions; all synthesized insights
@@ -32,8 +36,10 @@ For synthesized insights, use a summary of the sustained context:
 
 - **remember** — Store or update a memory. Requires `statement` (the fact/insight as a
   concise, third-person declarative sentence) and `evidence` (a direct quote
-  or a summary of sustained discussion that proves the statement, including the
-  date or date range). Optionally provide `category` to organize the fact.
+  or a summary of sustained discussion that proves the statement). Optionally
+  provide `category` to organize the fact. If a specific date or date range is
+  important, include a trailing `Date: [...]` in `evidence`; otherwise the store
+  adds today's date automatically.
 - **recall** — Retrieve stored facts about the current user. Call this
   proactively at the start of a conversation to check what you already know.
   Optionally provide `category` to retrieve only that section. Omit category
@@ -55,5 +61,5 @@ For synthesized insights, use a summary of the sustained context:
 | --------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------- |
 | action    | string | yes      | Operation to perform: "remember", "recall", or "forget".                                                                |
 | statement | string | no       | The memory as a concise third-person declarative sentence. Required for remember and forget.                            |
-| evidence  | string | no       | A verbatim quote OR a summary of sustained engagement proving the statement, plus the date(s). Required for remember.   |
+| evidence  | string | no       | A verbatim quote OR a summary of sustained engagement proving the statement. Append `Date: [...]` only when a specific date or range matters; otherwise the store adds today's date. Required for remember. |
 | category  | string | no       | Category for the fact: identity, preferences, system_rules, or notes. Defaults to notes. Used with remember and recall. |

@@ -55,6 +55,7 @@ func main() {
 	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
 
 	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, log)
+	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
 	log.Debug("Account links: %s", config.DefaultAccountLinkPath)
 
@@ -85,6 +86,8 @@ func main() {
 		toolRegistry,
 		cfg.OllamaModel,
 		soulStore,
+		userMemStore,
+		accountLinkService,
 		budget,
 		cfg.MaxToolFailureRetries,
 		memoryStore,

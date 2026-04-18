@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -40,6 +41,8 @@ type Store struct {
 	basedir string
 	log     *config.Logger
 
+	speakerLineResolver func(string) (string, error)
+
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
 }
@@ -52,6 +55,11 @@ func NewStore(basedir string, log *config.Logger) *Store {
 		log:     log,
 		locks:   make(map[string]*sync.Mutex),
 	}
+}
+
+// SetSpeakerLineResolver configures how speaker intro lines are derived.
+func (s *Store) SetSpeakerLineResolver(resolver func(string) (string, error)) {
+	s.speakerLineResolver = resolver
 }
 
 // lockFor returns (and lazily creates) the per-user mutex for userID.
@@ -88,6 +96,27 @@ func (s *Store) Read(userID string) (string, error) {
 	return string(data), nil
 }
 
+// ReadIntro returns the top intro block from the user's memory file.
+func (s *Store) ReadIntro(userID string) (string, error) {
+	l := s.lockFor(userID)
+	l.Lock()
+	defer l.Unlock()
+
+	data, err := os.ReadFile(s.filePath(userID))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to read user memory for %q: %w", userID, err)
+	}
+
+	intro := strings.TrimSpace(parseMemory(string(data)).Intro)
+	if !strings.HasPrefix(intro, "You are speaking with ") {
+		return "", nil
+	}
+	return intro, nil
+}
+
 // Set stores a new fact or replaces an existing one whose statement matches,
 // within the given category section. If category is empty, defaultCategory is used.
 // Each entry is written as:
@@ -121,6 +150,10 @@ func (s *Store) Set(userID, statement, evidence, category string) error {
 	cat := normalizeCategory(category)
 	entry := formatEntry(statement, evidence)
 	updated := replaceOrAppendCategorized(existing, statement, entry, cat)
+	updated, err = s.withSpeakerIntro(userID, updated)
+	if err != nil {
+		return err
+	}
 
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
@@ -151,7 +184,7 @@ func (s *Store) ReadCategory(userID, category string) (string, error) {
 	if !ok || strings.TrimSpace(content) == "" {
 		return "", nil
 	}
-	return "## " + capitalize(cat) + "\n\n" + strings.TrimSpace(content) + "\n", nil
+	return "## " + displayCategoryName(cat) + "\n\n" + strings.TrimSpace(content) + "\n", nil
 }
 
 // Delete removes the entry whose statement matches the given text.
@@ -171,6 +204,10 @@ func (s *Store) Delete(userID, statement string) error {
 	}
 
 	updated := deleteCategorizedEntry(migrateIfNeeded(string(data)), statement)
+	updated, err = s.withSpeakerIntro(userID, updated)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
 	}
@@ -208,6 +245,11 @@ func (s *Store) WriteFull(userID, content string) error {
 	path := s.filePath(userID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("failed to create memory directory: %w", err)
+	}
+	var err error
+	content, err = s.withSpeakerIntro(userID, content)
+	if err != nil {
+		return err
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
@@ -249,6 +291,12 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	}
 
 	merged := mergeCategorizedContent(string(winnerRaw), string(loserRaw))
+	if strings.TrimSpace(merged) != "" {
+		merged, err = s.withSpeakerIntro(winnerUserID, merged)
+		if err != nil {
+			return err
+		}
+	}
 	if strings.TrimSpace(merged) != "" && strings.TrimSpace(merged) != "# User Memory" {
 		if err := os.MkdirAll(filepath.Dir(winnerPath), 0o755); err != nil {
 			return fmt.Errorf("failed to create memory directory: %w", err)
@@ -266,10 +314,27 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	return nil
 }
 
+func (s *Store) withSpeakerIntro(userID, content string) (string, error) {
+	parsed := parseMemory(content)
+	if s.speakerLineResolver == nil {
+		return serializeMemory(parsed.Intro, parsed.Sections), nil
+	}
+
+	intro, err := s.speakerLineResolver(userID)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve speaker line for %q: %w", userID, err)
+	}
+	if strings.TrimSpace(intro) == "" {
+		intro = parsed.Intro
+	}
+	return serializeMemory(intro, parsed.Sections), nil
+}
+
 // normalizeCategory maps an input category string to a valid lowercase category name.
 // Falls back to defaultCategory if the input does not match any known category.
 func normalizeCategory(cat string) string {
 	cat = strings.TrimSpace(strings.ToLower(cat))
+	cat = strings.ReplaceAll(cat, " ", "_")
 	for _, valid := range ValidCategories {
 		if cat == valid {
 			return cat
@@ -278,20 +343,40 @@ func normalizeCategory(cat string) string {
 	return defaultCategory
 }
 
-// capitalize returns s with its first letter uppercased.
-func capitalize(s string) string {
-	if s == "" {
-		return s
+// displayCategoryName returns the human-readable Markdown heading for a category.
+func displayCategoryName(cat string) string {
+	parts := strings.Split(normalizeCategory(cat), "_")
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		r := []rune(part)
+		r[0] = []rune(strings.ToUpper(string(r[0])))[0]
+		parts[i] = string(r)
 	}
-	r := []rune(s)
-	r[0] = []rune(strings.ToUpper(string(r[0])))[0]
-	return string(r)
+	return strings.Join(parts, " ")
 }
 
 // formatEntry builds the two-line Markdown block for a single fact.
 func formatEntry(statement, evidence string) string {
+	evidence = sanitizeEvidence(evidence)
 	date := time.Now().Format("2006-01-02")
+	if hasExplicitEvidenceDate(evidence) {
+		return fmt.Sprintf("%s\n\n- Evidence: %s.\n", statement, evidence)
+	}
 	return fmt.Sprintf("%s\n\n- Evidence: %s. Date: [%s].\n", statement, evidence, date)
+}
+
+var explicitEvidenceDateRE = regexp.MustCompile(`(?i)\bDate:\s*\[[^\]]+\]$`)
+
+func sanitizeEvidence(evidence string) string {
+	evidence = strings.TrimSpace(evidence)
+	evidence = strings.TrimRight(evidence, ". ")
+	return evidence
+}
+
+func hasExplicitEvidenceDate(evidence string) bool {
+	return explicitEvidenceDateRE.MatchString(evidence)
 }
 
 // parseEntries splits a raw section body (no header lines) into individual entry blocks.
@@ -318,59 +403,98 @@ func statementOf(entry string) string {
 	return strings.TrimSpace(lines[0])
 }
 
-// parseSections parses a categorized user memory file into a map of
-// category -> section body (the text under each ## heading, excluding the heading itself).
-func parseSections(content string) map[string]string {
-	sections := make(map[string]string)
+type parsedMemory struct {
+	Intro    string
+	Sections map[string]string
+}
 
-	// Strip the top-level # User Memory header
+func parseMemory(content string) parsedMemory {
+	parsed := parsedMemory{Sections: make(map[string]string)}
+	body := memoryBody(content)
+
+	var introLines []string
+	var currentCat string
+	var buf strings.Builder
+
+	flush := func() {
+		if currentCat != "" {
+			parsed.Sections[currentCat] = buf.String()
+			buf.Reset()
+		}
+	}
+
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			if currentCat == "" {
+				parsed.Intro = strings.TrimSpace(strings.Join(introLines, "\n"))
+			} else {
+				flush()
+			}
+			currentCat = normalizeCategory(strings.TrimPrefix(line, "## "))
+			continue
+		}
+
+		if currentCat == "" {
+			introLines = append(introLines, line)
+			continue
+		}
+		buf.WriteString(line + "\n")
+	}
+
+	if currentCat == "" {
+		parsed.Intro = strings.TrimSpace(strings.Join(introLines, "\n"))
+	} else {
+		flush()
+	}
+
+	return parsed
+}
+
+func memoryBody(content string) string {
 	body := content
 	if strings.HasPrefix(content, "# User Memory") {
 		idx := strings.Index(content, "\n")
 		if idx >= 0 {
 			body = content[idx+1:]
-		}
-	}
-
-	// Split into lines and group under ## headings
-	var currentCat string
-	var buf strings.Builder
-	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			if currentCat != "" {
-				sections[currentCat] = buf.String()
-				buf.Reset()
-			}
-			currentCat = normalizeCategory(strings.TrimPrefix(line, "## "))
 		} else {
-			if currentCat != "" {
-				buf.WriteString(line + "\n")
-			}
+			body = ""
 		}
 	}
-	if currentCat != "" {
-		sections[currentCat] = buf.String()
-	}
-
-	return sections
+	return strings.TrimLeft(body, "\n")
 }
 
-// serializeSections writes the category map back to a full file string.
-func serializeSections(sections map[string]string) string {
+// parseSections parses a categorized user memory file into a map of
+// category -> section body (the text under each ## heading, excluding the heading itself).
+func parseSections(content string) map[string]string {
+	return parseMemory(content).Sections
+}
+
+// serializeMemory writes the intro block and category map back to a full file string.
+func serializeMemory(intro string, sections map[string]string) string {
 	var sb strings.Builder
 	sb.WriteString("# User Memory\n")
+	if strings.TrimSpace(intro) != "" {
+		sb.WriteString("\n")
+		sb.WriteString(strings.TrimSpace(intro))
+		sb.WriteString("\n")
+	}
 	for _, cat := range ValidCategories {
 		body, ok := sections[cat]
 		if !ok || strings.TrimSpace(body) == "" {
 			continue
 		}
 		sb.WriteString("\n## ")
-		sb.WriteString(capitalize(cat))
+		sb.WriteString(displayCategoryName(cat))
 		sb.WriteString("\n\n")
 		sb.WriteString(strings.TrimSpace(body))
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// serializeSections writes only the category map back to a full file string.
+func serializeSections(sections map[string]string) string {
+	return serializeMemory("", sections)
 }
 
 // migrateIfNeeded detects files in the old flat format (no ## category headers)
@@ -380,13 +504,12 @@ func migrateIfNeeded(content string) string {
 	if content == "" {
 		return content
 	}
-	// If the file already contains a ## category heading, it is in the new format.
-	if strings.Contains(content, "\n## ") {
+	if !needsMigration(content) {
 		return content
 	}
 
 	// Old format: parse flat entries and move them all to "notes".
-	entries := parseEntries(strings.TrimPrefix(content, "# User Memory\n\n"))
+	entries := parseEntries(memoryBody(content))
 	if len(entries) == 0 {
 		return "# User Memory\n"
 	}
@@ -402,7 +525,8 @@ func migrateIfNeeded(content string) string {
 // file, it is replaced in place (regardless of which section it lives in).
 // Otherwise the entry is appended to the given category section.
 func replaceOrAppendCategorized(content, statement, newEntry, cat string) string {
-	sections := parseSections(content)
+	parsed := parseMemory(content)
+	sections := parsed.Sections
 
 	// Search all sections for an existing matching statement.
 	for secCat, body := range sections {
@@ -411,7 +535,7 @@ func replaceOrAppendCategorized(content, statement, newEntry, cat string) string
 			if strings.EqualFold(statementOf(e), strings.TrimSpace(statement)) {
 				entries[i] = strings.TrimSpace(newEntry)
 				sections[secCat] = strings.Join(entries, "\n\n") + "\n"
-				return serializeSections(sections)
+				return serializeMemory(parsed.Intro, sections)
 			}
 		}
 	}
@@ -423,13 +547,14 @@ func replaceOrAppendCategorized(content, statement, newEntry, cat string) string
 	} else {
 		sections[cat] = existing + "\n\n" + strings.TrimSpace(newEntry) + "\n"
 	}
-	return serializeSections(sections)
+	return serializeMemory(parsed.Intro, sections)
 }
 
 // deleteCategorizedEntry removes the entry with a matching statement from any
 // category section. Returns the updated file content.
 func deleteCategorizedEntry(content, statement string) string {
-	sections := parseSections(content)
+	parsed := parseMemory(content)
+	sections := parsed.Sections
 	for cat, body := range sections {
 		entries := parseEntries(body)
 		kept := entries[:0]
@@ -444,12 +569,16 @@ func deleteCategorizedEntry(content, statement string) string {
 			sections[cat] = strings.Join(kept, "\n\n") + "\n"
 		}
 	}
-	return serializeSections(sections)
+	return serializeMemory(parsed.Intro, sections)
 }
 
 func mergeCategorizedContent(primary, secondary string) string {
-	primarySections := parseSections(migrateIfNeeded(primary))
-	secondarySections := parseSections(migrateIfNeeded(secondary))
+	primaryContent := migrateIfNeeded(primary)
+	secondaryContent := migrateIfNeeded(secondary)
+	primaryParsed := parseMemory(primaryContent)
+	secondaryParsed := parseMemory(secondaryContent)
+	primarySections := primaryParsed.Sections
+	secondarySections := secondaryParsed.Sections
 	mergedSections := make(map[string]string, len(ValidCategories))
 
 	for _, cat := range ValidCategories {
@@ -485,5 +614,9 @@ func mergeCategorizedContent(primary, secondary string) string {
 	if len(mergedSections) == 0 {
 		return ""
 	}
-	return serializeSections(mergedSections)
+	intro := primaryParsed.Intro
+	if strings.TrimSpace(intro) == "" {
+		intro = secondaryParsed.Intro
+	}
+	return serializeMemory(intro, mergedSections)
 }
