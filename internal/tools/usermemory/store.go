@@ -14,7 +14,7 @@ import (
 
 // ValidCategories lists the supported memory categories in display order.
 // The model can assign any of these when storing a fact.
-var ValidCategories = []string{"identity", "preferences", "context", "notes"}
+var ValidCategories = []string{"identity", "system_rules", "preferences", "notes"}
 
 // defaultCategory is used when the model omits the category argument.
 const defaultCategory = "notes"

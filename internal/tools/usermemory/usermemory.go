@@ -166,8 +166,8 @@ func migrateWithLLM(ctx context.Context, chatClient ollama.Chatter, model, raw s
 
 The four valid categories are:
 - identity   — name, pronouns, age, location, occupation
+- system_rules — explicit, non-negotiable instructions ("always do X", "never do Y") and corrections to AI behavior
 - preferences — likes, dislikes, communication style, settings
-- context    — ongoing projects, current goals, situation
 - notes      — everything else
 
 Below is the existing memory file content. Reorganize every fact into the correct category using this exact Markdown format. Preserve each statement line and its "- Evidence:" line exactly as written — do not paraphrase, add, or remove any facts.
