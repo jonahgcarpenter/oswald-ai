@@ -40,10 +40,11 @@ For synthesized insights, use a summary of the sustained context:
   provide `category` to organize the fact. If a specific date or date range is
   important, include a trailing `Date: [...]` in `evidence`; otherwise the store
   adds today's date automatically.
-- **recall** — Retrieve stored facts about the current user. Call this
-  proactively at the start of a conversation to check what you already know.
-  Optionally provide `category` to retrieve only that section. Omit category
-  to retrieve all stored facts.
+- **recall** — Retrieve stored facts about the current user. `identity` and `system_rules`
+  are already injected into context automatically, so do not recall those categories
+  unless you need the exact stored text or evidence for verification, update, or deletion.
+  Use recall mainly for `preferences`, `notes`, or full-memory lookups when broader
+  user context is needed.
 - **forget** — Remove a specific fact by passing its exact `statement` text.
   Pass `statement = "all"` to wipe the user's entire memory profile (only do
   this if explicitly asked).
@@ -57,9 +58,9 @@ For synthesized insights, use a summary of the sustained context:
 
 ## Parameters
 
-| Name      | Type   | Required | Description                                                                                                             |
-| --------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| action    | string | yes      | Operation to perform: "remember", "recall", or "forget".                                                                |
-| statement | string | no       | The memory as a concise third-person declarative sentence. Required for remember and forget.                            |
+| Name      | Type   | Required | Description                                                                                                                                                                                                 |
+| --------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| action    | string | yes      | Operation to perform: "remember", "recall", or "forget".                                                                                                                                                    |
+| statement | string | no       | The memory as a concise third-person declarative sentence. Required for remember and forget.                                                                                                                |
 | evidence  | string | no       | A verbatim quote OR a summary of sustained engagement proving the statement. Append `Date: [...]` only when a specific date or range matters; otherwise the store adds today's date. Required for remember. |
-| category  | string | no       | Category for the fact: identity, preferences, system_rules, or notes. Defaults to notes. Used with remember and recall. |
+| category  | string | no       | Category for the fact: identity, preferences, system_rules, or notes. Defaults to notes. Used with remember and recall.                                                                                     |
