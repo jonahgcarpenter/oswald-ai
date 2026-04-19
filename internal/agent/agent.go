@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 )
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
@@ -66,8 +67,9 @@ type Agent struct {
 	budget                memory.ContextBudget
 	model                 string
 	soul                  *soulmemory.Store
+	userMemory            *usermemory.Store
 	summarizer            *OllamaSummarizer
-	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
+	agentTracePath        string // directory for per-request agent trace dumps; empty disables
 	maxToolFailureRetries int
 	log                   *config.Logger
 }
@@ -79,10 +81,11 @@ func NewAgent(
 	registry *tools.Registry,
 	model string,
 	soul *soulmemory.Store,
+	userMemory *usermemory.Store,
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
 	memoryStore *memory.Store,
-	promptDebugPath string,
+	agentTracePath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
@@ -92,8 +95,9 @@ func NewAgent(
 		budget:                budget,
 		model:                 model,
 		soul:                  soul,
+		userMemory:            userMemory,
 		summarizer:            NewOllamaSummarizer(chatClient, model, log),
-		promptDebugPath:       promptDebugPath,
+		agentTracePath:        agentTracePath,
 		maxToolFailureRetries: maxToolFailureRetries,
 		log:                   log,
 	}
@@ -206,9 +210,9 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // identify the user without needing the session key. An empty senderID disables
 // user-scoped tool behaviour.
 //
-// displayName is the human-readable name for the sender (e.g. a Discord username).
-// If non-empty it is injected into the system prompt so the model knows who it is
-// speaking with without requiring a tool call.
+// displayName is the human-readable name supplied by the active gateway.
+// The agent prefers the persistent-memory intro and canonical account links for
+// speaker identity, but keeps this argument for request logging.
 //
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
@@ -235,13 +239,12 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// the persistent_memory tool when needed.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
-	promptParts = append(promptParts, "Current Date and Time: "+time.Now().Format(time.RFC1123))
 
-	if displayName != "" {
-		promptParts = append(promptParts, fmt.Sprintf("## Current Speaker\nYou are speaking with %s.", displayName))
-	} else if senderID != "" {
-		promptParts = append(promptParts, "## Current Speaker\nYou are speaking with a returning user.")
+	if speakerLine := a.currentSpeakerLine(senderID); speakerLine != "" {
+		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
 	}
+	promptParts = append(promptParts, a.userMemoryPromptSections(senderID)...)
+	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 
@@ -269,27 +272,6 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	messages = append(messages, trimmedHistory...)
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
-	// Write a full prompt debug dump when PROMPT_DEBUG_PATH is set.
-	if a.promptDebugPath != "" {
-		if dumpErr := debug.DumpPrompt(
-			a.promptDebugPath,
-			sessionKey,
-			a.model,
-			messages,
-			a.registry.OllamaTools(),
-			a.budget.ContextWindow,
-			a.budget.PromptBudget(),
-			prune.EstimatedBefore,
-			prune.EstimatedAfter,
-			prune.RemovedPairs,
-			userImages,
-		); dumpErr != nil {
-			a.log.Warn("Prompt debug: failed to write dump: %v", dumpErr)
-		} else {
-			a.log.Debug("Prompt debug: wrote dump to %s", a.promptDebugPath)
-		}
-	}
-
 	if len(trimmedHistory) > 0 {
 		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(trimmedHistory), sessionKey)
 	}
@@ -313,6 +295,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// appear in the final response turn (when no tool calls are made).
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
+	toolExecutions := make([]debug.ToolExecutionTrace, 0)
 
 	// consecutiveToolFailures tracks back-to-back tool execution failures for
 	// this request. A successful tool call resets the counter.
@@ -387,6 +370,11 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		// multiple to be safe.
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
+			traceEntry := debug.ToolExecutionTrace{
+				Iteration: iteration,
+				Name:      toolName,
+				Arguments: tc.Function.Arguments,
+			}
 
 			// Emit a status chunk so the gateway knows a tool is executing.
 			if streamCallback != nil {
@@ -401,6 +389,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				consecutiveToolFailures++
 				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
+				traceEntry.Error = execErr.Error()
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
@@ -408,6 +397,8 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
+			traceEntry.Result = toolContent
+			toolExecutions = append(toolExecutions, traceEntry)
 
 			messages = append(messages, ollama.ChatMessage{
 				Role:     "tool",
@@ -461,17 +452,39 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	if finalThinking == "" && lastResp != nil {
 		finalThinking = lastResp.Message.Thinking
 	}
+	if lastResp != nil {
+		messages = append(messages, lastResp.Message)
+	}
+
+	if a.agentTracePath != "" {
+		if dumpErr := debug.DumpAgentTrace(debug.AgentTrace{
+			Dir:                        a.agentTracePath,
+			SessionKey:                 sessionKey,
+			Model:                      a.model,
+			Messages:                   messages,
+			Tools:                      a.registry.OllamaTools(),
+			ContextWindow:              a.budget.ContextWindow,
+			PromptBudget:               a.budget.PromptBudget(),
+			EstimatedBefore:            prune.EstimatedBefore,
+			EstimatedAfter:             prune.EstimatedAfter,
+			RemovedPairs:               prune.RemovedPairs,
+			RequestImages:              userImages,
+			ToolExecutions:             toolExecutions,
+			FinalResponse:              finalContent,
+			FinalThinking:              finalThinking,
+			FinalModelResponse:         lastResp,
+			ToolFailureBudgetExhausted: toolFailureBudgetExhausted,
+		}); dumpErr != nil {
+			a.log.Warn("Agent trace: failed to write dump: %v", dumpErr)
+		} else {
+			a.log.Debug("Agent trace: wrote dump to %s", a.agentTracePath)
+		}
+	}
 
 	// Persist the user prompt and the assistant's final response to memory.
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
-	// A brief tool-use annotation is appended to the assistant message so future
-	// turns show what tools were called without ballooning history size.
 	if finalContent != "" {
-		storedContent := finalContent
-		if len(toolAnnotations) > 0 {
-			storedContent += "\n\n---\n_Tools used: " + strings.Join(toolAnnotations, ", ") + "_"
-		}
 		userMemoryContent := userPrompt
 		if len(userImages) > 0 {
 			userMemoryContent = strings.TrimSpace(userMemoryContent + fmt.Sprintf("\n\n[Attached %d image(s)]", len(userImages)))
@@ -479,7 +492,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		a.memory.AppendTurn(
 			sessionKey,
 			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
-			ollama.ChatMessage{Role: "assistant", Content: storedContent},
+			ollama.ChatMessage{Role: "assistant", Content: finalContent},
 		)
 	}
 
@@ -489,4 +502,65 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		Thinking: finalThinking,
 		Metrics:  mapMetrics(lastResp),
 	}, nil
+}
+
+func (a *Agent) currentSpeakerLine(senderID string) string {
+	if senderID == "" {
+		return ""
+	}
+
+	if a.userMemory != nil {
+		intro, err := a.userMemory.ReadIntro(senderID)
+		if err != nil {
+			a.log.Warn("Failed to read user memory intro for %q: %v", senderID, err)
+		} else if strings.TrimSpace(intro) != "" {
+			return strings.TrimSpace(intro)
+		}
+	}
+
+	return ""
+}
+
+func (a *Agent) userMemoryPromptSections(senderID string) []string {
+	if senderID == "" || a.userMemory == nil {
+		return nil
+	}
+
+	sections := make([]string, 0, 2)
+	if identity := a.userMemoryPromptSection(senderID, "identity", "## User Identity Memory"); identity != "" {
+		sections = append(sections, identity)
+	}
+	if systemRules := a.userMemoryPromptSection(senderID, "system_rules", "## User System Rules"); systemRules != "" {
+		sections = append(sections, systemRules)
+	}
+	return sections
+}
+
+func (a *Agent) userMemoryPromptSection(senderID, category, heading string) string {
+	content, err := a.userMemory.ReadCategory(senderID, category)
+	if err != nil {
+		a.log.Warn("Failed to read user memory category %q for %q: %v", category, senderID, err)
+		return ""
+	}
+	body := stripMarkdownHeading(content)
+	if body == "" {
+		return ""
+	}
+	return heading + "\n" + body
+}
+
+func stripMarkdownHeading(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if strings.HasPrefix(lines[0], "## ") {
+		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+	return content
 }

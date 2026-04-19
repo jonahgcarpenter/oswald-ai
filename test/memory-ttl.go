@@ -15,20 +15,20 @@ import (
 )
 
 const (
-	ttlDefaultPort            = "8080"
-	ttlDefaultPromptDebugPath = "./tmp/prompt-debug"
-	ttlDefaultUserID          = "memory-test-ttl"
-	ttlTestPrefix             = "MEMTEST"
-	ttlDumpPollInterval       = 200 * time.Millisecond
-	ttlDumpPollAttempts       = 50
-	ttlSleepPad               = 1500 * time.Millisecond
+	ttlDefaultPort           = "8080"
+	ttlDefaultAgentTracePath = "./tmp/agent-trace"
+	ttlDefaultUserID         = "memory-test-ttl"
+	ttlTestPrefix            = "MEMTEST"
+	ttlDumpPollInterval      = 200 * time.Millisecond
+	ttlDumpPollAttempts      = 50
+	ttlSleepPad              = 1500 * time.Millisecond
 )
 
 type ttlConfig struct {
-	port            string
-	promptDebugPath string
-	userID          string
-	expectedMaxAge  time.Duration
+	port           string
+	agentTracePath string
+	userID         string
+	expectedMaxAge time.Duration
 }
 
 type ttlAgentResponse struct {
@@ -56,10 +56,10 @@ func main() {
 	fmt.Println("Memory TTL integration test")
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Printf("WebSocket endpoint              : ws://localhost:%s/ws\n", cfg.port)
-	fmt.Printf("Prompt debug directory          : %s\n", cfg.promptDebugPath)
+	fmt.Printf("Agent trace directory           : %s\n", cfg.agentTracePath)
 	fmt.Printf("Expected server MEMORY_MAX_AGE  : %s\n", cfg.expectedMaxAge)
-	fmt.Printf("Expected server PROMPT_DEBUG_PATH: %s\n", cfg.promptDebugPath)
-	fmt.Println("This test expects a low non-zero TTL and validates expiration from Markdown prompt dumps.")
+	fmt.Printf("Expected server AGENT_TRACE_PATH: %s\n", cfg.agentTracePath)
+	fmt.Println("This test expects a low non-zero TTL and validates expiration from Markdown agent traces.")
 	fmt.Println("--------------------------------------------------------------------------------")
 
 	u := url.URL{Scheme: "ws", Host: "localhost:" + cfg.port, Path: "/ws"}
@@ -88,10 +88,10 @@ func main() {
 
 func ttlLoadConfig() ttlConfig {
 	return ttlConfig{
-		port:            ttlGetEnv("MEMORY_TEST_PORT", ttlDefaultPort),
-		promptDebugPath: ttlGetEnv("MEMORY_TEST_PROMPT_DEBUG_PATH", ttlDefaultPromptDebugPath),
-		userID:          ttlGetEnv("MEMORY_TEST_USER_ID", ttlDefaultUserID),
-		expectedMaxAge:  ttlGetEnvDuration("MEMORY_TEST_EXPECTED_MAX_AGE", 5*time.Second),
+		port:           ttlGetEnv("MEMORY_TEST_PORT", ttlDefaultPort),
+		agentTracePath: ttlGetEnv("MEMORY_TEST_AGENT_TRACE_PATH", ttlDefaultAgentTracePath),
+		userID:         ttlGetEnv("MEMORY_TEST_USER_ID", ttlDefaultUserID),
+		expectedMaxAge: ttlGetEnvDuration("MEMORY_TEST_EXPECTED_MAX_AGE", 5*time.Second),
 	}
 }
 
@@ -100,10 +100,10 @@ func ttlBuildExactAckPrompt(label string) string {
 }
 
 func ttlSendAndCapture(conn *websocket.Conn, cfg ttlConfig, label string, prompt string) ttlPromptDump {
-	knownFiles := ttlListMatchingPromptDumps(cfg.promptDebugPath, cfg.userID)
+	knownFiles := ttlListMatchingAgentTraces(cfg.agentTracePath, cfg.userID)
 	resp := ttlSendPrompt(conn, cfg.userID, prompt)
 	fmt.Printf("sent %-24s response=%q\n", label, resp.Response)
-	return ttlMustReadLatestPromptDump(cfg.promptDebugPath, cfg.userID, knownFiles)
+	return ttlMustReadLatestAgentTrace(cfg.agentTracePath, cfg.userID, knownFiles)
 }
 
 func ttlSendPrompt(conn *websocket.Conn, userID string, prompt string) ttlAgentResponse {
@@ -134,19 +134,19 @@ func ttlSendPrompt(conn *websocket.Conn, userID string, prompt string) ttlAgentR
 	}
 }
 
-func ttlMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[string]struct{}) ttlPromptDump {
-	pattern := filepath.Join(dir, "prompt_"+ttlSanitizeFilePart(sessionKey, 16)+"_*.md")
+func ttlMustReadLatestAgentTrace(dir string, sessionKey string, knownFiles map[string]struct{}) ttlPromptDump {
+	pattern := filepath.Join(dir, "trace_"+ttlSanitizeFilePart(sessionKey, 16)+"_*.md")
 	var lastErr error
 
 	for attempt := 0; attempt < ttlDumpPollAttempts; attempt++ {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+			log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 		}
 
 		allFiles, err := filepath.Glob(filepath.Join(dir, "*.md"))
 		if err != nil {
-			log.Fatalf("Invalid prompt debug directory glob for %q: %v", dir, err)
+			log.Fatalf("Invalid agent trace directory glob for %q: %v", dir, err)
 		}
 
 		latestPath := ""
@@ -168,9 +168,9 @@ func ttlMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[s
 
 		if latestPath == "" {
 			if len(allFiles) == 0 {
-				lastErr = fmt.Errorf("no markdown prompt dumps found in %s; ensure the server is running with PROMPT_DEBUG_PATH=%s and restart it", dir, dir)
+				lastErr = fmt.Errorf("no markdown agent traces found in %s; ensure the server is running with AGENT_TRACE_PATH=%s and restart it", dir, dir)
 			} else {
-				lastErr = fmt.Errorf("no new prompt dump found for session %q (pattern %s)", sessionKey, pattern)
+				lastErr = fmt.Errorf("no new agent trace found for session %q (pattern %s)", sessionKey, pattern)
 			}
 			time.Sleep(ttlDumpPollInterval)
 			continue
@@ -190,19 +190,19 @@ func ttlMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[s
 			continue
 		}
 
-		fmt.Printf("reading prompt dump            : %s\n", dump.Path)
+		fmt.Printf("reading agent trace           : %s\n", dump.Path)
 		return dump
 	}
 
-	log.Fatalf("Failed to read prompt dump for session %q from %s: %v", sessionKey, dir, lastErr)
+	log.Fatalf("Failed to read agent trace for session %q from %s: %v", sessionKey, dir, lastErr)
 	return ttlPromptDump{}
 }
 
-func ttlListMatchingPromptDumps(dir string, sessionKey string) map[string]struct{} {
-	pattern := filepath.Join(dir, "prompt_"+ttlSanitizeFilePart(sessionKey, 16)+"_*.md")
+func ttlListMatchingAgentTraces(dir string, sessionKey string) map[string]struct{} {
+	pattern := filepath.Join(dir, "trace_"+ttlSanitizeFilePart(sessionKey, 16)+"_*.md")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+		log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 	}
 	seen := make(map[string]struct{}, len(matches))
 	for _, path := range matches {
@@ -213,9 +213,9 @@ func ttlListMatchingPromptDumps(dir string, sessionKey string) map[string]struct
 
 func ttlParsePromptDump(path string, raw string) (ttlPromptDump, error) {
 	dump := ttlPromptDump{Path: path}
-	sectionStart := strings.Index(raw, "## Actual Request Sent to Ollama")
+	sectionStart := strings.Index(raw, "## Full Message Transcript")
 	if sectionStart < 0 {
-		return dump, fmt.Errorf("prompt dump %s missing request section", path)
+		return dump, fmt.Errorf("agent trace %s missing transcript section", path)
 	}
 
 	lines := strings.Split(raw[sectionStart:], "\n")
@@ -227,7 +227,7 @@ func ttlParsePromptDump(path string, raw string) (ttlPromptDump, error) {
 
 		role, ok := ttlFirstBacktickValue(line)
 		if !ok {
-			return dump, fmt.Errorf("prompt dump %s has malformed message header %q", path, line)
+			return dump, fmt.Errorf("agent trace %s has malformed message header %q", path, line)
 		}
 
 		msg := ttlDumpMessage{Role: role}
@@ -256,7 +256,7 @@ func ttlParsePromptDump(path string, raw string) (ttlPromptDump, error) {
 	}
 
 	if len(dump.Messages) == 0 {
-		return dump, fmt.Errorf("prompt dump %s contained no parsed messages", path)
+		return dump, fmt.Errorf("agent trace %s contained no parsed messages", path)
 	}
 	return dump, nil
 }

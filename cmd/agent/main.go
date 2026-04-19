@@ -55,6 +55,7 @@ func main() {
 	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
 
 	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, log)
+	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
 	log.Debug("Account links: %s", config.DefaultAccountLinkPath)
 
@@ -76,8 +77,8 @@ func main() {
 	}, log)
 	log.Debug("Memory: retaining in-process session history until restart (max_turns=%d max_age=%s context_window=%d prompt_budget=%d)", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
 
-	if cfg.PromptDebugPath != "" {
-		log.Info("Prompt debug dumps enabled at %s", cfg.PromptDebugPath)
+	if cfg.AgentTracePath != "" {
+		log.Info("Agent trace dumps enabled at %s", cfg.AgentTracePath)
 	}
 
 	agentEngine := agent.NewAgent(
@@ -85,10 +86,11 @@ func main() {
 		toolRegistry,
 		cfg.OllamaModel,
 		soulStore,
+		userMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
 		memoryStore,
-		cfg.PromptDebugPath,
+		cfg.AgentTracePath,
 		log,
 	)
 

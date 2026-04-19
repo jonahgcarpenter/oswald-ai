@@ -16,7 +16,7 @@ import (
 
 const (
 	compDefaultPort                = "8080"
-	compDefaultPromptDebugPath     = "./tmp/prompt-debug"
+	compDefaultAgentTracePath      = "./tmp/agent-trace"
 	compDefaultUserPrefix          = "memory-test-compaction"
 	compTestPrefix                 = "MEMTEST"
 	compContextBlobRepeatDefault   = 20000
@@ -27,7 +27,7 @@ const (
 
 type compConfig struct {
 	port              string
-	promptDebugPath   string
+	agentTracePath    string
 	userPrefix        string
 	expectedMaxTurns  int
 	expectedMaxAge    time.Duration
@@ -64,10 +64,10 @@ func main() {
 	fmt.Println("Memory compaction integration test")
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Printf("WebSocket endpoint              : ws://localhost:%s/ws\n", cfg.port)
-	fmt.Printf("Prompt debug directory          : %s\n", cfg.promptDebugPath)
+	fmt.Printf("Agent trace directory           : %s\n", cfg.agentTracePath)
 	fmt.Printf("Expected server MEMORY_MAX_TURNS: %d\n", cfg.expectedMaxTurns)
 	fmt.Printf("Expected server MEMORY_MAX_AGE  : %s\n", cfg.expectedMaxAge)
-	fmt.Printf("Expected server PROMPT_DEBUG_PATH: %s\n", cfg.promptDebugPath)
+	fmt.Printf("Expected server AGENT_TRACE_PATH: %s\n", cfg.agentTracePath)
 	fmt.Printf("Initial large-prompt repeat    : %d\n", cfg.contextBlobRepeat)
 	fmt.Println("This test expects MEMORY_MAX_AGE=0 so only compaction and max-turn pruning affect history.")
 	fmt.Println("--------------------------------------------------------------------------------")
@@ -105,7 +105,7 @@ func main() {
 func compLoadConfig() compConfig {
 	return compConfig{
 		port:              compGetEnv("MEMORY_TEST_PORT", compDefaultPort),
-		promptDebugPath:   compGetEnv("MEMORY_TEST_PROMPT_DEBUG_PATH", compDefaultPromptDebugPath),
+		agentTracePath:    compGetEnv("MEMORY_TEST_AGENT_TRACE_PATH", compDefaultAgentTracePath),
 		userPrefix:        compGetEnv("MEMORY_TEST_USER_PREFIX", compDefaultUserPrefix),
 		expectedMaxTurns:  compGetEnvInt("MEMORY_TEST_EXPECTED_MAX_TURNS", 3),
 		expectedMaxAge:    compGetEnvDuration("MEMORY_TEST_EXPECTED_MAX_AGE", 0),
@@ -142,10 +142,10 @@ func compBuildLargeContextPrompt(label string, repeat int) string {
 }
 
 func compSendAndCapture(conn *websocket.Conn, cfg compConfig, userID string, label string, prompt string) compPromptDump {
-	knownFiles := compListMatchingPromptDumps(cfg.promptDebugPath, userID)
+	knownFiles := compListMatchingAgentTraces(cfg.agentTracePath, userID)
 	resp := compSendPrompt(conn, userID, prompt)
 	fmt.Printf("sent %-24s response=%q\n", label, resp.Response)
-	return compMustReadLatestPromptDump(cfg.promptDebugPath, userID, knownFiles)
+	return compMustReadLatestAgentTrace(cfg.agentTracePath, userID, knownFiles)
 }
 
 func compSendPrompt(conn *websocket.Conn, userID string, prompt string) compAgentResponse {
@@ -176,19 +176,19 @@ func compSendPrompt(conn *websocket.Conn, userID string, prompt string) compAgen
 	}
 }
 
-func compMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[string]struct{}) compPromptDump {
-	pattern := filepath.Join(dir, "prompt_"+compSanitizeFilePart(sessionKey, 16)+"_*.md")
+func compMustReadLatestAgentTrace(dir string, sessionKey string, knownFiles map[string]struct{}) compPromptDump {
+	pattern := filepath.Join(dir, "trace_"+compSanitizeFilePart(sessionKey, 16)+"_*.md")
 	var lastErr error
 
 	for attempt := 0; attempt < compDumpPollAttempts; attempt++ {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+			log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 		}
 
 		allFiles, err := filepath.Glob(filepath.Join(dir, "*.md"))
 		if err != nil {
-			log.Fatalf("Invalid prompt debug directory glob for %q: %v", dir, err)
+			log.Fatalf("Invalid agent trace directory glob for %q: %v", dir, err)
 		}
 
 		latestPath := ""
@@ -210,9 +210,9 @@ func compMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[
 
 		if latestPath == "" {
 			if len(allFiles) == 0 {
-				lastErr = fmt.Errorf("no markdown prompt dumps found in %s; ensure the server is running with PROMPT_DEBUG_PATH=%s and restart it", dir, dir)
+				lastErr = fmt.Errorf("no markdown agent traces found in %s; ensure the server is running with AGENT_TRACE_PATH=%s and restart it", dir, dir)
 			} else {
-				lastErr = fmt.Errorf("no new prompt dump found for session %q (pattern %s)", sessionKey, pattern)
+				lastErr = fmt.Errorf("no new agent trace found for session %q (pattern %s)", sessionKey, pattern)
 			}
 			time.Sleep(compDumpPollInterval)
 			continue
@@ -232,19 +232,19 @@ func compMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[
 			continue
 		}
 
-		fmt.Printf("reading prompt dump            : %s\n", dump.Path)
+		fmt.Printf("reading agent trace           : %s\n", dump.Path)
 		return dump
 	}
 
-	log.Fatalf("Failed to read prompt dump for session %q from %s: %v", sessionKey, dir, lastErr)
+	log.Fatalf("Failed to read agent trace for session %q from %s: %v", sessionKey, dir, lastErr)
 	return compPromptDump{}
 }
 
-func compListMatchingPromptDumps(dir string, sessionKey string) map[string]struct{} {
-	pattern := filepath.Join(dir, "prompt_"+compSanitizeFilePart(sessionKey, 16)+"_*.md")
+func compListMatchingAgentTraces(dir string, sessionKey string) map[string]struct{} {
+	pattern := filepath.Join(dir, "trace_"+compSanitizeFilePart(sessionKey, 16)+"_*.md")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+		log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 	}
 	seen := make(map[string]struct{}, len(matches))
 	for _, path := range matches {
@@ -260,9 +260,9 @@ func compParsePromptDump(path string, raw string) (compPromptDump, error) {
 		EstimatedAfter:  compParseTableInt(raw, "Estimated tokens (after pruning)"),
 	}
 
-	sectionStart := strings.Index(raw, "## Actual Request Sent to Ollama")
+	sectionStart := strings.Index(raw, "## Full Message Transcript")
 	if sectionStart < 0 {
-		return dump, fmt.Errorf("prompt dump %s missing request section", path)
+		return dump, fmt.Errorf("agent trace %s missing transcript section", path)
 	}
 
 	lines := strings.Split(raw[sectionStart:], "\n")
@@ -274,7 +274,7 @@ func compParsePromptDump(path string, raw string) (compPromptDump, error) {
 
 		role, ok := compFirstBacktickValue(line)
 		if !ok {
-			return dump, fmt.Errorf("prompt dump %s has malformed message header %q", path, line)
+			return dump, fmt.Errorf("agent trace %s has malformed message header %q", path, line)
 		}
 
 		msg := compDumpMessage{Role: role}
@@ -303,7 +303,7 @@ func compParsePromptDump(path string, raw string) (compPromptDump, error) {
 	}
 
 	if len(dump.Messages) == 0 {
-		return dump, fmt.Errorf("prompt dump %s contained no parsed messages", path)
+		return dump, fmt.Errorf("agent trace %s contained no parsed messages", path)
 	}
 	return dump, nil
 }

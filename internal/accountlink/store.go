@@ -65,6 +65,9 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 				return "", err
 			}
 		}
+		if err := s.memories.SyncSpeakerIntro(canonicalID, FormatSpeakerLine(user.Accounts)); err != nil {
+			return "", err
+		}
 		return canonicalID, nil
 	}
 
@@ -87,6 +90,9 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 	data.AccountIndex[key] = canonicalID
 
 	if err := s.saveLocked(data); err != nil {
+		return "", err
+	}
+	if err := s.memories.SyncSpeakerIntro(canonicalID, FormatSpeakerLine(data.Users[canonicalID].Accounts)); err != nil {
 		return "", err
 	}
 
@@ -117,6 +123,15 @@ func (s *Service) AccountsForUser(canonicalUserID string) ([]LinkedAccount, erro
 		return accounts[i].Gateway < accounts[j].Gateway
 	})
 	return accounts, nil
+}
+
+// SpeakerLine returns a deterministic speaker line for the canonical user.
+func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
+	accounts, err := s.AccountsForUser(canonicalUserID)
+	if err != nil {
+		return "", err
+	}
+	return FormatSpeakerLine(accounts), nil
 }
 
 // LinkAccount links a new external account to a canonical user, merging users when needed.
@@ -216,6 +231,9 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 		if err := s.saveLocked(data); err != nil {
 			return LinkResult{}, err
 		}
+		if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(mergedUser.Accounts)); err != nil {
+			return LinkResult{}, err
+		}
 
 		linkedAccount, _ := findAccount(mergedUser.Accounts, gateway, identifier)
 		return LinkResult{
@@ -238,6 +256,9 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 	data.AccountIndex[key] = canonicalUserID
 
 	if err := s.saveLocked(data); err != nil {
+		return LinkResult{}, err
+	}
+	if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(current.Accounts)); err != nil {
 		return LinkResult{}, err
 	}
 
@@ -285,7 +306,10 @@ func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string)
 	data.Users[canonicalUserID] = user
 	delete(data.AccountIndex, key)
 
-	return s.saveLocked(data)
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	return s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(user.Accounts))
 }
 
 func (s *Service) loadLocked() (fileData, error) {
@@ -387,4 +411,49 @@ func chooseDisplayName(existing, requested string) string {
 		return existing
 	}
 	return requested
+}
+
+// FormatSpeakerLine formats a stable speaker line from linked gateway accounts.
+func FormatSpeakerLine(accounts []LinkedAccount) string {
+	var imessageName string
+	var discordName string
+	var websocketName string
+
+	for _, account := range accounts {
+		name := strings.TrimSpace(account.DisplayName)
+		if name == "" {
+			continue
+		}
+
+		switch account.Gateway {
+		case "imessage":
+			if imessageName == "" {
+				imessageName = name
+			}
+		case "discord":
+			if discordName == "" {
+				discordName = name
+			}
+		case "websocket":
+			if websocketName == "" {
+				websocketName = name
+			}
+		}
+	}
+
+	switch {
+	case imessageName != "" && discordName != "":
+		if strings.EqualFold(imessageName, discordName) {
+			return fmt.Sprintf("You are speaking with %s.", imessageName)
+		}
+		return fmt.Sprintf("You are speaking with %s aka %s.", imessageName, discordName)
+	case imessageName != "":
+		return fmt.Sprintf("You are speaking with %s.", imessageName)
+	case discordName != "":
+		return fmt.Sprintf("You are speaking with %s.", discordName)
+	case websocketName != "":
+		return fmt.Sprintf("You are speaking with %s.", websocketName)
+	default:
+		return "You are speaking with a returning user."
+	}
 }

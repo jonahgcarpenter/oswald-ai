@@ -155,7 +155,10 @@ func handleForget(store *Store, log *config.Logger, userID, statement string) (s
 // predates the category section system. A file is considered categorized if it
 // contains at least one "## " heading line.
 func needsMigration(content string) bool {
-	return !strings.Contains(content, "\n## ")
+	if strings.Contains(content, "\n## ") {
+		return false
+	}
+	return len(parseEntries(memoryBody(content))) > 0
 }
 
 // migrateWithLLM asks the model to classify each fact from a flat-format memory
@@ -166,8 +169,8 @@ func migrateWithLLM(ctx context.Context, chatClient ollama.Chatter, model, raw s
 
 The four valid categories are:
 - identity   — name, pronouns, age, location, occupation
+- system_rules — explicit, non-negotiable instructions ("always do X", "never do Y") and corrections to AI behavior
 - preferences — likes, dislikes, communication style, settings
-- context    — ongoing projects, current goals, situation
 - notes      — everything else
 
 Below is the existing memory file content. Reorganize every fact into the correct category using this exact Markdown format. Preserve each statement line and its "- Evidence:" line exactly as written — do not paraphrase, add, or remove any facts.

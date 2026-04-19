@@ -43,7 +43,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 | `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Consecutive tool failure limit per request      |
 | `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables   |
 | `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables          |
-| `PROMPT_DEBUG_PATH`        | empty                          | Writes per-request prompt debug markdown dumps  |
+| `AGENT_TRACE_PATH`         | empty                          | Writes per-request agent trace markdown dumps   |
 | `LOG_LEVEL`                | `info`                         | Log verbosity                                   |
 
 ## Memory
