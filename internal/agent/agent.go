@@ -484,13 +484,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// Persist the user prompt and the assistant's final response to memory.
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
-	// A brief tool-use annotation is appended to the assistant message so future
-	// turns show what tools were called without ballooning history size.
 	if finalContent != "" {
-		storedContent := finalContent
-		if len(toolAnnotations) > 0 {
-			storedContent += "\n\n---\n_Tools used: " + strings.Join(toolAnnotations, ", ") + "_"
-		}
 		userMemoryContent := userPrompt
 		if len(userImages) > 0 {
 			userMemoryContent = strings.TrimSpace(userMemoryContent + fmt.Sprintf("\n\n[Attached %d image(s)]", len(userImages)))
@@ -498,7 +492,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		a.memory.AppendTurn(
 			sessionKey,
 			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
-			ollama.ChatMessage{Role: "assistant", Content: storedContent},
+			ollama.ChatMessage{Role: "assistant", Content: finalContent},
 		)
 	}
 
