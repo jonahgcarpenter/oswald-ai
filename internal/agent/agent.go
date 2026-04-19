@@ -69,7 +69,7 @@ type Agent struct {
 	soul                  *soulmemory.Store
 	userMemory            *usermemory.Store
 	summarizer            *OllamaSummarizer
-	promptDebugPath       string // directory for per-request prompt debug dumps; empty disables
+	agentTracePath        string // directory for per-request agent trace dumps; empty disables
 	maxToolFailureRetries int
 	log                   *config.Logger
 }
@@ -85,7 +85,7 @@ func NewAgent(
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
 	memoryStore *memory.Store,
-	promptDebugPath string,
+	agentTracePath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
@@ -97,7 +97,7 @@ func NewAgent(
 		soul:                  soul,
 		userMemory:            userMemory,
 		summarizer:            NewOllamaSummarizer(chatClient, model, log),
-		promptDebugPath:       promptDebugPath,
+		agentTracePath:        agentTracePath,
 		maxToolFailureRetries: maxToolFailureRetries,
 		log:                   log,
 	}
@@ -272,27 +272,6 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	messages = append(messages, trimmedHistory...)
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
-	// Write a full prompt debug dump when PROMPT_DEBUG_PATH is set.
-	if a.promptDebugPath != "" {
-		if dumpErr := debug.DumpPrompt(
-			a.promptDebugPath,
-			sessionKey,
-			a.model,
-			messages,
-			a.registry.OllamaTools(),
-			a.budget.ContextWindow,
-			a.budget.PromptBudget(),
-			prune.EstimatedBefore,
-			prune.EstimatedAfter,
-			prune.RemovedPairs,
-			userImages,
-		); dumpErr != nil {
-			a.log.Warn("Prompt debug: failed to write dump: %v", dumpErr)
-		} else {
-			a.log.Debug("Prompt debug: wrote dump to %s", a.promptDebugPath)
-		}
-	}
-
 	if len(trimmedHistory) > 0 {
 		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(trimmedHistory), sessionKey)
 	}
@@ -316,6 +295,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// appear in the final response turn (when no tool calls are made).
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
+	toolExecutions := make([]debug.ToolExecutionTrace, 0)
 
 	// consecutiveToolFailures tracks back-to-back tool execution failures for
 	// this request. A successful tool call resets the counter.
@@ -390,6 +370,11 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		// multiple to be safe.
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
+			traceEntry := debug.ToolExecutionTrace{
+				Iteration: iteration,
+				Name:      toolName,
+				Arguments: tc.Function.Arguments,
+			}
 
 			// Emit a status chunk so the gateway knows a tool is executing.
 			if streamCallback != nil {
@@ -404,6 +389,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				consecutiveToolFailures++
 				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
+				traceEntry.Error = execErr.Error()
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
@@ -411,6 +397,8 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
+			traceEntry.Result = toolContent
+			toolExecutions = append(toolExecutions, traceEntry)
 
 			messages = append(messages, ollama.ChatMessage{
 				Role:     "tool",
@@ -463,6 +451,34 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	finalThinking := accumulatedThinking.String()
 	if finalThinking == "" && lastResp != nil {
 		finalThinking = lastResp.Message.Thinking
+	}
+	if lastResp != nil {
+		messages = append(messages, lastResp.Message)
+	}
+
+	if a.agentTracePath != "" {
+		if dumpErr := debug.DumpAgentTrace(debug.AgentTrace{
+			Dir:                        a.agentTracePath,
+			SessionKey:                 sessionKey,
+			Model:                      a.model,
+			Messages:                   messages,
+			Tools:                      a.registry.OllamaTools(),
+			ContextWindow:              a.budget.ContextWindow,
+			PromptBudget:               a.budget.PromptBudget(),
+			EstimatedBefore:            prune.EstimatedBefore,
+			EstimatedAfter:             prune.EstimatedAfter,
+			RemovedPairs:               prune.RemovedPairs,
+			RequestImages:              userImages,
+			ToolExecutions:             toolExecutions,
+			FinalResponse:              finalContent,
+			FinalThinking:              finalThinking,
+			FinalModelResponse:         lastResp,
+			ToolFailureBudgetExhausted: toolFailureBudgetExhausted,
+		}); dumpErr != nil {
+			a.log.Warn("Agent trace: failed to write dump: %v", dumpErr)
+		} else {
+			a.log.Debug("Agent trace: wrote dump to %s", a.agentTracePath)
+		}
 	}
 
 	// Persist the user prompt and the assistant's final response to memory.

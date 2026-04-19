@@ -24,7 +24,7 @@ type Config struct {
 	LogLevel              Level         // Logging verbosity (default: LevelInfo)
 	MemoryMaxTurns        int           // Maximum retained conversation turn pairs per session; 0 disables the limit
 	MemoryMaxAge          time.Duration // Maximum age for retained conversation turn pairs; 0 disables expiry
-	PromptDebugPath       string        // Optional directory path; when set, each request's full prompt is written to a Markdown file for inspection
+	AgentTracePath        string        // Optional directory path; when set, each request's full agent trace is written to a Markdown file for inspection
 }
 
 const (
@@ -55,7 +55,7 @@ func Load() *Config {
 		LogLevel:              ParseLevel(getEnv("LOG_LEVEL", "info")),
 		MemoryMaxTurns:        getEnvInt("MEMORY_MAX_TURNS", 10),
 		MemoryMaxAge:          getEnvDuration("MEMORY_MAX_AGE", 30*time.Minute),
-		PromptDebugPath:       getEnv("PROMPT_DEBUG_PATH", ""),
+		AgentTracePath:        getEnv("AGENT_TRACE_PATH", ""),
 	}
 }
 

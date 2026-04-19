@@ -87,7 +87,7 @@ Per request it does the following:
 5. Load retained session turns from `internal/memory`
 6. Compact older turns if the estimated prompt exceeds the active model budget
 7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
-8. Optionally write a prompt debug dump when `PROMPT_DEBUG_PATH` is set
+8. Optionally write a per-request agent trace when `AGENT_TRACE_PATH` is set
 9. Call Ollama with all registered tools available
 10. If the model emits tool calls:
     - execute each tool handler
@@ -341,19 +341,23 @@ Image validation is centralized in `internal/media/images.go`.
 - BlueBubbles commonly converts HEIC camera images to JPEG before Oswald receives them, so explicit HEIC support is not currently required
 - Any attachment that fails these checks is treated as an unsupported file and surfaced to the model via a short prompt note rather than a hard request failure
 
-## Prompt Debug Dumps
+## Agent Trace Dumps
 
-Set `PROMPT_DEBUG_PATH` to enable per-request markdown debug dumps.
+Set `AGENT_TRACE_PATH` to enable per-request markdown agent trace dumps.
 
-Each dump includes:
+Each trace includes:
 
 - model and session metadata
 - estimated token counts before and after pruning
 - number of compacted turn pairs
-- the exact message array sent to Ollama
+- the full message transcript for the entire agent loop
+- raw tool calls emitted by the model
+- raw tool results injected back into the model
+- final response content and accumulated thinking
+- final model metrics
 - the tool schemas included in the request
 
-Implementation: `internal/debug/prompt.go`
+Implementation: `internal/debug/agent_trace.go`
 
 ## Build, Run, and Verification
 
@@ -378,12 +382,12 @@ go run ./test/queueing.go
 
 `test/media.go` exercises WebSocket media flows including image+text, image-only, oversized images, too many images, and unsupported/non-image attachments.
 
-These memory checks are easiest to understand when the server runs with a small retention budget and prompt debug dumps enabled.
+These memory checks are easiest to understand when the server runs with a small retention budget and agent trace dumps enabled.
 
 Example:
 
 ```bash
-MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run ./cmd/agent/main.go
+MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s AGENT_TRACE_PATH=./tmp/agent-trace go run ./cmd/agent/main.go
 ```
 
 ## Environment Variables
@@ -404,7 +408,7 @@ MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s PROMPT_DEBUG_PATH=./tmp/prompt-debug go run
 | `LOG_LEVEL` | `info` | Logging verbosity |
 | `MEMORY_MAX_TURNS` | `10` | Max retained session turn pairs; `0` disables the cap |
 | `MEMORY_MAX_AGE` | `30m` | Max retained session age; `0` disables expiry |
-| `PROMPT_DEBUG_PATH` | empty | Directory for per-request prompt markdown dumps |
+| `AGENT_TRACE_PATH` | empty | Directory for per-request agent trace markdown dumps |
 
 ## Key Files
 

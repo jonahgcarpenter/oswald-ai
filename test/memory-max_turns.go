@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	maxTurnsDefaultPort            = "8080"
-	maxTurnsDefaultPromptDebugPath = "./tmp/prompt-debug"
-	maxTurnsDefaultUserID          = "memory-test-max"
-	maxTurnsTestPrefix             = "MEMTEST"
-	maxTurnsDumpPollInterval       = 200 * time.Millisecond
-	maxTurnsDumpPollAttempts       = 50
+	maxTurnsDefaultPort           = "8080"
+	maxTurnsDefaultAgentTracePath = "./tmp/agent-trace"
+	maxTurnsDefaultUserID         = "memory-test-max"
+	maxTurnsTestPrefix            = "MEMTEST"
+	maxTurnsDumpPollInterval      = 200 * time.Millisecond
+	maxTurnsDumpPollAttempts      = 50
 )
 
 type maxTurnsConfig struct {
 	port             string
-	promptDebugPath  string
+	agentTracePath   string
 	userID           string
 	expectedMaxTurns int
 	expectedMaxAge   time.Duration
@@ -60,10 +60,10 @@ func main() {
 	fmt.Println("Memory max-turns integration test")
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Printf("WebSocket endpoint              : ws://localhost:%s/ws\n", cfg.port)
-	fmt.Printf("Prompt debug directory          : %s\n", cfg.promptDebugPath)
+	fmt.Printf("Agent trace directory           : %s\n", cfg.agentTracePath)
 	fmt.Printf("Expected server MEMORY_MAX_TURNS: %d\n", cfg.expectedMaxTurns)
 	fmt.Printf("Expected server MEMORY_MAX_AGE  : %s\n", cfg.expectedMaxAge)
-	fmt.Printf("Expected server PROMPT_DEBUG_PATH: %s\n", cfg.promptDebugPath)
+	fmt.Printf("Expected server AGENT_TRACE_PATH: %s\n", cfg.agentTracePath)
 	fmt.Println("This test expects MEMORY_MAX_AGE=0 so only max-turn retention is active.")
 	fmt.Println("--------------------------------------------------------------------------------")
 
@@ -94,7 +94,7 @@ func main() {
 func maxTurnsLoadConfig() maxTurnsConfig {
 	return maxTurnsConfig{
 		port:             maxTurnsGetEnv("MEMORY_TEST_PORT", maxTurnsDefaultPort),
-		promptDebugPath:  maxTurnsGetEnv("MEMORY_TEST_PROMPT_DEBUG_PATH", maxTurnsDefaultPromptDebugPath),
+		agentTracePath:   maxTurnsGetEnv("MEMORY_TEST_AGENT_TRACE_PATH", maxTurnsDefaultAgentTracePath),
 		userID:           maxTurnsGetEnv("MEMORY_TEST_USER_ID", maxTurnsDefaultUserID),
 		expectedMaxTurns: maxTurnsGetEnvInt("MEMORY_TEST_EXPECTED_MAX_TURNS", 3),
 		expectedMaxAge:   maxTurnsGetEnvDuration("MEMORY_TEST_EXPECTED_MAX_AGE", 0),
@@ -106,10 +106,10 @@ func maxTurnsBuildExactAckPrompt(label string) string {
 }
 
 func maxTurnsSendAndCapture(conn *websocket.Conn, cfg maxTurnsConfig, label string, prompt string) maxTurnsPromptDump {
-	knownFiles := maxTurnsListMatchingPromptDumps(cfg.promptDebugPath, cfg.userID)
+	knownFiles := maxTurnsListMatchingAgentTraces(cfg.agentTracePath, cfg.userID)
 	resp := maxTurnsSendPrompt(conn, cfg.userID, prompt)
 	fmt.Printf("sent %-24s response=%q\n", label, resp.Response)
-	return maxTurnsMustReadLatestPromptDump(cfg.promptDebugPath, cfg.userID, knownFiles)
+	return maxTurnsMustReadLatestAgentTrace(cfg.agentTracePath, cfg.userID, knownFiles)
 }
 
 func maxTurnsSendPrompt(conn *websocket.Conn, userID string, prompt string) maxTurnsAgentResponse {
@@ -140,19 +140,19 @@ func maxTurnsSendPrompt(conn *websocket.Conn, userID string, prompt string) maxT
 	}
 }
 
-func maxTurnsMustReadLatestPromptDump(dir string, sessionKey string, knownFiles map[string]struct{}) maxTurnsPromptDump {
-	pattern := filepath.Join(dir, "prompt_"+maxTurnsSanitizeFilePart(sessionKey, 16)+"_*.md")
+func maxTurnsMustReadLatestAgentTrace(dir string, sessionKey string, knownFiles map[string]struct{}) maxTurnsPromptDump {
+	pattern := filepath.Join(dir, "trace_"+maxTurnsSanitizeFilePart(sessionKey, 16)+"_*.md")
 	var lastErr error
 
 	for attempt := 0; attempt < maxTurnsDumpPollAttempts; attempt++ {
 		matches, err := filepath.Glob(pattern)
 		if err != nil {
-			log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+			log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 		}
 
 		allFiles, err := filepath.Glob(filepath.Join(dir, "*.md"))
 		if err != nil {
-			log.Fatalf("Invalid prompt debug directory glob for %q: %v", dir, err)
+			log.Fatalf("Invalid agent trace directory glob for %q: %v", dir, err)
 		}
 
 		latestPath := ""
@@ -174,9 +174,9 @@ func maxTurnsMustReadLatestPromptDump(dir string, sessionKey string, knownFiles 
 
 		if latestPath == "" {
 			if len(allFiles) == 0 {
-				lastErr = fmt.Errorf("no markdown prompt dumps found in %s; ensure the server is running with PROMPT_DEBUG_PATH=%s and restart it", dir, dir)
+				lastErr = fmt.Errorf("no markdown agent traces found in %s; ensure the server is running with AGENT_TRACE_PATH=%s and restart it", dir, dir)
 			} else {
-				lastErr = fmt.Errorf("no new prompt dump found for session %q (pattern %s)", sessionKey, pattern)
+				lastErr = fmt.Errorf("no new agent trace found for session %q (pattern %s)", sessionKey, pattern)
 			}
 			time.Sleep(maxTurnsDumpPollInterval)
 			continue
@@ -196,19 +196,19 @@ func maxTurnsMustReadLatestPromptDump(dir string, sessionKey string, knownFiles 
 			continue
 		}
 
-		fmt.Printf("reading prompt dump            : %s\n", dump.Path)
+		fmt.Printf("reading agent trace           : %s\n", dump.Path)
 		return dump
 	}
 
-	log.Fatalf("Failed to read prompt dump for session %q from %s: %v", sessionKey, dir, lastErr)
+	log.Fatalf("Failed to read agent trace for session %q from %s: %v", sessionKey, dir, lastErr)
 	return maxTurnsPromptDump{}
 }
 
-func maxTurnsListMatchingPromptDumps(dir string, sessionKey string) map[string]struct{} {
-	pattern := filepath.Join(dir, "prompt_"+maxTurnsSanitizeFilePart(sessionKey, 16)+"_*.md")
+func maxTurnsListMatchingAgentTraces(dir string, sessionKey string) map[string]struct{} {
+	pattern := filepath.Join(dir, "trace_"+maxTurnsSanitizeFilePart(sessionKey, 16)+"_*.md")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		log.Fatalf("Invalid prompt debug glob %q: %v", pattern, err)
+		log.Fatalf("Invalid agent trace glob %q: %v", pattern, err)
 	}
 	seen := make(map[string]struct{}, len(matches))
 	for _, path := range matches {
@@ -219,9 +219,9 @@ func maxTurnsListMatchingPromptDumps(dir string, sessionKey string) map[string]s
 
 func maxTurnsParsePromptDump(path string, raw string) (maxTurnsPromptDump, error) {
 	dump := maxTurnsPromptDump{Path: path}
-	sectionStart := strings.Index(raw, "## Actual Request Sent to Ollama")
+	sectionStart := strings.Index(raw, "## Full Message Transcript")
 	if sectionStart < 0 {
-		return dump, fmt.Errorf("prompt dump %s missing request section", path)
+		return dump, fmt.Errorf("agent trace %s missing transcript section", path)
 	}
 
 	lines := strings.Split(raw[sectionStart:], "\n")
@@ -233,7 +233,7 @@ func maxTurnsParsePromptDump(path string, raw string) (maxTurnsPromptDump, error
 
 		role, ok := maxTurnsFirstBacktickValue(line)
 		if !ok {
-			return dump, fmt.Errorf("prompt dump %s has malformed message header %q", path, line)
+			return dump, fmt.Errorf("agent trace %s has malformed message header %q", path, line)
 		}
 
 		msg := maxTurnsDumpMessage{Role: role}
@@ -262,7 +262,7 @@ func maxTurnsParsePromptDump(path string, raw string) (maxTurnsPromptDump, error
 	}
 
 	if len(dump.Messages) == 0 {
-		return dump, fmt.Errorf("prompt dump %s contained no parsed messages", path)
+		return dump, fmt.Errorf("agent trace %s contained no parsed messages", path)
 	}
 	return dump, nil
 }
