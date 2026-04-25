@@ -97,13 +97,16 @@ func hasMessageContent(msg webhookMessage) bool {
 func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	chat := msg.primaryChat()
 	if chat.GUID == "" || strings.TrimSpace(msg.Handle.Address) == "" {
-		g.Log.Warn("iMessage webhook ignored: incomplete message payload")
+		g.Log.Debug("iMessage webhook ignored: incomplete message payload")
 		return
 	}
 	images, unsupported := g.loadImages(msg.Attachments)
+	if len(msg.Attachments) > 0 {
+		g.Log.Debug("iMessage attachments: chat=%s accepted=%d downgraded=%d declared_formats=%q", chat.GUID, len(images), len(unsupported), attachmentFormats(msg.Attachments))
+	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
-			g.Log.Warn("iMessage webhook ignored: incomplete message payload")
+			g.Log.Debug("iMessage webhook ignored: incomplete message payload")
 			return
 		}
 	}
@@ -276,6 +279,8 @@ func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		g.Log.Warn("BlueBubbles contact query failed: identifier=%q status=%d body=%q", normalizedSenderID, resp.StatusCode, strings.TrimSpace(string(body)))
 		return "", fmt.Errorf("BlueBubbles contact query failed with status %d", resp.StatusCode)
 	}
 
@@ -398,6 +403,8 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		g.Log.Warn("BlueBubbles attachment fetch failed: filename=%q status=%d body=%q", attachment.TransferName, resp.StatusCode, strings.TrimSpace(string(body)))
 		return ollama.InputImage{}, fmt.Errorf("download BlueBubbles attachment %q failed with status %d", attachment.TransferName, resp.StatusCode)
 	}
 
@@ -454,6 +461,8 @@ func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		g.Log.Warn("BlueBubbles typing failed: chat=%s status=%d body=%q", chatGUID, resp.StatusCode, strings.TrimSpace(string(body)))
 		return fmt.Errorf("BlueBubbles typing request failed with status %d", resp.StatusCode)
 	}
 	return nil
@@ -509,6 +518,11 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 		return "", fmt.Errorf("decode BlueBubbles send response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if result.Error != nil {
+			g.Log.Warn("BlueBubbles send failed: chat=%s method=%s status=%d error=%q", chatGUID, method, resp.StatusCode, result.Error.Error)
+		} else {
+			g.Log.Warn("BlueBubbles send failed: chat=%s method=%s status=%d", chatGUID, method, resp.StatusCode)
+		}
 		if result.Error != nil {
 			return "", fmt.Errorf("BlueBubbles send failed (%d): %s", resp.StatusCode, result.Error.Error)
 		}
@@ -630,6 +644,18 @@ func (m webhookMessage) replyTargetGUID() string {
 func isAccountCommand(input string) bool {
 	trimmed := strings.TrimSpace(input)
 	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
+}
+
+func attachmentFormats(attachments []attachment) string {
+	formats := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		format := strings.TrimSpace(attachment.MimeType)
+		if format == "" {
+			format = "unknown"
+		}
+		formats = append(formats, format)
+	}
+	return strings.Join(formats, ",")
 }
 
 // newTempGUID returns a temporary GUID for outbound BlueBubbles send requests.

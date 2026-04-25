@@ -78,6 +78,6 @@ func (s *OllamaSummarizer) Summarize(ctx context.Context, turns []memory.Turn) (
 		result = string(runes[:maxSummaryChars])
 	}
 
-	s.log.Debug("Summarizer: generated %d-char compacted summary from %d turn(s)", len(result), len(turns))
+	s.log.Debug("Summarizer: generated summary_chars=%d turns=%d", len(result), len(turns))
 	return result, nil
 }

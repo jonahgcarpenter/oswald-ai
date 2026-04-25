@@ -204,6 +204,7 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 		if err := s.memories.MergeUsers(canonicalUserID, existingOwner); err != nil {
 			return LinkResult{}, err
 		}
+		s.log.Info("AccountLink: merged source_user=%s target_user=%s account=%s", existingOwner, canonicalUserID, key)
 
 		mergedUser := current
 		seen := make(map[string]struct{}, len(mergedUser.Accounts))
@@ -261,6 +262,7 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 	if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(current.Accounts)); err != nil {
 		return LinkResult{}, err
 	}
+	s.log.Info("AccountLink: linked account=%s canonical_user=%s", key, canonicalUserID)
 
 	return LinkResult{CanonicalUserID: canonicalUserID, LinkedAccount: linked}, nil
 }
@@ -309,6 +311,7 @@ func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string)
 	if err := s.saveLocked(data); err != nil {
 		return err
 	}
+	s.log.Info("AccountLink: disconnected account=%s canonical_user=%s", key, canonicalUserID)
 	return s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(user.Accounts))
 }
 

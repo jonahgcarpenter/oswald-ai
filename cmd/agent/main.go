@@ -24,12 +24,12 @@ func main() {
 
 	// Initialize logger — all components receive this instance
 	log := config.NewLogger(cfg.LogLevel)
-	log.Debug("Log level: %s", cfg.LogLevel)
+	log.Debug("Log level: value=%s", cfg.LogLevel)
 
 	if cfg.OllamaModel == "" {
 		log.Fatal("Missing required OLLAMA_MODEL environment variable")
 	}
-	log.Info("Model: %s", cfg.OllamaModel)
+	log.Info("Model: name=%s", cfg.OllamaModel)
 
 	if cfg.OllamaURL == "" {
 		log.Fatal("Missing required OLLAMA_URL configuration")
@@ -39,7 +39,7 @@ func main() {
 
 	budget, budgetErr := memory.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
 	if budgetErr != nil {
-		log.Warn("Failed to discover context budget for model %s: %v", cfg.OllamaModel, budgetErr)
+		log.Warn("Context budget discovery failed: model=%s err=%v", cfg.OllamaModel, budgetErr)
 	}
 	log.Info("Context budget: window=%d prompt_budget=%d source=%s", budget.ContextWindow, budget.PromptBudget(), budget.Source)
 
@@ -47,17 +47,17 @@ func main() {
 	// its soul via the soul_memory tool) and the agent itself (so it can read
 	// the current soul on every request as its system prompt).
 	soulStore := soulmemory.NewStore(config.DefaultSoulPath, log)
-	log.Debug("Soul file: %s", config.DefaultSoulPath)
+	log.Debug("Soul file: path=%s", config.DefaultSoulPath)
 
 	// The user memory store is owned by the tool registry so the persistent_memory
 	// tool handler can remember, recall, and forget facts on behalf of the model.
 	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, log)
-	log.Debug("User memory: %s", config.DefaultUserMemoryPath)
+	log.Debug("User memory: path=%s", config.DefaultUserMemoryPath)
 
 	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, log)
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
-	log.Debug("Account links: %s", config.DefaultAccountLinkPath)
+	log.Debug("Account links: path=%s", config.DefaultAccountLinkPath)
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, log)
 	if err != nil {
@@ -75,10 +75,10 @@ func main() {
 		ContextWindow: budget.ContextWindow,
 		PromptBudget:  budget.PromptBudget(),
 	}, log)
-	log.Debug("Memory: retaining in-process session history until restart (max_turns=%d max_age=%s context_window=%d prompt_budget=%d)", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
+	log.Debug("Memory retention: max_turns=%d max_age=%s context_window=%d prompt_budget=%d", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
 
 	if cfg.AgentTracePath != "" {
-		log.Info("Agent trace dumps enabled at %s", cfg.AgentTracePath)
+		log.Info("Agent trace dumps enabled: path=%s", cfg.AgentTracePath)
 	}
 
 	agentEngine := agent.NewAgent(
@@ -106,7 +106,7 @@ func main() {
 		// Pass 'gw' into the closure to avoid loop variable capture bugs
 		go func(g gateway.Service) {
 			if err := g.Start(requestBroker); err != nil {
-				log.Error("%s gateway stopped/failed: %v", g.Name(), err)
+				log.Error("Gateway stopped: name=%s err=%v", g.Name(), err)
 			}
 		}(gw)
 	}

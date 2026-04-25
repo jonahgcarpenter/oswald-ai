@@ -79,12 +79,12 @@ func (b *Broker) Start() {
 // blocking. The caller must set req.ResponseChan to a buffered(1) channel before
 // calling Submit; the broker will write exactly one result to it.
 func (b *Broker) Submit(req *Request) {
-	b.log.Debug("Broker: queuing request from %s (chatID=%s)", req.Channel, req.ChatID)
+	b.log.Debug("Broker: queued request channel=%s chat_id=%s", req.Channel, req.ChatID)
 
 	select {
 	case b.requests <- req:
 	default:
-		b.log.Warn("Broker: rejecting request from %s (chatID=%s): queue full", req.Channel, req.ChatID)
+		b.log.Warn("Broker: rejected request channel=%s chat_id=%s reason=queue_full", req.Channel, req.ChatID)
 		req.ResponseChan <- Result{
 			Response: &agent.AgentResponse{
 				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
@@ -98,7 +98,7 @@ func (b *Broker) Submit(req *Request) {
 // to complete before returning. New Submit() calls must not be made after
 // Shutdown() is called.
 func (b *Broker) Shutdown() {
-	b.log.Info("Broker: shutting down, draining %d queued request(s)...", len(b.requests))
+	b.log.Info("Broker: shutting down queued_requests=%d", len(b.requests))
 	close(b.requests)
 	b.wg.Wait()
 	b.log.Info("Broker: all workers stopped")
@@ -112,7 +112,7 @@ func (b *Broker) runWorker(id int) {
 	b.log.Debug("Broker worker %d started", id)
 
 	for req := range b.requests {
-		b.log.Debug("Broker worker %d: processing request from %s (chatID=%s)", id, req.Channel, req.ChatID)
+		b.log.Debug("Broker worker: id=%d channel=%s chat_id=%s action=process_request", id, req.Channel, req.ChatID)
 
 		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
 

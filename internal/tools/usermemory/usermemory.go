@@ -69,7 +69,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 	}
 
 	cat := normalizeCategory(category)
-	log.Debug("UserMemory: remembered statement for user=%q category=%q", userID, cat)
+	log.Debug("UserMemory: remembered user=%q category=%q", userID, cat)
 	return fmt.Sprintf("Remembered: %s (category: %s)", statement, cat), nil
 }
 
@@ -92,21 +92,21 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 	// If the file is in old flat format (no ## category headers), run the
 	// LLM migration to classify each fact into the correct category.
 	if needsMigration(raw) {
-		log.Debug("UserMemory: old-format file detected for user=%q; running LLM migration", userID)
+		log.Debug("UserMemory: migration started user=%q source=legacy_format", userID)
 		migrated, migErr := migrateWithLLM(ctx, chatClient, model, raw, log)
 		if migErr != nil {
 			// Migration failed — return the raw content with a note so the
 			// model at least sees the data and can work with it.
-			log.Warn("UserMemory: LLM migration failed for user=%q: %v; returning raw content", userID, migErr)
+			log.Warn("UserMemory: migration failed user=%q err=%v action=return_raw", userID, migErr)
 			return "Note: Memory file could not be automatically categorized. Raw content follows:\n\n" + raw, nil
 		}
 
 		// Persist the migrated file so this only happens once.
 		if writeErr := store.WriteFull(userID, migrated); writeErr != nil {
-			log.Warn("UserMemory: failed to persist migrated memory for user=%q: %v", userID, writeErr)
+			log.Warn("UserMemory: migration persist failed user=%q err=%v", userID, writeErr)
 			// Still return the migrated content even if the write failed.
 		} else {
-			log.Debug("UserMemory: migration complete for user=%q; file updated on disk", userID)
+			log.Debug("UserMemory: migration complete user=%q persisted=true", userID)
 		}
 		raw = migrated
 	}
@@ -121,12 +121,12 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 			log.Debug("UserMemory: no memory in category=%q for user=%q", category, userID)
 			return fmt.Sprintf("No stored facts in category %q for this user.", category), nil
 		}
-		log.Debug("UserMemory: recalled category=%q for user=%q (%d bytes)", category, userID, len(content))
+		log.Debug("UserMemory: recalled category=%q user=%q bytes=%d", category, userID, len(content))
 		return content, nil
 	}
 
 	// Full recall — return everything.
-	log.Debug("UserMemory: recalled all memory for user=%q (%d bytes)", userID, len(raw))
+	log.Debug("UserMemory: recalled user=%q bytes=%d scope=all", userID, len(raw))
 	return raw, nil
 }
 
@@ -219,7 +219,7 @@ Memory file to reorganize:
 	if !strings.HasPrefix(result, "# User Memory") ||
 		!strings.Contains(result, "\n## ") ||
 		!strings.Contains(result, "- Evidence:") {
-		log.Warn("UserMemory: LLM migration response failed validation: %q", result[:min(len(result), 200)])
+		log.Warn("UserMemory: migration validation failed preview=%q", result[:min(len(result), 200)])
 		return "", fmt.Errorf("LLM migration response did not match expected format")
 	}
 

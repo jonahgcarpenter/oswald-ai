@@ -147,7 +147,7 @@ func (s *Store) SyncSpeakerIntro(userID, intro string) error {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
 	}
 
-	s.log.Debug("UserMemory: synced speaker intro for user=%q", userID)
+	s.log.Debug("UserMemory: synced speaker_intro user=%q", userID)
 	return nil
 }
 
@@ -193,7 +193,7 @@ func (s *Store) Set(userID, statement, evidence, category string) error {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
 	}
 
-	s.log.Debug("UserMemory: remembered statement for user=%q category=%q", userID, cat)
+	s.log.Debug("UserMemory: stored user=%q category=%q", userID, cat)
 	return nil
 }
 
@@ -246,7 +246,7 @@ func (s *Store) Delete(userID, statement string) error {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
 	}
 
-	s.log.Debug("UserMemory: deleted entry for user=%q", userID)
+	s.log.Debug("UserMemory: deleted entry user=%q", userID)
 	return nil
 }
 
@@ -265,7 +265,7 @@ func (s *Store) DeleteAll(userID string) error {
 		return fmt.Errorf("failed to delete user memory for %q: %w", userID, err)
 	}
 
-	s.log.Debug("UserMemory: wiped all memory for user=%q", userID)
+	s.log.Debug("UserMemory: deleted all user=%q", userID)
 	return nil
 }
 
@@ -288,7 +288,7 @@ func (s *Store) WriteFull(userID, content string) error {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
 	}
-	s.log.Debug("UserMemory: wrote full memory file for user=%q (%d bytes)", userID, len(content))
+	s.log.Debug("UserMemory: wrote full file user=%q bytes=%d", userID, len(content))
 	return nil
 }
 
@@ -338,7 +338,7 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 		return fmt.Errorf("failed to remove merged user memory for %q: %w", loserUserID, err)
 	}
 
-	s.log.Debug("UserMemory: merged user memory from %q into %q", loserUserID, winnerUserID)
+	s.log.Debug("UserMemory: merged source_user=%q target_user=%q", loserUserID, winnerUserID)
 	return nil
 }
 

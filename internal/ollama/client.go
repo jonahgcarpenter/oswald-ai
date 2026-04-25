@@ -182,6 +182,15 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	defer resp.Body.Close()
 
 	if req.Stream && chatStreamCallback != nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			rawBody, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return nil, fmt.Errorf("failed to read chat stream response body: %w", readErr)
+			}
+			c.log.Error("Ollama chat stream returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+			return nil, fmt.Errorf("Ollama chat stream returned HTTP %d", resp.StatusCode)
+		}
+
 		var finalResp ChatResponse
 		finalResp.Model = req.Model
 
@@ -191,7 +200,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 		for scanner.Scan() {
 			var chunk ollamaChatResponse
 			if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-				c.log.Debug("Ollama chat stream: failed to parse chunk: %v | raw: %q", err, scanner.Text())
+				c.log.Warn("Ollama chat stream parse failed: err=%v raw=%q", err, scanner.Text())
 				continue
 			}
 
@@ -215,7 +224,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			c.log.Warn("Ollama chat stream: scanner error: %v", err)
+			c.log.Warn("Ollama chat stream scan failed: err=%v", err)
 		}
 
 		if finalResp.Message.Content == "" && finalResp.Message.Thinking != "" {

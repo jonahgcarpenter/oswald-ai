@@ -49,11 +49,14 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.log.Warn("SearXNG request failed: query=%q err=%v", query, err)
 		return nil, fmt.Errorf("SearXNG request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		c.log.Warn("SearXNG response failed: query=%q status=%d body=%q", query, resp.StatusCode, string(body))
 		return nil, fmt.Errorf("SearXNG returned status %d", resp.StatusCode)
 	}
 

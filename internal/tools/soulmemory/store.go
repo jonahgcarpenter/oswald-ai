@@ -53,7 +53,7 @@ func (s *Store) Write(content string) error {
 	if err := os.WriteFile(s.path, []byte(content), 0o644); err != nil {
 		return err
 	}
-	s.log.Debug("Soul file written (%d bytes): %s", len(content), s.path)
+	s.log.Debug("Soul file written: path=%s bytes=%d", s.path, len(content))
 	return nil
 }
 
@@ -77,6 +77,6 @@ func (s *Store) Append(content string) error {
 	if err != nil {
 		return err
 	}
-	s.log.Debug("Soul file appended (%d bytes): %s", len(content), s.path)
+	s.log.Debug("Soul file appended: path=%s bytes=%d", s.path, len(content))
 	return nil
 }

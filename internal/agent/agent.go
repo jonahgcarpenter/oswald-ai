@@ -166,7 +166,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
 			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
 			if err != nil {
-				a.log.Warn("Failed to compact %d turn(s) for prompt budget: %v", compactCount, err)
+				a.log.Warn("Context budget compaction failed: turns=%d err=%v", compactCount, err)
 				continue
 			}
 
@@ -218,7 +218,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
 func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Processing request (session=%q sender=%q display=%q): %q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
+	a.log.Debug("Request start: session=%q sender=%q display=%q prompt=%q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -231,7 +231,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// made via the soul_memory tool take effect immediately.
 	soulContent, soulErr := a.soul.Read()
 	if soulErr != nil {
-		a.log.Warn("Failed to read soul file: %v", soulErr)
+		a.log.Warn("Soul file read failed: err=%v", soulErr)
 	}
 
 	// Build the dynamic system prompt: soul + timestamp + speaker identity.
@@ -273,7 +273,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
 	if len(trimmedHistory) > 0 {
-		a.log.Debug("Memory: loaded %d historical message(s) for session %q", len(trimmedHistory), sessionKey)
+		a.log.Debug("Memory: loaded historical_messages=%d session=%q", len(trimmedHistory), sessionKey)
 	}
 	if prune.RemovedPairs > 0 {
 		a.log.Debug("Context budget: compacted %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
@@ -338,7 +338,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
 		if err != nil {
-			a.log.Error("Model %s failed on iteration %d: %v", a.model, iteration, err)
+			a.log.Error("Model call failed: model=%s iteration=%d err=%v", a.model, iteration, err)
 			return &AgentResponse{
 				Model:    a.model,
 				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
@@ -393,7 +393,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
-				a.log.Debug("Tool %q executed successfully", toolName)
+				a.log.Debug("Tool execution succeeded: name=%q", toolName)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
@@ -426,7 +426,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
 		if err != nil {
-			a.log.Error("Model %s failed while finishing after tool failures: %v", a.model, err)
+			a.log.Error("Model finish failed after tool failures: model=%s err=%v", a.model, err)
 			return &AgentResponse{
 				Model:    a.model,
 				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
@@ -475,9 +475,9 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			FinalModelResponse:         lastResp,
 			ToolFailureBudgetExhausted: toolFailureBudgetExhausted,
 		}); dumpErr != nil {
-			a.log.Warn("Agent trace: failed to write dump: %v", dumpErr)
+			a.log.Warn("Agent trace write failed: err=%v", dumpErr)
 		} else {
-			a.log.Debug("Agent trace: wrote dump to %s", a.agentTracePath)
+			a.log.Debug("Agent trace written: path=%s", a.agentTracePath)
 		}
 	}
 
@@ -512,7 +512,7 @@ func (a *Agent) currentSpeakerLine(senderID string) string {
 	if a.userMemory != nil {
 		intro, err := a.userMemory.ReadIntro(senderID)
 		if err != nil {
-			a.log.Warn("Failed to read user memory intro for %q: %v", senderID, err)
+			a.log.Warn("User memory intro read failed: user=%q err=%v", senderID, err)
 		} else if strings.TrimSpace(intro) != "" {
 			return strings.TrimSpace(intro)
 		}
@@ -539,7 +539,7 @@ func (a *Agent) userMemoryPromptSections(senderID string) []string {
 func (a *Agent) userMemoryPromptSection(senderID, category, heading string) string {
 	content, err := a.userMemory.ReadCategory(senderID, category)
 	if err != nil {
-		a.log.Warn("Failed to read user memory category %q for %q: %v", category, senderID, err)
+		a.log.Warn("User memory category read failed: category=%q user=%q err=%v", category, senderID, err)
 		return ""
 	}
 	body := stripMarkdownHeading(content)

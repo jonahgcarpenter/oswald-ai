@@ -34,7 +34,7 @@ func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args
 			if content == "" {
 				return "", fmt.Errorf("write action requires a non-empty content argument")
 			}
-			log.Warn("Soul file overwritten via soul_memory tool")
+			log.Warn("Soul file overwritten via tool: name=soul_memory action=write")
 			if err := store.Write(content); err != nil {
 				return "", fmt.Errorf("failed to write soul file: %w", err)
 			}
@@ -44,7 +44,7 @@ func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args
 			if content == "" {
 				return "", fmt.Errorf("append action requires a non-empty content argument")
 			}
-			log.Warn("Soul file appended via soul_memory tool")
+			log.Warn("Soul file appended via tool: name=soul_memory action=append")
 			if err := store.Append(content); err != nil {
 				return "", fmt.Errorf("failed to append to soul file: %w", err)
 			}

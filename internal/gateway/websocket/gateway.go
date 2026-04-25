@@ -22,7 +22,7 @@ func (wg *Gateway) Start(b *broker.Broker) error {
 		wg.handleConnections(w, r, b)
 	})
 
-	wg.Log.Info("Websocket server listening on port %s", wg.Port)
+	wg.Log.Info("WebSocket server listening on port %s", wg.Port)
 	return http.ListenAndServe(":"+wg.Port, nil)
 }
 
@@ -31,7 +31,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	log := wg.Log
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Error("Upgrader error: %v", err)
+		log.Warn("WebSocket upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -58,6 +58,9 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			displayName = incoming.DisplayName
 			images, unsupported := decodeIncomingImages(incoming.Images)
 			userImages = images
+			if len(incoming.Images) > 0 {
+				log.Debug("WebSocket attachments: accepted=%d downgraded=%d", len(images), len(unsupported))
+			}
 			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
 			userPrompt = string(message)

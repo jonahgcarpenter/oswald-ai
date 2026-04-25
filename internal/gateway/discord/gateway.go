@@ -161,7 +161,7 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
 						dg.BotID = ready.User.ID
-						dg.Log.Debug("Discord Bot connected as: %s (ID: %s)", ready.User.Username, dg.BotID)
+						dg.Log.Info("Discord bot connected as %s (ID: %s)", ready.User.Username, dg.BotID)
 					}
 				case "RESUMED":
 					dg.Log.Debug("Discord session resumed successfully.")
@@ -264,6 +264,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	replyToID := ""
 	prompt := msg.Content
 	images, unsupported := dg.loadImages(msg.Attachments)
+	if len(msg.Attachments) > 0 {
+		dg.Log.Debug("Discord attachments: channel=%s accepted=%d downgraded=%d", msg.ChannelID, len(images), len(unsupported))
+	}
 
 	if msg.GuildID != "" {
 		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
@@ -488,6 +491,8 @@ func (dg *Gateway) fetchAttachmentImage(rawURL, filename string) (ollama.InputIm
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		dg.Log.Warn("Discord attachment fetch failed: filename=%q status=%d body=%q", filename, resp.StatusCode, strings.TrimSpace(string(body)))
 		return ollama.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
 	}
 
@@ -530,6 +535,8 @@ func (dg *Gateway) sendTyping(channelID string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		dg.Log.Warn("Discord typing failed: channel=%s status=%d body=%q", channelID, resp.StatusCode, strings.TrimSpace(string(body)))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
@@ -573,6 +580,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		dg.Log.Warn("Discord send failed: channel=%s status=%d body=%q", channelID, resp.StatusCode, trimResponseBody(respBody))
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -597,4 +605,12 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "..."
+}
+
+func trimResponseBody(body []byte) string {
+	trimmed := strings.TrimSpace(string(body))
+	if len(trimmed) <= 512 {
+		return trimmed
+	}
+	return trimmed[:512] + "..."
 }
