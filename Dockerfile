@@ -1,6 +1,6 @@
 FROM golang:1.26-alpine AS builder
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git build-base
 
 WORKDIR /app
 
@@ -12,13 +12,13 @@ COPY config/tools/ ./config/tools/
 COPY config/soul.md ./config/soul.md
 COPY internal/ ./internal/
 
-RUN go build -o oswald-agent ./cmd/agent/main.go
+RUN CGO_ENABLED=1 go build -o oswald-agent ./cmd/agent/main.go
 
 FROM alpine:3.23
 
 LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata libstdc++
 
 RUN addgroup -S oswald-group && adduser -S oswald-ai -G oswald-group
 
