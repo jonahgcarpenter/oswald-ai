@@ -12,7 +12,7 @@ COPY config/tools/ ./config/tools/
 COPY config/soul.md ./config/soul.md
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o oswald-agent ./cmd/agent/main.go
+RUN go build -o oswald-agent ./cmd/agent/main.go
 
 FROM alpine:3.23
 
