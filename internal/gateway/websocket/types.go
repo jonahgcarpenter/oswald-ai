@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 )
 
 // Gateway handles local WebSocket connections for testing and client access.
@@ -15,6 +16,7 @@ type Gateway struct {
 	Links    *accountlink.Service
 	Commands *accountlink.CommandHandler
 	Log      *config.Logger
+	Metrics  *metrics.Metrics
 }
 
 // IncomingMessage is the JSON payload clients send over the WebSocket connection.

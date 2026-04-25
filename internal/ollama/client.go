@@ -12,23 +12,26 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 )
 
 // Client interacts with the local Ollama REST API.
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+	metrics    *metrics.Metrics
 	log        *config.Logger
 }
 
 // NewClient creates an Ollama client with the given base URL and logger.
-func NewClient(baseURL string, log *config.Logger) *Client {
+func NewClient(baseURL string, obs *metrics.Metrics, log *config.Logger) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
-		log: log,
+		metrics: obs,
+		log:     log,
 	}
 }
 
@@ -193,6 +196,8 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 
 		var finalResp ChatResponse
 		finalResp.Model = req.Model
+		streamStartedAt := time.Now()
+		firstChunkObserved := false
 
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -205,6 +210,10 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 			}
 
 			msg := mapFromOllamaMessage(chunk.Message)
+			if !firstChunkObserved && (msg.Content != "" || msg.Thinking != "" || len(msg.ToolCalls) > 0) {
+				c.metrics.ObserveLLMResponseMetrics(req.Model, time.Since(streamStartedAt), 0, 0, 0, "", false)
+				firstChunkObserved = true
+			}
 			chatStreamCallback(msg)
 
 			finalResp.Message.Role = msg.Role
@@ -218,9 +227,11 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 				finalResp.DoneReason = chunk.DoneReason
 				finalResp.TotalDuration = chunk.TotalDuration
 				finalResp.LoadDuration = chunk.LoadDuration
+				finalResp.PromptEvalCount = chunk.PromptEvalCount
 				finalResp.PromptEvalDuration = chunk.PromptEvalDuration
 				finalResp.EvalDuration = chunk.EvalDuration
 				finalResp.EvalCount = chunk.EvalCount
+				c.metrics.ObserveLLMResponseMetrics(req.Model, 0, chunk.LoadDuration, chunk.PromptEvalDuration, chunk.EvalDuration, chunk.DoneReason, len(finalResp.Message.ToolCalls) > 0)
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -253,6 +264,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	if msg.Content == "" && msg.Thinking != "" {
 		msg.Content = msg.Thinking
 	}
+	c.metrics.ObserveLLMResponseMetrics(req.Model, 0, ollamaResp.LoadDuration, ollamaResp.PromptEvalDuration, ollamaResp.EvalDuration, ollamaResp.DoneReason, len(msg.ToolCalls) > 0)
 
 	return &ChatResponse{
 		Model:              ollamaResp.Model,

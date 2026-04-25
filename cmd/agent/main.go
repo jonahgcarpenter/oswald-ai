@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
@@ -35,7 +36,8 @@ func main() {
 		log.Fatal("Missing required OLLAMA_URL configuration")
 	}
 
-	llmClient := ollama.NewClient(cfg.OllamaURL, log)
+	obs := metrics.New()
+	llmClient := ollama.NewClient(cfg.OllamaURL, obs, log)
 
 	budget, budgetErr := memory.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
 	if budgetErr != nil {
@@ -64,7 +66,7 @@ func main() {
 		log.Fatal("Failed to initialize tools: %v", err)
 	}
 
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, log)
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, obs, log)
 	if err != nil {
 		log.Fatal("Failed to initialize gateways: %v", err)
 	}
@@ -74,7 +76,7 @@ func main() {
 		MaxAge:        cfg.MemoryMaxAge,
 		ContextWindow: budget.ContextWindow,
 		PromptBudget:  budget.PromptBudget(),
-	}, log)
+	}, obs, log)
 	log.Debug("Memory retention: max_turns=%d max_age=%s context_window=%d prompt_budget=%d", cfg.MemoryMaxTurns, cfg.MemoryMaxAge, budget.ContextWindow, budget.PromptBudget())
 
 	if cfg.AgentTracePath != "" {
@@ -91,13 +93,14 @@ func main() {
 		cfg.MaxToolFailureRetries,
 		memoryStore,
 		cfg.AgentTracePath,
+		obs,
 		log,
 	)
 
 	// Create the broker and start its worker pool.
 	// All gateways submit requests through the broker; it enforces the concurrency
 	// limit and routes responses back to the originating gateway.
-	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, log)
+	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, obs, log)
 	requestBroker.Start()
 
 	// Boot up all registered gateways dynamically

@@ -2,9 +2,11 @@ package broker
 
 import (
 	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
@@ -28,6 +30,7 @@ type Request struct {
 	Images       []ollama.InputImage     // Optional: current-turn image attachments for multimodal models
 	StreamFunc   func(agent.StreamChunk) // Optional: streaming callback (nil for non-streaming gateways)
 	ResponseChan chan Result             // Broker writes the final result here; must be buffered(1)
+	EnqueuedAt   time.Time               // Broker enqueue time used for queue wait and total duration metrics
 }
 
 // Result is the response payload the broker delivers back to the originating
@@ -49,16 +52,18 @@ type Broker struct {
 	requests    chan *Request
 	workerCount int
 	wg          sync.WaitGroup
+	metrics     *metrics.Metrics
 	log         *config.Logger
 }
 
 // NewBroker creates a Broker with the given agent, fixed worker pool size,
 // and logger. Call Start() to begin dispatching requests.
-func NewBroker(aiAgent *agent.Agent, workerCount int, log *config.Logger) *Broker {
+func NewBroker(aiAgent *agent.Agent, workerCount int, obs *metrics.Metrics, log *config.Logger) *Broker {
 	return &Broker{
 		agent:       aiAgent,
 		requests:    make(chan *Request, requestQueueSize),
 		workerCount: workerCount,
+		metrics:     obs,
 		log:         log,
 	}
 }
@@ -80,11 +85,14 @@ func (b *Broker) Start() {
 // calling Submit; the broker will write exactly one result to it.
 func (b *Broker) Submit(req *Request) {
 	b.log.Debug("Broker: queued request channel=%s chat_id=%s", req.Channel, req.ChatID)
+	req.EnqueuedAt = time.Now()
 
 	select {
 	case b.requests <- req:
+		b.metrics.ObserveBrokerEnqueue(len(b.requests))
 	default:
 		b.log.Warn("Broker: rejected request channel=%s chat_id=%s reason=queue_full", req.Channel, req.ChatID)
+		b.metrics.ObserveBrokerRejection(req.Channel, "queue_full", len(b.requests))
 		req.ResponseChan <- Result{
 			Response: &agent.AgentResponse{
 				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
@@ -99,6 +107,7 @@ func (b *Broker) Submit(req *Request) {
 // Shutdown() is called.
 func (b *Broker) Shutdown() {
 	b.log.Info("Broker: shutting down queued_requests=%d", len(b.requests))
+	b.metrics.ObserveBrokerEnqueue(0)
 	close(b.requests)
 	b.wg.Wait()
 	b.log.Info("Broker: all workers stopped")
@@ -113,8 +122,26 @@ func (b *Broker) runWorker(id int) {
 
 	for req := range b.requests {
 		b.log.Debug("Broker worker: id=%d channel=%s chat_id=%s action=process_request", id, req.Channel, req.ChatID)
+		b.metrics.ObserveBrokerDequeue(req.Channel, time.Since(req.EnqueuedAt), len(b.requests))
+		b.metrics.IncActiveRequest(req.Channel)
 
-		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
+		startedAt := time.Now()
+		resp, err := b.agent.Process(req.Channel, req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
+		b.metrics.DecActiveRequest(req.Channel)
+
+		resultLabel := "success"
+		switch {
+		case err != nil:
+			resultLabel = "gateway_error"
+		case resp == nil:
+			resultLabel = "empty_response"
+		case resp.Error != "":
+			resultLabel = "model_error"
+		case resp.Response == "":
+			resultLabel = "empty_response"
+		}
+		b.metrics.ObserveRequest(req.Channel, req.SenderID, resultLabel, time.Since(req.EnqueuedAt))
+		b.metrics.ObserveBrokerProcessing(req.Channel, resultLabel, time.Since(startedAt))
 
 		req.ResponseChan <- Result{
 			Response: resp,

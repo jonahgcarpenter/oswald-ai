@@ -8,15 +8,17 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	localws "github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, commands *accountlink.CommandHandler, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, commands *accountlink.CommandHandler, obs *metrics.Metrics, log *config.Logger) ([]Service, error) {
 	services := []Service{
 		&localws.Gateway{
 			Port:     cfg.Port,
 			Links:    links,
 			Commands: commands,
+			Metrics:  obs,
 			Log:      log,
 		},
 	}
@@ -26,6 +28,7 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 			Token:    cfg.DiscordToken,
 			Links:    links,
 			Commands: commands,
+			Metrics:  obs,
 			Log:      log,
 		})
 	}
@@ -38,6 +41,7 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 			BlueBubblesPassword: cfg.BlueBubblesPassword,
 			Links:               links,
 			Commands:            commands,
+			Metrics:             obs,
 			Log:                 log,
 		})
 	}

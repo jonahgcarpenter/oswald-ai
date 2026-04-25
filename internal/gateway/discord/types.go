@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/metrics"
 )
 
 const (
@@ -92,6 +93,7 @@ type Gateway struct {
 	Links      *accountlink.Service
 	Commands   *accountlink.CommandHandler
 	Log        *config.Logger
+	Metrics    *metrics.Metrics
 	replyMu    sync.RWMutex
 	replyIndex map[string]replyContext
 }
