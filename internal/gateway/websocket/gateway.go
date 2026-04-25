@@ -1,8 +1,11 @@
 package websocket
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
@@ -56,10 +59,10 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
 			displayName = incoming.DisplayName
-			images, unsupported := decodeIncomingImages(incoming.Images)
+			images, unsupported := wg.decodeIncomingImages(incoming.Images)
 			userImages = images
 			if len(incoming.Images) > 0 {
-				log.Debug("WebSocket attachments: accepted=%d downgraded=%d", len(images), len(unsupported))
+				log.Debug("WebSocket attachments: chat=%s accepted=%d downgraded=%d declared_formats=%q", remoteAddr, len(images), len(unsupported), attachmentFormats(incoming.Images))
 			}
 			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
@@ -155,7 +158,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	}
 }
 
-func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
+func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
 	if len(images) == 0 {
 		return nil, nil
 	}
@@ -167,14 +170,72 @@ func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		inputImage, err := media.BuildInputImage(image.MimeType, image.Data, image.Source)
+		result, err := normalizeIncomingImage(image)
 		if err != nil {
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		validated = append(validated, inputImage)
+		wg.Log.Debug(
+			"WebSocket attachment normalized: source=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
+			image.Source,
+			strings.TrimSpace(image.MimeType),
+			result.DetectedMIME,
+			result.Image.MimeType,
+			decodedLen(image.Data),
+			result.Width,
+			result.Height,
+			result.PreservedAlpha,
+			result.UsedDeclaredMIME,
+		)
+		validated = append(validated, result.Image)
 	}
 	return validated, unsupported
+}
+
+func normalizeIncomingImage(image IncomingImage) (media.NormalizationResult, error) {
+	data, err := decodeIncomingImageData(image.Data)
+	if err != nil {
+		return media.NormalizationResult{}, err
+	}
+	return media.NormalizeInputImageFromBytes(nil, image.MimeType, data, image.Source)
+}
+
+func decodeIncomingImageData(encoded string) ([]byte, error) {
+	payload := strings.TrimSpace(encoded)
+	if payload == "" {
+		return nil, fmt.Errorf("image payload is empty")
+	}
+	if comma := strings.Index(payload, ","); comma >= 0 && strings.HasPrefix(payload[:comma], "data:") {
+		payload = payload[comma+1:]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("image payload is not valid base64")
+	}
+	if len(decoded) > media.MaxImageBytes {
+		return nil, fmt.Errorf("image payload exceeds %d bytes", media.MaxImageBytes)
+	}
+	return decoded, nil
+}
+
+func decodedLen(encoded string) int {
+	decoded, err := decodeIncomingImageData(encoded)
+	if err != nil {
+		return 0
+	}
+	return len(decoded)
+}
+
+func attachmentFormats(images []IncomingImage) string {
+	formats := make([]string, 0, len(images))
+	for _, image := range images {
+		format := strings.TrimSpace(image.MimeType)
+		if format == "" {
+			format = "unknown"
+		}
+		formats = append(formats, format)
+	}
+	return strings.Join(formats, ",")
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.

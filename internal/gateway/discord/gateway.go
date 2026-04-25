@@ -265,7 +265,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	prompt := msg.Content
 	images, unsupported := dg.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
-		dg.Log.Debug("Discord attachments: channel=%s accepted=%d downgraded=%d", msg.ChannelID, len(images), len(unsupported))
+		dg.Log.Debug("Discord attachments: chat=%s accepted=%d downgraded=%d declared_formats=%q", msg.ChannelID, len(images), len(unsupported), attachmentFormats(msg.Attachments))
 	}
 
 	if msg.GuildID != "" {
@@ -450,7 +450,7 @@ func (dg *Gateway) loadImages(attachments []struct {
 			unsupported = append(unsupported, label)
 			continue
 		}
-		if !media.SupportsMIMEType(attachment.ContentType) && attachment.ContentType != "" {
+		if attachment.ContentType != "" && !media.LooksLikeImageMIME(attachment.ContentType) {
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -459,7 +459,7 @@ func (dg *Gateway) loadImages(attachments []struct {
 			continue
 		}
 
-		image, err := dg.fetchAttachmentImage(attachment.URL, attachment.Filename)
+		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
 			dg.Log.Warn("Discord attachment rejected for %q: %v", attachment.Filename, err)
 			unsupported = append(unsupported, label)
@@ -478,7 +478,7 @@ func (dg *Gateway) loadImages(attachments []struct {
 	return images, unsupported
 }
 
-func (dg *Gateway) fetchAttachmentImage(rawURL, filename string) (ollama.InputImage, error) {
+func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (ollama.InputImage, error) {
 	if strings.TrimSpace(rawURL) == "" {
 		return ollama.InputImage{}, nil
 	}
@@ -504,16 +504,43 @@ func (dg *Gateway) fetchAttachmentImage(rawURL, filename string) (ollama.InputIm
 		return ollama.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
 	}
 
-	mimeType := media.DetectMIMEType(resp.Header, body)
-	if mimeType == "" {
-		return ollama.InputImage{}, nil
-	}
-
-	image, err := media.BuildInputImageFromBytes(mimeType, body, filename)
+	result, err := media.NormalizeInputImageFromBytes(resp.Header, declaredMIME, body, filename)
 	if err != nil {
 		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
 	}
-	return image, nil
+	dg.Log.Debug(
+		"Discord attachment normalized: filename=%q id=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
+		filename,
+		attachmentID,
+		strings.TrimSpace(declaredMIME),
+		result.DetectedMIME,
+		result.Image.MimeType,
+		len(body),
+		result.Width,
+		result.Height,
+		result.PreservedAlpha,
+		result.UsedDeclaredMIME,
+	)
+	return result.Image, nil
+}
+
+func attachmentFormats(attachments []struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int    `json:"size,omitempty"`
+	URL         string `json:"url,omitempty"`
+	ProxyURL    string `json:"proxy_url,omitempty"`
+}) string {
+	formats := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		format := strings.TrimSpace(attachment.ContentType)
+		if format == "" {
+			format = "unknown"
+		}
+		formats = append(formats, format)
+	}
+	return strings.Join(formats, ",")
 }
 
 // sendTyping posts a typing indicator to Discord.

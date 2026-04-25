@@ -353,7 +353,7 @@ func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []s
 			unsupported = append(unsupported, label)
 			continue
 		}
-		if !media.SupportsMIMEType(attachment.MimeType) && attachment.MimeType != "" {
+		if attachment.MimeType != "" && !media.LooksLikeImageMIME(attachment.MimeType) {
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -416,18 +416,25 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage
 		return ollama.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", attachment.TransferName, media.MaxImageBytes)
 	}
 
-	mimeType := media.DetectMIMEType(resp.Header, body)
-	if mimeType == "" && media.SupportsMIMEType(attachment.MimeType) {
-		mimeType = attachment.MimeType
-	}
-	if mimeType == "" {
-		return ollama.InputImage{}, nil
-	}
-
-	image, err := media.BuildInputImageFromBytes(mimeType, body, attachment.TransferName)
+	result, err := media.NormalizeInputImageFromBytes(resp.Header, attachment.MimeType, body, attachment.TransferName)
 	if err != nil {
 		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", attachment.TransferName, err)
 	}
+	g.Log.Debug(
+		"iMessage attachment normalized: filename=%q guid=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
+		attachment.TransferName,
+		attachment.GUID,
+		strings.TrimSpace(attachment.MimeType),
+		result.DetectedMIME,
+		result.Image.MimeType,
+		len(body),
+		result.Width,
+		result.Height,
+		result.PreservedAlpha,
+		result.UsedDeclaredMIME,
+	)
+
+	image := result.Image
 	return image, nil
 }
 
