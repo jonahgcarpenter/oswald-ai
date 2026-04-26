@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -222,9 +221,8 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+func (a *Agent) Process(gateway string, kind string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
 	a.log.Debug("Request start: session=%q sender=%q display=%q prompt=%q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
-	a.metrics.ObserveRequestShape(gateway, len(userPrompt), len(userImages), totalImageBytes(userImages))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -257,7 +255,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 	// Retrieve retained conversation turns for this session. TTL and max-turn
 	// pruning are applied destructively inside the store before history is used.
 	turns := a.memory.Turns(sessionKey)
-	a.metrics.ObserveMemoryLoad(gateway, len(turns))
 
 	// If the estimated prompt would exceed the active model budget, destructively
 	// compact the oldest retained turns into a synthetic turn pair that remains
@@ -266,7 +263,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 	if compacted {
 		a.memory.ReplaceTurns(sessionKey, compactedTurns)
 		turns = compactedTurns
-		a.metrics.ObserveMemoryCompaction(prune.RemovedPairs)
 	}
 	trimmedHistory := memory.FlattenTurns(turns)
 
@@ -291,8 +287,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history compaction",
 			a.model, prune.EstimatedAfter, a.budget.PromptBudget())
 	}
-	a.metrics.ObservePromptBudget(a.model, prune.EstimatedAfter, 0, a.budget.PromptBudget(), prune.EstimatedAfter > a.budget.PromptBudget())
-
 	req := ollama.ChatRequest{
 		Model:  a.model,
 		Tools:  a.registry.OllamaTools(),
@@ -334,23 +328,20 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 
 	var lastResp *ollama.ChatResponse
 	toolFailureBudgetExhausted := false
-	iterations := 0
-	toolCalls := 0
+	totalPromptTokens := 0
+	totalCompletionTokens := 0
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
 	// expires, or consecutive tool execution failures exhaust the retry budget.
 	for iteration := 1; ; iteration++ {
-		iterations = iteration
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
 
 		req.Messages = messages
 
-		chatStartedAt := time.Now()
 		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
-		a.metrics.ObserveLLMCall(a.model, req.Stream, llmResultLabel(err), time.Since(chatStartedAt), promptEvalCount(resp), evalCount(resp), evalDuration(resp))
 		if err != nil {
 			a.log.Error("Model call failed: model=%s iteration=%d err=%v", a.model, iteration, err)
 			return &AgentResponse{
@@ -361,10 +352,11 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		}
 
 		lastResp = resp
+		totalPromptTokens += promptEvalCount(resp)
+		totalCompletionTokens += evalCount(resp)
 		if iteration == 1 && resp.PromptEvalCount > 0 {
 			a.log.Debug("Context budget: model=%s estimated_prompt_tokens=%d actual_prompt_tokens=%d",
 				a.model, prune.EstimatedAfter, resp.PromptEvalCount)
-			a.metrics.ObservePromptBudget(a.model, 0, resp.PromptEvalCount, a.budget.PromptBudget(), resp.PromptEvalCount > a.budget.PromptBudget())
 		}
 
 		a.log.Debug("Agentic loop iteration %d: tool_calls=%d thinking_len=%d content_len=%d failure_streak=%d",
@@ -384,7 +376,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		// NOTE: Most models only emit one tool call at a time, but we handle
 		// multiple to be safe.
 		for _, tc := range resp.Message.ToolCalls {
-			toolCalls++
 			toolName := tc.Function.Name
 			traceEntry := debug.ToolExecutionTrace{
 				Iteration: iteration,
@@ -399,7 +390,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 
 			var toolContent string
 
-			toolStartedAt := time.Now()
 			result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
@@ -407,14 +397,14 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
 				traceEntry.Error = execErr.Error()
-				a.metrics.ObserveTool(toolName, "error", classifyToolError(execErr), time.Since(toolStartedAt), toolArgumentChars(tc.Function.Arguments), len(toolContent))
+				a.metrics.ObserveToolCall(gateway, toolName, "error")
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
 				a.log.Debug("Tool execution succeeded: name=%q", toolName)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
-				a.metrics.ObserveTool(toolName, "success", "", time.Since(toolStartedAt), toolArgumentChars(tc.Function.Arguments), len(toolContent))
+				a.metrics.ObserveToolCall(gateway, toolName, "success")
 			}
 			traceEntry.Result = toolContent
 			toolExecutions = append(toolExecutions, traceEntry)
@@ -443,9 +433,7 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		finalReq.Messages = messages
 		finalReq.Tools = nil
 
-		chatStartedAt := time.Now()
 		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
-		a.metrics.ObserveLLMCall(a.model, finalReq.Stream, llmResultLabel(err), time.Since(chatStartedAt), promptEvalCount(resp), evalCount(resp), evalDuration(resp))
 		if err != nil {
 			a.log.Error("Model finish failed after tool failures: model=%s err=%v", a.model, err)
 			return &AgentResponse{
@@ -456,6 +444,8 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		}
 
 		lastResp = resp
+		totalPromptTokens += promptEvalCount(resp)
+		totalCompletionTokens += evalCount(resp)
 		a.log.Debug("Agentic loop complete after disabling tools following %d consecutive tool failures", consecutiveToolFailures)
 	}
 
@@ -515,12 +505,8 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
 			ollama.ChatMessage{Role: "assistant", Content: finalContent},
 		)
-		a.metrics.ObserveMemoryPersist(gateway, 1)
-	} else {
-		a.metrics.ObserveMemoryPersist(gateway, 0)
 	}
-	a.metrics.ObserveRequestOutput(gateway, len(finalContent))
-	a.metrics.ObserveAgentRequest(gateway, req.Stream, iterations, toolCalls, finalContent == "", toolFailureBudgetExhausted)
+	a.metrics.ObserveRequestTokens(gateway, kind, totalPromptTokens, totalCompletionTokens)
 
 	return &AgentResponse{
 		Model:    a.model,
@@ -528,13 +514,6 @@ func (a *Agent) Process(gateway string, sessionKey string, senderID string, disp
 		Thinking: finalThinking,
 		Metrics:  mapMetrics(lastResp),
 	}, nil
-}
-
-func llmResultLabel(err error) string {
-	if err != nil {
-		return "error"
-	}
-	return "success"
 }
 
 func promptEvalCount(resp *ollama.ChatResponse) int {
@@ -549,50 +528,6 @@ func evalCount(resp *ollama.ChatResponse) int {
 		return 0
 	}
 	return resp.EvalCount
-}
-
-func evalDuration(resp *ollama.ChatResponse) int64 {
-	if resp == nil {
-		return 0
-	}
-	return resp.EvalDuration
-}
-
-func totalImageBytes(images []ollama.InputImage) int {
-	total := 0
-	for _, image := range images {
-		total += len(image.Data)
-	}
-	return total
-}
-
-func toolArgumentChars(arguments map[string]interface{}) int {
-	payload, err := json.Marshal(arguments)
-	if err != nil {
-		return 0
-	}
-	return len(payload)
-}
-
-func classifyToolError(err error) string {
-	if err == nil {
-		return ""
-	}
-	text := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(text, "timeout"), strings.Contains(text, "deadline"):
-		return "timeout"
-	case strings.Contains(text, "http"):
-		return "http"
-	case strings.Contains(text, "marshal"), strings.Contains(text, "decode"), strings.Contains(text, "parse"):
-		return "validation"
-	case strings.Contains(text, "no handler"):
-		return "not_registered"
-	case strings.Contains(text, "read"), strings.Contains(text, "write"), strings.Contains(text, "open"):
-		return "io"
-	default:
-		return "internal"
-	}
 }
 
 func (a *Agent) currentSpeakerLine(senderID string) string {

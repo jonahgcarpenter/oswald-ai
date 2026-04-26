@@ -38,19 +38,16 @@ type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
 	options  Options
-	metrics  *metrics.Metrics
 	log      *config.Logger
 }
 
 // NewStore creates an in-memory conversation store.
-func NewStore(options Options, obs *metrics.Metrics, log *config.Logger) *Store {
+func NewStore(options Options, _ *metrics.Metrics, log *config.Logger) *Store {
 	store := &Store{
 		sessions: make(map[string]*session),
 		options:  sanitizeOptions(options),
-		metrics:  obs,
 		log:      log,
 	}
-	store.updateMetricsLocked()
 	return store
 }
 
@@ -82,14 +79,12 @@ func (s *Store) Turns(sessionKey string) []Turn {
 	removedOverflow := result.RemovedOverflow
 	if len(keptTurns) == 0 {
 		delete(s.sessions, sessionKey)
-		s.updateMetricsLocked()
 		s.mu.Unlock()
 		s.logPrune(sessionKey, removedExpired, removedOverflow, 0, "history")
 		return nil
 	}
 
 	sess.turns = keptTurns
-	s.updateMetricsLocked()
 	s.mu.Unlock()
 
 	s.logPrune(sessionKey, removedExpired, removedOverflow, len(keptTurns), "history")
@@ -121,7 +116,6 @@ func (s *Store) ReplaceTurns(sessionKey string, turns []Turn) {
 		}
 		sess.turns = keptTurns
 	}
-	s.updateMetricsLocked()
 	s.mu.Unlock()
 
 	s.logPrune(sessionKey, removedExpired, removedOverflow, len(keptTurns), "replace")
@@ -164,7 +158,6 @@ func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant
 	} else {
 		sess.turns = prunedTurns
 	}
-	s.updateMetricsLocked()
 
 	turnCount := len(prunedTurns)
 	s.log.Debug("Memory: session=%q turns=%d action=append", sessionKey, turnCount)
@@ -218,15 +211,4 @@ func (s *Store) logPrune(sessionKey string, removedExpired int, removedOverflow 
 		s.options.MaxTurns,
 		s.options.MaxAge,
 	)
-}
-
-func (s *Store) updateMetricsLocked() {
-	if s.metrics == nil {
-		return
-	}
-	turns := 0
-	for _, sess := range s.sessions {
-		turns += len(sess.turns)
-	}
-	s.metrics.SetMemoryStoreState(len(s.sessions), turns)
 }

@@ -22,6 +22,7 @@ const (
 // one Result to ResponseChan when processing completes.
 type Request struct {
 	Channel      string                  // Gateway name (e.g., "discord", "websocket")
+	Kind         string                  // Agent-bound request kind (e.g. text_only, image_only)
 	ChatID       string                  // Conversation/room identifier
 	SenderID     string                  // User identifier
 	DisplayName  string                  // Human-readable display name for the sender (optional)
@@ -89,10 +90,8 @@ func (b *Broker) Submit(req *Request) {
 
 	select {
 	case b.requests <- req:
-		b.metrics.ObserveBrokerEnqueue(len(b.requests))
 	default:
 		b.log.Warn("Broker: rejected request channel=%s chat_id=%s reason=queue_full", req.Channel, req.ChatID)
-		b.metrics.ObserveBrokerRejection(req.Channel, "queue_full", len(b.requests))
 		req.ResponseChan <- Result{
 			Response: &agent.AgentResponse{
 				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
@@ -107,7 +106,6 @@ func (b *Broker) Submit(req *Request) {
 // Shutdown() is called.
 func (b *Broker) Shutdown() {
 	b.log.Info("Broker: shutting down queued_requests=%d", len(b.requests))
-	b.metrics.ObserveBrokerEnqueue(0)
 	close(b.requests)
 	b.wg.Wait()
 	b.log.Info("Broker: all workers stopped")
@@ -122,12 +120,9 @@ func (b *Broker) runWorker(id int) {
 
 	for req := range b.requests {
 		b.log.Debug("Broker worker: id=%d channel=%s chat_id=%s action=process_request", id, req.Channel, req.ChatID)
-		b.metrics.ObserveBrokerDequeue(req.Channel, time.Since(req.EnqueuedAt), len(b.requests))
-		b.metrics.IncActiveRequest(req.Channel)
 
 		startedAt := time.Now()
-		resp, err := b.agent.Process(req.Channel, req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
-		b.metrics.DecActiveRequest(req.Channel)
+		resp, err := b.agent.Process(req.Channel, req.Kind, req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
 
 		resultLabel := "success"
 		switch {
@@ -140,8 +135,7 @@ func (b *Broker) runWorker(id int) {
 		case resp.Response == "":
 			resultLabel = "empty_response"
 		}
-		b.metrics.ObserveRequest(req.Channel, req.SenderID, resultLabel, time.Since(req.EnqueuedAt))
-		b.metrics.ObserveBrokerProcessing(req.Channel, resultLabel, time.Since(startedAt))
+		b.metrics.ObserveRequest(req.Channel, req.Kind, req.SenderID, resultLabel, time.Since(startedAt))
 
 		req.ResponseChan <- Result{
 			Response: resp,

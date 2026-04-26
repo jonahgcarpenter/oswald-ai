@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
@@ -40,11 +39,8 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Warn("WebSocket upgrade failed: %v", err)
-		wg.Metrics.ObserveError("websocket", "upgrade")
 		return
 	}
-	wg.Metrics.IncWebsocketConnections()
-	defer wg.Metrics.DecWebsocketConnections()
 	defer conn.Close()
 
 	// remoteAddr is used as the fallback identity for clients that send plain text.
@@ -54,7 +50,6 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
 			log.Debug("Websocket connection closed: %v", err)
-			wg.Metrics.ObserveGatewayIgnored("websocket", "connection_closed")
 			break
 		}
 
@@ -78,9 +73,6 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			userPrompt = string(message)
 			userID = remoteAddr
 		}
-		isCommand := strings.HasPrefix(strings.TrimSpace(userPrompt), "/connect") || strings.HasPrefix(strings.TrimSpace(userPrompt), "/disconnect")
-		wg.Metrics.ObserveGatewayReceived("websocket", requestKind(userPrompt, len(userImages), isCommand))
-
 		// Build the session key from the gateway identity while keeping
 		// persistent memory keyed separately by canonical user ID.
 		sessionIdentity := userID
@@ -90,16 +82,10 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		}
 		normalizedUserID, normErr := accountlink.NormalizeIdentifier("websocket", userID)
 		if normErr != nil {
-			wg.Metrics.ObserveGatewaySent("websocket", "error")
-			wg.Metrics.ObserveGatewaySendFailure("websocket", "bad_identity")
-			wg.Metrics.ObserveError("websocket", "bad_identity")
 			errorPayload := agent.AgentResponse{Error: normErr.Error()}
 			errBytes, _ := json.Marshal(errorPayload)
-			writeStartedAt := time.Now()
 			if err := conn.WriteMessage(messageType, errBytes); err != nil { // nolint: govet
-				wg.Metrics.ObserveWebsocketWriteFailure()
 			}
-			wg.Metrics.ObserveGatewaySendDuration("websocket", "error", time.Since(writeStartedAt))
 			continue
 		}
 		sessionKey := "websocket:" + sessionIdentity
@@ -107,34 +93,22 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
 		if err != nil {
 			log.Error("Websocket account resolution error: %v", err)
-			wg.Metrics.ObserveGatewaySent("websocket", "error")
-			wg.Metrics.ObserveGatewaySendFailure("websocket", "account_resolution")
-			wg.Metrics.ObserveError("websocket", "account_resolution")
 			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
 			errBytes, _ := json.Marshal(errorPayload)
-			writeStartedAt := time.Now()
 			if err := conn.WriteMessage(messageType, errBytes); err != nil { // nolint: govet
-				wg.Metrics.ObserveWebsocketWriteFailure()
 			}
-			wg.Metrics.ObserveGatewaySendDuration("websocket", "error", time.Since(writeStartedAt))
 			continue
 		}
 
 		if commandResponse, handled, commandErr := wg.Commands.Handle(canonicalUserID, userPrompt); handled {
 			if commandErr != nil {
 				log.Error("Websocket account command error: %v", commandErr)
-				wg.Metrics.ObserveError("websocket", "command")
 				commandResponse = "Failed to process account linking command."
 			}
-			wg.Metrics.ObserveGatewaySent("websocket", "success")
 			payload := agent.AgentResponse{Response: commandResponse}
 			respBytes, _ := json.Marshal(payload)
-			writeStartedAt := time.Now()
 			if err := conn.WriteMessage(messageType, respBytes); err != nil { // nolint: govet
-				wg.Metrics.ObserveWebsocketWriteFailure()
-				wg.Metrics.ObserveGatewaySendFailure("websocket", "write")
 			}
-			wg.Metrics.ObserveGatewaySendDuration("websocket", "success", time.Since(writeStartedAt))
 			continue
 		}
 
@@ -146,21 +120,18 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 				log.Debug("Websocket: streaming response started (type=%s)", chunk.Type)
 				firstChunk = false
 			}
-			wg.Metrics.ObserveWebsocketStreamChunk(string(chunk.Type))
 			chunkBytes, err := json.Marshal(chunk)
 			if err != nil {
 				log.Warn("Websocket: failed to marshal stream chunk: %v", err)
-				wg.Metrics.ObserveError("websocket", "stream_marshal")
 				return
 			}
 			if err := conn.WriteMessage(messageType, chunkBytes); err != nil { // nolint: govet
-				wg.Metrics.ObserveWebsocketWriteFailure()
-				wg.Metrics.ObserveGatewaySendFailure("websocket", "stream_write")
 			}
 		}
 
 		req := &broker.Request{
 			Channel:      "websocket",
+			Kind:         requestKind(userPrompt, len(userImages)),
 			ChatID:       sessionKey,
 			SenderID:     canonicalUserID,
 			DisplayName:  displayName,
@@ -175,38 +146,24 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 
 		if result.Err != nil {
 			log.Error("Engine processing error: %v", result.Err)
-			wg.Metrics.ObserveGatewaySent("websocket", "error")
-			wg.Metrics.ObserveGatewaySendFailure("websocket", "internal")
-			wg.Metrics.ObserveError("websocket", "internal")
 			errorPayload := agent.AgentResponse{Error: "Internal engine timeout or failure"}
 			errBytes, _ := json.Marshal(errorPayload)
-			writeStartedAt := time.Now()
 			if err := conn.WriteMessage(messageType, errBytes); err != nil { // nolint: govet
-				wg.Metrics.ObserveWebsocketWriteFailure()
 			}
-			wg.Metrics.ObserveGatewaySendDuration("websocket", "error", time.Since(writeStartedAt))
 			continue
 		}
 
 		jsonBytes, err := json.Marshal(result.Response)
 		if err != nil {
 			log.Error("Failed to marshal JSON payload: %v", err)
-			wg.Metrics.ObserveError("websocket", "marshal")
 			continue
 		}
 
 		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), result.Response.Model)
-		writeStartedAt := time.Now()
 		if err = conn.WriteMessage(messageType, jsonBytes); err != nil {
 			log.Debug("Websocket write error: %v", err)
-			wg.Metrics.ObserveGatewaySent("websocket", "error")
-			wg.Metrics.ObserveGatewaySendFailure("websocket", "write")
-			wg.Metrics.ObserveGatewaySendDuration("websocket", "error", time.Since(writeStartedAt))
-			wg.Metrics.ObserveWebsocketWriteFailure()
 			break
 		}
-		wg.Metrics.ObserveGatewaySent("websocket", "success")
-		wg.Metrics.ObserveGatewaySendDuration("websocket", "success", time.Since(writeStartedAt))
 	}
 }
 
@@ -218,19 +175,15 @@ func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]ollama.InputI
 	validated := make([]ollama.InputImage, 0, len(images))
 	unsupported := make([]string, 0)
 	for _, image := range images {
-		wg.Metrics.ObserveAttachmentDeclaredMIME("websocket", strings.TrimSpace(image.MimeType))
 		if len(validated) >= media.MaxImagesPerRequest {
-			wg.Metrics.ObserveUnsupportedAttachment("websocket", "too_many")
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
 		result, err := normalizeIncomingImage(image)
 		if err != nil {
-			wg.Metrics.ObserveUnsupportedAttachment("websocket", classifyIncomingImageError(err))
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		wg.Metrics.ObserveAttachmentDetectedMIME("websocket", result.Image.MimeType)
 		wg.Log.Debug(
 			"WebSocket attachment normalized: source=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
 			image.Source,
@@ -294,10 +247,7 @@ func attachmentFormats(images []IncomingImage) string {
 	return strings.Join(formats, ",")
 }
 
-func requestKind(prompt string, imageCount int, isCommand bool) string {
-	if isCommand {
-		return "command"
-	}
+func requestKind(prompt string, imageCount int) string {
 	hasText := strings.TrimSpace(prompt) != ""
 	switch {
 	case hasText && imageCount > 0:

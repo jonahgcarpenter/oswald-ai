@@ -258,7 +258,6 @@ func resolveMentions(text string, mentions []struct {
 // handleMessage processes an incoming Discord message.
 func (dg *Gateway) handleMessage(msg MessageCreate) {
 	if msg.Author.Bot {
-		dg.Metrics.ObserveGatewayIgnored("discord", "bot_message")
 		return
 	}
 
@@ -276,7 +275,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		isAccountCommand := strings.HasPrefix(strings.TrimSpace(msg.Content), "/connect") || strings.HasPrefix(strings.TrimSpace(msg.Content), "/disconnect")
 
 		if !isReplyToBot && !isAccountCommand && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
-			dg.Metrics.ObserveGatewayIgnored("discord", "no_mention")
 			return
 		}
 		replyToID = msg.ID
@@ -288,12 +286,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	prompt = strings.TrimSpace(prompt)
 	prompt = media.AugmentPromptWithUnsupportedFiles(prompt, unsupported)
-	dg.Metrics.ObserveGatewayReceived("discord", requestKind(prompt, len(images), strings.HasPrefix(strings.TrimSpace(msg.Content), "/connect") || strings.HasPrefix(strings.TrimSpace(msg.Content), "/disconnect")))
 	if prompt == "" && len(images) == 0 {
-		startedAt := time.Now()
 		_, _ = dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
-		dg.Metrics.ObserveGatewaySent("discord", "success")
-		dg.Metrics.ObserveGatewaySendDuration("discord", "success", time.Since(startedAt))
 		return
 	}
 
@@ -314,37 +308,23 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
 		dg.Log.Error("Discord account normalization error: %v", normErr)
-		startedAt := time.Now()
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
-		dg.Metrics.ObserveGatewaySent("discord", "error")
-		dg.Metrics.ObserveGatewaySendDuration("discord", "error", time.Since(startedAt))
-		dg.Metrics.ObserveGatewaySendFailure("discord", "bad_identity")
-		dg.Metrics.ObserveError("discord", "bad_identity")
 		return
 	}
 
 	canonicalUserID, err := dg.Links.EnsureAccount("discord", normalizedAuthorID, msg.Author.Username)
 	if err != nil {
 		dg.Log.Error("Discord account resolution error: %v", err)
-		startedAt := time.Now()
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your account identity.", replyToID)
-		dg.Metrics.ObserveGatewaySent("discord", "error")
-		dg.Metrics.ObserveGatewaySendDuration("discord", "error", time.Since(startedAt))
-		dg.Metrics.ObserveGatewaySendFailure("discord", "account_resolution")
-		dg.Metrics.ObserveError("discord", "account_resolution")
 		return
 	}
 
 	if commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
 			dg.Log.Error("Discord account command error: %v", commandErr)
-			dg.Metrics.ObserveError("discord", "command")
 			commandResponse = "Failed to process account linking command."
 		}
-		startedAt := time.Now()
 		_, _ = dg.sendMessage(msg.ChannelID, commandResponse, replyToID)
-		dg.Metrics.ObserveGatewaySent("discord", "success")
-		dg.Metrics.ObserveGatewaySendDuration("discord", "success", time.Since(startedAt))
 		return
 	}
 
@@ -357,7 +337,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 		switch {
 		case strings.TrimSpace(quotedContent) != "" && replyName != "":
-			dg.Metrics.ObserveDiscordReplyContext("hit")
 			if msg.ReferencedMessage.Author.ID == dg.BotID {
 				dg.Log.Debug("Discord reply context: quoted Oswald message %s in channel %s", msg.ReferencedMessage.ID, msg.ChannelID)
 			} else {
@@ -369,14 +348,12 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 				prompt,
 			)
 		case replyName != "":
-			dg.Metrics.ObserveDiscordReplyContext("partial")
 			dg.Log.Debug("Discord reply context: referenced message from %s is unavailable in channel %s", replyName, msg.ChannelID)
 			prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s",
 				replyName,
 				prompt,
 			)
 		default:
-			dg.Metrics.ObserveDiscordReplyContext("miss")
 			dg.Log.Debug("Discord reply context: referenced message is unavailable in channel %s", msg.ChannelID)
 			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
@@ -388,22 +365,14 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	defer close(stopTyping)
 
 	go func() {
-		if err := dg.sendTyping(msg.ChannelID); err != nil {
-			dg.Metrics.ObserveDiscordTyping("error")
-		} else {
-			dg.Metrics.ObserveDiscordTyping("success")
-		}
+		_ = dg.sendTyping(msg.ChannelID)
 		ticker := time.NewTicker(9 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				if err := dg.sendTyping(msg.ChannelID); err != nil {
-					dg.Metrics.ObserveDiscordTyping("error")
-				} else {
-					dg.Metrics.ObserveDiscordTyping("success")
-				}
+				_ = dg.sendTyping(msg.ChannelID)
 			case <-stopTyping:
 				return
 			}
@@ -412,6 +381,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	req := &broker.Request{
 		Channel:      "discord",
+		Kind:         requestKind(prompt, len(images)),
 		ChatID:       msg.ChannelID,
 		SenderID:     canonicalUserID,
 		DisplayName:  msg.Author.Username,
@@ -426,12 +396,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	if result.Err != nil {
 		dg.Log.Error("Agent process error: %v", result.Err)
-		startedAt := time.Now()
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID)
-		dg.Metrics.ObserveGatewaySent("discord", "error")
-		dg.Metrics.ObserveGatewaySendDuration("discord", "error", time.Since(startedAt))
-		dg.Metrics.ObserveGatewaySendFailure("discord", "internal")
-		dg.Metrics.ObserveError("discord", "internal")
 		return
 	}
 
@@ -447,7 +412,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	dg.Log.Debug("Discord response to %s: %d chunk(s), %d chars, model: %s",
 		msg.Author.Username, len(chunks), len(responseText), finalPayload.Model)
-	dg.Metrics.ObserveDiscordSplitChunks(len(chunks))
 
 	for i, chunk := range chunks {
 		currentReplyID := ""
@@ -455,23 +419,16 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			currentReplyID = replyToID
 		}
 
-		startedAt := time.Now()
 		sentMessageID, err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
 		if err != nil {
 			dg.Log.Error("Failed to send chunk %d to Discord: %v", i+1, err)
-			dg.Metrics.ObserveGatewaySent("discord", "error")
-			dg.Metrics.ObserveGatewaySendDuration("discord", "error", time.Since(startedAt))
-			dg.Metrics.ObserveGatewaySendFailure("discord", "send")
-			dg.Metrics.ObserveError("discord", "send")
 			break
 		}
-		dg.Metrics.ObserveGatewaySendDuration("discord", "success", time.Since(startedAt))
 
 		if i == 0 {
 			dg.rememberReply(sentMessageID, originCtx)
 		}
 	}
-	dg.Metrics.ObserveGatewaySent("discord", "success")
 }
 
 func (dg *Gateway) loadImages(attachments []struct {
@@ -489,20 +446,16 @@ func (dg *Gateway) loadImages(attachments []struct {
 	images := make([]ollama.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
-		dg.Metrics.ObserveAttachmentDeclaredMIME("discord", strings.TrimSpace(attachment.ContentType))
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
 		if len(images) >= media.MaxImagesPerRequest {
-			dg.Metrics.ObserveUnsupportedAttachment("discord", "too_many")
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.ContentType != "" && !media.LooksLikeImageMIME(attachment.ContentType) {
-			dg.Metrics.ObserveUnsupportedAttachment("discord", "unsupported_type")
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.Size > media.MaxImageBytes {
-			dg.Metrics.ObserveUnsupportedAttachment("discord", "too_large")
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -510,16 +463,13 @@ func (dg *Gateway) loadImages(attachments []struct {
 		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
 			dg.Log.Warn("Discord attachment rejected for %q: %v", attachment.Filename, err)
-			dg.Metrics.ObserveUnsupportedAttachment("discord", classifyRemoteImageError(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if image.Data == "" {
-			dg.Metrics.ObserveUnsupportedAttachment("discord", "empty")
 			unsupported = append(unsupported, label)
 			continue
 		}
-		dg.Metrics.ObserveAttachmentDetectedMIME("discord", image.MimeType)
 		images = append(images, image)
 	}
 
@@ -693,10 +643,7 @@ func trimResponseBody(body []byte) string {
 	return trimmed[:512] + "..."
 }
 
-func requestKind(prompt string, imageCount int, isCommand bool) string {
-	if isCommand {
-		return "command"
-	}
+func requestKind(prompt string, imageCount int) string {
 	hasText := strings.TrimSpace(prompt) != ""
 	switch {
 	case hasText && imageCount > 0:

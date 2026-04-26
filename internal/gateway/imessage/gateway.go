@@ -72,24 +72,19 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	switch strings.TrimSpace(strings.ToLower(event.Type)) {
 	case "new-message":
 		if event.Data.IsFromMe {
-			g.Metrics.ObserveIMessageWebhook("new-message", "ignored_self")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		g.Metrics.ObserveIMessageWebhook("new-message", "accepted")
 		if !hasMessageContent(event.Data) {
 			g.Log.Debug("iMessage webhook ignored: no text or attachments (guid=%s associated_type=%s)", event.Data.GUID, event.Data.AssociatedMessageType)
-			g.Metrics.ObserveGatewayIgnored("imessage", "empty")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		go g.processIncomingMessage(event.Data)
 		w.WriteHeader(http.StatusAccepted)
 	case "typing-indicator":
-		g.Metrics.ObserveIMessageWebhook("typing-indicator", "ignored")
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		g.Metrics.ObserveIMessageWebhook(strings.TrimSpace(strings.ToLower(event.Type)), "ignored")
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -103,7 +98,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	chat := msg.primaryChat()
 	if chat.GUID == "" || strings.TrimSpace(msg.Handle.Address) == "" {
 		g.Log.Debug("iMessage webhook ignored: incomplete message payload")
-		g.Metrics.ObserveGatewayIgnored("imessage", "incomplete")
 		return
 	}
 	images, unsupported := g.loadImages(msg.Attachments)
@@ -113,39 +107,30 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
 			g.Log.Debug("iMessage webhook ignored: incomplete message payload")
-			g.Metrics.ObserveGatewayIgnored("imessage", "incomplete")
 			return
 		}
 	}
 
 	prompt := media.AugmentPromptWithUnsupportedFiles(strings.TrimSpace(msg.Text), unsupported)
-	g.Metrics.ObserveGatewayReceived("imessage", requestKind(prompt, len(images), isAccountCommand(prompt)))
 	if prompt == "" && len(images) == 0 {
-		g.Metrics.ObserveGatewayIgnored("imessage", "empty")
 		return
 	}
 
 	normalizedSenderID, err := accountlink.NormalizeIdentifier("imessage", msg.Handle.Address)
 	if err != nil {
 		g.Log.Error("iMessage identifier normalization error: %v", err)
-		g.Metrics.ObserveError("imessage", "bad_identity")
 		return
 	}
 	displayName := normalizedSenderID
 	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
 		g.Log.Debug("iMessage contact lookup failed for %s: %v", normalizedSenderID, err)
-		g.Metrics.ObserveIMessageContactLookup("error")
 	} else if resolvedName != "" {
 		displayName = resolvedName
-		g.Metrics.ObserveIMessageContactLookup("hit")
-	} else {
-		g.Metrics.ObserveIMessageContactLookup("miss")
 	}
 
 	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, displayName)
 	if err != nil {
 		g.Log.Error("iMessage account resolution error: %v", err)
-		g.Metrics.ObserveError("imessage", "account_resolution")
 		return
 	}
 
@@ -155,7 +140,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	isReplyToBot := false
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupMessage(replyGUID); ok {
-			g.Metrics.ObserveIMessageReplyContext("hit")
 			isReplyToBot = replyCtx.IsFromBot
 			replyName := strings.TrimSpace(replyCtx.DisplayName)
 			if replyName == "" && replyCtx.IsFromBot {
@@ -178,7 +162,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			}
 		} else {
 			g.Log.Debug("iMessage reply context: unknown reply target %s; no cached context available", replyGUID)
-			g.Metrics.ObserveIMessageReplyContext("miss")
 			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
 	}
@@ -190,7 +173,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		selectedMessageGUID = msg.GUID
 	}
 	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
-		g.Metrics.ObserveGatewayIgnored("imessage", "no_mention")
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
 	}
@@ -204,17 +186,11 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	if prompt == "" && len(images) == 0 {
 		responseText := "What do you want idiot."
-		startedAt := time.Now()
 		messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 		if err != nil {
 			g.Log.Error("iMessage empty prompt response send failed: %v", err)
-			g.Metrics.ObserveGatewaySent("imessage", "error")
-			g.Metrics.ObserveGatewaySendDuration("imessage", "error", time.Since(startedAt))
-			g.Metrics.ObserveGatewaySendFailure("imessage", "send")
 		} else {
 			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
-			g.Metrics.ObserveGatewaySent("imessage", "success")
-			g.Metrics.ObserveGatewaySendDuration("imessage", "success", time.Since(startedAt))
 		}
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
@@ -226,26 +202,20 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
 			g.Log.Error("iMessage account command error: %v", commandErr)
-			g.Metrics.ObserveError("imessage", "command")
 			commandResponse = "Failed to process account linking command."
 		}
-		startedAt := time.Now()
 		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, selectedMessageGUID, 0)
 		if err != nil {
 			g.Log.Error("iMessage command response send failed: %v", err)
-			g.Metrics.ObserveGatewaySent("imessage", "error")
-			g.Metrics.ObserveGatewaySendDuration("imessage", "error", time.Since(startedAt))
-			g.Metrics.ObserveGatewaySendFailure("imessage", "send")
 		} else {
 			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, commandResponse)
-			g.Metrics.ObserveGatewaySent("imessage", "success")
-			g.Metrics.ObserveGatewaySendDuration("imessage", "success", time.Since(startedAt))
 		}
 		return
 	}
 
 	req := &broker.Request{
 		Channel:      "imessage",
+		Kind:         requestKind(prompt, len(images)),
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
 		DisplayName:  displayName,
@@ -261,9 +231,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	responseText := ""
 	if result.Err != nil {
 		g.Log.Error("iMessage agent process error: %v", result.Err)
-		g.Metrics.ObserveGatewaySent("imessage", "error")
-		g.Metrics.ObserveGatewaySendFailure("imessage", "internal")
-		g.Metrics.ObserveError("imessage", "internal")
 		responseText = "Sorry, I encountered an internal error processing that."
 	} else if result.Response != nil {
 		responseText = strings.TrimSpace(result.Response.Response)
@@ -273,19 +240,12 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	startedAt := time.Now()
 	messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 	if err != nil {
 		g.Log.Error("iMessage send failed for chat %s: %v", chat.GUID, err)
-		g.Metrics.ObserveGatewaySent("imessage", "error")
-		g.Metrics.ObserveGatewaySendDuration("imessage", "error", time.Since(startedAt))
-		g.Metrics.ObserveGatewaySendFailure("imessage", "send")
-		g.Metrics.ObserveError("imessage", "send")
 		return
 	}
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
-	g.Metrics.ObserveGatewaySent("imessage", "success")
-	g.Metrics.ObserveGatewaySendDuration("imessage", "success", time.Since(startedAt))
 }
 
 func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, error) {
@@ -389,20 +349,16 @@ func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []s
 	images := make([]ollama.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
-		g.Metrics.ObserveAttachmentDeclaredMIME("imessage", strings.TrimSpace(attachment.MimeType))
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
 		if len(images) >= media.MaxImagesPerRequest {
-			g.Metrics.ObserveUnsupportedAttachment("imessage", "too_many")
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.MimeType != "" && !media.LooksLikeImageMIME(attachment.MimeType) {
-			g.Metrics.ObserveUnsupportedAttachment("imessage", "unsupported_type")
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.TotalBytes > media.MaxImageBytes {
-			g.Metrics.ObserveUnsupportedAttachment("imessage", "too_large")
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -410,16 +366,13 @@ func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []s
 		image, err := g.fetchAttachmentImage(attachment)
 		if err != nil {
 			g.Log.Warn("iMessage attachment rejected for %q: %v", attachment.TransferName, err)
-			g.Metrics.ObserveUnsupportedAttachment("imessage", classifyRemoteImageError(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if image.Data == "" {
-			g.Metrics.ObserveUnsupportedAttachment("imessage", "empty")
 			unsupported = append(unsupported, label)
 			continue
 		}
-		g.Metrics.ObserveAttachmentDetectedMIME("imessage", image.MimeType)
 		images = append(images, image)
 	}
 
@@ -512,17 +465,14 @@ func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	}
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
-		g.Metrics.ObserveIMessageTyping("error")
 		return fmt.Errorf("send BlueBubbles typing request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		g.Log.Warn("BlueBubbles typing failed: chat=%s status=%d body=%q", chatGUID, resp.StatusCode, strings.TrimSpace(string(body)))
-		g.Metrics.ObserveIMessageTyping("error")
 		return fmt.Errorf("BlueBubbles typing request failed with status %d", resp.StatusCode)
 	}
-	g.Metrics.ObserveIMessageTyping("success")
 	return nil
 }
 
@@ -617,10 +567,7 @@ func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string
 	return parsed.String(), nil
 }
 
-func requestKind(prompt string, imageCount int, isCommand bool) string {
-	if isCommand {
-		return "command"
-	}
+func requestKind(prompt string, imageCount int) string {
 	hasText := strings.TrimSpace(prompt) != ""
 	switch {
 	case hasText && imageCount > 0:

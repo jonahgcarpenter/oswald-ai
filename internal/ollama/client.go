@@ -19,19 +19,18 @@ import (
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
-	metrics    *metrics.Metrics
 	log        *config.Logger
 }
 
 // NewClient creates an Ollama client with the given base URL and logger.
 func NewClient(baseURL string, obs *metrics.Metrics, log *config.Logger) *Client {
+	_ = obs
 	return &Client{
 		BaseURL: baseURL,
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
-		metrics: obs,
-		log:     log,
+		log: log,
 	}
 }
 
@@ -196,7 +195,6 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 
 		var finalResp ChatResponse
 		finalResp.Model = req.Model
-		streamStartedAt := time.Now()
 		firstChunkObserved := false
 
 		scanner := bufio.NewScanner(resp.Body)
@@ -211,7 +209,6 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 
 			msg := mapFromOllamaMessage(chunk.Message)
 			if !firstChunkObserved && (msg.Content != "" || msg.Thinking != "" || len(msg.ToolCalls) > 0) {
-				c.metrics.ObserveLLMResponseMetrics(req.Model, time.Since(streamStartedAt), 0, 0, 0, "", false)
 				firstChunkObserved = true
 			}
 			chatStreamCallback(msg)
@@ -231,7 +228,6 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 				finalResp.PromptEvalDuration = chunk.PromptEvalDuration
 				finalResp.EvalDuration = chunk.EvalDuration
 				finalResp.EvalCount = chunk.EvalCount
-				c.metrics.ObserveLLMResponseMetrics(req.Model, 0, chunk.LoadDuration, chunk.PromptEvalDuration, chunk.EvalDuration, chunk.DoneReason, len(finalResp.Message.ToolCalls) > 0)
 			}
 		}
 		if err := scanner.Err(); err != nil {
@@ -264,8 +260,6 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	if msg.Content == "" && msg.Thinking != "" {
 		msg.Content = msg.Thinking
 	}
-	c.metrics.ObserveLLMResponseMetrics(req.Model, 0, ollamaResp.LoadDuration, ollamaResp.PromptEvalDuration, ollamaResp.EvalDuration, ollamaResp.DoneReason, len(msg.ToolCalls) > 0)
-
 	return &ChatResponse{
 		Model:              ollamaResp.Model,
 		Message:            msg,
