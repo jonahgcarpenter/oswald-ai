@@ -96,7 +96,7 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 		return "", err
 	}
 
-	s.log.Debug("AccountLink: created canonical user %s for %s", canonicalID, key)
+	s.log.Debug("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("account", key))
 	return canonicalID, nil
 }
 
@@ -204,7 +204,7 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 		if err := s.memories.MergeUsers(canonicalUserID, existingOwner); err != nil {
 			return LinkResult{}, err
 		}
-		s.log.Info("AccountLink: merged source_user=%s target_user=%s account=%s", existingOwner, canonicalUserID, key)
+		s.log.Info("account_link.users.merged", "merged linked users", config.F("source_user_id", existingOwner), config.F("target_user_id", canonicalUserID), config.F("account", key))
 
 		mergedUser := current
 		seen := make(map[string]struct{}, len(mergedUser.Accounts))
@@ -262,7 +262,7 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 	if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(current.Accounts)); err != nil {
 		return LinkResult{}, err
 	}
-	s.log.Info("AccountLink: linked account=%s canonical_user=%s", key, canonicalUserID)
+	s.log.Info("account_link.account.linked", "linked account", config.F("account", key), config.F("target_user_id", canonicalUserID))
 
 	return LinkResult{CanonicalUserID: canonicalUserID, LinkedAccount: linked}, nil
 }
@@ -311,7 +311,7 @@ func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string)
 	if err := s.saveLocked(data); err != nil {
 		return err
 	}
-	s.log.Info("AccountLink: disconnected account=%s canonical_user=%s", key, canonicalUserID)
+	s.log.Info("account_link.account.disconnected", "disconnected account", config.F("account", key), config.F("target_user_id", canonicalUserID))
 	return s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(user.Accounts))
 }
 
@@ -337,14 +337,14 @@ func (s *Service) loadLocked() (fileData, error) {
 		if jsonErr := json.Unmarshal(sanitized, &data); jsonErr != nil {
 			backupPath := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
 			if writeErr := os.WriteFile(backupPath, raw, 0o644); writeErr != nil {
-				s.log.Warn("AccountLink: failed to back up corrupt store %s: %v", backupPath, writeErr)
+				s.log.Warn("account_link.store.backup_failed", "failed to back up corrupt account link store", config.F("path", backupPath), config.F("status", "degraded"), config.ErrorField(writeErr))
 			}
 			return fileData{}, fmt.Errorf("failed to decode account link store: %w", err)
 		}
 		if err := os.WriteFile(s.path, sanitized, 0o644); err != nil {
-			s.log.Warn("AccountLink: recovered malformed JSON in memory but could not rewrite store: %v", err)
+			s.log.Warn("account_link.store.recovered", "recovered malformed JSON in memory but could not rewrite store", config.F("path", s.path), config.F("status", "degraded"), config.ErrorField(err))
 		} else {
-			s.log.Warn("AccountLink: repaired malformed JSON in %s", s.path)
+			s.log.Warn("account_link.store.repaired", "repaired malformed account link store", config.F("path", s.path), config.F("status", "degraded"))
 		}
 	}
 	if data.Users == nil {

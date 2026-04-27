@@ -390,6 +390,164 @@ Example:
 MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s AGENT_TRACE_PATH=./tmp/agent-trace go run ./cmd/agent/main.go
 ```
 
+## Logging
+
+Oswald now uses structured single-line JSON logs for production and Grafana/Loki dashboards.
+
+### Shared Envelope
+
+Every log line should include these top-level fields:
+
+- `ts`
+- `level`
+- `service`
+- `log_type`
+- `component`
+- `event`
+- `msg`
+
+Current defaults:
+
+- `service`: `oswald-ai`
+- `level`: `debug`, `info`, `warn`, `error`
+- `log_type`: `server` or `agent`
+
+### Server vs Agent Logs
+
+Use `server` logs for runtime infrastructure and transport behavior:
+
+- startup and shutdown
+- gateway transport
+- broker queueing and workers
+- provider IO
+- storage and persistence
+- account linking
+- tool bootstrap and registry loading
+
+Use `agent` logs for request-scoped agent execution behavior:
+
+- `Agent.Process()` lifecycle
+- context compaction
+- loop iterations
+- tool execution during a prompt
+- final agent response completion
+
+### Request Correlation
+
+- Every inbound prompt gets a generated `request_id`
+- `request_id` is propagated through gateway, broker, agent, tools, and provider logs
+- All request-scoped logs must include `request_id`
+
+### Agent Foundation
+
+Every `agent` log must include:
+
+- `request_id`
+- `session_id`
+- `user_id`
+- `gateway`
+- `model`
+
+Use `config.Logger.Agent(...)` to attach this foundation consistently.
+
+### Naming Conventions
+
+Keep field names metric-friendly and stable:
+
+- identifiers end with `_id`
+- counts end with `_count`
+- durations end with `_ms`
+- text sizes end with `_chars`
+- booleans use `is_` prefixes
+
+Examples:
+
+- `chat_id`
+- `tool_call_count`
+- `image_count`
+- `duration_ms`
+- `response_chars`
+- `is_reply`
+
+### Status Vocabulary
+
+When a `status` field is used, keep it within:
+
+- `ok`
+- `error`
+- `rejected`
+- `retry`
+- `degraded`
+
+### Event Naming
+
+Use stable dotted event names instead of formatting variable text into `msg`.
+
+Examples:
+
+- `app.start`
+- `broker.request.rejected`
+- `gateway.request.received`
+- `provider.ollama.chat.http_error`
+- `agent.request.start`
+- `agent.loop.iteration`
+- `agent.tool.failure`
+- `agent.response.complete`
+
+### Data Hygiene
+
+Do not log:
+
+- full prompt text
+- full response text
+- raw image bytes or base64 payloads
+- full tool results
+- secrets, tokens, or passwords
+
+Prefer summaries:
+
+- `prompt_chars`
+- `response_chars`
+- `thinking_chars`
+- `image_count`
+- `tool_call_count`
+- `http_status`
+
+### Loki Labels
+
+Recommended low-cardinality labels:
+
+- `service`
+- `level`
+- `log_type`
+- `component`
+- `event`
+
+Optional:
+
+- `gateway`
+
+Do not use these as labels:
+
+- `request_id`
+- `session_id`
+- `user_id`
+- `chat_id`
+- `tool_name`
+
+### Logger API
+
+Logging helpers live in `internal/config/logging.go`.
+
+Preferred patterns:
+
+- `log.Server("component")`
+- `log.Agent("component", requestID, sessionID, userID, gateway, model)`
+- `config.F("field_name", value)`
+- `config.ErrorField(err)`
+
+Avoid reintroducing printf-style freeform logs. New logs should be added as structured event logs so dashboards remain stable.
+
 ## Environment Variables
 
 | Variable | Default | Purpose |

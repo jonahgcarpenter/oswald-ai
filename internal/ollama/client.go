@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
 // Client interacts with the local Ollama REST API.
@@ -59,13 +60,19 @@ func (c *Client) Show(ctx context.Context, req ShowRequest) (*ShowResponse, erro
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.log.Error("Ollama show returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+		c.log.Error("provider.ollama.show.http_error", "ollama show returned non-2xx",
+			config.F("operation", "show"),
+			config.F("http_status", resp.StatusCode),
+		)
 		return nil, fmt.Errorf("Ollama show returned HTTP %d", resp.StatusCode)
 	}
 
 	var showResp ShowResponse
 	if err := json.Unmarshal(rawBody, &showResp); err != nil {
-		c.log.Error("Ollama show response decode failed: %v | raw: %q", err, string(rawBody))
+		c.log.Error("provider.ollama.show.decode_error", "failed to decode ollama show response",
+			config.F("operation", "show"),
+			config.ErrorField(err),
+		)
 		return nil, fmt.Errorf("failed to decode show response: %w", err)
 	}
 
@@ -182,12 +189,23 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	defer resp.Body.Close()
 
 	if req.Stream && chatStreamCallback != nil {
+		meta := toolctx.MetadataFromContext(ctx)
+		requestLog := c.log.With(
+			config.F("request_id", meta.RequestID),
+			config.F("gateway", meta.Gateway),
+			config.F("user_id", meta.SenderID),
+			config.F("session_id", meta.SessionID),
+			config.F("model", req.Model),
+		)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			rawBody, readErr := io.ReadAll(resp.Body)
+			_, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {
 				return nil, fmt.Errorf("failed to read chat stream response body: %w", readErr)
 			}
-			c.log.Error("Ollama chat stream returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+			requestLog.Error("provider.ollama.chat.http_error", "ollama chat stream returned non-2xx",
+				config.F("operation", "chat_stream"),
+				config.F("http_status", resp.StatusCode),
+			)
 			return nil, fmt.Errorf("Ollama chat stream returned HTTP %d", resp.StatusCode)
 		}
 
@@ -200,7 +218,11 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 		for scanner.Scan() {
 			var chunk ollamaChatResponse
 			if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-				c.log.Warn("Ollama chat stream parse failed: err=%v raw=%q", err, scanner.Text())
+				requestLog.Warn("provider.ollama.chat.stream.parse_failed", "failed to parse ollama chat stream chunk",
+					config.F("operation", "chat_stream"),
+					config.F("status", "degraded"),
+					config.ErrorField(err),
+				)
 				continue
 			}
 
@@ -224,7 +246,11 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			c.log.Warn("Ollama chat stream scan failed: err=%v", err)
+			requestLog.Warn("provider.ollama.chat.stream.scan_failed", "ollama chat stream scan failed",
+				config.F("operation", "chat_stream"),
+				config.F("status", "degraded"),
+				config.ErrorField(err),
+			)
 		}
 
 		if finalResp.Message.Content == "" && finalResp.Message.Thinking != "" {
@@ -239,13 +265,33 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, chatStreamCallback f
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		c.log.Error("Ollama chat returned HTTP %d: %s", resp.StatusCode, string(rawBody))
+		meta := toolctx.MetadataFromContext(ctx)
+		c.log.With(
+			config.F("request_id", meta.RequestID),
+			config.F("gateway", meta.Gateway),
+			config.F("user_id", meta.SenderID),
+			config.F("session_id", meta.SessionID),
+			config.F("model", req.Model),
+		).Error("provider.ollama.chat.http_error", "ollama chat returned non-2xx",
+			config.F("operation", "chat"),
+			config.F("http_status", resp.StatusCode),
+		)
 		return nil, fmt.Errorf("Ollama chat returned HTTP %d", resp.StatusCode)
 	}
 
 	var ollamaResp ollamaChatResponse
 	if err := json.Unmarshal(rawBody, &ollamaResp); err != nil {
-		c.log.Error("Ollama chat response decode failed: %v | raw: %q", err, string(rawBody))
+		meta := toolctx.MetadataFromContext(ctx)
+		c.log.With(
+			config.F("request_id", meta.RequestID),
+			config.F("gateway", meta.Gateway),
+			config.F("user_id", meta.SenderID),
+			config.F("session_id", meta.SessionID),
+			config.F("model", req.Model),
+		).Error("provider.ollama.chat.decode_error", "failed to decode ollama chat response",
+			config.F("operation", "chat"),
+			config.ErrorField(err),
+		)
 		return nil, fmt.Errorf("failed to decode chat response: %w", err)
 	}
 

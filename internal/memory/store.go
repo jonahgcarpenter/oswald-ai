@@ -158,7 +158,7 @@ func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant
 	}
 
 	turnCount := len(prunedTurns)
-	s.log.Debug("Memory: session=%q turns=%d action=append", sessionKey, turnCount)
+	s.log.Debug("memory.turn.appended", "appended session turn", config.F("session_id", sessionKey), config.F("turn_count", turnCount), config.F("operation", "append"))
 	s.mu.Unlock()
 
 	s.logPrune(sessionKey, removedExpired, removedOverflow, turnCount, "append")
@@ -199,14 +199,13 @@ func (s *Store) logPrune(sessionKey string, removedExpired int, removedOverflow 
 		return
 	}
 
-	s.log.Debug(
-		"Memory: pruned session=%q operation=%s expired=%d overflow=%d retained_turns=%d max_turns=%d max_age=%s",
-		sessionKey,
-		operation,
-		removedExpired,
-		removedOverflow,
-		retained,
-		s.options.MaxTurns,
-		s.options.MaxAge,
+	s.log.Debug("memory.turn.pruned", "pruned session turns",
+		config.F("session_id", sessionKey),
+		config.F("operation", operation),
+		config.F("expired_count", removedExpired),
+		config.F("overflow_count", removedOverflow),
+		config.F("retained_turn_count", retained),
+		config.F("max_turn_count", s.options.MaxTurns),
+		config.F("max_age", s.options.MaxAge.String()),
 	)
 }

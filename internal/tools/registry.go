@@ -79,23 +79,23 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			r.log.Warn("Tools: failed to read %q: %v", path, err)
+			r.log.Warn("tool.registry.definition_read_failed", "failed to read tool definition", config.F("file", path), config.F("status", "error"), config.ErrorField(err))
 			continue
 		}
 
 		spec, err := parseToolMarkdown(string(data))
 		if err != nil {
-			r.log.Warn("Tools: failed to parse %q: %v", path, err)
+			r.log.Warn("tool.registry.definition_parse_failed", "failed to parse tool definition", config.F("file", path), config.F("status", "error"), config.ErrorField(err))
 			continue
 		}
 
 		r.specs[spec.Name] = spec
-		r.log.Debug("Tools: loaded %q from %s", spec.Name, entry.Name())
+		r.log.Debug("tool.registry.definition_loaded", "loaded tool definition", config.F("tool_name", spec.Name), config.F("file", entry.Name()))
 		loaded++
 	}
 
 	if loaded == 0 {
-		r.log.Warn("Tools: no tool definitions found in %q", dir)
+		r.log.Warn("tool.registry.empty", "no tool definitions found", config.F("path", dir), config.F("status", "degraded"))
 	}
 
 	return nil
@@ -109,7 +109,7 @@ func (r *Registry) RegisterHandler(name string, handler Handler) error {
 		return fmt.Errorf("cannot register handler for %q: no tool spec loaded with that name", name)
 	}
 	r.handlers[name] = handler
-	r.log.Debug("Tools: registered handler for %q", name)
+	r.log.Debug("tool.registry.handler_registered", "registered tool handler", config.F("tool_name", name))
 	return nil
 }
 

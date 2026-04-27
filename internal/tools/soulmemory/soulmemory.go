@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
 // NewHandler returns a tool handler for the soul_memory tool. The handler
@@ -14,6 +15,8 @@ import (
 // the next request without requiring a restart.
 func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		meta := toolctx.MetadataFromContext(ctx)
+		reqLog := log.Agent("agent.tool.soul_memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 		action, _ := args["action"].(string)
 		action = strings.TrimSpace(strings.ToLower(action))
 
@@ -34,7 +37,7 @@ func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args
 			if content == "" {
 				return "", fmt.Errorf("write action requires a non-empty content argument")
 			}
-			log.Warn("Soul file overwritten via tool: name=soul_memory action=write")
+			reqLog.Warn("agent.tool.soul_memory.overwritten", "overwrote soul memory", config.F("tool_name", "soul_memory"), config.F("action", "write"))
 			if err := store.Write(content); err != nil {
 				return "", fmt.Errorf("failed to write soul file: %w", err)
 			}
@@ -44,7 +47,7 @@ func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args
 			if content == "" {
 				return "", fmt.Errorf("append action requires a non-empty content argument")
 			}
-			log.Warn("Soul file appended via tool: name=soul_memory action=append")
+			reqLog.Warn("agent.tool.soul_memory.appended", "appended soul memory", config.F("tool_name", "soul_memory"), config.F("action", "append"))
 			if err := store.Append(content); err != nil {
 				return "", fmt.Errorf("failed to append to soul file: %w", err)
 			}

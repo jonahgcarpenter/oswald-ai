@@ -49,14 +49,23 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.log.Warn("SearXNG request failed: query=%q err=%v", query, err)
+		c.log.Warn("tool.web_search.request_failed", "web search request failed",
+			config.F("query_chars", len(query)),
+			config.F("status", "error"),
+			config.ErrorField(err),
+		)
 		return nil, fmt.Errorf("SearXNG request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		c.log.Warn("SearXNG response failed: query=%q status=%d body=%q", query, resp.StatusCode, string(body))
+		c.log.Warn("tool.web_search.response_failed", "web search response failed",
+			config.F("query_chars", len(query)),
+			config.F("http_status", resp.StatusCode),
+			config.F("status", "error"),
+			config.F("body_preview", string(body)),
+		)
 		return nil, fmt.Errorf("SearXNG returned status %d", resp.StatusCode)
 	}
 
@@ -84,6 +93,6 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 		}
 	}
 
-	c.log.Debug("SearXNG: query=%q returned %d results", query, len(out))
+	c.log.Debug("tool.web_search.results_returned", "web search returned results", config.F("query_chars", len(query)), config.F("result_count", len(out)))
 	return out, nil
 }

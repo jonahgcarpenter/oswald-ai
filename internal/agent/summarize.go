@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
 // maxSummaryChars caps compacted history length to keep it from consuming too
@@ -78,6 +79,12 @@ func (s *OllamaSummarizer) Summarize(ctx context.Context, turns []memory.Turn) (
 		result = string(runes[:maxSummaryChars])
 	}
 
-	s.log.Debug("Summarizer: generated summary_chars=%d turns=%d", len(result), len(turns))
+	meta := toolctx.MetadataFromContext(ctx)
+	s.log.Agent("agent.summarizer", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
+		"agent.summarizer.generated",
+		"generated history summary",
+		config.F("summary_chars", len(result)),
+		config.F("turn_pair_count", len(turns)),
+	)
 	return result, nil
 }

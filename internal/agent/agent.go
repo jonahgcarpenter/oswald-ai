@@ -144,7 +144,7 @@ func makeCompactedTurn(summary string, now time.Time) memory.Turn {
 	}
 }
 
-func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
+func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
 	tools := a.registry.OllamaTools()
 	currentTurns := append([]memory.Turn(nil), turns...)
 	persisted := false
@@ -166,7 +166,10 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
 			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
 			if err != nil {
-				a.log.Warn("Context budget compaction failed: turns=%d err=%v", compactCount, err)
+				log.Warn("agent.context.compaction_failed", "failed to compact context",
+					config.F("turn_pair_count", compactCount),
+					config.ErrorField(err),
+				)
 				continue
 			}
 
@@ -217,8 +220,14 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, systemPrompt string, turn
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
-	a.log.Debug("Request start: session=%q sender=%q display=%q prompt=%q", sessionKey, senderID, displayName, truncate(userPrompt, 100))
+func (a *Agent) Process(requestID string, gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+	startedAt := time.Now()
+	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
+	reqLog.Debug("agent.request.start", "agent request started",
+		config.F("display_name", displayName),
+		config.F("prompt_chars", len(userPrompt)),
+		config.F("image_count", len(userImages)),
+	)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -226,12 +235,19 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// Inject the sender ID into the context so tool handlers can identify
 	// which user this request belongs to without coupling to the session key.
 	ctx = toolctx.WithSenderID(ctx, senderID)
+	ctx = toolctx.WithMetadata(ctx, toolctx.Metadata{
+		RequestID: requestID,
+		SessionID: sessionKey,
+		SenderID:  senderID,
+		Gateway:   gateway,
+		Model:     a.model,
+	})
 
 	// Read the soul file fresh on every request so that any edits the agent
 	// made via the soul_memory tool take effect immediately.
 	soulContent, soulErr := a.soul.Read()
 	if soulErr != nil {
-		a.log.Warn("Soul file read failed: err=%v", soulErr)
+		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
 	// Build the dynamic system prompt: soul + timestamp + speaker identity.
@@ -240,10 +256,10 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 
-	if speakerLine := a.currentSpeakerLine(senderID); speakerLine != "" {
+	if speakerLine := a.currentSpeakerLine(reqLog, senderID); speakerLine != "" {
 		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
 	}
-	promptParts = append(promptParts, a.userMemoryPromptSections(senderID)...)
+	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)
 	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
@@ -255,7 +271,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	// If the estimated prompt would exceed the active model budget, destructively
 	// compact the oldest retained turns into a synthetic turn pair that remains
 	// in ordinary conversation history.
-	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, dynamicSystemPrompt, turns, userPrompt, userImages)
+	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, reqLog, dynamicSystemPrompt, turns, userPrompt, userImages)
 	if compacted {
 		a.memory.ReplaceTurns(sessionKey, compactedTurns)
 		turns = compactedTurns
@@ -273,15 +289,24 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
 	if len(trimmedHistory) > 0 {
-		a.log.Debug("Memory: loaded historical_messages=%d session=%q", len(trimmedHistory), sessionKey)
+		reqLog.Debug("agent.memory.loaded", "loaded retained memory",
+			config.F("historical_message_count", len(trimmedHistory)),
+			config.F("turn_pair_count", len(turns)),
+		)
 	}
 	if prune.RemovedPairs > 0 {
-		a.log.Debug("Context budget: compacted %d turn pair(s) for model=%s budget=%d estimated_before=%d estimated_after=%d",
-			prune.RemovedPairs, a.model, a.budget.PromptBudget(), prune.EstimatedBefore, prune.EstimatedAfter)
+		reqLog.Debug("agent.context.compacted", "compacted retained context",
+			config.F("removed_pair_count", prune.RemovedPairs),
+			config.F("prompt_budget", a.budget.PromptBudget()),
+			config.F("estimated_before", prune.EstimatedBefore),
+			config.F("estimated_after", prune.EstimatedAfter),
+		)
 	}
 	if prune.EstimatedAfter > a.budget.PromptBudget() {
-		a.log.Warn("Context budget: prompt still exceeds budget for model=%s estimated=%d budget=%d after history compaction",
-			a.model, prune.EstimatedAfter, a.budget.PromptBudget())
+		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
+			config.F("estimated_after", prune.EstimatedAfter),
+			config.F("prompt_budget", a.budget.PromptBudget()),
+		)
 	}
 
 	req := ollama.ChatRequest{
@@ -335,10 +360,15 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		accumulatedContent.Reset()
 
 		req.Messages = messages
+		reqLog.Debug("agent.model.call", "calling model",
+			config.F("iteration", iteration),
+			config.F("is_streaming", req.Stream),
+			config.F("tool_count", len(req.Tools)),
+		)
 
 		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
 		if err != nil {
-			a.log.Error("Model call failed: model=%s iteration=%d err=%v", a.model, iteration, err)
+			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
 			return &AgentResponse{
 				Model:    a.model,
 				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
@@ -348,17 +378,23 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 		lastResp = resp
 		if iteration == 1 && resp.PromptEvalCount > 0 {
-			a.log.Debug("Context budget: model=%s estimated_prompt_tokens=%d actual_prompt_tokens=%d",
-				a.model, prune.EstimatedAfter, resp.PromptEvalCount)
+			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
+				config.F("estimated_after", prune.EstimatedAfter),
+				config.F("actual_prompt_tokens", resp.PromptEvalCount),
+			)
 		}
 
-		a.log.Debug("Agentic loop iteration %d: tool_calls=%d thinking_len=%d content_len=%d failure_streak=%d",
-			iteration, len(resp.Message.ToolCalls),
-			len(resp.Message.Thinking), len(resp.Message.Content), consecutiveToolFailures)
+		reqLog.Debug("agent.loop.iteration", "completed agent loop iteration",
+			config.F("iteration", iteration),
+			config.F("tool_call_count", len(resp.Message.ToolCalls)),
+			config.F("thinking_chars", len(resp.Message.Thinking)),
+			config.F("content_chars", len(resp.Message.Content)),
+			config.F("failure_streak", consecutiveToolFailures),
+		)
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
-			a.log.Debug("Agentic loop complete after %d iteration(s): model=%s", iteration, a.model)
+			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration), config.F("status", "ok"))
 			break
 		}
 
@@ -370,6 +406,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		// multiple to be safe.
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
+			toolStartedAt := time.Now()
 			traceEntry := debug.ToolExecutionTrace{
 				Iteration: iteration,
 				Name:      toolName,
@@ -380,6 +417,10 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			if streamCallback != nil {
 				streamCallback(StreamChunk{Type: ChunkStatus, Text: fmt.Sprintf("[Calling: %s]", toolName)})
 			}
+			reqLog.Debug("agent.tool.start", "starting tool execution",
+				config.F("iteration", iteration),
+				config.F("tool_name", toolName),
+			)
 
 			var toolContent string
 
@@ -387,13 +428,26 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				consecutiveToolFailures++
-				a.log.Warn("Tool %q execution failed (%d/%d): %v", toolName, consecutiveToolFailures, a.maxToolFailureRetries, execErr)
+				reqLog.Warn("agent.tool.failure", "tool execution failed",
+					config.F("iteration", iteration),
+					config.F("tool_name", toolName),
+					config.F("failure_streak", consecutiveToolFailures),
+					config.F("max_failures", a.maxToolFailureRetries),
+					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
+					config.F("status", "error"),
+					config.ErrorField(execErr),
+				)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
 				traceEntry.Error = execErr.Error()
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
-				a.log.Debug("Tool execution succeeded: name=%q", toolName)
+				reqLog.Debug("agent.tool.success", "tool execution succeeded",
+					config.F("iteration", iteration),
+					config.F("tool_name", toolName),
+					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
+					config.F("status", "ok"),
+				)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
@@ -407,7 +461,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			})
 
 			if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
-				a.log.Warn("Agentic loop: stopping after %d consecutive tool execution failures", consecutiveToolFailures)
+				reqLog.Warn("agent.tool_budget.exhausted", "tool failure budget exhausted", config.F("failure_streak", consecutiveToolFailures), config.F("max_failures", a.maxToolFailureRetries), config.F("status", "degraded"))
 				toolFailureBudgetExhausted = true
 				break
 			}
@@ -426,7 +480,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 
 		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
 		if err != nil {
-			a.log.Error("Model finish failed after tool failures: model=%s err=%v", a.model, err)
+			reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
 			return &AgentResponse{
 				Model:    a.model,
 				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
@@ -435,10 +489,12 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		}
 
 		lastResp = resp
-		a.log.Debug("Agentic loop complete after disabling tools following %d consecutive tool failures", consecutiveToolFailures)
+		reqLog.Debug("agent.loop.complete", "completed agent loop after disabling tools",
+			config.F("iteration_count", len(toolExecutions)+1),
+			config.F("failure_streak", consecutiveToolFailures),
+			config.F("status", "degraded"),
+		)
 	}
-
-	a.log.Debug("Response complete: model=%s", a.model)
 
 	// Extract the final response content. The Ollama client already handles
 	// thinking-to-content promotion for non-streaming calls.
@@ -475,9 +531,9 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 			FinalModelResponse:         lastResp,
 			ToolFailureBudgetExhausted: toolFailureBudgetExhausted,
 		}); dumpErr != nil {
-			a.log.Warn("Agent trace write failed: err=%v", dumpErr)
+			reqLog.Warn("agent.trace.write_failed", "failed to write agent trace", config.ErrorField(dumpErr))
 		} else {
-			a.log.Debug("Agent trace written: path=%s", a.agentTracePath)
+			reqLog.Debug("agent.trace.written", "wrote agent trace", config.F("path", a.agentTracePath))
 		}
 	}
 
@@ -496,6 +552,16 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 		)
 	}
 
+	reqLog.Debug("agent.response.complete", "completed agent response",
+		config.F("iteration_count", len(toolExecutions)+1),
+		config.F("response_chars", len(finalContent)),
+		config.F("thinking_chars", len(finalThinking)),
+		config.F("tool_call_count", len(toolExecutions)),
+		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
+		config.F("tool_failure_budget_exhausted", toolFailureBudgetExhausted),
+		config.F("status", "ok"),
+	)
+
 	return &AgentResponse{
 		Model:    a.model,
 		Response: finalContent,
@@ -504,7 +570,7 @@ func (a *Agent) Process(sessionKey string, senderID string, displayName string, 
 	}, nil
 }
 
-func (a *Agent) currentSpeakerLine(senderID string) string {
+func (a *Agent) currentSpeakerLine(log *config.Logger, senderID string) string {
 	if senderID == "" {
 		return ""
 	}
@@ -512,7 +578,7 @@ func (a *Agent) currentSpeakerLine(senderID string) string {
 	if a.userMemory != nil {
 		intro, err := a.userMemory.ReadIntro(senderID)
 		if err != nil {
-			a.log.Warn("User memory intro read failed: user=%q err=%v", senderID, err)
+			log.Warn("agent.user_memory_intro.read_failed", "failed to read user memory intro", config.F("user_id", senderID), config.ErrorField(err))
 		} else if strings.TrimSpace(intro) != "" {
 			return strings.TrimSpace(intro)
 		}
@@ -521,25 +587,25 @@ func (a *Agent) currentSpeakerLine(senderID string) string {
 	return ""
 }
 
-func (a *Agent) userMemoryPromptSections(senderID string) []string {
+func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []string {
 	if senderID == "" || a.userMemory == nil {
 		return nil
 	}
 
 	sections := make([]string, 0, 2)
-	if identity := a.userMemoryPromptSection(senderID, "identity", "## User Identity Memory"); identity != "" {
+	if identity := a.userMemoryPromptSection(log, senderID, "identity", "## User Identity Memory"); identity != "" {
 		sections = append(sections, identity)
 	}
-	if systemRules := a.userMemoryPromptSection(senderID, "system_rules", "## User System Rules"); systemRules != "" {
+	if systemRules := a.userMemoryPromptSection(log, senderID, "system_rules", "## User System Rules"); systemRules != "" {
 		sections = append(sections, systemRules)
 	}
 	return sections
 }
 
-func (a *Agent) userMemoryPromptSection(senderID, category, heading string) string {
+func (a *Agent) userMemoryPromptSection(log *config.Logger, senderID, category, heading string) string {
 	content, err := a.userMemory.ReadCategory(senderID, category)
 	if err != nil {
-		a.log.Warn("User memory category read failed: category=%q user=%q err=%v", category, senderID, err)
+		log.Warn("agent.user_memory_category.read_failed", "failed to read user memory category", config.F("category", category), config.F("user_id", senderID), config.ErrorField(err))
 		return ""
 	}
 	body := stripMarkdownHeading(content)

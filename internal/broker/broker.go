@@ -19,6 +19,7 @@ const (
 // stream callback for real-time token delivery. The broker writes exactly
 // one Result to ResponseChan when processing completes.
 type Request struct {
+	RequestID    string                  // Per-prompt correlation identifier
 	Channel      string                  // Gateway name (e.g., "discord", "websocket")
 	ChatID       string                  // Conversation/room identifier
 	SenderID     string                  // User identifier
@@ -70,7 +71,7 @@ func (b *Broker) Start() {
 		b.wg.Add(1)
 		go b.runWorker(i + 1)
 	}
-	b.log.Info("Broker started with %d worker(s)", b.workerCount)
+	b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
 }
 
 // Submit enqueues a request for processing. If the internal queue is full
@@ -79,12 +80,23 @@ func (b *Broker) Start() {
 // blocking. The caller must set req.ResponseChan to a buffered(1) channel before
 // calling Submit; the broker will write exactly one result to it.
 func (b *Broker) Submit(req *Request) {
-	b.log.Debug("Broker: queued request channel=%s chat_id=%s", req.Channel, req.ChatID)
+	b.log.Debug("broker.request.queued", "queued broker request",
+		config.F("request_id", req.RequestID),
+		config.F("gateway", req.Channel),
+		config.F("chat_id", req.ChatID),
+		config.F("session_id", req.SessionKey),
+	)
 
 	select {
 	case b.requests <- req:
 	default:
-		b.log.Warn("Broker: rejected request channel=%s chat_id=%s reason=queue_full", req.Channel, req.ChatID)
+		b.log.Warn("broker.request.rejected", "rejected broker request",
+			config.F("request_id", req.RequestID),
+			config.F("gateway", req.Channel),
+			config.F("chat_id", req.ChatID),
+			config.F("status", "rejected"),
+			config.F("reason", "queue_full"),
+		)
 		req.ResponseChan <- Result{
 			Response: &agent.AgentResponse{
 				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
@@ -98,10 +110,10 @@ func (b *Broker) Submit(req *Request) {
 // to complete before returning. New Submit() calls must not be made after
 // Shutdown() is called.
 func (b *Broker) Shutdown() {
-	b.log.Info("Broker: shutting down queued_requests=%d", len(b.requests))
+	b.log.Info("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", len(b.requests)))
 	close(b.requests)
 	b.wg.Wait()
-	b.log.Info("Broker: all workers stopped")
+	b.log.Info("broker.shutdown.complete", "broker shutdown complete")
 }
 
 // runWorker is the body of a single broker worker goroutine. It reads
@@ -109,12 +121,17 @@ func (b *Broker) Shutdown() {
 // the result back to the gateway via the request's ResponseChan.
 func (b *Broker) runWorker(id int) {
 	defer b.wg.Done()
-	b.log.Debug("Broker worker %d started", id)
+	b.log.Debug("broker.worker.started", "broker worker started", config.F("worker_id", id))
 
 	for req := range b.requests {
-		b.log.Debug("Broker worker: id=%d channel=%s chat_id=%s action=process_request", id, req.Channel, req.ChatID)
+		b.log.Debug("broker.worker.processing", "broker worker processing request",
+			config.F("worker_id", id),
+			config.F("request_id", req.RequestID),
+			config.F("gateway", req.Channel),
+			config.F("chat_id", req.ChatID),
+		)
 
-		resp, err := b.agent.Process(req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
+		resp, err := b.agent.Process(req.RequestID, req.Channel, req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
 
 		req.ResponseChan <- Result{
 			Response: resp,
@@ -122,5 +139,5 @@ func (b *Broker) runWorker(id int) {
 		}
 	}
 
-	b.log.Debug("Broker worker %d stopped", id)
+	b.log.Debug("broker.worker.stopped", "broker worker stopped", config.F("worker_id", id))
 }

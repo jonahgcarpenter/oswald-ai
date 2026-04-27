@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
@@ -24,6 +25,7 @@ func (g *Gateway) Name() string {
 // Start initializes the BlueBubbles webhook listener.
 func (g *Gateway) Start(b *broker.Broker) error {
 	g.Broker = b
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
 	if g.messageIndex == nil {
 		g.messageIndex = make(map[string]messageContext)
 	}
@@ -42,12 +44,13 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, g.handleWebhook)
 
-	g.Log.Info("iMessage webhook listener on port %s path %s", g.Port, path)
+	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", path))
 	return http.ListenAndServe(":"+g.Port, mux)
 }
 
 // handleWebhook validates and dispatches incoming BlueBubbles webhook events.
 func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -57,14 +60,14 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		g.Log.Warn("iMessage webhook read failed: %v", err)
+		log.Warn("gateway.webhook.read_failed", "failed to read imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
 	var event webhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		g.Log.Warn("iMessage webhook decode failed: %v", err)
+		log.Warn("gateway.webhook.decode_failed", "failed to decode imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -76,7 +79,7 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !hasMessageContent(event.Data) {
-			g.Log.Debug("iMessage webhook ignored: no text or attachments (guid=%s associated_type=%s)", event.Data.GUID, event.Data.AssociatedMessageType)
+			log.Debug("gateway.webhook.ignored", "ignored imessage webhook without content", config.F("message_guid", event.Data.GUID), config.F("associated_type", event.Data.AssociatedMessageType))
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -95,18 +98,20 @@ func hasMessageContent(msg webhookMessage) bool {
 
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
 func (g *Gateway) processIncomingMessage(msg webhookMessage) {
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
+	requestID := config.NewRequestID()
 	chat := msg.primaryChat()
 	if chat.GUID == "" || strings.TrimSpace(msg.Handle.Address) == "" {
-		g.Log.Debug("iMessage webhook ignored: incomplete message payload")
+		log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
 		return
 	}
 	images, unsupported := g.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
-		g.Log.Debug("iMessage attachments: chat=%s accepted=%d downgraded=%d declared_formats=%q", chat.GUID, len(images), len(unsupported), attachmentFormats(msg.Attachments))
+		log.Debug("gateway.attachment.processed", "processed imessage attachments", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
-			g.Log.Debug("iMessage webhook ignored: incomplete message payload")
+			log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
 			return
 		}
 	}
@@ -118,19 +123,19 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	normalizedSenderID, err := accountlink.NormalizeIdentifier("imessage", msg.Handle.Address)
 	if err != nil {
-		g.Log.Error("iMessage identifier normalization error: %v", err)
+		log.Error("gateway.account.normalize_failed", "failed to normalize imessage account", config.F("request_id", requestID), config.ErrorField(err))
 		return
 	}
 	displayName := normalizedSenderID
 	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
-		g.Log.Debug("iMessage contact lookup failed for %s: %v", normalizedSenderID, err)
+		log.Debug("gateway.contact_lookup.failed", "imessage contact lookup failed", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.F("status", "degraded"), config.ErrorField(err))
 	} else if resolvedName != "" {
 		displayName = resolvedName
 	}
 
 	canonicalUserID, err := g.Links.EnsureAccount("imessage", normalizedSenderID, displayName)
 	if err != nil {
-		g.Log.Error("iMessage account resolution error: %v", err)
+		log.Error("gateway.account.resolve_failed", "failed to resolve imessage account", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.ErrorField(err))
 		return
 	}
 
@@ -147,21 +152,17 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			}
 			switch {
 			case strings.TrimSpace(replyCtx.Text) != "" && replyName != "":
-				if replyCtx.IsFromBot {
-					g.Log.Debug("iMessage reply context: quoted Oswald message %s in chat %s", replyGUID, chat.GUID)
-				} else {
-					g.Log.Debug("iMessage reply context: quoted non-bot message from %s in chat %s", replyName, chat.GUID)
-				}
+				log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot))
 				prompt = fmt.Sprintf("[Replying to %s: %q]\n%s", replyName, replyCtx.Text, prompt)
 			case replyName != "":
-				g.Log.Debug("iMessage reply context: referenced message from %s is unavailable in chat %s", replyName, chat.GUID)
+				log.Debug("gateway.reply_context.applied", "imessage reply target unavailable", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
 				prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s", replyName, prompt)
 			default:
-				g.Log.Debug("iMessage reply context: referenced message %s is unavailable in chat %s", replyGUID, chat.GUID)
+				log.Debug("gateway.reply_context.applied", "imessage reply target unavailable", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
 				prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 			}
 		} else {
-			g.Log.Debug("iMessage reply context: unknown reply target %s; no cached context available", replyGUID)
+			log.Debug("gateway.reply_context.applied", "imessage reply target missing from cache", config.F("request_id", requestID), config.F("status", "degraded"))
 			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
 	}
@@ -181,14 +182,14 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	if err := g.startTyping(chat.GUID); err != nil {
-		g.Log.Debug("iMessage start typing failed for chat %s: %v", chat.GUID, err)
+		log.Debug("gateway.typing.start_failed", "failed to start imessage typing indicator", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"), config.ErrorField(err))
 	}
 
 	if prompt == "" && len(images) == 0 {
 		responseText := "What do you want idiot."
 		messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 		if err != nil {
-			g.Log.Error("iMessage empty prompt response send failed: %v", err)
+			log.Error("gateway.response.failed", "failed to send imessage empty prompt response", config.F("request_id", requestID), config.ErrorField(err))
 		} else {
 			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
 		}
@@ -197,16 +198,16 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-	g.Log.Debug("iMessage request from %s (session=%s canonical=%s images=%d): %q", normalizedSenderID, sessionKey, canonicalUserID, len(images), truncate(prompt, 100))
+	log.Debug("gateway.request.received", "received imessage request", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(images)), config.F("is_group", isGroup), config.F("is_reply", replyGUID != ""), config.F("prompt_chars", len(prompt)))
 
 	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
-			g.Log.Error("iMessage account command error: %v", commandErr)
+			log.Error("gateway.command.failed", "imessage account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
 			commandResponse = "Failed to process account linking command."
 		}
 		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, selectedMessageGUID, 0)
 		if err != nil {
-			g.Log.Error("iMessage command response send failed: %v", err)
+			log.Error("gateway.response.failed", "failed to send imessage command response", config.F("request_id", requestID), config.ErrorField(err))
 		} else {
 			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, commandResponse)
 		}
@@ -214,6 +215,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	req := &broker.Request{
+		RequestID:    requestID,
 		Channel:      "imessage",
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
@@ -229,21 +231,22 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	responseText := ""
 	if result.Err != nil {
-		g.Log.Error("iMessage agent process error: %v", result.Err)
+		log.Error("gateway.response.failed", "imessage agent processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
 		responseText = "Sorry, I encountered an internal error processing that."
 	} else if result.Response != nil {
 		responseText = strings.TrimSpace(result.Response.Response)
 	}
 	if responseText == "" {
-		g.Log.Debug("iMessage agent returned empty response for chat %s", chat.GUID)
+		log.Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
 		return
 	}
 
 	messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
 	if err != nil {
-		g.Log.Error("iMessage send failed for chat %s: %v", chat.GUID, err)
+		log.Error("gateway.send.failed", "imessage send failed", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.ErrorField(err))
 		return
 	}
+	log.Debug("gateway.response.sent", "sent imessage response", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("response_chars", len(responseText)), config.F("status", "ok"))
 	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
 }
 
@@ -280,7 +283,7 @@ func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, e
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.Log.Warn("BlueBubbles contact query failed: identifier=%q status=%d body=%q", normalizedSenderID, resp.StatusCode, strings.TrimSpace(string(body)))
+		g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.contact_lookup.failed", "BlueBubbles contact query failed", config.F("user_id", normalizedSenderID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return "", fmt.Errorf("BlueBubbles contact query failed with status %d", resp.StatusCode)
 	}
 
@@ -364,7 +367,7 @@ func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []s
 
 		image, err := g.fetchAttachmentImage(attachment)
 		if err != nil {
-			g.Log.Warn("iMessage attachment rejected for %q: %v", attachment.TransferName, err)
+			g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.attachment.rejected", "rejected imessage attachment", config.F("filename", attachment.TransferName), config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -404,7 +407,7 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.Log.Warn("BlueBubbles attachment fetch failed: filename=%q status=%d body=%q", attachment.TransferName, resp.StatusCode, strings.TrimSpace(string(body)))
+		g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.attachment.fetch_failed", "failed to fetch imessage attachment", config.F("filename", attachment.TransferName), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return ollama.InputImage{}, fmt.Errorf("download BlueBubbles attachment %q failed with status %d", attachment.TransferName, resp.StatusCode)
 	}
 
@@ -420,19 +423,7 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage
 	if err != nil {
 		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", attachment.TransferName, err)
 	}
-	g.Log.Debug(
-		"iMessage attachment normalized: filename=%q guid=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
-		attachment.TransferName,
-		attachment.GUID,
-		strings.TrimSpace(attachment.MimeType),
-		result.DetectedMIME,
-		result.Image.MimeType,
-		len(body),
-		result.Width,
-		result.Height,
-		result.PreservedAlpha,
-		result.UsedDeclaredMIME,
-	)
+	g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.attachment.normalized", "normalized imessage attachment", config.F("filename", attachment.TransferName), config.F("attachment_id", attachment.GUID), config.F("declared_mime", strings.TrimSpace(attachment.MimeType)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("width", result.Width), config.F("height", result.Height), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 
 	image := result.Image
 	return image, nil
@@ -469,7 +460,7 @@ func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.Log.Warn("BlueBubbles typing failed: chat=%s status=%d body=%q", chatGUID, resp.StatusCode, strings.TrimSpace(string(body)))
+		g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.typing.failed", "BlueBubbles typing request failed", config.F("chat_id", chatGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return fmt.Errorf("BlueBubbles typing request failed with status %d", resp.StatusCode)
 	}
 	return nil
@@ -484,7 +475,7 @@ func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, part
 	if defaultSendMethod == fallbackSendMethod {
 		return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
 	}
-	g.Log.Warn("iMessage %s send failed for chat %s: %v; retrying with %s", defaultSendMethod, chatGUID, err, fallbackSendMethod)
+	g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.send.retry", "retrying imessage send with fallback method", config.F("chat_id", chatGUID), config.F("default_method", defaultSendMethod), config.F("fallback_method", fallbackSendMethod), config.F("status", "retry"), config.ErrorField(err))
 	return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
 }
 
@@ -526,9 +517,9 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if result.Error != nil {
-			g.Log.Warn("BlueBubbles send failed: chat=%s method=%s status=%d error=%q", chatGUID, method, resp.StatusCode, result.Error.Error)
+			g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.send.provider_failed", "BlueBubbles send failed", config.F("chat_id", chatGUID), config.F("method", method), config.F("http_status", resp.StatusCode), config.F("status", "error"), config.F("error", result.Error.Error))
 		} else {
-			g.Log.Warn("BlueBubbles send failed: chat=%s method=%s status=%d", chatGUID, method, resp.StatusCode)
+			g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.send.provider_failed", "BlueBubbles send failed", config.F("chat_id", chatGUID), config.F("method", method), config.F("http_status", resp.StatusCode), config.F("status", "error"))
 		}
 		if result.Error != nil {
 			return "", fmt.Errorf("BlueBubbles send failed (%d): %s", resp.StatusCode, result.Error.Error)

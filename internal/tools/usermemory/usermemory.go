@@ -10,6 +10,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
+func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
+	meta := toolctx.MetadataFromContext(ctx)
+	return log.Agent("agent.tool.persistent_memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+}
+
 // NewHandler returns a Handler for the persistent_memory tool.
 // The handler dispatches on the "action" argument:
 //
@@ -45,11 +50,11 @@ func NewHandler(store *Store, chatClient ollama.Chatter, model string, log *conf
 
 		switch action {
 		case "remember":
-			return handleRemember(store, log, userID, statement, evidence, category)
+			return handleRemember(store, requestLog(log, ctx), userID, statement, evidence, category)
 		case "recall":
-			return handleRecall(ctx, store, chatClient, model, log, userID, category)
+			return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category)
 		case "forget":
-			return handleForget(store, log, userID, statement)
+			return handleForget(store, requestLog(log, ctx), userID, statement)
 		default:
 			return "", fmt.Errorf("persistent_memory: unknown action %q — use remember, recall, or forget", action)
 		}
@@ -69,7 +74,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 	}
 
 	cat := normalizeCategory(category)
-	log.Debug("UserMemory: remembered user=%q category=%q", userID, cat)
+	log.Debug("agent.tool.persistent_memory.remembered", "remembered persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", cat))
 	return fmt.Sprintf("Remembered: %s (category: %s)", statement, cat), nil
 }
 
@@ -85,28 +90,28 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 	}
 
 	if raw == "" {
-		log.Debug("UserMemory: no memory found for user=%q", userID)
+		log.Debug("agent.tool.persistent_memory.not_found", "no persistent memory found", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
 		return "No persistent memory found for this user.", nil
 	}
 
 	// If the file is in old flat format (no ## category headers), run the
 	// LLM migration to classify each fact into the correct category.
 	if needsMigration(raw) {
-		log.Debug("UserMemory: migration started user=%q source=legacy_format", userID)
+		log.Debug("agent.tool.persistent_memory.migration.started", "started persistent memory migration", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("source", "legacy_format"))
 		migrated, migErr := migrateWithLLM(ctx, chatClient, model, raw, log)
 		if migErr != nil {
 			// Migration failed — return the raw content with a note so the
 			// model at least sees the data and can work with it.
-			log.Warn("UserMemory: migration failed user=%q err=%v action=return_raw", userID, migErr)
+			log.Warn("agent.tool.persistent_memory.migration.failed", "persistent memory migration failed", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("action", "return_raw"), config.F("status", "degraded"), config.ErrorField(migErr))
 			return "Note: Memory file could not be automatically categorized. Raw content follows:\n\n" + raw, nil
 		}
 
 		// Persist the migrated file so this only happens once.
 		if writeErr := store.WriteFull(userID, migrated); writeErr != nil {
-			log.Warn("UserMemory: migration persist failed user=%q err=%v", userID, writeErr)
+			log.Warn("agent.tool.persistent_memory.migration.persist_failed", "failed to persist migrated memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(writeErr))
 			// Still return the migrated content even if the write failed.
 		} else {
-			log.Debug("UserMemory: migration complete user=%q persisted=true", userID)
+			log.Debug("agent.tool.persistent_memory.migration.completed", "completed persistent memory migration", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("status", "ok"))
 		}
 		raw = migrated
 	}
@@ -118,15 +123,15 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 			return "", err
 		}
 		if content == "" {
-			log.Debug("UserMemory: no memory in category=%q for user=%q", category, userID)
+			log.Debug("agent.tool.persistent_memory.not_found", "no persistent memory found in category", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", category))
 			return fmt.Sprintf("No stored facts in category %q for this user.", category), nil
 		}
-		log.Debug("UserMemory: recalled category=%q user=%q bytes=%d", category, userID, len(content))
+		log.Debug("agent.tool.persistent_memory.recalled", "recalled persistent memory category", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
 		return content, nil
 	}
 
 	// Full recall — return everything.
-	log.Debug("UserMemory: recalled user=%q bytes=%d scope=all", userID, len(raw))
+	log.Debug("agent.tool.persistent_memory.recalled", "recalled all persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("scope", "all"), config.F("content_chars", len(raw)))
 	return raw, nil
 }
 
@@ -139,7 +144,7 @@ func handleForget(store *Store, log *config.Logger, userID, statement string) (s
 		if err := store.DeleteAll(userID); err != nil {
 			return "", err
 		}
-		log.Debug("UserMemory: wiped all memory for user=%q", userID)
+		log.Debug("agent.tool.persistent_memory.wiped", "wiped all persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
 		return "All persistent memory for this user has been cleared.", nil
 	}
 
@@ -147,7 +152,7 @@ func handleForget(store *Store, log *config.Logger, userID, statement string) (s
 		return "", err
 	}
 
-	log.Debug("UserMemory: forgot statement for user=%q", userID)
+	log.Debug("agent.tool.persistent_memory.forgot", "forgot persistent memory statement", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
 	return fmt.Sprintf("Forgotten: %s", statement), nil
 }
 
@@ -219,7 +224,7 @@ Memory file to reorganize:
 	if !strings.HasPrefix(result, "# User Memory") ||
 		!strings.Contains(result, "\n## ") ||
 		!strings.Contains(result, "- Evidence:") {
-		log.Warn("UserMemory: migration validation failed preview=%q", result[:min(len(result), 200)])
+		log.Warn("agent.tool.persistent_memory.validation_failed", "persistent memory migration validation failed", config.F("tool_name", "persistent_memory"), config.F("preview", result[:min(len(result), 200)]), config.F("status", "error"))
 		return "", fmt.Errorf("LLM migration response did not match expected format")
 	}
 

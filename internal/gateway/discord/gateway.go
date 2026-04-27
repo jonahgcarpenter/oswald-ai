@@ -14,6 +14,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
@@ -29,6 +30,7 @@ func (dg *Gateway) Name() string {
 // It blocks forever, automatically reconnecting if the websocket drops.
 func (dg *Gateway) Start(b *broker.Broker) error {
 	dg.Broker = b
+	log := dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
 	if dg.replyIndex == nil {
 		dg.replyIndex = make(map[string]replyContext)
 	}
@@ -37,12 +39,12 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 		err := dg.connectAndListen()
 
 		if err != nil {
-			dg.Log.Warn("Discord connection dropped: %v", err)
+			log.Warn("gateway.connection.dropped", "discord connection dropped", config.ErrorField(err))
 		} else {
-			dg.Log.Debug("Discord connection closed normally.")
+			log.Debug("gateway.connection.closed", "discord connection closed normally")
 		}
 
-		dg.Log.Debug("Reconnecting to Discord Gateway in 5 seconds...")
+		log.Debug("gateway.reconnect.scheduled", "scheduled discord reconnect", config.F("delay_ms", 5000))
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -139,7 +141,7 @@ func (dg *Gateway) heartbeatLoop(conn *gorilla.Conn, interval time.Duration) {
 	for range ticker.C {
 		hb := Payload{Op: 1, D: []byte("null")}
 		if err := conn.WriteJSON(hb); err != nil {
-			dg.Log.Error("Heartbeat failed: %v", err)
+			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Error("gateway.heartbeat.failed", "discord heartbeat failed", config.ErrorField(err))
 			return
 		}
 	}
@@ -161,10 +163,10 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 					var ready ReadyEvent
 					if err := json.Unmarshal(p.D, &ready); err == nil {
 						dg.BotID = ready.User.ID
-						dg.Log.Info("Discord bot connected as %s (ID: %s)", ready.User.Username, dg.BotID)
+						dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Info("gateway.session.ready", "discord gateway ready", config.F("bot_id", dg.BotID), config.F("bot_username", ready.User.Username))
 					}
 				case "RESUMED":
-					dg.Log.Debug("Discord session resumed successfully.")
+					dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.session.resumed", "discord session resumed")
 				case "MESSAGE_CREATE":
 					var msg MessageCreate
 					if err := json.Unmarshal(p.D, &msg); err == nil {
@@ -257,15 +259,17 @@ func resolveMentions(text string, mentions []struct {
 
 // handleMessage processes an incoming Discord message.
 func (dg *Gateway) handleMessage(msg MessageCreate) {
+	log := dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
 	if msg.Author.Bot {
 		return
 	}
+	requestID := config.NewRequestID()
 
 	replyToID := ""
 	prompt := msg.Content
 	images, unsupported := dg.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
-		dg.Log.Debug("Discord attachments: chat=%s accepted=%d downgraded=%d declared_formats=%q", msg.ChannelID, len(images), len(unsupported), attachmentFormats(msg.Attachments))
+		log.Debug("gateway.attachment.processed", "processed discord attachments", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
 	}
 
 	if msg.GuildID != "" {
@@ -307,21 +311,21 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
-		dg.Log.Error("Discord account normalization error: %v", normErr)
+		log.Error("gateway.account.normalize_failed", "failed to normalize discord account", config.F("request_id", requestID), config.ErrorField(normErr))
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
 		return
 	}
 
 	canonicalUserID, err := dg.Links.EnsureAccount("discord", normalizedAuthorID, msg.Author.Username)
 	if err != nil {
-		dg.Log.Error("Discord account resolution error: %v", err)
+		log.Error("gateway.account.resolve_failed", "failed to resolve discord account", config.F("request_id", requestID), config.F("user_id", normalizedAuthorID), config.ErrorField(err))
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your account identity.", replyToID)
 		return
 	}
 
 	if commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, prompt); handled {
 		if commandErr != nil {
-			dg.Log.Error("Discord account command error: %v", commandErr)
+			log.Error("gateway.command.failed", "discord account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
 			commandResponse = "Failed to process account linking command."
 		}
 		_, _ = dg.sendMessage(msg.ChannelID, commandResponse, replyToID)
@@ -337,29 +341,25 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 		switch {
 		case strings.TrimSpace(quotedContent) != "" && replyName != "":
-			if msg.ReferencedMessage.Author.ID == dg.BotID {
-				dg.Log.Debug("Discord reply context: quoted Oswald message %s in channel %s", msg.ReferencedMessage.ID, msg.ChannelID)
-			} else {
-				dg.Log.Debug("Discord reply context: quoted non-bot message from %s in channel %s", replyName, msg.ChannelID)
-			}
+			log.Debug("gateway.reply_context.applied", "applied discord reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", msg.ReferencedMessage.Author.ID == dg.BotID))
 			prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
 				replyName,
 				quotedContent,
 				prompt,
 			)
 		case replyName != "":
-			dg.Log.Debug("Discord reply context: referenced message from %s is unavailable in channel %s", replyName, msg.ChannelID)
+			log.Debug("gateway.reply_context.applied", "discord reply target unavailable", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("status", "degraded"))
 			prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s",
 				replyName,
 				prompt,
 			)
 		default:
-			dg.Log.Debug("Discord reply context: referenced message is unavailable in channel %s", msg.ChannelID)
+			log.Debug("gateway.reply_context.applied", "discord reply target unavailable", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("status", "degraded"))
 			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
 		}
 	}
 
-	dg.Log.Debug("Discord request from %s (session=%s canonical=%s): %q", msg.Author.Username, sessionKey, canonicalUserID, truncate(prompt, 100))
+	log.Debug("gateway.request.received", "received discord request", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(images)), config.F("is_dm", msg.GuildID == ""), config.F("is_reply", msg.ReferencedMessage != nil), config.F("prompt_chars", len(prompt)))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)
@@ -380,6 +380,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}()
 
 	req := &broker.Request{
+		RequestID:    requestID,
 		Channel:      "discord",
 		ChatID:       msg.ChannelID,
 		SenderID:     canonicalUserID,
@@ -394,7 +395,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	result := <-req.ResponseChan
 
 	if result.Err != nil {
-		dg.Log.Error("Agent process error: %v", result.Err)
+		log.Error("gateway.response.failed", "discord agent processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID)
 		return
 	}
@@ -409,9 +410,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		CreatedAt:  time.Now(),
 	}
 
-	dg.Log.Debug("Discord response to %s: %d chunk(s), %d chars, model: %s",
-		msg.Author.Username, len(chunks), len(responseText), finalPayload.Model)
+	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", finalPayload.Model))
 
+	sentCount := 0
 	for i, chunk := range chunks {
 		currentReplyID := ""
 		if i == 0 {
@@ -420,13 +421,17 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 		sentMessageID, err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
 		if err != nil {
-			dg.Log.Error("Failed to send chunk %d to Discord: %v", i+1, err)
+			log.Error("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", requestID), config.F("chunk_index", i+1), config.ErrorField(err))
 			break
 		}
+		sentCount++
 
 		if i == 0 {
 			dg.rememberReply(sentMessageID, originCtx)
 		}
+	}
+	if sentCount == len(chunks) {
+		log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
 	}
 }
 
@@ -461,7 +466,7 @@ func (dg *Gateway) loadImages(attachments []struct {
 
 		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
-			dg.Log.Warn("Discord attachment rejected for %q: %v", attachment.Filename, err)
+			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.attachment.rejected", "rejected discord attachment", config.F("filename", attachment.Filename), config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -492,7 +497,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.Log.Warn("Discord attachment fetch failed: filename=%q status=%d body=%q", filename, resp.StatusCode, strings.TrimSpace(string(body)))
+		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("filename", filename), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return ollama.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
 	}
 
@@ -508,19 +513,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 	if err != nil {
 		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
 	}
-	dg.Log.Debug(
-		"Discord attachment normalized: filename=%q id=%q declared_mime=%q detected_mime=%q normalized_mime=%q bytes=%d width=%d height=%d preserved_alpha=%t used_declared_mime=%t",
-		filename,
-		attachmentID,
-		strings.TrimSpace(declaredMIME),
-		result.DetectedMIME,
-		result.Image.MimeType,
-		len(body),
-		result.Width,
-		result.Height,
-		result.PreservedAlpha,
-		result.UsedDeclaredMIME,
-	)
+	dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("width", result.Width), config.F("height", result.Height), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil
 }
 
@@ -563,7 +556,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.Log.Warn("Discord typing failed: channel=%s status=%d body=%q", channelID, resp.StatusCode, strings.TrimSpace(string(body)))
+		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
@@ -607,7 +600,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		dg.Log.Warn("Discord send failed: channel=%s status=%d body=%q", channelID, resp.StatusCode, trimResponseBody(respBody))
+		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "error"), config.F("body_preview", trimResponseBody(respBody)))
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 

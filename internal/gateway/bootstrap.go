@@ -12,6 +12,7 @@ import (
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
 func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, commands *accountlink.CommandHandler, log *config.Logger) ([]Service, error) {
+	gatewayLog := log.Server("gateway.bootstrap")
 	services := []Service{
 		&localws.Gateway{
 			Port:     cfg.Port,
@@ -42,7 +43,10 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 		})
 	}
 
-	log.Info("Gateways enabled: %s", serviceNames(services))
+	gatewayLog.Info("gateway.bootstrap.enabled", "resolved enabled gateways",
+		config.F("gateway_count", len(services)),
+		config.F("gateways", serviceNames(services)),
+	)
 
 	return services, nil
 }
