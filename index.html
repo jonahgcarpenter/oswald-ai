@@ -188,24 +188,44 @@
         display: none;
       }
       .assistant-section-title {
-        margin-bottom: 6px;
+        width: 100%;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border: 0;
+        background: transparent;
         color: var(--muted);
         font-size: 0.8rem;
         font-weight: 600;
         letter-spacing: 0.02em;
         text-transform: uppercase;
+        cursor: pointer;
+      }
+      .assistant-section-title i {
+        font-size: 0.9rem;
+        transition: transform 0.15s ease;
+      }
+      .assistant-section-title[aria-expanded="true"] i {
+        transform: rotate(90deg);
       }
       .assistant-section-body {
+        margin-top: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .reasoning-text {
         white-space: pre-wrap;
         word-break: break-word;
         line-height: 1.55;
       }
-      .tool-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
+      .assistant-section-body.is-collapsed {
+        display: none;
       }
       .tool-chip {
+        display: inline-flex;
+        align-self: flex-start;
         padding: 6px 10px;
         border: 1px solid var(--border);
         border-radius: 999px;
@@ -424,15 +444,9 @@
         const thinkingSection = document.createElement("div");
         thinkingSection.className = "assistant-section is-hidden";
         thinkingSection.innerHTML =
-          '<div class="assistant-section-title">Thinking</div><div class="assistant-section-body"></div>';
-
-        const toolSection = document.createElement("div");
-        toolSection.className = "assistant-section is-hidden";
-        toolSection.innerHTML =
-          '<div class="assistant-section-title">Tools</div><div class="tool-list"></div>';
+          '<button class="assistant-section-title" type="button" aria-expanded="false">Thinking <i class="bi bi-chevron-right"></i></button><div class="assistant-section-body is-collapsed"></div>';
 
         meta.appendChild(thinkingSection);
-        meta.appendChild(toolSection);
 
         const content = document.createElement("div");
         content.className = "assistant-content";
@@ -442,18 +456,28 @@
         row.appendChild(block);
         chatThread.appendChild(row);
 
+        const thinkingToggle = thinkingSection.querySelector(
+          ".assistant-section-title",
+        );
+        const thinkingBody = thinkingSection.querySelector(
+          ".assistant-section-body",
+        );
+
+        thinkingToggle.addEventListener("click", () => {
+          const isExpanded =
+            thinkingToggle.getAttribute("aria-expanded") === "true";
+          thinkingToggle.setAttribute("aria-expanded", String(!isExpanded));
+          thinkingBody.classList.toggle("is-collapsed", isExpanded);
+        });
+
         pendingAssistantMessage = {
           row,
           thinkingSection,
-          thinkingBody: thinkingSection.querySelector(
-            ".assistant-section-body",
-          ),
-          toolSection,
-          toolList: toolSection.querySelector(".tool-list"),
+          thinkingToggle,
+          thinkingBody,
           content,
-          thinkingText: "",
           contentText: "",
-          tools: new Set(),
+          lastReasoningNode: null,
         };
 
         scrollToBottom();
@@ -470,8 +494,12 @@
         }
 
         const message = ensurePendingAssistantMessage();
-        message.thinkingText += text;
-        message.thinkingBody.textContent = message.thinkingText;
+        if (!message.lastReasoningNode || !message.lastReasoningNode.classList.contains("reasoning-text")) {
+          message.lastReasoningNode = document.createElement("div");
+          message.lastReasoningNode.className = "reasoning-text";
+          message.thinkingBody.appendChild(message.lastReasoningNode);
+        }
+        message.lastReasoningNode.textContent += text;
         message.thinkingSection.classList.remove("is-hidden");
         scrollToBottom();
       }
@@ -484,16 +512,12 @@
         const message = ensurePendingAssistantMessage();
         const match = text.match(/^\[Calling:\s*(.+?)\]$/);
         const label = match ? match[1] : text;
-        if (message.tools.has(label)) {
-          return;
-        }
-
-        message.tools.add(label);
         const chip = document.createElement("div");
         chip.className = "tool-chip";
         chip.textContent = label;
-        message.toolList.appendChild(chip);
-        message.toolSection.classList.remove("is-hidden");
+        message.thinkingBody.appendChild(chip);
+        message.lastReasoningNode = chip;
+        message.thinkingSection.classList.remove("is-hidden");
         scrollToBottom();
       }
 
@@ -517,10 +541,8 @@
 
         const message = ensurePendingAssistantMessage();
         if (payload) {
-          if (payload.thinking && message.thinkingText.length === 0) {
-            message.thinkingText = payload.thinking;
-            message.thinkingBody.textContent = payload.thinking;
-            message.thinkingSection.classList.remove("is-hidden");
+          if (payload.thinking && message.thinkingBody.childElementCount === 0) {
+            appendThinking(payload.thinking);
           }
           if (payload.response) {
             message.contentText = payload.response;
