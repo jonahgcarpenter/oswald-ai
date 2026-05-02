@@ -47,7 +47,7 @@ func Load() *Config {
 		BlueBubblesURL:        getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:   getEnv("BLUEBUBBLES_PASSWORD", ""),
 		OllamaURL:             getEnv("OLLAMA_URL", "http://localhost:11434"),
-		OllamaModel:           getEnv("OLLAMA_MODEL", "jaahas/qwen3.5-uncensored:4b"),
+		OllamaModel:           getEnv("OLLAMA_MODEL", ""),
 		DiscordToken:          getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:            getEnv("SEARXNG_URL", "http://localhost:8888"),
 		MaxToolFailureRetries: getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),

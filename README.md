@@ -28,23 +28,23 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 ### Environment variables:
 
-| Variable                   | Default                        | Purpose                                         |
-| -------------------------- | ------------------------------ | ----------------------------------------------- |
-| `OLLAMA_MODEL`             | `jaahas/qwen3.5-uncensored:4b` | Ollama model name                               |
-| `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                             |
-| `PORT`                     | `8080`                         | WebSocket gateway port                          |
-| `DISCORD_TOKEN`            | empty                          | Enables Discord gateway when set                |
-| `BLUE_BUBBLES_URL`         | empty                          | Enables iMessage gateway when set               |
-| `BLUE_BUBBLES_PASSWORD`    | empty                          | Enables iMessage gateway when set               |
-| `IMESSAGE_PORT`            | `8090`                         | The port listening for BlueBubbles webhooks     |
-| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`            | The endpoint listening for BlueBubbles webhooks |
-| `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG base URL                                |
-| `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                             |
-| `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Consecutive tool failure limit per request      |
-| `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables   |
-| `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables          |
-| `AGENT_TRACE_PATH`         | empty                          | Writes per-request agent trace markdown dumps   |
-| `LOG_LEVEL`                | `info`                         | Log verbosity                                   |
+| Variable                   | Default                  | Purpose                                         |
+| -------------------------- | ------------------------ | ----------------------------------------------- |
+| `OLLAMA_MODEL`             | empty                    | Ollama model name                               |
+| `OLLAMA_URL`               | `http://localhost:11434` | Ollama API base URL                             |
+| `PORT`                     | `8080`                   | WebSocket gateway port                          |
+| `DISCORD_TOKEN`            | empty                    | Enables Discord gateway when set                |
+| `BLUE_BUBBLES_URL`         | empty                    | Enables iMessage gateway when set               |
+| `BLUE_BUBBLES_PASSWORD`    | empty                    | Enables iMessage gateway when set               |
+| `IMESSAGE_PORT`            | `8090`                   | The port listening for BlueBubbles webhooks     |
+| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`      | The endpoint listening for BlueBubbles webhooks |
+| `SEARXNG_URL`              | `http://localhost:8888`  | SearXNG base URL                                |
+| `WORKER_POOL_SIZE`         | `1`                      | Broker worker count                             |
+| `MAX_TOOL_FAILURE_RETRIES` | `3`                      | Consecutive tool failure limit per request      |
+| `MEMORY_MAX_TURNS`         | `10`                     | Max retained session turn pairs; `0` disables   |
+| `MEMORY_MAX_AGE`           | `30m`                    | Max retained session age; `0` disables          |
+| `AGENT_TRACE_PATH`         | empty                    | Writes per-request agent trace markdown dumps   |
+| `LOG_LEVEL`                | `info`                   | Log verbosity                                   |
 
 ## Memory
 
