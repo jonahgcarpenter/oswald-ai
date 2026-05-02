@@ -1,12 +1,16 @@
 package websocket
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
@@ -18,20 +22,21 @@ func (wg *Gateway) Name() string {
 
 // Start initializes the HTTP server and registers the WebSocket handler.
 func (wg *Gateway) Start(b *broker.Broker) error {
+	log := wg.Log.Server("gateway.websocket", config.F("gateway", "websocket"))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		wg.handleConnections(w, r, b)
 	})
 
-	wg.Log.Info("Websocket server listening on port %s", wg.Port)
+	log.Info("gateway.listen", "websocket gateway listening", config.F("port", wg.Port))
 	return http.ListenAndServe(":"+wg.Port, nil)
 }
 
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
 func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
-	log := wg.Log
+	log := wg.Log.Server("gateway.websocket", config.F("gateway", "websocket"))
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Error("Upgrader error: %v", err)
+		log.Warn("gateway.connection.upgrade_failed", "websocket upgrade failed", config.ErrorField(err))
 		return
 	}
 	defer conn.Close()
@@ -40,9 +45,10 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	remoteAddr := conn.RemoteAddr().String()
 
 	for {
+		requestID := config.NewRequestID()
 		messageType, message, err := conn.ReadMessage()
 		if err != nil {
-			log.Debug("Websocket connection closed: %v", err)
+			log.Debug("gateway.connection.closed", "websocket connection closed", config.F("chat_id", remoteAddr), config.ErrorField(err))
 			break
 		}
 
@@ -56,8 +62,17 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			userPrompt = incoming.Prompt
 			userID = incoming.UserID
 			displayName = incoming.DisplayName
-			images, unsupported := decodeIncomingImages(incoming.Images)
+			images, unsupported := wg.decodeIncomingImages(incoming.Images)
 			userImages = images
+			if len(incoming.Images) > 0 {
+				log.Debug("gateway.attachment.processed", "processed websocket attachments",
+					config.F("request_id", requestID),
+					config.F("chat_id", remoteAddr),
+					config.F("accepted_count", len(images)),
+					config.F("downgraded_count", len(unsupported)),
+					config.F("declared_format_count", len(incoming.Images)),
+				)
+			}
 			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
 			userPrompt = string(message)
@@ -82,7 +97,12 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 
 		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
 		if err != nil {
-			log.Error("Websocket account resolution error: %v", err)
+			log.Error("gateway.account.resolve_failed", "failed to resolve websocket account",
+				config.F("request_id", requestID),
+				config.F("session_id", sessionKey),
+				config.F("user_id", normalizedUserID),
+				config.ErrorField(err),
+			)
 			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
 			errBytes, _ := json.Marshal(errorPayload)
 			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
@@ -91,7 +111,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 
 		if commandResponse, handled, commandErr := wg.Commands.Handle(canonicalUserID, userPrompt); handled {
 			if commandErr != nil {
-				log.Error("Websocket account command error: %v", commandErr)
+				log.Error("gateway.command.failed", "websocket account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
 				commandResponse = "Failed to process account linking command."
 			}
 			payload := agent.AgentResponse{Response: commandResponse}
@@ -100,23 +120,31 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			continue
 		}
 
-		log.Debug("Websocket request (session=%s sender=%s canonical=%s): %q", sessionKey, normalizedUserID, canonicalUserID, truncate(userPrompt, 100))
+		log.Debug("gateway.request.received", "received websocket request",
+			config.F("request_id", requestID),
+			config.F("gateway", "websocket"),
+			config.F("session_id", sessionKey),
+			config.F("user_id", canonicalUserID),
+			config.F("prompt_chars", len(userPrompt)),
+			config.F("image_count", len(userImages)),
+		)
 
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
 			if firstChunk {
-				log.Debug("Websocket: streaming response started (type=%s)", chunk.Type)
+				log.Debug("gateway.stream.started", "started websocket stream", config.F("request_id", requestID), config.F("stream_type", string(chunk.Type)))
 				firstChunk = false
 			}
 			chunkBytes, err := json.Marshal(chunk)
 			if err != nil {
-				log.Warn("Websocket: failed to marshal stream chunk: %v", err)
+				log.Warn("gateway.stream.marshal_failed", "failed to marshal websocket stream chunk", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
 				return
 			}
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
 		req := &broker.Request{
+			RequestID:    requestID,
 			Channel:      "websocket",
 			ChatID:       sessionKey,
 			SenderID:     canonicalUserID,
@@ -131,7 +159,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		result := <-req.ResponseChan
 
 		if result.Err != nil {
-			log.Error("Engine processing error: %v", result.Err)
+			log.Error("gateway.response.failed", "websocket engine processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
 			errorPayload := agent.AgentResponse{Error: "Internal engine timeout or failure"}
 			errBytes, _ := json.Marshal(errorPayload)
 			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
@@ -140,19 +168,19 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 
 		jsonBytes, err := json.Marshal(result.Response)
 		if err != nil {
-			log.Error("Failed to marshal JSON payload: %v", err)
+			log.Error("gateway.response.failed", "failed to marshal websocket response", config.F("request_id", requestID), config.ErrorField(err))
 			continue
 		}
 
-		log.Debug("Websocket: sending final payload (%d bytes, model=%s)", len(jsonBytes), result.Response.Model)
+		log.Debug("gateway.response.sent", "sent websocket response", config.F("request_id", requestID), config.F("content_chars", len(jsonBytes)), config.F("model", result.Response.Model), config.F("status", "ok"))
 		if err = conn.WriteMessage(messageType, jsonBytes); err != nil {
-			log.Debug("Websocket write error: %v", err)
+			log.Warn("gateway.write_failed", "websocket write failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
 			break
 		}
 	}
 }
 
-func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
+func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
 	if len(images) == 0 {
 		return nil, nil
 	}
@@ -164,14 +192,73 @@ func decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		inputImage, err := media.BuildInputImage(image.MimeType, image.Data, image.Source)
+		result, err := normalizeIncomingImage(image)
 		if err != nil {
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		validated = append(validated, inputImage)
+		wg.Log.Server("gateway.websocket", config.F("gateway", "websocket")).Debug(
+			"gateway.attachment.normalized",
+			"normalized websocket attachment",
+			config.F("source", image.Source),
+			config.F("declared_mime", strings.TrimSpace(image.MimeType)),
+			config.F("detected_mime", result.DetectedMIME),
+			config.F("normalized_mime", result.Image.MimeType),
+			config.F("content_chars", decodedLen(image.Data)),
+			config.F("width", result.Width),
+			config.F("height", result.Height),
+			config.F("preserved_alpha", result.PreservedAlpha),
+			config.F("used_declared_mime", result.UsedDeclaredMIME),
+		)
+		validated = append(validated, result.Image)
 	}
 	return validated, unsupported
+}
+
+func normalizeIncomingImage(image IncomingImage) (media.NormalizationResult, error) {
+	data, err := decodeIncomingImageData(image.Data)
+	if err != nil {
+		return media.NormalizationResult{}, err
+	}
+	return media.NormalizeInputImageFromBytes(nil, image.MimeType, data, image.Source)
+}
+
+func decodeIncomingImageData(encoded string) ([]byte, error) {
+	payload := strings.TrimSpace(encoded)
+	if payload == "" {
+		return nil, fmt.Errorf("image payload is empty")
+	}
+	if comma := strings.Index(payload, ","); comma >= 0 && strings.HasPrefix(payload[:comma], "data:") {
+		payload = payload[comma+1:]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("image payload is not valid base64")
+	}
+	if len(decoded) > media.MaxImageBytes {
+		return nil, fmt.Errorf("image payload exceeds %d bytes", media.MaxImageBytes)
+	}
+	return decoded, nil
+}
+
+func decodedLen(encoded string) int {
+	decoded, err := decodeIncomingImageData(encoded)
+	if err != nil {
+		return 0
+	}
+	return len(decoded)
+}
+
+func attachmentFormats(images []IncomingImage) string {
+	formats := make([]string, 0, len(images))
+	for _, image := range images {
+		format := strings.TrimSpace(image.MimeType)
+		if format == "" {
+			format = "unknown"
+		}
+		formats = append(formats, format)
+	}
+	return strings.Join(formats, ",")
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.

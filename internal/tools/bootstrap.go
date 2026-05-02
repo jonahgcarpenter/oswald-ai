@@ -17,7 +17,8 @@ import (
 // chatClient and model are forwarded to the persistent_memory handler so it can perform
 // LLM-based migration of old flat-format user memory files on first recall.
 func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, log *config.Logger) (*Registry, error) {
-	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log)
+	bootstrapLog := log.Server("tool.bootstrap")
+	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
 		return nil, err
 	}
@@ -26,27 +27,28 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, user
 		return nil, err
 	}
 
-	log.Info("Tools enabled: %s", strings.Join(registry.Names(), ", "))
+	bootstrapLog.Info("tool.bootstrap.enabled", "enabled builtin tools", config.F("tool_count", registry.Count()), config.F("tools", strings.Join(registry.Names(), ",")))
 	return registry, nil
 }
 
 // registerBuiltins wires all builtin tools into the shared registry.
 func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, log *config.Logger) error {
-	searchClient := websearch.NewClient(cfg.SearxngURL, log)
+	bootstrapLog := log.Server("tool.bootstrap")
+	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web_search"))
 	if err := registry.RegisterHandler("web_search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
 		return fmt.Errorf("failed to initialize web_search tool: %w", err)
 	}
-	log.Debug("Tools: web search client configured: %s", cfg.SearxngURL)
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web_search"), config.F("path", cfg.SearxngURL))
 
 	if err := registry.RegisterHandler("persistent_memory", Handler(usermemory.NewHandler(userMemStore, chatClient, model, log))); err != nil {
 		return fmt.Errorf("failed to initialize persistent_memory tool: %w", err)
 	}
-	log.Debug("Tools: persistent user memory configured: %s", config.DefaultUserMemoryPath)
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured persistent memory tool", config.F("tool_name", "persistent_memory"), config.F("path", config.DefaultUserMemoryPath))
 
 	if err := registry.RegisterHandler("soul_memory", Handler(soulmemory.NewHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul_memory tool: %w", err)
 	}
-	log.Debug("Tools: soul memory configured: %s", config.DefaultSoulPath)
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul memory tool", config.F("tool_name", "soul_memory"), config.F("path", config.DefaultSoulPath))
 
 	return nil
 }
