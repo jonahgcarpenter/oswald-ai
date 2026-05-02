@@ -353,6 +353,9 @@ func resolveGatewayURL(resumeURL string) string {
 	if resumeURL == "" {
 		return gatewayURL
 	}
+	if strings.HasPrefix(resumeURL, "ws://") || strings.HasPrefix(resumeURL, "wss://") {
+		return resumeURL
+	}
 	return fmt.Sprintf("wss://%s/?v=10&encoding=json", resumeURL)
 }
 
