@@ -114,11 +114,11 @@ Streaming behavior:
 
 Oswald keeps three distinct memory layers.
 
-| Layer | Storage | Purpose | Mutable by agent |
-| --- | --- | --- | --- |
-| Soul memory | `config/soul.md` | Identity, directives, personality | Yes |
-| Persistent user memory | `config/memory/users/<id>.md` | Facts about a user that survive restart | Yes |
-| Session chat memory | In-process only | Conversation history for the active session | Implicitly |
+| Layer                  | Storage                       | Purpose                                     | Mutable by agent |
+| ---------------------- | ----------------------------- | ------------------------------------------- | ---------------- |
+| Soul memory            | `config/soul.md`              | Identity, directives, personality           | Yes              |
+| Persistent user memory | `config/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
+| Session chat memory    | In-process only               | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
@@ -365,30 +365,9 @@ Implementation: `internal/debug/agent_trace.go`
 go run ./cmd/agent/main.go
 go build -o ./tmp/main ./cmd/agent/main.go
 gofmt -w .
-go list ./... | grep -v '/test$' | xargs go vet
 ```
 
-There are no `*_test.go` tests yet. Integration checks are standalone programs in `test/` and expect the server to already be running.
-
-```bash
-go run ./test/ttft.go
-go run ./test/interactive.go
-go run ./test/media.go -file /path/to/image.jpg
-go run ./test/memory-ttl.go
-go run ./test/memory-max_turns.go
-go run ./test/memory-compaction.go
-go run ./test/queueing.go
-```
-
-`test/media.go` exercises WebSocket media flows including image+text, image-only, oversized images, too many images, and unsupported/non-image attachments.
-
-These memory checks are easiest to understand when the server runs with a small retention budget and agent trace dumps enabled.
-
-Example:
-
-```bash
-MEMORY_MAX_TURNS=3 MEMORY_MAX_AGE=5s AGENT_TRACE_PATH=./tmp/agent-trace go run ./cmd/agent/main.go
-```
+There are no tests yet.
 
 ## Logging
 
@@ -550,44 +529,44 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ## Environment Variables
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `8080` | WebSocket gateway port |
-| `IMESSAGE_PORT` | `8090` | HTTP port for the iMessage BlueBubbles webhook listener |
-| `IMESSAGE_WEBHOOK_PATH` | `/imessage/webhook` | HTTP path for incoming BlueBubbles webhooks |
-| `BLUEBUBBLES_URL` | empty | BlueBubbles server base URL; enables iMessage when paired with password |
-| `BLUEBUBBLES_PASSWORD` | empty | BlueBubbles server password/token used for iMessage REST API auth |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama API base URL |
-| `OLLAMA_MODEL` | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama |
-| `SEARXNG_URL` | `http://localhost:8888` | SearXNG API base URL |
-| `DISCORD_TOKEN` | empty | Enables Discord gateway |
-| `WORKER_POOL_SIZE` | `1` | Broker worker count |
-| `MAX_TOOL_FAILURE_RETRIES` | `3` | Max consecutive tool failures before disabling tools for the request |
-| `LOG_LEVEL` | `info` | Logging verbosity |
-| `MEMORY_MAX_TURNS` | `10` | Max retained session turn pairs; `0` disables the cap |
-| `MEMORY_MAX_AGE` | `30m` | Max retained session age; `0` disables expiry |
-| `AGENT_TRACE_PATH` | empty | Directory for per-request agent trace markdown dumps |
+| Variable                   | Default                        | Purpose                                                                 |
+| -------------------------- | ------------------------------ | ----------------------------------------------------------------------- |
+| `PORT`                     | `8080`                         | WebSocket gateway port                                                  |
+| `IMESSAGE_PORT`            | `8090`                         | HTTP port for the iMessage BlueBubbles webhook listener                 |
+| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`            | HTTP path for incoming BlueBubbles webhooks                             |
+| `BLUEBUBBLES_URL`          | empty                          | BlueBubbles server base URL; enables iMessage when paired with password |
+| `BLUEBUBBLES_PASSWORD`     | empty                          | BlueBubbles server password/token used for iMessage REST API auth       |
+| `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                                                     |
+| `OLLAMA_MODEL`             | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama                                    |
+| `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
+| `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
+| `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
+| `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Max consecutive tool failures before disabling tools for the request    |
+| `LOG_LEVEL`                | `info`                         | Logging verbosity                                                       |
+| `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables the cap                   |
+| `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables expiry                           |
+| `AGENT_TRACE_PATH`         | empty                          | Directory for per-request agent trace markdown dumps                    |
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `cmd/agent/main.go` | Startup wiring and shutdown |
-| `internal/agent/agent.go` | Main agent loop |
-| `internal/agent/summarize.go` | History compaction summarizer |
-| `internal/broker/broker.go` | Request queue and worker pool |
-| `internal/memory/store.go` | Session memory retention |
-| `internal/memory/budget.go` | Context budget discovery |
-| `internal/ollama/client.go` | Ollama HTTP client |
-| `internal/tools/registry.go` | Tool schema loading and execution |
-| `internal/tools/bootstrap.go` | Builtin tool wiring |
-| `internal/tools/usermemory/store.go` | Persistent per-user memory store |
-| `internal/tools/soulmemory/store.go` | Soul file store |
-| `internal/accountlink/store.go` | Canonical account link store |
-| `internal/gateway/websocket/gateway.go` | WebSocket transport |
-| `internal/gateway/discord/gateway.go` | Discord transport |
-| `internal/gateway/imessage/gateway.go` | iMessage BlueBubbles transport |
-| `internal/debug/prompt.go` | Prompt debug dump writer |
+| File                                    | Purpose                           |
+| --------------------------------------- | --------------------------------- |
+| `cmd/agent/main.go`                     | Startup wiring and shutdown       |
+| `internal/agent/agent.go`               | Main agent loop                   |
+| `internal/agent/summarize.go`           | History compaction summarizer     |
+| `internal/broker/broker.go`             | Request queue and worker pool     |
+| `internal/memory/store.go`              | Session memory retention          |
+| `internal/memory/budget.go`             | Context budget discovery          |
+| `internal/ollama/client.go`             | Ollama HTTP client                |
+| `internal/tools/registry.go`            | Tool schema loading and execution |
+| `internal/tools/bootstrap.go`           | Builtin tool wiring               |
+| `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
+| `internal/tools/soulmemory/store.go`    | Soul file store                   |
+| `internal/accountlink/store.go`         | Canonical account link store      |
+| `internal/gateway/websocket/gateway.go` | WebSocket transport               |
+| `internal/gateway/discord/gateway.go`   | Discord transport                 |
+| `internal/gateway/imessage/gateway.go`  | iMessage BlueBubbles transport    |
+| `internal/debug/prompt.go`              | Prompt debug dump writer          |
 
 ## Code Style
 
