@@ -31,7 +31,9 @@ type HelloEvent struct {
 
 // ReadyEvent carries the authenticated bot user identity.
 type ReadyEvent struct {
-	User struct {
+	SessionID        string `json:"session_id"`
+	ResumeGatewayURL string `json:"resume_gateway_url"`
+	User             struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 	} `json:"user"`
@@ -94,4 +96,9 @@ type Gateway struct {
 	Log        *config.Logger
 	replyMu    sync.RWMutex
 	replyIndex map[string]replyContext
+	sessionMu  sync.RWMutex
+	sessionID  string
+	resumeURL  string
+	lastSeq    *int
+	hbAcked    bool
 }
