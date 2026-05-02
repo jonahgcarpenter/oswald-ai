@@ -436,6 +436,18 @@ type parsedMemory struct {
 	Sections map[string]string
 }
 
+// MemoryEntry is a structured fact parsed from markdown memory content.
+type MemoryEntry struct {
+	Statement string `json:"statement"`
+	Evidence  string `json:"evidence"`
+}
+
+// ParsedContent is a structured view of a user memory markdown document.
+type ParsedContent struct {
+	Intro    string                   `json:"intro,omitempty"`
+	Sections map[string][]MemoryEntry `json:"sections,omitempty"`
+}
+
 func parseMemory(content string) parsedMemory {
 	parsed := parsedMemory{Sections: make(map[string]string)}
 	body := memoryBody(content)
@@ -495,6 +507,42 @@ func memoryBody(content string) string {
 // category -> section body (the text under each ## heading, excluding the heading itself).
 func parseSections(content string) map[string]string {
 	return parseMemory(content).Sections
+}
+
+// ParseContent converts persisted memory markdown into structured sections and entries.
+func ParseContent(content string) ParsedContent {
+	parsed := parseMemory(content)
+	out := ParsedContent{
+		Intro:    strings.TrimSpace(parsed.Intro),
+		Sections: make(map[string][]MemoryEntry),
+	}
+
+	for _, cat := range ValidCategories {
+		body, ok := parsed.Sections[cat]
+		if !ok {
+			continue
+		}
+		entries := parseEntries(body)
+		if len(entries) == 0 {
+			continue
+		}
+		out.Sections[cat] = make([]MemoryEntry, 0, len(entries))
+		for _, entry := range entries {
+			lines := strings.SplitN(strings.TrimSpace(entry), "\n", 2)
+			memoryEntry := MemoryEntry{Statement: strings.TrimSpace(lines[0])}
+			if len(lines) == 2 {
+				evidence := strings.TrimSpace(lines[1])
+				evidence = strings.TrimPrefix(evidence, "- Evidence:")
+				memoryEntry.Evidence = strings.TrimSpace(evidence)
+			}
+			out.Sections[cat] = append(out.Sections[cat], memoryEntry)
+		}
+	}
+
+	if len(out.Sections) == 0 {
+		out.Sections = nil
+	}
+	return out
 }
 
 // serializeMemory writes the intro block and category map back to a full file string.

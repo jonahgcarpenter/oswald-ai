@@ -173,6 +173,11 @@
         word-break: break-word;
         line-height: 1.65;
       }
+      .assistant-content a,
+      .reasoning-text a,
+      .tool-result-body a {
+        color: #8ab4ff;
+      }
       .assistant-content > :first-child,
       .reasoning-text > :first-child {
         margin-top: 0;
@@ -279,6 +284,86 @@
         background: var(--panel-2);
         color: #f1f3f7;
         font-size: 0.9rem;
+      }
+      .reasoning-tool {
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .reasoning-tool[open] {
+        background: rgba(255, 255, 255, 0.035);
+      }
+      .reasoning-tool-summary {
+        padding: 10px 12px;
+        cursor: pointer;
+        color: #f1f3f7;
+        font-size: 0.95rem;
+        font-weight: 500;
+      }
+      .reasoning-tool-summary::marker {
+        color: var(--muted);
+      }
+      .tool-result-body {
+        padding: 0 12px 12px;
+        color: #e8eaf0;
+      }
+      .tool-result-body p {
+        margin: 0 0 0.75em;
+      }
+      .tool-result-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .tool-result-item {
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .tool-result-title {
+        display: inline-block;
+        margin-bottom: 6px;
+        font-weight: 600;
+        text-decoration: none;
+      }
+      .tool-result-url {
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+        word-break: break-all;
+      }
+      .tool-result-snippet {
+        color: #e8eaf0;
+        line-height: 1.5;
+      }
+      .memory-section {
+        margin-top: 12px;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .memory-section-title {
+        margin-bottom: 8px;
+        color: #f1f3f7;
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      .memory-entry + .memory-entry {
+        margin-top: 10px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
+      .memory-entry-statement {
+        margin-bottom: 4px;
+        color: #f7f7f8;
+        font-weight: 500;
+      }
+      .memory-entry-evidence {
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.5;
       }
       .input-bar {
         width: min(760px, calc(100vw - 32px));
@@ -450,6 +535,29 @@
         return marked.parse(text || "");
       }
 
+      function escapeHTML(text) {
+        return String(text || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function formatToolName(name) {
+        return String(name || "Tool")
+          .split("_")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ");
+      }
+
+      function formatCategoryName(name) {
+        return String(name || "")
+          .split("_")
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ");
+      }
+
       function setStatus(message) {
         status.textContent = message;
         status.classList.toggle("is-visible", Boolean(message));
@@ -579,6 +687,137 @@
         scrollToBottom();
       }
 
+      function appendToolEvent(tool, mode) {
+        if (!tool || !tool.name) {
+          return;
+        }
+
+        const message = ensurePendingAssistantMessage();
+        const details = document.createElement("details");
+        details.className = "reasoning-tool";
+
+        const summary = document.createElement("summary");
+        summary.className = "reasoning-tool-summary";
+
+        if (mode === "call") {
+          const query = tool.web_search?.query?.trim();
+          if (tool.name === "web_search" && query) {
+            summary.textContent = `Web Search: ${query}`;
+          } else if (tool.name === "persistent_memory" && tool.persistent_memory?.action) {
+            summary.textContent = `Persistent Memory: ${tool.persistent_memory.action}`;
+          } else if (tool.name === "soul_memory" && tool.soul_memory?.action) {
+            summary.textContent = `Soul Memory: ${tool.soul_memory.action}`;
+          } else {
+            summary.textContent = `Calling ${formatToolName(tool.name)}`;
+          }
+        } else {
+          const resultCount = tool.web_search?.results?.length || 0;
+          if (tool.name === "web_search") {
+            summary.textContent = resultCount > 0
+              ? `Web Search Results (${resultCount})`
+              : tool.is_error
+                ? "Web Search Error"
+                : "Web Search Results";
+          } else if (tool.name === "persistent_memory") {
+            summary.textContent = tool.is_error
+              ? "Persistent Memory Error"
+              : `Persistent Memory ${tool.persistent_memory?.action ? `(${tool.persistent_memory.action})` : "Result"}`;
+          } else if (tool.name === "soul_memory") {
+            summary.textContent = tool.is_error
+              ? "Soul Memory Error"
+              : `Soul Memory ${tool.soul_memory?.action ? `(${tool.soul_memory.action})` : "Result"}`;
+          } else {
+            summary.textContent = tool.is_error
+              ? `${formatToolName(tool.name)} Error`
+              : `${formatToolName(tool.name)} Result`;
+          }
+        }
+
+        const body = document.createElement("div");
+        body.className = "tool-result-body";
+
+        if (mode === "call") {
+          if (tool.name === "web_search" && tool.web_search?.query) {
+            body.innerHTML = renderMarkdown(`Searching for: \`${tool.web_search.query}\``);
+          } else if (tool.name === "persistent_memory" && tool.persistent_memory) {
+            const memory = tool.persistent_memory;
+            const lines = [`Action: \`${memory.action || "unknown"}\``];
+            if (memory.category) {
+              lines.push(`Category: \`${memory.category}\``);
+            }
+            if (memory.statement) {
+              lines.push(`Statement: ${memory.statement}`);
+            }
+            if (memory.evidence) {
+              lines.push(`Evidence: ${memory.evidence}`);
+            }
+            body.innerHTML = renderMarkdown(lines.join("\n\n"));
+          } else if (tool.name === "soul_memory" && tool.soul_memory) {
+            const soul = tool.soul_memory;
+            body.innerHTML = renderMarkdown(`Action: \`${soul.action || "unknown"}\``);
+            if (soul.content) {
+              body.innerHTML += renderMarkdown(`\`\`\`md\n${soul.content}\n\`\`\``);
+            }
+          } else if (tool.arguments && Object.keys(tool.arguments).length > 0) {
+            body.innerHTML = renderMarkdown(`\`\`\`json\n${JSON.stringify(tool.arguments, null, 2)}\n\`\`\``);
+          }
+        } else if (tool.name === "web_search" && tool.web_search?.results?.length) {
+          const list = document.createElement("div");
+          list.className = "tool-result-list";
+          for (const result of tool.web_search.results) {
+            const item = document.createElement("div");
+            item.className = "tool-result-item";
+            item.innerHTML = `
+              <a class="tool-result-title" href="${escapeHTML(result.url)}" target="_blank" rel="noreferrer">${escapeHTML(result.title || result.url)}</a>
+              <div class="tool-result-url">${escapeHTML(result.url)}</div>
+              <div class="tool-result-snippet">${escapeHTML(result.content || "")}</div>
+            `;
+            list.appendChild(item);
+          }
+          body.appendChild(list);
+        } else if (tool.name === "persistent_memory" && tool.persistent_memory?.content?.sections) {
+          const memory = tool.persistent_memory.content;
+          if (memory.intro) {
+            body.innerHTML = renderMarkdown(memory.intro);
+          }
+          for (const [category, entries] of Object.entries(memory.sections)) {
+            const section = document.createElement("div");
+            section.className = "memory-section";
+            const title = document.createElement("div");
+            title.className = "memory-section-title";
+            title.textContent = formatCategoryName(category);
+            section.appendChild(title);
+            for (const entry of entries) {
+              const item = document.createElement("div");
+              item.className = "memory-entry";
+              item.innerHTML = `
+                <div class="memory-entry-statement">${escapeHTML(entry.statement || "")}</div>
+                <div class="memory-entry-evidence">${escapeHTML(entry.evidence || "")}</div>
+              `;
+              section.appendChild(item);
+            }
+            body.appendChild(section);
+          }
+        } else if (tool.name === "soul_memory" && tool.soul_memory?.content) {
+          body.innerHTML = renderMarkdown(`\`\`\`md\n${tool.soul_memory.content}\n\`\`\``);
+        } else if (tool.result_text) {
+          body.innerHTML = renderMarkdown(tool.result_text);
+        }
+
+        if (!body.innerHTML.trim() && body.childElementCount === 0) {
+          body.innerHTML = renderMarkdown(
+            mode === "call" ? formatToolName(tool.name) : "No result details available.",
+          );
+        }
+
+        details.appendChild(summary);
+        details.appendChild(body);
+        message.thinkingBody.appendChild(details);
+        message.lastReasoningNode = details;
+        message.thinkingSection.classList.remove("is-hidden");
+        scrollToBottom();
+      }
+
       function appendContent(text) {
         if (!text) {
           return;
@@ -651,8 +890,20 @@
               return;
             }
 
+            if (payload.type === "tool_call") {
+              appendToolEvent(payload.tool, "call");
+              return;
+            }
+
+            if (payload.type === "tool_result") {
+              appendToolEvent(payload.tool, "result");
+              return;
+            }
+
             if (payload.type === "status") {
-              appendToolCall(payload.text || "");
+              if (payload.text && !/^\[Calling:\s*(.+?)\]$/.test(payload.text)) {
+                appendToolCall(payload.text);
+              }
               return;
             }
 

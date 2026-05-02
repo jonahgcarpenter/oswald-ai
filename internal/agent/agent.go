@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
 )
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
@@ -30,13 +31,138 @@ const (
 
 	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
 	ChunkStatus StreamChunkType = "status"
+
+	// ChunkToolCall carries structured tool invocation data for frontend timelines.
+	ChunkToolCall StreamChunkType = "tool_call"
+
+	// ChunkToolResult carries structured tool result data for frontend timelines.
+	ChunkToolResult StreamChunkType = "tool_result"
 )
+
+// ToolStreamSearchResult is a UI-safe search result emitted for web_search tools.
+type ToolStreamSearchResult struct {
+	Title   string `json:"title,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Content string `json:"content,omitempty"`
+}
+
+// ToolStreamSearchPayload contains structured web_search details for streaming UIs.
+type ToolStreamSearchPayload struct {
+	Query   string                   `json:"query,omitempty"`
+	Results []ToolStreamSearchResult `json:"results,omitempty"`
+}
+
+// ToolStreamPayload contains structured tool data for frontend rendering.
+type ToolStreamPayload struct {
+	Name             string                             `json:"name"`
+	Arguments        map[string]interface{}             `json:"arguments,omitempty"`
+	ResultText       string                             `json:"result_text,omitempty"`
+	DurationMS       int64                              `json:"duration_ms,omitempty"`
+	IsError          bool                               `json:"is_error,omitempty"`
+	WebSearch        *ToolStreamSearchPayload           `json:"web_search,omitempty"`
+	PersistentMemory *ToolStreamPersistentMemoryPayload `json:"persistent_memory,omitempty"`
+	SoulMemory       *ToolStreamSoulMemoryPayload       `json:"soul_memory,omitempty"`
+}
+
+// ToolStreamPersistentMemoryPayload contains structured persistent memory details.
+type ToolStreamPersistentMemoryPayload struct {
+	Action    string                    `json:"action,omitempty"`
+	Category  string                    `json:"category,omitempty"`
+	Statement string                    `json:"statement,omitempty"`
+	Evidence  string                    `json:"evidence,omitempty"`
+	Content   *usermemory.ParsedContent `json:"content,omitempty"`
+}
+
+// ToolStreamSoulMemoryPayload contains structured soul memory details.
+type ToolStreamSoulMemoryPayload struct {
+	Action  string `json:"action,omitempty"`
+	Content string `json:"content,omitempty"`
+}
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
 // Gateways receive thinking tokens, content tokens, and agent status messages via this type.
 type StreamChunk struct {
-	Type StreamChunkType `json:"type"`
-	Text string          `json:"text"`
+	Type StreamChunkType    `json:"type"`
+	Text string             `json:"text,omitempty"`
+	Tool *ToolStreamPayload `json:"tool,omitempty"`
+}
+
+func toolStreamPayload(toolName string, args map[string]interface{}, result string, duration time.Duration, isError bool) *ToolStreamPayload {
+	payload := &ToolStreamPayload{
+		Name:       toolName,
+		Arguments:  args,
+		ResultText: result,
+		DurationMS: duration.Milliseconds(),
+		IsError:    isError,
+	}
+
+	if toolName != "web_search" {
+		switch toolName {
+		case "persistent_memory":
+			payload.PersistentMemory = persistentMemoryStreamPayload(args, result, isError)
+		case "soul_memory":
+			payload.SoulMemory = soulMemoryStreamPayload(args, result, isError)
+		}
+		return payload
+	}
+
+	searchPayload := &ToolStreamSearchPayload{}
+	if query, ok := args["query"].(string); ok {
+		searchPayload.Query = strings.TrimSpace(query)
+	}
+	results := websearch.ParseFormattedResults(result)
+	if len(results) > 0 {
+		searchPayload.Results = make([]ToolStreamSearchResult, 0, len(results))
+		for _, r := range results {
+			searchPayload.Results = append(searchPayload.Results, ToolStreamSearchResult{
+				Title:   r.Title,
+				URL:     r.URL,
+				Content: r.Content,
+			})
+		}
+	}
+	payload.WebSearch = searchPayload
+	return payload
+}
+
+func persistentMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamPersistentMemoryPayload {
+	payload := &ToolStreamPersistentMemoryPayload{}
+	if action, ok := args["action"].(string); ok {
+		payload.Action = strings.TrimSpace(strings.ToLower(action))
+	}
+	if category, ok := args["category"].(string); ok {
+		payload.Category = strings.TrimSpace(strings.ToLower(category))
+	}
+	if statement, ok := args["statement"].(string); ok {
+		payload.Statement = strings.TrimSpace(statement)
+	}
+	if evidence, ok := args["evidence"].(string); ok {
+		payload.Evidence = strings.TrimSpace(evidence)
+	}
+	if isError {
+		return payload
+	}
+	if payload.Action == "recall" {
+		content := usermemory.ParseContent(result)
+		if content.Intro != "" || len(content.Sections) > 0 {
+			payload.Content = &content
+		}
+	}
+	return payload
+}
+
+func soulMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamSoulMemoryPayload {
+	payload := &ToolStreamSoulMemoryPayload{}
+	if action, ok := args["action"].(string); ok {
+		payload.Action = strings.TrimSpace(strings.ToLower(action))
+	}
+	if content, ok := args["content"].(string); ok && content != "" {
+		payload.Content = content
+	}
+	if payload.Action == "read" && !isError {
+		payload.Content = result
+	}
+	return payload
 }
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -413,9 +539,9 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				Arguments: tc.Function.Arguments,
 			}
 
-			// Emit a status chunk so the gateway knows a tool is executing.
+			// Emit a structured tool-call chunk so UIs can render the invocation.
 			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkStatus, Text: fmt.Sprintf("[Calling: %s]", toolName)})
+				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)})
 			}
 			reqLog.Debug("agent.tool.start", "starting tool execution",
 				config.F("iteration", iteration),
@@ -453,6 +579,12 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			}
 			traceEntry.Result = toolContent
 			toolExecutions = append(toolExecutions, traceEntry)
+			if streamCallback != nil {
+				streamCallback(StreamChunk{
+					Type: ChunkToolResult,
+					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil),
+				})
+			}
 
 			messages = append(messages, ollama.ChatMessage{
 				Role:     "tool",
