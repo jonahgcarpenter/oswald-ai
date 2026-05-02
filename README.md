@@ -111,7 +111,3 @@ What is Bitcoins current price?
 - [x] Support for images
 - [ ] Support for files
 - [ ] STT & TTS support
-
-## License
-
-MIT
