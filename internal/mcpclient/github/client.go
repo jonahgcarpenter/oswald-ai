@@ -13,7 +13,7 @@ import (
 
 const (
 	DefaultURL      = "https://api.githubcopilot.com/mcp/"
-	DefaultToolsets = "context,repos"
+	DefaultToolsets = "repos,issues,pull_request,users,discussions"
 )
 
 type Client struct {
