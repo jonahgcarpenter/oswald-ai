@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
@@ -68,7 +69,12 @@ func main() {
 	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
 	log.Debug("app.account_link.configured", "configured account link store", config.F("path", config.DefaultAccountLinkPath))
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, rootLog)
+	mcpManager, err := mcpclient.NewManagerFromConfig(context.Background(), cfg, rootLog)
+	if err != nil {
+		log.Fatal("app.mcp.init_failed", "failed to initialize MCP clients", config.ErrorField(err))
+	}
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, mcpManager, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
@@ -138,4 +144,7 @@ func main() {
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
 	requestBroker.Shutdown()
+	if err := mcpManager.Close(); err != nil {
+		log.Warn("app.mcp.shutdown_failed", "failed to shut down MCP clients", config.ErrorField(err), config.F("status", "degraded"))
+	}
 }

@@ -23,6 +23,7 @@ type ParamSpec struct {
 	Type        string
 	Required    bool
 	Description string
+	Enum        []string
 }
 
 // Spec holds the fully parsed definition from a single tool markdown file.
@@ -113,6 +114,29 @@ func (r *Registry) RegisterHandler(name string, handler Handler) error {
 	return nil
 }
 
+// RegisterSpec adds a tool spec that was discovered programmatically rather than
+// loaded from markdown.
+func (r *Registry) RegisterSpec(spec Spec) error {
+	if spec.Name == "" {
+		return fmt.Errorf("cannot register tool spec with empty name")
+	}
+	if _, ok := r.specs[spec.Name]; ok {
+		return fmt.Errorf("tool spec %q is already registered", spec.Name)
+	}
+	r.specs[spec.Name] = spec
+	r.log.Debug("tool.registry.definition_registered", "registered tool definition", config.F("tool_name", spec.Name), config.F("source", "dynamic"))
+	return nil
+}
+
+// RegisterTool registers a programmatically discovered tool and its handler in a
+// single step.
+func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
+	if err := r.RegisterSpec(spec); err != nil {
+		return err
+	}
+	return r.RegisterHandler(spec.Name, handler)
+}
+
 // OllamaTools converts all loaded Specs into the []ollama.Tool slice
 // passed to ChatRequest.Tools. All loaded specs are included regardless of
 // whether a handler has been registered.
@@ -125,6 +149,7 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 			props[p.Name] = ollama.ToolParameterProperty{
 				Type:        p.Type,
 				Description: p.Description,
+				Enum:        p.Enum,
 			}
 			if p.Required {
 				required = append(required, p.Name)
