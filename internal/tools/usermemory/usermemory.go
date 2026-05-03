@@ -12,32 +12,18 @@ import (
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := toolctx.MetadataFromContext(ctx)
-	return log.Agent("agent.tool.persistent_memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 }
 
-// NewHandler returns a Handler for the persistent_memory tool.
-// The handler dispatches on the "action" argument:
-//
-//   - remember — store or update a fact (requires statement and evidence)
-//   - recall   — return stored facts for the current user, optionally filtered by category
-//   - forget   — remove a fact by its statement text, or pass statement "all" to wipe everything
-//
+// NewRememberHandler returns a Handler for the memory.remember tool.
 // The target user is determined from the sender ID injected into ctx by the
 // agent, so the model never needs to pass user identity as an argument.
-//
-// chatClient and model are used to perform a one-time LLM-based migration when
-// recall is called on a memory file that pre-dates the category system. The LLM
-// is asked to classify each flat fact into the correct category section. The
-// migrated content is written back to disk so the migration only fires once.
-func NewHandler(store *Store, chatClient ollama.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		userID := toolctx.SenderIDFromContext(ctx)
 		if userID == "" {
-			return "", fmt.Errorf("persistent_memory: no user identity available in this context")
+			return "", fmt.Errorf("memory.remember: no user identity available in this context")
 		}
-
-		action, _ := args["action"].(string)
-		action = strings.TrimSpace(strings.ToLower(action))
 
 		statement, _ := args["statement"].(string)
 		statement = strings.TrimSpace(statement)
@@ -48,25 +34,52 @@ func NewHandler(store *Store, chatClient ollama.Chatter, model string, log *conf
 		category, _ := args["category"].(string)
 		category = strings.TrimSpace(strings.ToLower(category))
 
-		switch action {
-		case "remember":
-			return handleRemember(store, requestLog(log, ctx), userID, statement, evidence, category)
-		case "recall":
-			return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category)
-		case "forget":
-			return handleForget(store, requestLog(log, ctx), userID, statement)
-		default:
-			return "", fmt.Errorf("persistent_memory: unknown action %q — use remember, recall, or forget", action)
+		return handleRemember(store, requestLog(log, ctx), userID, statement, evidence, category)
+	}
+}
+
+// NewRecallHandler returns a Handler for the memory.recall tool.
+// chatClient and model are used to perform a one-time LLM-based migration when
+// recall is called on a memory file that pre-dates the category system. The LLM
+// is asked to classify each flat fact into the correct category section. The
+// migrated content is written back to disk so the migration only fires once.
+func NewRecallHandler(store *Store, chatClient ollama.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		userID := toolctx.SenderIDFromContext(ctx)
+		if userID == "" {
+			return "", fmt.Errorf("memory.recall: no user identity available in this context")
 		}
+
+		category, _ := args["category"].(string)
+		category = strings.TrimSpace(strings.ToLower(category))
+
+		return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category)
+	}
+}
+
+// NewForgetHandler returns a Handler for the memory.forget tool.
+// The target user is determined from the sender ID injected into ctx by the
+// agent, so the model never needs to pass user identity as an argument.
+func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		userID := toolctx.SenderIDFromContext(ctx)
+		if userID == "" {
+			return "", fmt.Errorf("memory.forget: no user identity available in this context")
+		}
+
+		statement, _ := args["statement"].(string)
+		statement = strings.TrimSpace(statement)
+
+		return handleForget(store, requestLog(log, ctx), userID, statement)
 	}
 }
 
 func handleRemember(store *Store, log *config.Logger, userID, statement, evidence, category string) (string, error) {
 	if statement == "" {
-		return "", fmt.Errorf("persistent_memory remember: statement is required")
+		return "", fmt.Errorf("memory.remember: statement is required")
 	}
 	if evidence == "" {
-		return "", fmt.Errorf("persistent_memory remember: evidence is required")
+		return "", fmt.Errorf("memory.remember: evidence is required")
 	}
 
 	if err := store.Set(userID, statement, evidence, category); err != nil {
@@ -74,7 +87,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 	}
 
 	cat := normalizeCategory(category)
-	log.Debug("agent.tool.persistent_memory.remembered", "remembered persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", cat))
+	log.Debug("agent.tool.memory.remembered", "remembered persistent memory", config.F("tool_name", "memory.remember"), config.F("user_id", userID), config.F("category", cat))
 	return fmt.Sprintf("Remembered: %s (category: %s)", statement, cat), nil
 }
 
@@ -90,28 +103,28 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 	}
 
 	if raw == "" {
-		log.Debug("agent.tool.persistent_memory.not_found", "no persistent memory found", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
+		log.Debug("agent.tool.memory.not_found", "no persistent memory found", config.F("tool_name", "memory.recall"), config.F("user_id", userID))
 		return "No persistent memory found for this user.", nil
 	}
 
 	// If the file is in old flat format (no ## category headers), run the
 	// LLM migration to classify each fact into the correct category.
 	if needsMigration(raw) {
-		log.Debug("agent.tool.persistent_memory.migration.started", "started persistent memory migration", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("source", "legacy_format"))
+		log.Debug("agent.tool.memory.migration.started", "started persistent memory migration", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("source", "legacy_format"))
 		migrated, migErr := migrateWithLLM(ctx, chatClient, model, raw, log)
 		if migErr != nil {
 			// Migration failed — return the raw content with a note so the
 			// model at least sees the data and can work with it.
-			log.Warn("agent.tool.persistent_memory.migration.failed", "persistent memory migration failed", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("action", "return_raw"), config.F("status", "degraded"), config.ErrorField(migErr))
+			log.Warn("agent.tool.memory.migration.failed", "persistent memory migration failed", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("action", "return_raw"), config.F("status", "degraded"), config.ErrorField(migErr))
 			return "Note: Memory file could not be automatically categorized. Raw content follows:\n\n" + raw, nil
 		}
 
 		// Persist the migrated file so this only happens once.
 		if writeErr := store.WriteFull(userID, migrated); writeErr != nil {
-			log.Warn("agent.tool.persistent_memory.migration.persist_failed", "failed to persist migrated memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(writeErr))
+			log.Warn("agent.tool.memory.migration.persist_failed", "failed to persist migrated memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(writeErr))
 			// Still return the migrated content even if the write failed.
 		} else {
-			log.Debug("agent.tool.persistent_memory.migration.completed", "completed persistent memory migration", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("status", "ok"))
+			log.Debug("agent.tool.memory.migration.completed", "completed persistent memory migration", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "ok"))
 		}
 		raw = migrated
 	}
@@ -123,28 +136,28 @@ func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, 
 			return "", err
 		}
 		if content == "" {
-			log.Debug("agent.tool.persistent_memory.not_found", "no persistent memory found in category", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", category))
+			log.Debug("agent.tool.memory.not_found", "no persistent memory found in category", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category))
 			return fmt.Sprintf("No stored facts in category %q for this user.", category), nil
 		}
-		log.Debug("agent.tool.persistent_memory.recalled", "recalled persistent memory category", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
+		log.Debug("agent.tool.memory.recalled", "recalled persistent memory category", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
 		return content, nil
 	}
 
 	// Full recall — return everything.
-	log.Debug("agent.tool.persistent_memory.recalled", "recalled all persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID), config.F("scope", "all"), config.F("content_chars", len(raw)))
+	log.Debug("agent.tool.memory.recalled", "recalled all persistent memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("scope", "all"), config.F("content_chars", len(raw)))
 	return raw, nil
 }
 
 func handleForget(store *Store, log *config.Logger, userID, statement string) (string, error) {
 	if statement == "" {
-		return "", fmt.Errorf("persistent_memory forget: statement is required (use \"all\" to wipe everything)")
+		return "", fmt.Errorf("memory.forget: statement is required (use \"all\" to wipe everything)")
 	}
 
 	if strings.ToLower(statement) == "all" {
 		if err := store.DeleteAll(userID); err != nil {
 			return "", err
 		}
-		log.Debug("agent.tool.persistent_memory.wiped", "wiped all persistent memory", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
+		log.Debug("agent.tool.memory.wiped", "wiped all persistent memory", config.F("tool_name", "memory.forget"), config.F("user_id", userID))
 		return "All persistent memory for this user has been cleared.", nil
 	}
 
@@ -152,7 +165,7 @@ func handleForget(store *Store, log *config.Logger, userID, statement string) (s
 		return "", err
 	}
 
-	log.Debug("agent.tool.persistent_memory.forgot", "forgot persistent memory statement", config.F("tool_name", "persistent_memory"), config.F("user_id", userID))
+	log.Debug("agent.tool.memory.forgot", "forgot persistent memory statement", config.F("tool_name", "memory.forget"), config.F("user_id", userID))
 	return fmt.Sprintf("Forgotten: %s", statement), nil
 }
 
@@ -224,7 +237,7 @@ Memory file to reorganize:
 	if !strings.HasPrefix(result, "# User Memory") ||
 		!strings.Contains(result, "\n## ") ||
 		!strings.Contains(result, "- Evidence:") {
-		log.Warn("agent.tool.persistent_memory.validation_failed", "persistent memory migration validation failed", config.F("tool_name", "persistent_memory"), config.F("preview", result[:min(len(result), 200)]), config.F("status", "error"))
+		log.Warn("agent.tool.memory.validation_failed", "persistent memory migration validation failed", config.F("tool_name", "memory.recall"), config.F("preview", result[:min(len(result), 200)]), config.F("status", "error"))
 		return "", fmt.Errorf("LLM migration response did not match expected format")
 	}
 

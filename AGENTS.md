@@ -5,10 +5,12 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports three builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports five builtin tools:
 
 - `web_search`
-- `persistent_memory`
+- `memory.remember`
+- `memory.recall`
+- `memory.forget`
 - `soul_memory`
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
@@ -130,8 +132,8 @@ Oswald keeps three distinct memory layers.
 ### Persistent User Memory
 
 - Stored in `config/memory/users/<id>.md`
-- Managed by the `persistent_memory` tool
-- Organized into categories: `identity`, `preferences`, `context`, `notes`
+- Managed by the `memory.*` tools
+- Organized into categories: `identity`, `system_rules`, `preferences`, `notes`
 - Uses per-user locking so different users can be updated in parallel safely
 - Older flat files are migrated to categorized markdown on first recall or write
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
@@ -291,7 +293,9 @@ Tools are split into schema and runtime layers.
 Current builtin tools:
 
 - `web_search` — SearXNG-backed search
-- `persistent_memory` — remember, recall, and forget user facts
+- `memory.remember` — store or update user facts
+- `memory.recall` — retrieve stored user facts
+- `memory.forget` — remove stored user facts
 - `soul_memory` — read, write, or append to the soul file
 
 ### Tool Registry
@@ -603,7 +607,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only three builtin tools ship today
+- Only five builtin tools ship today
 - Ollama is the only LLM backend
 
 Account-linking note:

@@ -54,18 +54,18 @@ type ToolStreamSearchPayload struct {
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name             string                             `json:"name"`
-	Arguments        map[string]interface{}             `json:"arguments,omitempty"`
-	ResultText       string                             `json:"result_text,omitempty"`
-	DurationMS       int64                              `json:"duration_ms,omitempty"`
-	IsError          bool                               `json:"is_error,omitempty"`
-	WebSearch        *ToolStreamSearchPayload           `json:"web_search,omitempty"`
-	PersistentMemory *ToolStreamPersistentMemoryPayload `json:"persistent_memory,omitempty"`
-	SoulMemory       *ToolStreamSoulMemoryPayload       `json:"soul_memory,omitempty"`
+	Name       string                       `json:"name"`
+	Arguments  map[string]interface{}       `json:"arguments,omitempty"`
+	ResultText string                       `json:"result_text,omitempty"`
+	DurationMS int64                        `json:"duration_ms,omitempty"`
+	IsError    bool                         `json:"is_error,omitempty"`
+	WebSearch  *ToolStreamSearchPayload     `json:"web_search,omitempty"`
+	Memory     *ToolStreamMemoryPayload     `json:"memory,omitempty"`
+	SoulMemory *ToolStreamSoulMemoryPayload `json:"soul_memory,omitempty"`
 }
 
-// ToolStreamPersistentMemoryPayload contains structured persistent memory details.
-type ToolStreamPersistentMemoryPayload struct {
+// ToolStreamMemoryPayload contains structured memory tool details.
+type ToolStreamMemoryPayload struct {
 	Action    string                    `json:"action,omitempty"`
 	Category  string                    `json:"category,omitempty"`
 	Statement string                    `json:"statement,omitempty"`
@@ -98,8 +98,8 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web_search" {
 		switch toolName {
-		case "persistent_memory":
-			payload.PersistentMemory = persistentMemoryStreamPayload(args, result, isError)
+		case "memory.remember", "memory.recall", "memory.forget":
+			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
 		case "soul_memory":
 			payload.SoulMemory = soulMemoryStreamPayload(args, result, isError)
 		}
@@ -125,11 +125,9 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 	return payload
 }
 
-func persistentMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamPersistentMemoryPayload {
-	payload := &ToolStreamPersistentMemoryPayload{}
-	if action, ok := args["action"].(string); ok {
-		payload.Action = strings.TrimSpace(strings.ToLower(action))
-	}
+func memoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamMemoryPayload {
+	payload := &ToolStreamMemoryPayload{}
+	payload.Action = memoryToolAction(toolName)
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
 	}
@@ -149,6 +147,13 @@ func persistentMemoryStreamPayload(args map[string]interface{}, result string, i
 		}
 	}
 	return payload
+}
+
+func memoryToolAction(toolName string) string {
+	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "memory."); ok {
+		return suffix
+	}
+	return ""
 }
 
 func soulMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamSoulMemoryPayload {
@@ -335,7 +340,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, syste
 // (stateless one-shot behaviour).
 //
 // senderID is the stable internal user identifier for the current request. It is
-// injected into the request context so that tools such as persistent_memory can
+// injected into the request context so that tools such as memory.* can
 // identify the user without needing the session key. An empty senderID disables
 // user-scoped tool behaviour.
 //
@@ -378,7 +383,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	// Build the dynamic system prompt: soul + timestamp + speaker identity.
 	// User memory is not injected automatically — the model retrieves it via
-	// the persistent_memory tool when needed.
+	// the memory.recall tool when needed.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 

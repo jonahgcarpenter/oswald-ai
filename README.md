@@ -11,7 +11,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 - Iterative tool-calling agent loop on top of Ollama
 - iMessage, Discord, and WebSocket gateway
-- Builtin `web_search`, `persistent_memory`, and `soul_memory` tools
+- Builtin `web_search`, `memory.remember`, `memory.recall`, `memory.forget`, and `soul_memory` tools
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
 - Fully local runtime with no hosted model dependency
@@ -51,7 +51,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 Oswald uses three memory layers:
 
 - Soul memory: `config/soul.md`, read fresh on every request
-- Persistent user memory: `config/memory/users/*.md`, managed by `persistent_memory`
+- Persistent user memory: `config/memory/users/*.md`, managed by `memory.*` tools
 - Session chat memory: in-process only, pruned by TTL and max-turn limits, then compacted again if prompt budget is exceeded
 
 `AGENTS.md` documents the full runtime and architecture in detail.

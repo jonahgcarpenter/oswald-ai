@@ -59,8 +59,8 @@ func main() {
 	soulStore := soulmemory.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
-	// The user memory store is owned by the tool registry so the persistent_memory
-	// tool handler can remember, recall, and forget facts on behalf of the model.
+	// The user memory store is owned by the tool registry so the memory.* tool
+	// handlers can remember, recall, and forget facts on behalf of the model.
 	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, rootLog.Server("memory.user"))
 	log.Debug("app.memory_user.configured", "configured user memory path", config.F("path", config.DefaultUserMemoryPath))
 
