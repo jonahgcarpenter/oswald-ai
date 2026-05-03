@@ -15,6 +15,7 @@ type Config struct {
 	IMessageWebhookPath   string        // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
 	BlueBubblesURL        string        // BlueBubbles server base URL; iMessage gateway disabled if empty
 	BlueBubblesPassword   string        // BlueBubbles server password/token for REST API auth
+	GitHubMCPToken        string        // GitHub PAT used to authenticate to the GitHub MCP server
 	OllamaURL             string        // Ollama API base URL (default: "http://localhost:11434")
 	OllamaModel           string        // Ollama model name; required — startup fails if empty
 	DiscordToken          string        // Discord bot token; Discord gateway disabled if empty
@@ -46,6 +47,7 @@ func Load() *Config {
 		IMessageWebhookPath:   getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
 		BlueBubblesURL:        getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:   getEnv("BLUEBUBBLES_PASSWORD", ""),
+		GitHubMCPToken:        getEnv("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
 		OllamaURL:             getEnv("OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:           getEnv("OLLAMA_MODEL", ""),
 		DiscordToken:          getEnv("DISCORD_TOKEN", ""),
@@ -57,6 +59,11 @@ func Load() *Config {
 		MemoryMaxAge:          getEnvDuration("MEMORY_MAX_AGE", 30*time.Minute),
 		AgentTracePath:        getEnv("AGENT_TRACE_PATH", ""),
 	}
+}
+
+// GitHubMCPEnabled reports whether GitHub MCP should be initialized at startup.
+func (c *Config) GitHubMCPEnabled() bool {
+	return c != nil && c.GitHubMCPToken != ""
 }
 
 // getEnv retrieves an environment variable with a fallback to the default value

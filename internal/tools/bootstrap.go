@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
@@ -16,7 +17,7 @@ import (
 // can share the same instances with the tool handlers.
 // chatClient and model are forwarded to the persistent_memory handler so it can perform
 // LLM-based migration of old flat-format user memory files on first recall.
-func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, log *config.Logger) (*Registry, error) {
+func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, mcpManager *mcpclient.Manager, log *config.Logger) (*Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
@@ -26,8 +27,11 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, user
 	if err := registerBuiltins(registry, cfg, soulStore, userMemStore, chatClient, model, log); err != nil {
 		return nil, err
 	}
+	if err := registerMCPTools(registry, mcpManager, log); err != nil {
+		return nil, err
+	}
 
-	bootstrapLog.Info("tool.bootstrap.enabled", "enabled builtin tools", config.F("tool_count", registry.Count()), config.F("tools", strings.Join(registry.Names(), ",")))
+	bootstrapLog.Info("tool.bootstrap.enabled", "enabled tools", config.F("tool_count", registry.Count()), config.F("tools", strings.Join(registry.Names(), ",")))
 	return registry, nil
 }
 
@@ -50,5 +54,37 @@ func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmem
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul memory tool", config.F("tool_name", "soul_memory"), config.F("path", config.DefaultSoulPath))
 
+	return nil
+}
+
+func registerMCPTools(registry *Registry, manager *mcpclient.Manager, log *config.Logger) error {
+	if manager == nil || manager.ServerCount() == 0 {
+		return nil
+	}
+
+	bootstrapLog := log.Server("tool.bootstrap")
+	for _, tool := range manager.ToolSpecs() {
+		params := make([]ParamSpec, 0, len(tool.Parameters))
+		for _, p := range tool.Parameters {
+			params = append(params, ParamSpec{
+				Name:        p.Name,
+				Type:        p.Type,
+				Required:    p.Required,
+				Description: p.Description,
+				Enum:        p.Enum,
+			})
+		}
+
+		if err := registry.RegisterTool(Spec{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Parameters:  params,
+		}, Handler(tool.Handler)); err != nil {
+			return fmt.Errorf("failed to register MCP tool %q: %w", tool.Name, err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP tool", config.F("tool_name", tool.Name), config.F("source", "mcp"))
+	}
+
+	bootstrapLog.Info("tool.bootstrap.mcp_enabled", "enabled MCP tools", config.F("server_count", manager.ServerCount()), config.F("servers", manager.ServerNames()), config.F("tool_count", len(manager.ToolSpecs())))
 	return nil
 }
