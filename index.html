@@ -369,6 +369,26 @@
         width: min(760px, calc(100vw - 32px));
         margin: 0 auto 32px;
       }
+      .jump-to-bottom {
+        position: fixed;
+        right: 24px;
+        bottom: 108px;
+        z-index: 9;
+        padding: 10px 14px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: rgba(48, 48, 48, 0.96);
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+      }
+      .jump-to-bottom.is-hidden {
+        display: none;
+      }
+      .jump-to-bottom:hover {
+        background: #383838;
+      }
       .composer {
         display: flex;
         align-items: flex-end;
@@ -508,6 +528,9 @@
         </button>
       </div>
     </form>
+    <button class="jump-to-bottom is-hidden" id="jump-to-bottom" type="button">
+      Jump to latest
+    </button>
     <script>
       const form = document.getElementById("prompt-form");
       const input = document.getElementById("prompt-input");
@@ -519,12 +542,16 @@
       const status = document.getElementById("status");
       const chatThread = document.getElementById("chat-thread");
       const emptyState = document.getElementById("empty-state");
+      const jumpToBottomButton = document.getElementById("jump-to-bottom");
 
       const WS_URL = "ws://localhost:8080/ws";
 
       let socket = null;
       let isConnecting = false;
       let pendingAssistantMessage = null;
+      let autoScrollEnabled = true;
+
+      const AUTO_SCROLL_THRESHOLD = 120;
 
       marked.setOptions({
         breaks: true,
@@ -567,10 +594,24 @@
         sendButton.disabled = isDisabled;
       }
 
-      function scrollToBottom() {
+      function isNearBottom() {
+        const scrollBottom = window.scrollY + window.innerHeight;
+        return document.documentElement.scrollHeight - scrollBottom <= AUTO_SCROLL_THRESHOLD;
+      }
+
+      function syncAutoScrollState() {
+        jumpToBottomButton.classList.toggle("is-hidden", autoScrollEnabled);
+      }
+
+      function scrollToBottom(options = {}) {
+        const { force = false, smooth = true } = options;
+        if (!force && !autoScrollEnabled) {
+          return;
+        }
+
         window.scrollTo({
           top: document.body.scrollHeight,
-          behavior: "smooth",
+          behavior: smooth ? "smooth" : "auto",
         });
       }
 
@@ -972,6 +1013,8 @@
           prompt,
         };
 
+        autoScrollEnabled = true;
+        syncAutoScrollState();
         appendUserMessage(prompt);
         createAssistantMessage();
         socket.send(JSON.stringify(payload));
@@ -1014,8 +1057,20 @@
         submitPrompt();
       });
 
+      window.addEventListener("scroll", () => {
+        autoScrollEnabled = isNearBottom();
+        syncAutoScrollState();
+      }, { passive: true });
+
+      jumpToBottomButton.addEventListener("click", () => {
+        autoScrollEnabled = true;
+        syncAutoScrollState();
+        scrollToBottom({ force: true, smooth: true });
+      });
+
       autoResize();
       syncSendButton();
+      syncAutoScrollState();
       connectWebSocket();
     </script>
   </body>
