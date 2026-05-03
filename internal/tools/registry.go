@@ -297,8 +297,10 @@ func splitMarkdownSections(content string) map[string]string {
 // parseParameterTable parses a markdown table of tool parameters.
 // Expected columns (in order): Name, Type, Required, Description.
 // Skips the header row and any separator rows (containing only dashes and pipes).
+// Zero-argument tools are allowed and return an empty parameter slice.
 func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 	var params []ParamSpec
+	hasTableRow := false
 
 	for _, line := range strings.Split(section, "\n") {
 		line = strings.TrimSpace(line)
@@ -306,6 +308,7 @@ func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 		if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
 			continue
 		}
+		hasTableRow = true
 
 		inner := strings.TrimPrefix(line, "|")
 		inner = strings.TrimSuffix(inner, "|")
@@ -335,7 +338,7 @@ func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 		})
 	}
 
-	if len(params) == 0 {
+	if !hasTableRow {
 		return nil, fmt.Errorf("tool %q: parameter table has no valid rows", toolName)
 	}
 

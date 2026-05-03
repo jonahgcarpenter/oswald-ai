@@ -5,13 +5,15 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports five builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports seven builtin tools:
 
 - `web_search`
 - `memory.remember`
 - `memory.recall`
 - `memory.forget`
-- `soul_memory`
+- `soul.read`
+- `soul.write`
+- `soul.append`
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
 
@@ -126,7 +128,7 @@ Oswald keeps three distinct memory layers.
 
 - Stored in `config/soul.md`
 - Read fresh on every request
-- Edited through the `soul_memory` tool
+- Edited through the `soul.*` tools
 - Changes take effect on the next request without restart
 
 ### Persistent User Memory
@@ -296,7 +298,9 @@ Current builtin tools:
 - `memory.remember` — store or update user facts
 - `memory.recall` — retrieve stored user facts
 - `memory.forget` — remove stored user facts
-- `soul_memory` — read, write, or append to the soul file
+- `soul.read` — read the soul file
+- `soul.write` — replace the soul file
+- `soul.append` — append to the soul file
 
 ### Tool Registry
 
@@ -599,7 +603,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 ### Changing Personality
 
 - Edit `config/soul.md` directly, or
-- let the agent update it through the `soul_memory` tool
+- let the agent update it through the `soul.*` tools
 
 Changes apply on the next request because the soul file is read fresh each time.
 
@@ -607,7 +611,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only five builtin tools ship today
+- Only seven builtin tools ship today
 - Ollama is the only LLM backend
 
 Account-linking note:

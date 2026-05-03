@@ -59,10 +59,20 @@ func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmem
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultUserMemoryPath))
 
-	if err := registry.RegisterHandler("soul_memory", Handler(soulmemory.NewHandler(soulStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize soul_memory tool: %w", err)
+	if err := registry.RegisterHandler("soul.read", Handler(soulmemory.NewReadHandler(soulStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize soul.read tool: %w", err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul memory tool", config.F("tool_name", "soul_memory"), config.F("path", config.DefaultSoulPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.read"), config.F("path", config.DefaultSoulPath))
+
+	if err := registry.RegisterHandler("soul.write", Handler(soulmemory.NewWriteHandler(soulStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize soul.write tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.write"), config.F("path", config.DefaultSoulPath))
+
+	if err := registry.RegisterHandler("soul.append", Handler(soulmemory.NewAppendHandler(soulStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize soul.append tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.append"), config.F("path", config.DefaultSoulPath))
 
 	return nil
 }

@@ -54,14 +54,14 @@ type ToolStreamSearchPayload struct {
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name       string                       `json:"name"`
-	Arguments  map[string]interface{}       `json:"arguments,omitempty"`
-	ResultText string                       `json:"result_text,omitempty"`
-	DurationMS int64                        `json:"duration_ms,omitempty"`
-	IsError    bool                         `json:"is_error,omitempty"`
-	WebSearch  *ToolStreamSearchPayload     `json:"web_search,omitempty"`
-	Memory     *ToolStreamMemoryPayload     `json:"memory,omitempty"`
-	SoulMemory *ToolStreamSoulMemoryPayload `json:"soul_memory,omitempty"`
+	Name       string                   `json:"name"`
+	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
+	ResultText string                   `json:"result_text,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	IsError    bool                     `json:"is_error,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web_search,omitempty"`
+	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
+	Soul       *ToolStreamSoulPayload   `json:"soul,omitempty"`
 }
 
 // ToolStreamMemoryPayload contains structured memory tool details.
@@ -73,8 +73,8 @@ type ToolStreamMemoryPayload struct {
 	Content   *usermemory.ParsedContent `json:"content,omitempty"`
 }
 
-// ToolStreamSoulMemoryPayload contains structured soul memory details.
-type ToolStreamSoulMemoryPayload struct {
+// ToolStreamSoulPayload contains structured soul tool details.
+type ToolStreamSoulPayload struct {
 	Action  string `json:"action,omitempty"`
 	Content string `json:"content,omitempty"`
 }
@@ -100,8 +100,8 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		switch toolName {
 		case "memory.remember", "memory.recall", "memory.forget":
 			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
-		case "soul_memory":
-			payload.SoulMemory = soulMemoryStreamPayload(args, result, isError)
+		case "soul.read", "soul.write", "soul.append":
+			payload.Soul = soulStreamPayload(toolName, args, result, isError)
 		}
 		return payload
 	}
@@ -156,11 +156,9 @@ func memoryToolAction(toolName string) string {
 	return ""
 }
 
-func soulMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamSoulMemoryPayload {
-	payload := &ToolStreamSoulMemoryPayload{}
-	if action, ok := args["action"].(string); ok {
-		payload.Action = strings.TrimSpace(strings.ToLower(action))
-	}
+func soulStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamSoulPayload {
+	payload := &ToolStreamSoulPayload{}
+	payload.Action = soulToolAction(toolName)
 	if content, ok := args["content"].(string); ok && content != "" {
 		payload.Content = content
 	}
@@ -168,6 +166,13 @@ func soulMemoryStreamPayload(args map[string]interface{}, result string, isError
 		payload.Content = result
 	}
 	return payload
+}
+
+func soulToolAction(toolName string) string {
+	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "soul."); ok {
+		return suffix
+	}
+	return ""
 }
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -375,7 +380,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	})
 
 	// Read the soul file fresh on every request so that any edits the agent
-	// made via the soul_memory tool take effect immediately.
+	// made via the soul.* tools take effect immediately.
 	soulContent, soulErr := a.soul.Read()
 	if soulErr != nil {
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
