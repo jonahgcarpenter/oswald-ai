@@ -18,6 +18,7 @@ type ParamSpec struct {
 type ToolSpec struct {
 	Name        string
 	Description string
+	Server      string
 	Parameters  []ParamSpec
 	Handler     Handler
 }

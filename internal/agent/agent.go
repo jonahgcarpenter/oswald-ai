@@ -296,6 +296,38 @@ func makeCompactedTurn(summary string, now time.Time) memory.Turn {
 	}
 }
 
+func traceToolsFromCatalog(entries []tools.CatalogEntry) []debug.TraceTool {
+	out := make([]debug.TraceTool, 0, len(entries))
+	for _, entry := range entries {
+		params := make([]debug.TraceToolParameter, 0, len(entry.Parameters))
+		for _, param := range entry.Parameters {
+			params = append(params, debug.TraceToolParameter{
+				Name:        param.Name,
+				Type:        param.Type,
+				Required:    param.Required,
+				Description: param.Description,
+			})
+		}
+		out = append(out, debug.TraceTool{
+			Name:        entry.Name,
+			Description: entry.Description,
+			Parameters:  params,
+		})
+	}
+	return out
+}
+
+func traceMCPServersFromCatalog(groups []tools.CatalogServerGroup) []debug.TraceMCPServer {
+	out := make([]debug.TraceMCPServer, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, debug.TraceMCPServer{
+			Server: group.Server,
+			Tools:  traceToolsFromCatalog(group.Tools),
+		})
+	}
+	return out
+}
+
 func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
 	tools := a.registry.OllamaTools()
 	currentTurns := append([]memory.Turn(nil), turns...)
@@ -676,7 +708,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			SessionKey:                 sessionKey,
 			Model:                      a.model,
 			Messages:                   messages,
-			Tools:                      a.registry.OllamaTools(),
+			BuiltinTools:               traceToolsFromCatalog(a.registry.BuiltinCatalog()),
+			MCPServers:                 traceMCPServersFromCatalog(a.registry.MCPCatalogByServer()),
 			ContextWindow:              a.budget.ContextWindow,
 			PromptBudget:               a.budget.PromptBudget(),
 			EstimatedBefore:            prune.EstimatedBefore,

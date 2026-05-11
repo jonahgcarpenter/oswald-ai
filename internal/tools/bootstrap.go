@@ -93,6 +93,8 @@ func registerMCPTools(registry *Registry, manager *mcpclient.Manager, log *confi
 		if err := registry.RegisterTool(Spec{
 			Name:        tool.Name,
 			Description: tool.Description,
+			Source:      ToolSourceMCP,
+			Server:      tool.Server,
 			Parameters:  params,
 		}, Handler(tool.Handler)); err != nil {
 			return fmt.Errorf("failed to register MCP tool %q: %w", tool.Name, err)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,13 +21,35 @@ type ToolExecutionTrace struct {
 	Error     string
 }
 
+// TraceToolParameter describes one tool parameter in the trace output.
+type TraceToolParameter struct {
+	Name        string
+	Type        string
+	Required    bool
+	Description string
+}
+
+// TraceTool contains one tool definition in the trace output.
+type TraceTool struct {
+	Name        string
+	Description string
+	Parameters  []TraceToolParameter
+}
+
+// TraceMCPServer groups traced MCP tools under a single server name.
+type TraceMCPServer struct {
+	Server string
+	Tools  []TraceTool
+}
+
 // AgentTrace contains the final trace payload for a single agent request.
 type AgentTrace struct {
 	Dir                        string
 	SessionKey                 string
 	Model                      string
 	Messages                   []ollama.ChatMessage
-	Tools                      []ollama.Tool
+	BuiltinTools               []TraceTool
+	MCPServers                 []TraceMCPServer
 	ContextWindow              int
 	PromptBudget               int
 	EstimatedBefore            int
@@ -65,7 +88,7 @@ func DumpAgentTrace(trace AgentTrace) error {
 	fmt.Fprintf(&sb, "| Session | `%s` |\n", trace.SessionKey)
 	fmt.Fprintf(&sb, "| Model | `%s` |\n", trace.Model)
 	fmt.Fprintf(&sb, "| Messages | %d |\n", len(trace.Messages))
-	fmt.Fprintf(&sb, "| Tools | %d |\n", len(trace.Tools))
+	fmt.Fprintf(&sb, "| Tools | %d |\n", totalTraceTools(trace))
 	fmt.Fprintf(&sb, "| Tool executions | %d |\n", len(trace.ToolExecutions))
 	fmt.Fprintf(&sb, "| Context window | %d tokens |\n", trace.ContextWindow)
 	fmt.Fprintf(&sb, "| Prompt budget | %d tokens |\n", trace.PromptBudget)
@@ -166,25 +189,23 @@ func DumpAgentTrace(trace AgentTrace) error {
 		fmt.Fprintf(&sb, "| Tokens per second | %.2f |\n\n", tokensPerSecond)
 	}
 
-	if len(trace.Tools) > 0 {
-		fmt.Fprintf(&sb, "## Available Tools (%d)\n\n", len(trace.Tools))
-		for _, t := range trace.Tools {
-			fmt.Fprintf(&sb, "### `%s`\n\n", t.Function.Name)
-			fmt.Fprintf(&sb, "%s\n\n", t.Function.Description)
-			if len(t.Function.Parameters.Properties) > 0 {
-				sb.WriteString("| Parameter | Type | Required | Description |\n")
-				sb.WriteString("|---|---|---|---|\n")
-				for name, prop := range t.Function.Parameters.Properties {
-					required := "no"
-					for _, req := range t.Function.Parameters.Required {
-						if req == name {
-							required = "yes"
-							break
-						}
-					}
-					fmt.Fprintf(&sb, "| `%s` | %s | %s | %s |\n", name, prop.Type, required, markdownTableEscape(prop.Description))
-				}
-				sb.WriteString("\n")
+	if len(trace.BuiltinTools) > 0 {
+		fmt.Fprintf(&sb, "## Builtin Tools (%d)\n\n", len(trace.BuiltinTools))
+		for _, tool := range trace.BuiltinTools {
+			writeTraceTool(&sb, tool)
+		}
+	}
+
+	mcpToolCount := 0
+	for _, server := range trace.MCPServers {
+		mcpToolCount += len(server.Tools)
+	}
+	if mcpToolCount > 0 {
+		fmt.Fprintf(&sb, "## MCP Tools (%d)\n\n", mcpToolCount)
+		for _, server := range trace.MCPServers {
+			fmt.Fprintf(&sb, "### Server: `%s`\n\n", server.Server)
+			for _, tool := range server.Tools {
+				writeTraceTool(&sb, tool)
 			}
 		}
 	}
@@ -222,4 +243,36 @@ func IsFileSafe(r rune) bool {
 func markdownTableEscape(s string) string {
 	s = strings.ReplaceAll(s, "|", `\|`)
 	return strings.TrimSpace(s)
+}
+
+func totalTraceTools(trace AgentTrace) int {
+	total := len(trace.BuiltinTools)
+	for _, server := range trace.MCPServers {
+		total += len(server.Tools)
+	}
+	return total
+}
+
+func writeTraceTool(sb *strings.Builder, tool TraceTool) {
+	fmt.Fprintf(sb, "### `%s`\n\n", tool.Name)
+	fmt.Fprintf(sb, "%s\n\n", tool.Description)
+	if len(tool.Parameters) == 0 {
+		return
+	}
+
+	params := append([]TraceToolParameter(nil), tool.Parameters...)
+	sort.Slice(params, func(i, j int) bool {
+		return params[i].Name < params[j].Name
+	})
+
+	sb.WriteString("| Parameter | Type | Required | Description |\n")
+	sb.WriteString("|---|---|---|---|\n")
+	for _, param := range params {
+		required := "no"
+		if param.Required {
+			required = "yes"
+		}
+		fmt.Fprintf(sb, "| `%s` | %s | %s | %s |\n", param.Name, param.Type, required, markdownTableEscape(param.Description))
+	}
+	sb.WriteString("\n")
 }
