@@ -5,15 +5,14 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports seven builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports six builtin tools:
 
 - `web_search`
 - `memory.remember`
 - `memory.recall`
 - `memory.forget`
 - `soul.read`
-- `soul.write`
-- `soul.append`
+- `soul.patch`
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
 
@@ -299,8 +298,7 @@ Current builtin tools:
 - `memory.recall` — retrieve stored user facts
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
-- `soul.write` — replace the soul file
-- `soul.append` — append to the soul file
+- `soul.patch` — add, replace, or remove one exact line in the soul file
 
 ### Tool Registry
 
@@ -611,7 +609,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only seven builtin tools ship today
+- Only six builtin tools ship today
 - Ollama is the only LLM backend
 
 Account-linking note:

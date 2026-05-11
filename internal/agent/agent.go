@@ -75,8 +75,12 @@ type ToolStreamMemoryPayload struct {
 
 // ToolStreamSoulPayload contains structured soul tool details.
 type ToolStreamSoulPayload struct {
-	Action  string `json:"action,omitempty"`
-	Content string `json:"content,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Target    string `json:"target,omitempty"`
+	Anchor    string `json:"anchor,omitempty"`
+	Position  string `json:"position,omitempty"`
+	Content   string `json:"content,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -100,7 +104,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		switch toolName {
 		case "memory.remember", "memory.recall", "memory.forget":
 			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
-		case "soul.read", "soul.write", "soul.append":
+		case "soul.read", "soul.patch":
 			payload.Soul = soulStreamPayload(toolName, args, result, isError)
 		}
 		return payload
@@ -159,6 +163,18 @@ func memoryToolAction(toolName string) string {
 func soulStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamSoulPayload {
 	payload := &ToolStreamSoulPayload{}
 	payload.Action = soulToolAction(toolName)
+	if operation, ok := args["operation"].(string); ok {
+		payload.Operation = strings.TrimSpace(strings.ToLower(operation))
+	}
+	if target, ok := args["target"].(string); ok {
+		payload.Target = target
+	}
+	if anchor, ok := args["anchor"].(string); ok {
+		payload.Anchor = anchor
+	}
+	if position, ok := args["position"].(string); ok {
+		payload.Position = strings.TrimSpace(strings.ToLower(position))
+	}
 	if content, ok := args["content"].(string); ok && content != "" {
 		payload.Content = content
 	}

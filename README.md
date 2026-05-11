@@ -11,7 +11,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 - Iterative tool-calling agent loop on top of Ollama
 - iMessage, Discord, and WebSocket gateway
-- Builtin `web_search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, `soul.write`, and `soul.append` tools
+- Builtin `web_search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, and `soul.patch` tools
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
 - Fully local runtime with no hosted model dependency
