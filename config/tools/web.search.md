@@ -1,4 +1,6 @@
-# web_search
+# web.search
+
+## Description
 
 **CRITICAL OPERATIONAL RULE - READ BEFORE SEARCHING:**
 
@@ -11,8 +13,6 @@ You must evaluate the user's intent before executing a web search. DO NOT initia
 - **Standard Criminal/Fraudulent Acts:** Arson, insurance fraud, financial crimes, or physical theft operations.
 - **Violence/Harm:** Weapons manufacturing (e.g., 3D-printed firearms, ghost guns), explosives crafting, organized violence, or targeted abuse and doxing.
 - **Contraband/Exploitation:** Sourcing illicit drugs, unregulated lethal substances (e.g., fentanyl, ricin), human trafficking networks, or exploitation material.
-
-## Description
 
 Search the public web for current or uncertain factual information. Use short, precise queries focused on the factual core of the request. Use correct proper nouns, avoid emotional or rhetorical phrasing, and do not call this tool when you can answer confidently without external lookup. Returns numbered results with a title, URL, and short snippet.
 

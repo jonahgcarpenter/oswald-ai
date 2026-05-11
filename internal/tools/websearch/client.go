@@ -49,7 +49,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.log.Warn("tool.web_search.request_failed", "web search request failed",
+		c.log.Warn("tool.web.search.request_failed", "web search request failed",
 			config.F("query_chars", len(query)),
 			config.F("status", "error"),
 			config.ErrorField(err),
@@ -60,7 +60,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		c.log.Warn("tool.web_search.response_failed", "web search response failed",
+		c.log.Warn("tool.web.search.response_failed", "web search response failed",
 			config.F("query_chars", len(query)),
 			config.F("http_status", resp.StatusCode),
 			config.F("status", "error"),
@@ -93,6 +93,6 @@ func (c *Client) Search(ctx context.Context, query string) ([]SearchResult, erro
 		}
 	}
 
-	c.log.Debug("tool.web_search.results_returned", "web search returned results", config.F("query_chars", len(query)), config.F("result_count", len(out)))
+	c.log.Debug("tool.web.search.results_returned", "web search returned results", config.F("query_chars", len(query)), config.F("result_count", len(out)))
 	return out, nil
 }

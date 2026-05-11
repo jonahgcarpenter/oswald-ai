@@ -7,7 +7,7 @@ This file is the internal reference for how Oswald AI works today.
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
 It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports six builtin tools:
 
-- `web_search`
+- `web.search`
 - `memory.remember`
 - `memory.recall`
 - `memory.forget`
@@ -293,7 +293,7 @@ Tools are split into schema and runtime layers.
 
 Current builtin tools:
 
-- `web_search` — SearXNG-backed search
+- `web.search` — SearXNG-backed search
 - `memory.remember` — store or update user facts
 - `memory.recall` — retrieve stored user facts
 - `memory.forget` — remove stored user facts

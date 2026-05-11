@@ -29,7 +29,7 @@ const (
 	// ChunkContent carries tokens from the model's visible response.
 	ChunkContent StreamChunkType = "content"
 
-	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
+	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web.search]").
 	ChunkStatus StreamChunkType = "status"
 
 	// ChunkToolCall carries structured tool invocation data for frontend timelines.
@@ -39,14 +39,14 @@ const (
 	ChunkToolResult StreamChunkType = "tool_result"
 )
 
-// ToolStreamSearchResult is a UI-safe search result emitted for web_search tools.
+// ToolStreamSearchResult is a UI-safe search result emitted for web.search tools.
 type ToolStreamSearchResult struct {
 	Title   string `json:"title,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
-// ToolStreamSearchPayload contains structured web_search details for streaming UIs.
+// ToolStreamSearchPayload contains structured web.search details for streaming UIs.
 type ToolStreamSearchPayload struct {
 	Query   string                   `json:"query,omitempty"`
 	Results []ToolStreamSearchResult `json:"results,omitempty"`
@@ -59,7 +59,7 @@ type ToolStreamPayload struct {
 	ResultText string                   `json:"result_text,omitempty"`
 	DurationMS int64                    `json:"duration_ms,omitempty"`
 	IsError    bool                     `json:"is_error,omitempty"`
-	WebSearch  *ToolStreamSearchPayload `json:"web_search,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
 	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
 	Soul       *ToolStreamSoulPayload   `json:"soul,omitempty"`
 }
@@ -100,7 +100,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		IsError:    isError,
 	}
 
-	if toolName != "web_search" {
+	if toolName != "web.search" {
 		switch toolName {
 		case "memory.remember", "memory.recall", "memory.forget":
 			payload.Memory = memoryStreamPayload(toolName, args, result, isError)

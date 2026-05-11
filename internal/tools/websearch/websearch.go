@@ -91,10 +91,10 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 		}
 
 		meta := toolctx.MetadataFromContext(ctx)
-		log.Agent("agent.tool.web_search", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
-			"agent.tool.web_search.start",
+		log.Agent("agent.tool.web.search", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
+			"agent.tool.web.search.start",
 			"starting web search tool",
-			config.F("tool_name", "web_search"),
+			config.F("tool_name", "web.search"),
 			config.F("query_chars", len(query)),
 		)
 

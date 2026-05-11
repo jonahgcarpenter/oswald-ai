@@ -741,9 +741,10 @@
         summary.className = "reasoning-tool-summary";
 
         if (mode === "call") {
-          const query = tool.web_search?.query?.trim();
-          if (tool.name === "web_search" && query) {
-            summary.textContent = `Web Search: ${query}`;
+		  const webSearch = tool["web.search"];
+		  const query = webSearch?.query?.trim();
+		  if (tool.name === "web.search" && query) {
+			summary.textContent = `Web Search: ${query}`;
           } else if (tool.name === "persistent_memory" && tool.persistent_memory?.action) {
             summary.textContent = `Persistent Memory: ${tool.persistent_memory.action}`;
           } else if (tool.name === "soul_memory" && tool.soul_memory?.action) {
@@ -752,8 +753,9 @@
             summary.textContent = `Calling ${formatToolName(tool.name)}`;
           }
         } else {
-          const resultCount = tool.web_search?.results?.length || 0;
-          if (tool.name === "web_search") {
+		  const webSearch = tool["web.search"];
+		  const resultCount = webSearch?.results?.length || 0;
+		  if (tool.name === "web.search") {
             summary.textContent = resultCount > 0
               ? `Web Search Results (${resultCount})`
               : tool.is_error
@@ -778,8 +780,9 @@
         body.className = "tool-result-body";
 
         if (mode === "call") {
-          if (tool.name === "web_search" && tool.web_search?.query) {
-            body.innerHTML = renderMarkdown(`Searching for: \`${tool.web_search.query}\``);
+		  const webSearch = tool["web.search"];
+		  if (tool.name === "web.search" && webSearch?.query) {
+			body.innerHTML = renderMarkdown(`Searching for: \`${webSearch.query}\``);
           } else if (tool.name === "persistent_memory" && tool.persistent_memory) {
             const memory = tool.persistent_memory;
             const lines = [`Action: \`${memory.action || "unknown"}\``];
@@ -802,11 +805,11 @@
           } else if (tool.arguments && Object.keys(tool.arguments).length > 0) {
             body.innerHTML = renderMarkdown(`\`\`\`json\n${JSON.stringify(tool.arguments, null, 2)}\n\`\`\``);
           }
-        } else if (tool.name === "web_search" && tool.web_search?.results?.length) {
-          const list = document.createElement("div");
-          list.className = "tool-result-list";
-          for (const result of tool.web_search.results) {
-            const item = document.createElement("div");
+		} else if (tool.name === "web.search" && tool["web.search"]?.results?.length) {
+		  const list = document.createElement("div");
+		  list.className = "tool-result-list";
+		  for (const result of tool["web.search"].results) {
+			const item = document.createElement("div");
             item.className = "tool-result-item";
             item.innerHTML = `
               <a class="tool-result-title" href="${escapeHTML(result.url)}" target="_blank" rel="noreferrer">${escapeHTML(result.title || result.url)}</a>

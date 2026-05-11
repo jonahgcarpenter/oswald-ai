@@ -38,11 +38,11 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, user
 // registerBuiltins wires all builtin tools into the shared registry.
 func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web_search"))
-	if err := registry.RegisterHandler("web_search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
-		return fmt.Errorf("failed to initialize web_search tool: %w", err)
+	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
+	if err := registry.RegisterHandler("web.search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
+		return fmt.Errorf("failed to initialize web.search tool: %w", err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web_search"), config.F("path", cfg.SearxngURL))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("path", cfg.SearxngURL))
 
 	if err := registry.RegisterHandler("memory.remember", Handler(usermemory.NewRememberHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize memory.remember tool: %w", err)
