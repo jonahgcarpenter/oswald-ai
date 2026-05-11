@@ -12,6 +12,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Iterative tool-calling agent loop on top of Ollama
 - iMessage, Discord, and WebSocket gateway
 - Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- MCP integration starting with Github
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
 - Fully local runtime with no hosted model dependency
@@ -28,23 +29,24 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 ### Environment variables:
 
-| Variable                   | Default                  | Purpose                                         |
-| -------------------------- | ------------------------ | ----------------------------------------------- |
-| `OLLAMA_MODEL`             | empty                    | Ollama model name                               |
-| `OLLAMA_URL`               | `http://localhost:11434` | Ollama API base URL                             |
-| `PORT`                     | `8080`                   | WebSocket gateway port                          |
-| `DISCORD_TOKEN`            | empty                    | Enables Discord gateway when set                |
-| `BLUE_BUBBLES_URL`         | empty                    | Enables iMessage gateway when set               |
-| `BLUE_BUBBLES_PASSWORD`    | empty                    | Enables iMessage gateway when set               |
-| `IMESSAGE_PORT`            | `8090`                   | The port listening for BlueBubbles webhooks     |
-| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`      | The endpoint listening for BlueBubbles webhooks |
-| `SEARXNG_URL`              | `http://localhost:8888`  | SearXNG base URL                                |
-| `WORKER_POOL_SIZE`         | `1`                      | Broker worker count                             |
-| `MAX_TOOL_FAILURE_RETRIES` | `3`                      | Consecutive tool failure limit per request      |
-| `MEMORY_MAX_TURNS`         | `10`                     | Max retained session turn pairs; `0` disables   |
-| `MEMORY_MAX_AGE`           | `30m`                    | Max retained session age; `0` disables          |
-| `AGENT_TRACE_PATH`         | empty                    | Writes per-request agent trace markdown dumps   |
-| `LOG_LEVEL`                | `info`                   | Log verbosity                                   |
+| Variable                       | Default                  | Purpose                                         |
+| ------------------------------ | ------------------------ | ----------------------------------------------- |
+| `OLLAMA_MODEL`                 | empty                    | Ollama model name                               |
+| `OLLAMA_URL`                   | `http://localhost:11434` | Ollama API base URL                             |
+| `PORT`                         | `8080`                   | WebSocket gateway port                          |
+| `DISCORD_TOKEN`                | empty                    | Enables Discord gateway when set                |
+| `BLUE_BUBBLES_URL`             | empty                    | Enables iMessage gateway when set               |
+| `BLUE_BUBBLES_PASSWORD`        | empty                    | Enables iMessage gateway when set               |
+| `IMESSAGE_PORT`                | `8090`                   | The port listening for BlueBubbles webhooks     |
+| `IMESSAGE_WEBHOOK_PATH`        | `/imessage/webhook`      | The endpoint listening for BlueBubbles webhooks |
+| `SEARXNG_URL`                  | `http://localhost:8888`  | SearXNG base URL                                |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                    | Github MCP                                      |
+| `WORKER_POOL_SIZE`             | `1`                      | Broker worker count                             |
+| `MAX_TOOL_FAILURE_RETRIES`     | `3`                      | Consecutive tool failure limit per request      |
+| `MEMORY_MAX_TURNS`             | `10`                     | Max retained session turn pairs; `0` disables   |
+| `MEMORY_MAX_AGE`               | `30m`                    | Max retained session age; `0` disables          |
+| `AGENT_TRACE_PATH`             | empty                    | Writes per-request agent trace markdown dumps   |
+| `LOG_LEVEL`                    | `info`                   | Log verbosity                                   |
 
 ## Memory
 

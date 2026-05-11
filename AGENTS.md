@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and supports six builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin tools:
 
 - `web.search`
 - `memory.remember`
@@ -13,6 +13,8 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `memory.forget`
 - `soul.read`
 - `soul.patch`
+
+Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
 
@@ -23,12 +25,15 @@ There is no JavaScript, TypeScript, or frontend code in this repository.
 Current layers:
 
 1. `cmd/agent/main.go` — startup wiring
-2. `internal/gateway/` — gateway bootstrap and implementations
-3. `internal/broker/` — request queue and worker pool
-4. `internal/agent/` — iterative tool-calling agent loop
-5. `internal/memory/` — in-process conversation retention and compaction
-6. `internal/tools/` — tool registry, schemas, and builtin handlers
-7. `internal/ollama/` — Ollama client and request/response schema
+2. `internal/accountlink/` — canonical user identity and cross-gateway account linking
+3. `internal/gateway/` — gateway bootstrap and implementations
+4. `internal/broker/` — request queue and worker pool
+5. `internal/agent/` — iterative tool-calling agent loop
+6. `internal/memory/` — in-process conversation retention and compaction
+7. `internal/tools/` — tool registry, builtin handlers, and schema loading
+8. `internal/mcpclient/` — optional MCP client sessions and discovered tools
+9. `internal/media/` — image validation and normalization
+10. `internal/ollama/` — Ollama client and request/response schema
 
 ## Startup Flow
 
@@ -39,25 +44,29 @@ Current layers:
 3. Create the Ollama client
 4. Discover context budget from Ollama `/api/show`
 5. Create the soul store and persistent user-memory store
-6. Load tool schemas from `config/tools/*.md` and register builtin handlers
-7. Build enabled gateways from config
-8. Create the in-process conversation memory store
-9. Create the agent
-10. Start the broker worker pool
-11. Start each gateway in its own goroutine
-12. Wait for shutdown signal and drain the broker
+6. Create the account-link service and shared `/connect` and `/disconnect` command handler
+7. Initialize optional MCP clients
+8. Load tool schemas from `config/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+9. Build enabled gateways from config
+10. Create the in-process conversation memory store
+11. Create the agent
+12. Start the broker worker pool
+13. Start each gateway in its own goroutine
+14. Wait for shutdown signal, drain the broker, and close MCP clients
 
 ## Request Lifecycle
 
 Every request follows the same high-level path:
 
 1. A gateway receives user input
-2. The gateway derives routing metadata such as `SessionKey`, `SenderID`, and `DisplayName`, and may attach current-turn images
-3. The gateway submits a `broker.Request`
-4. A broker worker calls `(*Agent).Process()`
-5. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
-6. The final response is returned to the originating gateway
-7. The gateway sends the response back to the client, Discord channel, or iMessage chat
+2. The gateway derives routing metadata such as `SessionKey`, canonical `SenderID`, and `DisplayName`, and may attach current-turn images
+3. The gateway resolves or creates the canonical user identity through `internal/accountlink/`
+4. Account-link commands may be handled immediately by the gateway without reaching the agent loop
+5. The gateway submits a `broker.Request`
+6. A broker worker calls `(*Agent).Process()`
+7. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+8. The final response is returned to the originating gateway
+9. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -73,6 +82,7 @@ The broker lives in `internal/broker/` and sits between gateways and the agent.
 Relevant config:
 
 - `WORKER_POOL_SIZE` default: `1`
+- Internal request queue size: `10`
 
 ## Agent Flow
 
@@ -85,8 +95,9 @@ Per request it does the following:
 3. Read `config/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
    - soul content
-   - current date and time
    - current speaker identity when available
+   - user `system_rules` memory when available
+   - current date and time
 5. Load retained session turns from `internal/memory`
 6. Compact older turns if the estimated prompt exceeds the active model budget
 7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
@@ -104,12 +115,12 @@ Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
-- Prompt debug dumps include image counts and metadata, not base64 payloads
+- Agent trace dumps include image counts and metadata, not base64 payloads
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 
 Streaming behavior:
 
-- WebSocket clients can receive `thinking`, `content`, and `status` chunks while the request is running
+- WebSocket clients can receive `thinking`, `content`, `status`, `tool_call`, and `tool_result` chunks while the request is running
 - Discord does not stream token-by-token; it waits for the final response
 - iMessage does not stream token-by-token; it waits for the final response
 
@@ -134,10 +145,12 @@ Oswald keeps three distinct memory layers.
 
 - Stored in `config/memory/users/<id>.md`
 - Managed by the `memory.*` tools
+- Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories: `identity`, `system_rules`, `preferences`, `notes`
 - Uses per-user locking so different users can be updated in parallel safely
 - Older flat files are migrated to categorized markdown on first recall or write
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
+- Only the `system_rules` category is injected automatically into the system prompt; other categories are retrieved on demand via tools
 
 ### Account Links
 
@@ -145,6 +158,7 @@ Oswald keeps three distinct memory layers.
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
+- Linking can merge two canonical users when the requested external account is already attached elsewhere and the gateway sets do not conflict
 
 ### Session Chat Memory
 
@@ -206,10 +220,11 @@ Behavior:
   - `prompt`
   - `images`
 - If plain text is sent, the remote address is used as fallback identity
-- If `user_id` is present, it becomes the primary session key
+- If `user_id` is present, it becomes the primary session identity and is normalized through the account-link service
 - Supports text-only, image-only, and text-plus-image JSON requests
 - Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
+- Supports `/connect` and `/disconnect` account-link commands on the same socket
 
 WebSocket image payloads use the shape:
 
@@ -228,6 +243,7 @@ Behavior:
 
 - Maintains a reconnecting Discord Gateway websocket session
 - Sends heartbeats and identifies with the configured bot token
+- Attempts session resume after reconnect when Discord permits it
 - Ignores bot-authored messages
 - In guilds, only responds to mentions or direct replies to the bot
 - In DMs, responds to any message
@@ -237,6 +253,7 @@ Behavior:
 - Sends typing indicators while the request is running
 - Splits long replies to stay under Discord's 2000-character limit
 - Supports text-only, image-only, and text-plus-image messages
+- Supports `/connect` and `/disconnect` account-link commands
 
 Discord session keys use a hybrid strategy:
 
@@ -268,8 +285,10 @@ Behavior:
 - Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators and replies back through the BlueBubbles REST API
+- Retries BlueBubbles send failures with a fallback send method
 - Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
 - Supports text-only, image-only, and text-plus-image messages
+- Supports `/connect` and `/disconnect` account-link commands
 
 iMessage session keys use a hybrid strategy:
 
@@ -290,6 +309,7 @@ Tools are split into schema and runtime layers.
 
 - Schemas are loaded from `config/tools/*.md`
 - Runtime handlers are wired in `internal/tools/bootstrap.go`
+- Additional tool definitions can be discovered dynamically from connected MCP servers
 
 Current builtin tools:
 
@@ -300,6 +320,10 @@ Current builtin tools:
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
 
+Optional external tools:
+
+- Read-only GitHub MCP tools are discovered at startup and registered under the `github.` namespace when `GITHUB_PERSONAL_ACCESS_TOKEN` is set
+
 ### Tool Registry
 
 The registry:
@@ -308,6 +332,15 @@ The registry:
 - converts them into Ollama tool schemas
 - maps tool names to handlers
 - executes handlers when the model issues tool calls
+- keeps builtin tools and MCP-discovered tools in the same runtime catalog
+
+### MCP Integration
+
+- MCP client startup lives in `internal/mcpclient/`
+- GitHub is the only MCP server integration today
+- The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
+- Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
+- MCP tools are surfaced to the model with a `github.` prefix and traced separately in agent trace dumps
 
 ### Tool Failure Handling
 
@@ -331,20 +364,28 @@ Notes:
 - The client maps between internal app types and Ollama's wire format
 - Streaming responses accumulate both `thinking` and visible content
 - Current-turn images are sent to Ollama on the user message `images` field when provided by a gateway
+- Gateways normalize accepted source images into JPEG or PNG before they reach Ollama
 
 ## Image Validation
 
 Image validation is centralized in `internal/media/images.go`.
 
-- Supported MIME types:
+- Accepted source image formats:
   - `image/jpeg`
   - `image/png`
   - `image/webp`
+  - `image/heic`
+  - `image/heif`
+  - `image/heic-sequence`
+  - `image/heif-sequence`
+- Normalized output formats sent to Ollama:
+  - `image/jpeg`
+  - `image/png`
 - Maximum images per request: `4`
 - Maximum size per image: `10 MiB`
 - WebSocket validates the declared MIME type and base64 payload supplied by the client
-- Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type` and content sniffing
-- BlueBubbles commonly converts HEIC camera images to JPEG before Oswald receives them, so explicit HEIC support is not currently required
+- Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type`, content sniffing, and HEIC/HEIF signature detection
+- Decoded images are re-encoded as PNG when transparency must be preserved; otherwise they are re-encoded as JPEG
 - Any attachment that fails these checks is treated as an unsupported file and surfaced to the model via a short prompt note rather than a hard request failure
 
 ## Agent Trace Dumps
@@ -361,7 +402,8 @@ Each trace includes:
 - raw tool results injected back into the model
 - final response content and accumulated thinking
 - final model metrics
-- the tool schemas included in the request
+- builtin tool definitions included in the request
+- MCP tool definitions grouped by server
 
 Implementation: `internal/debug/agent_trace.go`
 
@@ -542,8 +584,9 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`            | HTTP path for incoming BlueBubbles webhooks                             |
 | `BLUEBUBBLES_URL`          | empty                          | BlueBubbles server base URL; enables iMessage when paired with password |
 | `BLUEBUBBLES_PASSWORD`     | empty                          | BlueBubbles server password/token used for iMessage REST API auth       |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                      | Enables the GitHub MCP client and read-only `github.*` tools            |
 | `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                                                     |
-| `OLLAMA_MODEL`             | `jaahas/qwen3.5-uncensored:4b` | Model name passed directly to Ollama                                    |
+| `OLLAMA_MODEL`             | empty                          | Model name passed directly to Ollama; required at startup               |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
 | `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
 | `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
@@ -563,16 +606,18 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/broker/broker.go`             | Request queue and worker pool     |
 | `internal/memory/store.go`              | Session memory retention          |
 | `internal/memory/budget.go`             | Context budget discovery          |
+| `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
 | `internal/ollama/client.go`             | Ollama HTTP client                |
 | `internal/tools/registry.go`            | Tool schema loading and execution |
 | `internal/tools/bootstrap.go`           | Builtin tool wiring               |
 | `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
 | `internal/tools/soulmemory/store.go`    | Soul file store                   |
 | `internal/accountlink/store.go`         | Canonical account link store      |
+| `internal/media/images.go`              | Image normalization and validation |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
 | `internal/gateway/discord/gateway.go`   | Discord transport                 |
 | `internal/gateway/imessage/gateway.go`  | iMessage BlueBubbles transport    |
-| `internal/debug/prompt.go`              | Prompt debug dump writer          |
+| `internal/debug/agent_trace.go`         | Agent trace dump writer           |
 
 ## Code Style
 
@@ -609,7 +654,8 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only six builtin tools ship today
+- Only six builtin tools ship locally; extra tools require optional MCP integration
+- GitHub is the only MCP server integration today
 - Ollama is the only LLM backend
 
 Account-linking note:
