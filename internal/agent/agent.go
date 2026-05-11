@@ -435,8 +435,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	}
 
 	// Build the dynamic system prompt: soul + timestamp + speaker identity.
-	// User memory is not injected automatically — the model retrieves it via
-	// the memory.recall tool when needed.
+	// Only system_rules memory is injected automatically; other user memory,
+	// including identity, must be retrieved via the memory.recall tool.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 
@@ -783,10 +783,7 @@ func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []
 		return nil
 	}
 
-	sections := make([]string, 0, 2)
-	if identity := a.userMemoryPromptSection(log, senderID, "identity", "## User Identity Memory"); identity != "" {
-		sections = append(sections, identity)
-	}
+	sections := make([]string, 0, 1)
 	if systemRules := a.userMemoryPromptSection(log, senderID, "system_rules", "## User System Rules"); systemRules != "" {
 		sections = append(sections, systemRules)
 	}
