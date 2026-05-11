@@ -148,6 +148,7 @@ func githubToolSpec(tool *gomcp.Tool, session *gomcp.ClientSession, log *config.
 	return ToolSpec{
 		Name:        localName,
 		Description: description,
+		Server:      "github",
 		Parameters:  params,
 		Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
 			meta := toolctx.MetadataFromContext(ctx)

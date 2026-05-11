@@ -9,52 +9,134 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
-// NewHandler returns a tool handler for the soul_memory tool. The handler
-// gives the agent read/write/append access to its own soul file, which serves
-// as its live system prompt. Changes made via write or append take effect on
-// the next request without requiring a restart.
-func NewHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
+	meta := toolctx.MetadataFromContext(ctx)
+	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+}
+
+// NewReadHandler returns a tool handler for the soul.read tool.
+func NewReadHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		meta := toolctx.MetadataFromContext(ctx)
-		reqLog := log.Agent("agent.tool.soul_memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
-		action, _ := args["action"].(string)
-		action = strings.TrimSpace(strings.ToLower(action))
+		soul, err := store.Read()
+		if err != nil {
+			return "", fmt.Errorf("failed to read soul file: %w", err)
+		}
+		if soul == "" {
+			return "Soul file is empty or does not exist.", nil
+		}
+		return soul, nil
+	}
+}
 
-		content, _ := args["content"].(string)
+// NewPatchHandler returns a tool handler for the soul.patch tool.
+func NewPatchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		operation := strings.TrimSpace(strings.ToLower(stringArg(args, "operation")))
+		if operation == "" {
+			return "", fmt.Errorf("soul.patch: operation is required")
+		}
 
-		switch action {
-		case "read":
-			soul, err := store.Read()
-			if err != nil {
-				return "", fmt.Errorf("failed to read soul file: %w", err)
-			}
-			if soul == "" {
-				return "Soul file is empty or does not exist.", nil
-			}
-			return soul, nil
+		target := stringArg(args, "target")
+		content := stringArg(args, "content")
+		position := strings.TrimSpace(strings.ToLower(stringArg(args, "position")))
+		anchor := stringArg(args, "anchor")
 
-		case "write":
-			if content == "" {
-				return "", fmt.Errorf("write action requires a non-empty content argument")
-			}
-			reqLog.Warn("agent.tool.soul_memory.overwritten", "overwrote soul memory", config.F("tool_name", "soul_memory"), config.F("action", "write"))
-			if err := store.Write(content); err != nil {
-				return "", fmt.Errorf("failed to write soul file: %w", err)
-			}
-			return "Soul file updated. Changes take effect on the next request.", nil
+		if position == "" && operation == "add" {
+			position = "end"
+		}
+		if err := validatePatchArgs(operation, target, content, position, anchor); err != nil {
+			return "", err
+		}
 
-		case "append":
-			if content == "" {
-				return "", fmt.Errorf("append action requires a non-empty content argument")
-			}
-			reqLog.Warn("agent.tool.soul_memory.appended", "appended soul memory", config.F("tool_name", "soul_memory"), config.F("action", "append"))
-			if err := store.Append(content); err != nil {
-				return "", fmt.Errorf("failed to append to soul file: %w", err)
-			}
-			return "Content appended to soul file. Changes take effect on the next request.", nil
+		reqLog := requestLog(log, ctx)
+		reqLog.Warn("agent.tool.soul.patched", "patched soul memory",
+			config.F("tool_name", "soul.patch"),
+			config.F("action", "patch"),
+			config.F("operation", operation),
+			config.F("position", position),
+		)
+		if err := store.Patch(operation, target, content, position, anchor); err != nil {
+			return "", fmt.Errorf("failed to patch soul file: %w", err)
+		}
 
+		switch operation {
+		case "replace":
+			return "Replaced 1 line in soul file. Changes take effect on the next request.", nil
+		case "remove":
+			return "Removed 1 line from soul file. Changes take effect on the next request.", nil
 		default:
-			return "", fmt.Errorf("unknown action %q — valid actions are: read, write, append", action)
+			if position == "end" {
+				return "Inserted 1 line at the end of the soul file. Changes take effect on the next request.", nil
+			}
+			return fmt.Sprintf("Inserted 1 line %s anchor in soul file. Changes take effect on the next request.", position), nil
 		}
 	}
+}
+
+func validatePatchArgs(operation, target, content, position, anchor string) error {
+	switch operation {
+	case "replace":
+		if target == "" {
+			return fmt.Errorf("soul.patch: target is required for replace")
+		}
+		if content == "" {
+			return fmt.Errorf("soul.patch: content is required for replace")
+		}
+		if position != "" {
+			return fmt.Errorf("soul.patch: position is not allowed for replace")
+		}
+		if anchor != "" {
+			return fmt.Errorf("soul.patch: anchor is not allowed for replace")
+		}
+	case "remove":
+		if target == "" {
+			return fmt.Errorf("soul.patch: target is required for remove")
+		}
+		if content != "" {
+			return fmt.Errorf("soul.patch: content is not allowed for remove")
+		}
+		if position != "" {
+			return fmt.Errorf("soul.patch: position is not allowed for remove")
+		}
+		if anchor != "" {
+			return fmt.Errorf("soul.patch: anchor is not allowed for remove")
+		}
+	case "add":
+		if content == "" {
+			return fmt.Errorf("soul.patch: content is required for add")
+		}
+		if target != "" {
+			return fmt.Errorf("soul.patch: target is not allowed for add")
+		}
+		switch position {
+		case "end":
+			if anchor != "" {
+				return fmt.Errorf("soul.patch: anchor is not allowed for add with position %q", position)
+			}
+		case "before", "after":
+			if anchor == "" {
+				return fmt.Errorf("soul.patch: anchor is required for add with position %q", position)
+			}
+		default:
+			return fmt.Errorf("soul.patch: invalid add position %q", position)
+		}
+	default:
+		return fmt.Errorf("soul.patch: invalid operation %q", operation)
+	}
+
+	if strings.Contains(target, "\n") {
+		return fmt.Errorf("soul.patch: target must be a single line")
+	}
+	if strings.Contains(content, "\n") {
+		return fmt.Errorf("soul.patch: content must be a single line")
+	}
+	if strings.Contains(anchor, "\n") {
+		return fmt.Errorf("soul.patch: anchor must be a single line")
+	}
+	return nil
+}
+
+func stringArg(args map[string]interface{}, key string) string {
+	value, _ := args[key].(string)
+	return value
 }

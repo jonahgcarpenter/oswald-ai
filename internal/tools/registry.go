@@ -26,12 +26,37 @@ type ParamSpec struct {
 	Enum        []string
 }
 
+const (
+	// ToolSourceBuiltin identifies tools defined locally in config/tools.
+	ToolSourceBuiltin = "builtin"
+
+	// ToolSourceMCP identifies tools discovered from connected MCP servers.
+	ToolSourceMCP = "mcp"
+)
+
 // Spec holds the fully parsed definition from a single tool markdown file.
 // Name and Description are sent to the model via the ollama.Tool schema.
 type Spec struct {
 	Name        string
 	Description string
+	Source      string
+	Server      string
 	Parameters  []ParamSpec
+}
+
+// CatalogEntry is a registry tool definition annotated with its source.
+type CatalogEntry struct {
+	Name        string
+	Description string
+	Source      string
+	Server      string
+	Parameters  []ParamSpec
+}
+
+// CatalogServerGroup contains MCP tools grouped under a single server.
+type CatalogServerGroup struct {
+	Server string
+	Tools  []CatalogEntry
 }
 
 // Registry maps tool names to their parsed Spec and registered Handler.
@@ -90,6 +115,8 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 			continue
 		}
 
+		spec.Source = ToolSourceBuiltin
+
 		r.specs[spec.Name] = spec
 		r.log.Debug("tool.registry.definition_loaded", "loaded tool definition", config.F("tool_name", spec.Name), config.F("file", entry.Name()))
 		loaded++
@@ -120,11 +147,14 @@ func (r *Registry) RegisterSpec(spec Spec) error {
 	if spec.Name == "" {
 		return fmt.Errorf("cannot register tool spec with empty name")
 	}
+	if spec.Source == "" {
+		spec.Source = ToolSourceBuiltin
+	}
 	if _, ok := r.specs[spec.Name]; ok {
 		return fmt.Errorf("tool spec %q is already registered", spec.Name)
 	}
 	r.specs[spec.Name] = spec
-	r.log.Debug("tool.registry.definition_registered", "registered tool definition", config.F("tool_name", spec.Name), config.F("source", "dynamic"))
+	r.log.Debug("tool.registry.definition_registered", "registered tool definition", config.F("tool_name", spec.Name), config.F("source", spec.Source), config.F("server", spec.Server))
 	return nil
 }
 
@@ -142,7 +172,7 @@ func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
 // whether a handler has been registered.
 func (r *Registry) OllamaTools() []ollama.Tool {
 	tools := make([]ollama.Tool, 0, len(r.specs))
-	for _, spec := range r.specs {
+	for _, spec := range r.orderedSpecs() {
 		props := make(map[string]ollama.ToolParameterProperty, len(spec.Parameters))
 		required := []string{}
 		for _, p := range spec.Parameters {
@@ -159,7 +189,7 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 			Type: "function",
 			Function: ollama.ToolDefinition{
 				Name:        spec.Name,
-				Description: spec.Description,
+				Description: ollamaToolDescription(spec),
 				Parameters: ollama.ToolParameters{
 					Type:       "object",
 					Properties: props,
@@ -169,6 +199,45 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 		})
 	}
 	return tools
+}
+
+// BuiltinCatalog returns builtin tool definitions in stable order.
+func (r *Registry) BuiltinCatalog() []CatalogEntry {
+	entries := make([]CatalogEntry, 0)
+	for _, spec := range r.orderedSpecs() {
+		if spec.Source != ToolSourceBuiltin {
+			continue
+		}
+		entries = append(entries, catalogEntry(spec))
+	}
+	return entries
+}
+
+// MCPCatalogByServer returns MCP tool definitions grouped by server in stable order.
+func (r *Registry) MCPCatalogByServer() []CatalogServerGroup {
+	grouped := make(map[string][]CatalogEntry)
+	for _, spec := range r.orderedSpecs() {
+		if spec.Source != ToolSourceMCP {
+			continue
+		}
+		grouped[spec.Server] = append(grouped[spec.Server], catalogEntry(spec))
+	}
+
+	servers := make([]string, 0, len(grouped))
+	for server := range grouped {
+		servers = append(servers, server)
+	}
+	sort.Strings(servers)
+
+	out := make([]CatalogServerGroup, 0, len(servers))
+	for _, server := range servers {
+		tools := grouped[server]
+		sort.Slice(tools, func(i, j int) bool {
+			return tools[i].Name < tools[j].Name
+		})
+		out = append(out, CatalogServerGroup{Server: server, Tools: tools})
+	}
+	return out
 }
 
 // Execute calls the registered handler for the named tool with the given arguments.
@@ -200,6 +269,79 @@ func (r *Registry) Names() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+func (r *Registry) orderedSpecs() []Spec {
+	specs := make([]Spec, 0, len(r.specs))
+	for _, spec := range r.specs {
+		specs = append(specs, spec)
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		left := specSortKey(specs[i])
+		right := specSortKey(specs[j])
+		if left != right {
+			return left < right
+		}
+		if specs[i].Server != specs[j].Server {
+			return specs[i].Server < specs[j].Server
+		}
+		return specs[i].Name < specs[j].Name
+	})
+	return specs
+}
+
+func specSortKey(spec Spec) int {
+	switch spec.Source {
+	case ToolSourceBuiltin:
+		return 0
+	case ToolSourceMCP:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func ollamaToolDescription(spec Spec) string {
+	description := strings.TrimSpace(spec.Description)
+	if spec.Source != ToolSourceMCP {
+		return description
+	}
+	serverLabel := displayServerName(spec.Server)
+	prefix := serverLabel + " MCP tool:"
+	if description == "" {
+		return prefix
+	}
+	if strings.HasPrefix(strings.ToLower(description), strings.ToLower(prefix)) {
+		return description
+	}
+	return prefix + " " + description
+}
+
+func catalogEntry(spec Spec) CatalogEntry {
+	return CatalogEntry{
+		Name:        spec.Name,
+		Description: spec.Description,
+		Source:      spec.Source,
+		Server:      spec.Server,
+		Parameters:  append([]ParamSpec(nil), spec.Parameters...),
+	}
+}
+
+func displayServerName(server string) string {
+	server = strings.TrimSpace(server)
+	if server == "" {
+		return "Unknown"
+	}
+	parts := strings.FieldsFunc(server, func(r rune) bool {
+		return r == '-' || r == '_' || r == ' ' || r == '.'
+	})
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+	}
+	return strings.Join(parts, " ")
 }
 
 // parseToolMarkdown parses a tool definition from a markdown string.
@@ -297,8 +439,10 @@ func splitMarkdownSections(content string) map[string]string {
 // parseParameterTable parses a markdown table of tool parameters.
 // Expected columns (in order): Name, Type, Required, Description.
 // Skips the header row and any separator rows (containing only dashes and pipes).
+// Zero-argument tools are allowed and return an empty parameter slice.
 func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 	var params []ParamSpec
+	hasTableRow := false
 
 	for _, line := range strings.Split(section, "\n") {
 		line = strings.TrimSpace(line)
@@ -306,6 +450,7 @@ func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 		if !strings.HasPrefix(line, "|") || !strings.HasSuffix(line, "|") {
 			continue
 		}
+		hasTableRow = true
 
 		inner := strings.TrimPrefix(line, "|")
 		inner = strings.TrimSuffix(inner, "|")
@@ -335,7 +480,7 @@ func parseParameterTable(section, toolName string) ([]ParamSpec, error) {
 		})
 	}
 
-	if len(params) == 0 {
+	if !hasTableRow {
 		return nil, fmt.Errorf("tool %q: parameter table has no valid rows", toolName)
 	}
 

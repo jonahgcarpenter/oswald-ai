@@ -29,7 +29,7 @@ const (
 	// ChunkContent carries tokens from the model's visible response.
 	ChunkContent StreamChunkType = "content"
 
-	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
+	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web.search]").
 	ChunkStatus StreamChunkType = "status"
 
 	// ChunkToolCall carries structured tool invocation data for frontend timelines.
@@ -39,14 +39,14 @@ const (
 	ChunkToolResult StreamChunkType = "tool_result"
 )
 
-// ToolStreamSearchResult is a UI-safe search result emitted for web_search tools.
+// ToolStreamSearchResult is a UI-safe search result emitted for web.search tools.
 type ToolStreamSearchResult struct {
 	Title   string `json:"title,omitempty"`
 	URL     string `json:"url,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
-// ToolStreamSearchPayload contains structured web_search details for streaming UIs.
+// ToolStreamSearchPayload contains structured web.search details for streaming UIs.
 type ToolStreamSearchPayload struct {
 	Query   string                   `json:"query,omitempty"`
 	Results []ToolStreamSearchResult `json:"results,omitempty"`
@@ -54,18 +54,18 @@ type ToolStreamSearchPayload struct {
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name             string                             `json:"name"`
-	Arguments        map[string]interface{}             `json:"arguments,omitempty"`
-	ResultText       string                             `json:"result_text,omitempty"`
-	DurationMS       int64                              `json:"duration_ms,omitempty"`
-	IsError          bool                               `json:"is_error,omitempty"`
-	WebSearch        *ToolStreamSearchPayload           `json:"web_search,omitempty"`
-	PersistentMemory *ToolStreamPersistentMemoryPayload `json:"persistent_memory,omitempty"`
-	SoulMemory       *ToolStreamSoulMemoryPayload       `json:"soul_memory,omitempty"`
+	Name       string                   `json:"name"`
+	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
+	ResultText string                   `json:"result_text,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	IsError    bool                     `json:"is_error,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
+	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
+	Soul       *ToolStreamSoulPayload   `json:"soul,omitempty"`
 }
 
-// ToolStreamPersistentMemoryPayload contains structured persistent memory details.
-type ToolStreamPersistentMemoryPayload struct {
+// ToolStreamMemoryPayload contains structured memory tool details.
+type ToolStreamMemoryPayload struct {
 	Action    string                    `json:"action,omitempty"`
 	Category  string                    `json:"category,omitempty"`
 	Statement string                    `json:"statement,omitempty"`
@@ -73,10 +73,14 @@ type ToolStreamPersistentMemoryPayload struct {
 	Content   *usermemory.ParsedContent `json:"content,omitempty"`
 }
 
-// ToolStreamSoulMemoryPayload contains structured soul memory details.
-type ToolStreamSoulMemoryPayload struct {
-	Action  string `json:"action,omitempty"`
-	Content string `json:"content,omitempty"`
+// ToolStreamSoulPayload contains structured soul tool details.
+type ToolStreamSoulPayload struct {
+	Action    string `json:"action,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	Target    string `json:"target,omitempty"`
+	Anchor    string `json:"anchor,omitempty"`
+	Position  string `json:"position,omitempty"`
+	Content   string `json:"content,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -96,12 +100,12 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		IsError:    isError,
 	}
 
-	if toolName != "web_search" {
+	if toolName != "web.search" {
 		switch toolName {
-		case "persistent_memory":
-			payload.PersistentMemory = persistentMemoryStreamPayload(args, result, isError)
-		case "soul_memory":
-			payload.SoulMemory = soulMemoryStreamPayload(args, result, isError)
+		case "memory.remember", "memory.recall", "memory.forget":
+			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
+		case "soul.read", "soul.patch":
+			payload.Soul = soulStreamPayload(toolName, args, result, isError)
 		}
 		return payload
 	}
@@ -125,11 +129,9 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 	return payload
 }
 
-func persistentMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamPersistentMemoryPayload {
-	payload := &ToolStreamPersistentMemoryPayload{}
-	if action, ok := args["action"].(string); ok {
-		payload.Action = strings.TrimSpace(strings.ToLower(action))
-	}
+func memoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamMemoryPayload {
+	payload := &ToolStreamMemoryPayload{}
+	payload.Action = memoryToolAction(toolName)
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
 	}
@@ -151,10 +153,27 @@ func persistentMemoryStreamPayload(args map[string]interface{}, result string, i
 	return payload
 }
 
-func soulMemoryStreamPayload(args map[string]interface{}, result string, isError bool) *ToolStreamSoulMemoryPayload {
-	payload := &ToolStreamSoulMemoryPayload{}
-	if action, ok := args["action"].(string); ok {
-		payload.Action = strings.TrimSpace(strings.ToLower(action))
+func memoryToolAction(toolName string) string {
+	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "memory."); ok {
+		return suffix
+	}
+	return ""
+}
+
+func soulStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamSoulPayload {
+	payload := &ToolStreamSoulPayload{}
+	payload.Action = soulToolAction(toolName)
+	if operation, ok := args["operation"].(string); ok {
+		payload.Operation = strings.TrimSpace(strings.ToLower(operation))
+	}
+	if target, ok := args["target"].(string); ok {
+		payload.Target = target
+	}
+	if anchor, ok := args["anchor"].(string); ok {
+		payload.Anchor = anchor
+	}
+	if position, ok := args["position"].(string); ok {
+		payload.Position = strings.TrimSpace(strings.ToLower(position))
 	}
 	if content, ok := args["content"].(string); ok && content != "" {
 		payload.Content = content
@@ -163,6 +182,13 @@ func soulMemoryStreamPayload(args map[string]interface{}, result string, isError
 		payload.Content = result
 	}
 	return payload
+}
+
+func soulToolAction(toolName string) string {
+	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "soul."); ok {
+		return suffix
+	}
+	return ""
 }
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -270,6 +296,38 @@ func makeCompactedTurn(summary string, now time.Time) memory.Turn {
 	}
 }
 
+func traceToolsFromCatalog(entries []tools.CatalogEntry) []debug.TraceTool {
+	out := make([]debug.TraceTool, 0, len(entries))
+	for _, entry := range entries {
+		params := make([]debug.TraceToolParameter, 0, len(entry.Parameters))
+		for _, param := range entry.Parameters {
+			params = append(params, debug.TraceToolParameter{
+				Name:        param.Name,
+				Type:        param.Type,
+				Required:    param.Required,
+				Description: param.Description,
+			})
+		}
+		out = append(out, debug.TraceTool{
+			Name:        entry.Name,
+			Description: entry.Description,
+			Parameters:  params,
+		})
+	}
+	return out
+}
+
+func traceMCPServersFromCatalog(groups []tools.CatalogServerGroup) []debug.TraceMCPServer {
+	out := make([]debug.TraceMCPServer, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, debug.TraceMCPServer{
+			Server: group.Server,
+			Tools:  traceToolsFromCatalog(group.Tools),
+		})
+	}
+	return out
+}
+
 func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
 	tools := a.registry.OllamaTools()
 	currentTurns := append([]memory.Turn(nil), turns...)
@@ -335,7 +393,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, syste
 // (stateless one-shot behaviour).
 //
 // senderID is the stable internal user identifier for the current request. It is
-// injected into the request context so that tools such as persistent_memory can
+// injected into the request context so that tools such as memory.* can
 // identify the user without needing the session key. An empty senderID disables
 // user-scoped tool behaviour.
 //
@@ -370,15 +428,15 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	})
 
 	// Read the soul file fresh on every request so that any edits the agent
-	// made via the soul_memory tool take effect immediately.
+	// made via the soul.* tools take effect immediately.
 	soulContent, soulErr := a.soul.Read()
 	if soulErr != nil {
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
 	// Build the dynamic system prompt: soul + timestamp + speaker identity.
-	// User memory is not injected automatically — the model retrieves it via
-	// the persistent_memory tool when needed.
+	// Only system_rules memory is injected automatically; other user memory,
+	// including identity, must be retrieved via the memory.recall tool.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 
@@ -650,7 +708,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			SessionKey:                 sessionKey,
 			Model:                      a.model,
 			Messages:                   messages,
-			Tools:                      a.registry.OllamaTools(),
+			BuiltinTools:               traceToolsFromCatalog(a.registry.BuiltinCatalog()),
+			MCPServers:                 traceMCPServersFromCatalog(a.registry.MCPCatalogByServer()),
 			ContextWindow:              a.budget.ContextWindow,
 			PromptBudget:               a.budget.PromptBudget(),
 			EstimatedBefore:            prune.EstimatedBefore,
@@ -724,10 +783,7 @@ func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []
 		return nil
 	}
 
-	sections := make([]string, 0, 2)
-	if identity := a.userMemoryPromptSection(log, senderID, "identity", "## User Identity Memory"); identity != "" {
-		sections = append(sections, identity)
-	}
+	sections := make([]string, 0, 1)
 	if systemRules := a.userMemoryPromptSection(log, senderID, "system_rules", "## User System Rules"); systemRules != "" {
 		sections = append(sections, systemRules)
 	}

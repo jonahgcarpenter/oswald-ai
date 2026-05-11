@@ -54,13 +54,13 @@ func main() {
 	)
 
 	// The soul store is shared between the tool registry (so the agent can edit
-	// its soul via the soul_memory tool) and the agent itself (so it can read
+	// its soul via the soul.* tools) and the agent itself (so it can read
 	// the current soul on every request as its system prompt).
 	soulStore := soulmemory.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
-	// The user memory store is owned by the tool registry so the persistent_memory
-	// tool handler can remember, recall, and forget facts on behalf of the model.
+	// The user memory store is owned by the tool registry so the memory.* tool
+	// handlers can remember, recall, and forget facts on behalf of the model.
 	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, rootLog.Server("memory.user"))
 	log.Debug("app.memory_user.configured", "configured user memory path", config.F("path", config.DefaultUserMemoryPath))
 
