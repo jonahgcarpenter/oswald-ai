@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
 
 // Name returns the human-readable gateway name.
@@ -116,8 +117,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		}
 	}
 
-	prompt := media.AugmentPromptWithUnsupportedFiles(strings.TrimSpace(msg.Text), unsupported)
-	if prompt == "" && len(images) == 0 {
+	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && len(unsupported) == 0 {
 		return
 	}
 
@@ -140,89 +140,90 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
-	prompt = strings.TrimSpace(prompt)
+	text := strings.TrimSpace(msg.Text)
 	replyGUID := msg.replyTargetGUID()
-	isReplyToBot := false
-	if replyGUID != "" {
-		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
-			isReplyToBot = replyCtx.IsFromBot
-			replyName := strings.TrimSpace(replyCtx.DisplayName)
-			if replyName == "" && replyCtx.IsFromBot {
-				replyName = "Oswald"
-			}
-			replyImageCount := 0
-			if len(replyCtx.Attachments) > 0 {
-				replyUnsupported := make([]string, 0)
-				remainingImageSlots := media.MaxImagesPerRequest - len(images)
-				if remainingImageSlots > 0 {
-					replyImages, downgraded := g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots)
-					images = append(images, replyImages...)
-					replyImageCount = len(replyImages)
-					replyUnsupported = append(replyUnsupported, downgraded...)
-					unsupported = append(unsupported, replyUnsupported...)
-				} else {
-					replyUnsupported = append(replyUnsupported, attachmentLabels(replyCtx.Attachments)...)
-					unsupported = append(unsupported, replyUnsupported...)
-				}
-				prompt = media.AugmentPromptWithUnsupportedFiles(prompt, replyUnsupported)
-			}
-			switch {
-			case strings.TrimSpace(replyCtx.Text) != "" && replyImageCount > 0 && replyName != "":
-				log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", replyImageCount))
-				prompt = fmt.Sprintf("[Replying to %s: %q with %s]\n%s", replyName, replyCtx.Text, imageAttachmentDescription(replyImageCount), prompt)
-			case strings.TrimSpace(replyCtx.Text) != "" && replyName != "":
-				log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot))
-				prompt = fmt.Sprintf("[Replying to %s: %q]\n%s", replyName, replyCtx.Text, prompt)
-			case replyImageCount > 0 && replyName != "":
-				log.Debug("gateway.reply_context.applied", "applied imessage reply image context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", replyImageCount))
-				prompt = fmt.Sprintf("[Replying to %s's %s]\n%s", replyName, imageAttachmentDescription(replyImageCount), prompt)
-			case replyName != "":
-				log.Debug("gateway.reply_context.applied", "imessage reply target unavailable", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
-				prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s", replyName, prompt)
-			default:
-				log.Debug("gateway.reply_context.applied", "imessage reply target unavailable", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
-				prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
-			}
-		} else {
-			log.Debug("gateway.reply_context.applied", "imessage reply target missing from cache", config.F("request_id", requestID), config.F("status", "degraded"))
-			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
-		}
-	}
-
-	isAccountCommand := isAccountCommand(prompt)
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
 	selectedMessageGUID := ""
 	if isGroup {
 		selectedMessageGUID = msg.GUID
 	}
-	if isGroup && !isReplyToBot && !isAccountCommand && !mentionRE.MatchString(prompt) {
+	mentionsBot := mentionRE.MatchString(text)
+	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
+	currentIsAccountCommand := isAccountCommand(textWithoutMention)
+	var reply *routing.ReplyContext
+	if replyGUID != "" {
+		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
+			if isGroup && !mentionsBot && !replyCtx.IsFromBot && !currentIsAccountCommand {
+				g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
+				return
+			}
+			replyName := strings.TrimSpace(replyCtx.DisplayName)
+			if replyName == "" && replyCtx.IsFromBot {
+				replyName = "Oswald"
+			}
+			reply = &routing.ReplyContext{
+				SenderName: replyName,
+				Text:       strings.TrimSpace(replyCtx.Text),
+				IsFromBot:  replyCtx.IsFromBot,
+			}
+			if len(replyCtx.Attachments) > 0 {
+				remainingImageSlots := media.MaxImagesPerRequest - len(images)
+				if remainingImageSlots > 0 {
+					reply.Images, reply.Unsupported = g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots)
+				} else {
+					reply.Unsupported = attachmentLabels(replyCtx.Attachments)
+				}
+			}
+			log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", len(reply.Images)))
+		} else {
+			log.Debug("gateway.reply_context.applied", "imessage reply target missing from cache", config.F("request_id", requestID), config.F("status", "degraded"))
+			reply = &routing.ReplyContext{IsUnavailable: true}
+		}
+	}
+
+	decision := routing.Decide(routing.Input{
+		Gateway:            "imessage",
+		ChatID:             chat.GUID,
+		SenderID:           canonicalUserID,
+		DisplayName:        displayName,
+		SessionKey:         sessionKey,
+		IsDirect:           !isGroup,
+		IsGroup:            isGroup,
+		MentionsBot:        mentionsBot,
+		IsAccountCommand:   currentIsAccountCommand,
+		Text:               textWithoutMention,
+		CurrentImages:      images,
+		CurrentUnsupported: unsupported,
+		Reply:              reply,
+	})
+	if decision.Action == routing.ActionIgnore {
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
-	}
-	if isGroup {
-		prompt = strings.TrimSpace(mentionRE.ReplaceAllString(prompt, ""))
 	}
 
 	if err := g.startTyping(chat.GUID); err != nil {
 		log.Debug("gateway.typing.start_failed", "failed to start imessage typing indicator", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"), config.ErrorField(err))
 	}
 
-	if prompt == "" && len(images) == 0 {
-		responseText := "What do you want idiot."
-		messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
+	if decision.Action == routing.ActionGatewayFallback {
+		messageGUID, err := g.sendTextReply(chat.GUID, decision.ResponseText, selectedMessageGUID, 0)
 		if err != nil {
 			log.Error("gateway.response.failed", "failed to send imessage empty prompt response", config.F("request_id", requestID), config.ErrorField(err))
 		} else {
-			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
+			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, decision.ResponseText)
 		}
 		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 		return
 	}
 
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-	log.Debug("gateway.request.received", "received imessage request", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(images)), config.F("is_group", isGroup), config.F("is_reply", replyGUID != ""), config.F("prompt_chars", len(prompt)))
+	log.Debug("gateway.request.received", "received imessage request", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(decision.Images)), config.F("is_group", isGroup), config.F("is_reply", replyGUID != ""), config.F("prompt_chars", len(decision.Prompt)))
 
-	if commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, prompt); handled {
+	if decision.Action == routing.ActionCommand {
+		commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, decision.Prompt)
+		if !handled {
+			return
+		}
 		if commandErr != nil {
 			log.Error("gateway.command.failed", "imessage account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
 			commandResponse = "Failed to process account linking command."
@@ -243,8 +244,8 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		SenderID:     canonicalUserID,
 		DisplayName:  displayName,
 		SessionKey:   sessionKey,
-		Prompt:       prompt,
-		Images:       images,
+		Prompt:       decision.Prompt,
+		Images:       decision.Images,
 		StreamFunc:   nil,
 		ResponseChan: make(chan broker.Result, 1),
 	}
@@ -582,13 +583,6 @@ func attachmentLabels(attachments []attachment) []string {
 		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
 	}
 	return labels
-}
-
-func imageAttachmentDescription(count int) string {
-	if count == 1 {
-		return "image attachment"
-	}
-	return fmt.Sprintf("%d image attachments", count)
 }
 
 func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage, error) {

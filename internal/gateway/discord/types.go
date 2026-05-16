@@ -54,22 +54,37 @@ type MessageCreate struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 	} `json:"mentions,omitempty"`
-	Attachments []struct {
-		ID          string `json:"id"`
-		Filename    string `json:"filename"`
-		ContentType string `json:"content_type,omitempty"`
-		Size        int    `json:"size,omitempty"`
-		URL         string `json:"url,omitempty"`
-		ProxyURL    string `json:"proxy_url,omitempty"`
-	} `json:"attachments,omitempty"`
+	Attachments       []Attachment `json:"attachments,omitempty"`
 	ReferencedMessage *struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
-		Author  struct {
+		ID          string       `json:"id"`
+		Content     string       `json:"content"`
+		Attachments []Attachment `json:"attachments,omitempty"`
+		Author      struct {
 			ID       string `json:"id"`
 			Username string `json:"username"`
 		} `json:"author"`
 	} `json:"referenced_message,omitempty"`
+}
+
+// messageResponse is the minimal Discord API response for a fetched message.
+type messageResponse struct {
+	ID          string       `json:"id"`
+	Content     string       `json:"content"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Author      struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+	} `json:"author"`
+}
+
+// Attachment describes a Discord message attachment relevant to gateway routing.
+type Attachment struct {
+	ID          string `json:"id"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int    `json:"size,omitempty"`
+	URL         string `json:"url,omitempty"`
+	ProxyURL    string `json:"proxy_url,omitempty"`
 }
 
 // createMessageResponse is the minimal Discord API response for a created message.
@@ -80,10 +95,14 @@ type createMessageResponse struct {
 // replyContext records the routing metadata for a message Oswald sent, so that
 // reply-chain lookups can determine which session and channel a prior message belongs to.
 type replyContext struct {
-	SessionKey string
-	ChannelID  string
-	SenderID   string
-	CreatedAt  time.Time
+	SessionKey  string
+	ChannelID   string
+	SenderID    string
+	DisplayName string
+	Text        string
+	Attachments []Attachment
+	IsFromBot   bool
+	CreatedAt   time.Time
 }
 
 // Gateway runs the Discord gateway connection loop.

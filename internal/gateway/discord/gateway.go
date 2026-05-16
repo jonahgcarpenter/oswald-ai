@@ -18,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
 
 const replyIndexTTL = time.Hour
@@ -449,38 +450,24 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	requestID := config.NewRequestID()
 
 	replyToID := ""
-	prompt := msg.Content
 	images, unsupported := dg.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
 		log.Debug("gateway.attachment.processed", "processed discord attachments", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
 	}
 
+	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
+	mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
+	mentionsBot := strings.Contains(msg.Content, mention1) || strings.Contains(msg.Content, mention2)
 	if msg.GuildID != "" {
-		mention1 := fmt.Sprintf("<@%s>", dg.BotID)
-		mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
-		isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
-		isAccountCommand := strings.HasPrefix(strings.TrimSpace(msg.Content), "/connect") || strings.HasPrefix(strings.TrimSpace(msg.Content), "/disconnect")
-
-		if !isReplyToBot && !isAccountCommand && !strings.Contains(msg.Content, mention1) && !strings.Contains(msg.Content, mention2) {
-			return
-		}
 		replyToID = msg.ID
-
-		prompt = strings.ReplaceAll(prompt, mention1, "")
-		prompt = strings.ReplaceAll(prompt, mention2, "")
-		prompt = strings.TrimSpace(prompt)
-	}
-
-	prompt = strings.TrimSpace(prompt)
-	prompt = media.AugmentPromptWithUnsupportedFiles(prompt, unsupported)
-	if prompt == "" && len(images) == 0 {
-		_, _ = dg.sendMessage(msg.ChannelID, "What do you want idiot.", replyToID)
-		return
 	}
 
 	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
-	prompt = re.ReplaceAllString(prompt, ":$1:")
-	prompt = resolveMentions(prompt, msg.Mentions)
+	text := strings.ReplaceAll(msg.Content, mention1, "")
+	text = strings.ReplaceAll(text, mention2, "")
+	text = strings.TrimSpace(text)
+	text = re.ReplaceAllString(text, ":$1:")
+	text = resolveMentions(text, msg.Mentions)
 
 	// Compute the session key using the hybrid strategy:
 	//   DMs (no GuildID):      SenderID           — continuous per-user memory
@@ -490,6 +477,20 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		sessionKey = "discord:dm:" + msg.Author.ID
 	} else {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
+	}
+	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
+	if msg.GuildID != "" && !mentionsBot && !isReplyToBot && !isAccountCommand(text) {
+		dg.rememberReply(msg.ID, replyContext{
+			SessionKey:  sessionKey,
+			ChannelID:   msg.ChannelID,
+			SenderID:    msg.Author.ID,
+			DisplayName: msg.Author.Username,
+			Text:        text,
+			Attachments: msg.Attachments,
+			IsFromBot:   false,
+			CreatedAt:   time.Now(),
+		})
+		return
 	}
 
 	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
@@ -506,7 +507,48 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		return
 	}
 
-	if commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, prompt); handled {
+	var reply *routing.ReplyContext
+	if msg.ReferencedMessage != nil {
+		reply = dg.resolveReplyContext(msg, re, images, requestID)
+	}
+
+	decision := routing.Decide(routing.Input{
+		Gateway:            "discord",
+		ChatID:             msg.ChannelID,
+		SenderID:           canonicalUserID,
+		DisplayName:        msg.Author.Username,
+		SessionKey:         sessionKey,
+		IsDirect:           msg.GuildID == "",
+		IsGroup:            msg.GuildID != "",
+		MentionsBot:        mentionsBot,
+		IsAccountCommand:   isAccountCommand(text),
+		Text:               text,
+		CurrentImages:      images,
+		CurrentUnsupported: unsupported,
+		Reply:              reply,
+	})
+	dg.rememberReply(msg.ID, replyContext{
+		SessionKey:  sessionKey,
+		ChannelID:   msg.ChannelID,
+		SenderID:    msg.Author.ID,
+		DisplayName: msg.Author.Username,
+		Text:        text,
+		Attachments: msg.Attachments,
+		IsFromBot:   false,
+		CreatedAt:   time.Now(),
+	})
+	if decision.Action == routing.ActionIgnore {
+		return
+	}
+	if decision.Action == routing.ActionGatewayFallback {
+		_, _ = dg.sendMessage(msg.ChannelID, decision.ResponseText, replyToID)
+		return
+	}
+	if decision.Action == routing.ActionCommand {
+		commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, decision.Prompt)
+		if !handled {
+			return
+		}
 		if commandErr != nil {
 			log.Error("gateway.command.failed", "discord account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
 			commandResponse = "Failed to process account linking command."
@@ -515,34 +557,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		return
 	}
 
-	if msg.ReferencedMessage != nil {
-		replyName := strings.TrimSpace(msg.ReferencedMessage.Author.Username)
-		if replyName == "" && msg.ReferencedMessage.Author.ID == dg.BotID {
-			replyName = "Oswald"
-		}
-		quotedContent := re.ReplaceAllString(msg.ReferencedMessage.Content, ":$1:")
-
-		switch {
-		case strings.TrimSpace(quotedContent) != "" && replyName != "":
-			log.Debug("gateway.reply_context.applied", "applied discord reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", msg.ReferencedMessage.Author.ID == dg.BotID))
-			prompt = fmt.Sprintf("[Replying to %s: \"%s\"]\n%s",
-				replyName,
-				quotedContent,
-				prompt,
-			)
-		case replyName != "":
-			log.Debug("gateway.reply_context.applied", "discord reply target unavailable", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("status", "degraded"))
-			prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s",
-				replyName,
-				prompt,
-			)
-		default:
-			log.Debug("gateway.reply_context.applied", "discord reply target unavailable", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("status", "degraded"))
-			prompt = fmt.Sprintf("[Replying to a message that is unavailable]\n%s", prompt)
-		}
-	}
-
-	log.Debug("gateway.request.received", "received discord request", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(images)), config.F("is_dm", msg.GuildID == ""), config.F("is_reply", msg.ReferencedMessage != nil), config.F("prompt_chars", len(prompt)))
+	log.Debug("gateway.request.received", "received discord request", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(decision.Images)), config.F("is_dm", msg.GuildID == ""), config.F("is_reply", msg.ReferencedMessage != nil), config.F("prompt_chars", len(decision.Prompt)))
 
 	stopTyping := make(chan struct{})
 	defer close(stopTyping)
@@ -569,8 +584,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		SenderID:     canonicalUserID,
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
-		Prompt:       prompt,
-		Images:       images,
+		Prompt:       decision.Prompt,
+		Images:       decision.Images,
 		StreamFunc:   nil,
 		ResponseChan: make(chan broker.Result, 1),
 	}
@@ -587,10 +602,13 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	responseText := finalPayload.Response
 	chunks := splitMessage(responseText, 2000)
 	originCtx := replyContext{
-		SessionKey: sessionKey,
-		ChannelID:  msg.ChannelID,
-		SenderID:   msg.Author.ID,
-		CreatedAt:  time.Now(),
+		SessionKey:  sessionKey,
+		ChannelID:   msg.ChannelID,
+		SenderID:    msg.Author.ID,
+		DisplayName: "Oswald",
+		Text:        responseText,
+		IsFromBot:   true,
+		CreatedAt:   time.Now(),
 	}
 
 	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", finalPayload.Model))
@@ -609,32 +627,153 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		}
 		sentCount++
 
-		if i == 0 {
-			dg.rememberReply(sentMessageID, originCtx)
-		}
+		chunkCtx := originCtx
+		chunkCtx.Text = chunk
+		dg.rememberReply(sentMessageID, chunkCtx)
 	}
 	if sentCount == len(chunks) {
 		log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
 	}
 }
 
-func (dg *Gateway) loadImages(attachments []struct {
-	ID          string `json:"id"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type,omitempty"`
-	Size        int    `json:"size,omitempty"`
-	URL         string `json:"url,omitempty"`
-	ProxyURL    string `json:"proxy_url,omitempty"`
-}) ([]ollama.InputImage, []string) {
+func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []ollama.InputImage, requestID string) *routing.ReplyContext {
+	log := dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
+	referenced := msg.ReferencedMessage
+	if referenced == nil {
+		return nil
+	}
+
+	if cached, ok := dg.lookupReply(referenced.ID); ok {
+		reply := &routing.ReplyContext{
+			SenderName: strings.TrimSpace(cached.DisplayName),
+			Text:       strings.TrimSpace(cached.Text),
+			IsFromBot:  cached.IsFromBot,
+		}
+		if reply.SenderName == "" && cached.IsFromBot {
+			reply.SenderName = "Oswald"
+		}
+		if len(cached.Attachments) > 0 {
+			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
+			if remainingImageSlots > 0 {
+				reply.Images, reply.Unsupported = dg.loadImagesLimit(cached.Attachments, remainingImageSlots)
+			} else {
+				reply.Unsupported = discordAttachmentLabels(cached.Attachments)
+			}
+		}
+		log.Debug("gateway.reply_context.applied", "applied discord cached reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", cached.IsFromBot), config.F("reply_image_count", len(reply.Images)))
+		return reply
+	}
+
+	replyName := strings.TrimSpace(referenced.Author.Username)
+	if replyName == "" && referenced.Author.ID == dg.BotID {
+		replyName = "Oswald"
+	}
+	quotedContent := strings.TrimSpace(emojiRE.ReplaceAllString(referenced.Content, ":$1:"))
+	reply := &routing.ReplyContext{
+		SenderName: replyName,
+		Text:       quotedContent,
+		IsFromBot:  referenced.Author.ID == dg.BotID,
+	}
+	if len(referenced.Attachments) > 0 {
+		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
+		if remainingImageSlots > 0 {
+			reply.Images, reply.Unsupported = dg.loadImagesLimit(referenced.Attachments, remainingImageSlots)
+		} else {
+			reply.Unsupported = discordAttachmentLabels(referenced.Attachments)
+		}
+	}
+	if quotedContent == "" && len(reply.Images) == 0 && len(reply.Unsupported) == 0 {
+		if fetched, ok := dg.fetchMessage(msg.ChannelID, referenced.ID, requestID); ok {
+			reply.SenderName = strings.TrimSpace(fetched.Author.Username)
+			if reply.SenderName == "" && fetched.Author.ID == dg.BotID {
+				reply.SenderName = "Oswald"
+			}
+			reply.Text = strings.TrimSpace(emojiRE.ReplaceAllString(fetched.Content, ":$1:"))
+			reply.IsFromBot = fetched.Author.ID == dg.BotID
+			if len(fetched.Attachments) > 0 {
+				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages)
+				if remainingImageSlots > 0 {
+					reply.Images, reply.Unsupported = dg.loadImagesLimit(fetched.Attachments, remainingImageSlots)
+				} else {
+					reply.Unsupported = discordAttachmentLabels(fetched.Attachments)
+				}
+			}
+		}
+	}
+	if strings.TrimSpace(reply.Text) == "" && len(reply.Images) == 0 && len(reply.Unsupported) == 0 {
+		reply.IsUnavailable = true
+	}
+	status := "ok"
+	if reply.IsUnavailable {
+		status = "degraded"
+	}
+	log.Debug("gateway.reply_context.applied", "applied discord reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", reply.IsFromBot), config.F("reply_image_count", len(reply.Images)), config.F("status", status))
+	return reply
+}
+
+func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (messageResponse, bool) {
+	log := dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
+	if strings.TrimSpace(channelID) == "" || strings.TrimSpace(messageID) == "" {
+		return messageResponse{}, false
+	}
+
+	url := fmt.Sprintf("%s/channels/%s/messages/%s", apiBaseURL, channelID, messageID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to build discord reply lookup request", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageResponse{}, false
+	}
+	req.Header.Set("Authorization", "Bot "+dg.Token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to fetch discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageResponse{}, false
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to read discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageResponse{}, false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Debug("gateway.reply_lookup.failed", "discord reply lookup failed", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", trimResponseBody(respBody)))
+		return messageResponse{}, false
+	}
+
+	var result messageResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to decode discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageResponse{}, false
+	}
+	log.Debug("gateway.reply_lookup.fetched", "fetched discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("attachment_count", len(result.Attachments)), config.F("status", "ok"))
+	return result, true
+}
+
+func isAccountCommand(input string) bool {
+	trimmed := strings.TrimSpace(input)
+	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
+}
+
+func (dg *Gateway) loadImages(attachments []Attachment) ([]ollama.InputImage, []string) {
+	return dg.loadImagesLimit(attachments, media.MaxImagesPerRequest)
+}
+
+func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]ollama.InputImage, []string) {
 	if len(attachments) == 0 {
 		return nil, nil
+	}
+	if maxImages <= 0 {
+		return nil, discordAttachmentLabels(attachments)
 	}
 
 	images := make([]ollama.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
-		if len(images) >= media.MaxImagesPerRequest {
+		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -664,6 +803,14 @@ func (dg *Gateway) loadImages(attachments []struct {
 		return nil, unsupported
 	}
 	return images, unsupported
+}
+
+func discordAttachmentLabels(attachments []Attachment) []string {
+	labels := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		labels = append(labels, media.AttachmentLabel(attachment.Filename, attachment.ContentType))
+	}
+	return labels
 }
 
 func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (ollama.InputImage, error) {
@@ -700,14 +847,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 	return result.Image, nil
 }
 
-func attachmentFormats(attachments []struct {
-	ID          string `json:"id"`
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type,omitempty"`
-	Size        int    `json:"size,omitempty"`
-	URL         string `json:"url,omitempty"`
-	ProxyURL    string `json:"proxy_url,omitempty"`
-}) string {
+func attachmentFormats(attachments []Attachment) string {
 	formats := make([]string, 0, len(attachments))
 	for _, attachment := range attachments {
 		format := strings.TrimSpace(attachment.ContentType)
