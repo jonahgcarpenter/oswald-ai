@@ -5,3 +5,6 @@ tmp/
 # Users
 config/memory/
 config/accounts/
+
+# Temp
+OLD-PROMPT.md
