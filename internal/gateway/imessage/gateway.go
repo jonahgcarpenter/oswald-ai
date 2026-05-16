@@ -144,16 +144,38 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	replyGUID := msg.replyTargetGUID()
 	isReplyToBot := false
 	if replyGUID != "" {
-		if replyCtx, ok := g.lookupMessage(replyGUID); ok {
+		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
 			isReplyToBot = replyCtx.IsFromBot
 			replyName := strings.TrimSpace(replyCtx.DisplayName)
 			if replyName == "" && replyCtx.IsFromBot {
 				replyName = "Oswald"
 			}
+			replyImageCount := 0
+			if len(replyCtx.Attachments) > 0 {
+				replyUnsupported := make([]string, 0)
+				remainingImageSlots := media.MaxImagesPerRequest - len(images)
+				if remainingImageSlots > 0 {
+					replyImages, downgraded := g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots)
+					images = append(images, replyImages...)
+					replyImageCount = len(replyImages)
+					replyUnsupported = append(replyUnsupported, downgraded...)
+					unsupported = append(unsupported, replyUnsupported...)
+				} else {
+					replyUnsupported = append(replyUnsupported, attachmentLabels(replyCtx.Attachments)...)
+					unsupported = append(unsupported, replyUnsupported...)
+				}
+				prompt = media.AugmentPromptWithUnsupportedFiles(prompt, replyUnsupported)
+			}
 			switch {
+			case strings.TrimSpace(replyCtx.Text) != "" && replyImageCount > 0 && replyName != "":
+				log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", replyImageCount))
+				prompt = fmt.Sprintf("[Replying to %s: %q with %s]\n%s", replyName, replyCtx.Text, imageAttachmentDescription(replyImageCount), prompt)
 			case strings.TrimSpace(replyCtx.Text) != "" && replyName != "":
 				log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot))
 				prompt = fmt.Sprintf("[Replying to %s: %q]\n%s", replyName, replyCtx.Text, prompt)
+			case replyImageCount > 0 && replyName != "":
+				log.Debug("gateway.reply_context.applied", "applied imessage reply image context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", replyImageCount))
+				prompt = fmt.Sprintf("[Replying to %s's %s]\n%s", replyName, imageAttachmentDescription(replyImageCount), prompt)
 			case replyName != "":
 				log.Debug("gateway.reply_context.applied", "imessage reply target unavailable", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
 				prompt = fmt.Sprintf("[Replying to %s's message, but it is unavailable]\n%s", replyName, prompt)
@@ -313,6 +335,169 @@ func chooseContactDisplayName(contacts []contactRecord) string {
 	return ""
 }
 
+func (g *Gateway) lookupReplyContext(replyGUID, chatGUID, sessionKey, requestID string) (messageContext, bool) {
+	if replyCtx, ok := g.lookupMessage(replyGUID); ok {
+		return replyCtx, true
+	}
+
+	replyCtx, ok := g.fetchReplyContext(replyGUID, chatGUID, sessionKey, requestID)
+	if !ok {
+		return messageContext{}, false
+	}
+	g.rememberMessage(replyGUID, replyCtx)
+	return replyCtx, true
+}
+
+func (g *Gateway) fetchReplyContext(replyGUID, chatGUID, sessionKey, requestID string) (messageContext, bool) {
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
+	if strings.TrimSpace(replyGUID) == "" {
+		return messageContext{}, false
+	}
+
+	if data, ok := g.queryReplyMessage(replyGUID, requestID); ok {
+		return g.replyContextFromMessage(data, chatGUID, sessionKey, requestID), true
+	}
+
+	endpoint, err := buildBlueBubblesMessageEndpoint(g.BlueBubblesURL, replyGUID, g.BlueBubblesPassword)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to build imessage reply lookup request", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageContext{}, false
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to build imessage reply lookup request", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageContext{}, false
+	}
+
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to fetch imessage reply target", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageContext{}, false
+	}
+	defer resp.Body.Close()
+
+	var result messageLookupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Debug("gateway.reply_lookup.failed", "failed to decode imessage reply target", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageContext{}, false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if result.Error != nil {
+			log.Debug("gateway.reply_lookup.failed", "BlueBubbles reply lookup failed", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("error", result.Error.Error))
+		} else {
+			log.Debug("gateway.reply_lookup.failed", "BlueBubbles reply lookup failed", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"))
+		}
+		return messageContext{}, false
+	}
+
+	return g.replyContextFromMessage(result.Data, chatGUID, sessionKey, requestID), true
+}
+
+func (g *Gateway) queryReplyMessage(replyGUID, requestID string) (messageLookupData, bool) {
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
+	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/query", g.BlueBubblesPassword)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.query_failed", "failed to build imessage reply query request", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageLookupData{}, false
+	}
+
+	payload := messageQueryRequest{
+		Limit:  1,
+		Offset: 0,
+		With:   []string{"chat", "attachment", "handle"},
+		Where: []messageQueryClause{
+			{
+				Statement: "message.guid = :guid",
+				Args: map[string]string{
+					"guid": replyGUID,
+				},
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.query_failed", "failed to marshal imessage reply query", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageLookupData{}, false
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		log.Debug("gateway.reply_lookup.query_failed", "failed to build imessage reply query request", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageLookupData{}, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		log.Debug("gateway.reply_lookup.query_failed", "failed to query imessage reply target", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageLookupData{}, false
+	}
+	defer resp.Body.Close()
+
+	var result messageQueryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Debug("gateway.reply_lookup.query_failed", "failed to decode imessage reply query", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"), config.ErrorField(err))
+		return messageLookupData{}, false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if result.Error != nil {
+			log.Debug("gateway.reply_lookup.query_failed", "BlueBubbles reply query failed", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("error", result.Error.Error))
+		} else {
+			log.Debug("gateway.reply_lookup.query_failed", "BlueBubbles reply query failed", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"))
+		}
+		return messageLookupData{}, false
+	}
+	if len(result.Data) == 0 {
+		log.Debug("gateway.reply_lookup.query_miss", "BlueBubbles reply query returned no messages", config.F("request_id", requestID), config.F("message_guid", replyGUID), config.F("status", "degraded"))
+		return messageLookupData{}, false
+	}
+	return result.Data[0], true
+}
+
+func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID, sessionKey, requestID string) messageContext {
+	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
+	ctx := messageContext{
+		SessionKey:  sessionKey,
+		ChatGUID:    chatGUID,
+		Text:        strings.TrimSpace(data.Text),
+		Attachments: data.Attachments,
+		IsFromBot:   data.IsFromMe,
+		CreatedAt:   time.Now(),
+	}
+	if len(data.Chats) > 0 && data.Chats[0].GUID != "" {
+		ctx.ChatGUID = data.Chats[0].GUID
+	}
+	if data.IsFromMe {
+		ctx.SenderID = "imessage:self"
+		ctx.DisplayName = "Oswald"
+		log.Debug("gateway.reply_lookup.fetched", "fetched imessage reply target", config.F("request_id", requestID), config.F("message_guid", data.GUID), config.F("is_bot_reply", true), config.F("attachment_count", len(ctx.Attachments)), config.F("status", "ok"))
+		return ctx
+	}
+
+	address := strings.TrimSpace(data.Handle.Address)
+	ctx.SenderID = address
+	ctx.DisplayName = address
+	if address != "" {
+		if normalizedSenderID, err := accountlink.NormalizeIdentifier("imessage", address); err != nil {
+			log.Debug("gateway.reply_lookup.normalize_failed", "failed to normalize imessage reply sender", config.F("request_id", requestID), config.F("message_guid", data.GUID), config.F("status", "degraded"), config.ErrorField(err))
+		} else {
+			ctx.SenderID = normalizedSenderID
+			ctx.DisplayName = normalizedSenderID
+			if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID); err != nil {
+				log.Debug("gateway.reply_lookup.contact_failed", "imessage reply contact lookup failed", config.F("request_id", requestID), config.F("user_id", normalizedSenderID), config.F("status", "degraded"), config.ErrorField(err))
+			} else if resolvedName != "" {
+				ctx.DisplayName = resolvedName
+			}
+		}
+	}
+	if strings.TrimSpace(ctx.DisplayName) == "" {
+		ctx.DisplayName = "someone"
+	}
+	log.Debug("gateway.reply_lookup.fetched", "fetched imessage reply target", config.F("request_id", requestID), config.F("message_guid", data.GUID), config.F("is_bot_reply", false), config.F("attachment_count", len(ctx.Attachments)), config.F("status", "ok"))
+	return ctx
+}
+
 func (g *Gateway) cachedContactDisplayName(normalizedSenderID string) (string, bool) {
 	g.contactMu.Lock()
 	defer g.contactMu.Unlock()
@@ -344,15 +529,22 @@ func (g *Gateway) pruneContactNamesLocked() {
 }
 
 func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []string) {
+	return g.loadImagesLimit(attachments, media.MaxImagesPerRequest)
+}
+
+func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int) ([]ollama.InputImage, []string) {
 	if len(attachments) == 0 {
 		return nil, nil
+	}
+	if maxImages <= 0 {
+		return nil, attachmentLabels(attachments)
 	}
 
 	images := make([]ollama.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
-		if len(images) >= media.MaxImagesPerRequest {
+		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -382,6 +574,21 @@ func (g *Gateway) loadImages(attachments []attachment) ([]ollama.InputImage, []s
 		return nil, unsupported
 	}
 	return images, unsupported
+}
+
+func attachmentLabels(attachments []attachment) []string {
+	labels := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		labels = append(labels, media.AttachmentLabel(attachment.TransferName, attachment.MimeType))
+	}
+	return labels
+}
+
+func imageAttachmentDescription(count int) string {
+	if count == 1 {
+		return "image attachment"
+	}
+	return fmt.Sprintf("%d image attachments", count)
 }
 
 func (g *Gateway) fetchAttachmentImage(attachment attachment) (ollama.InputImage, error) {
@@ -542,6 +749,21 @@ func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	return parsed.String(), nil
 }
 
+func buildBlueBubblesMessageEndpoint(baseURL, messageGUID, password string) (string, error) {
+	endpoint, err := buildBlueBubblesEndpoint(baseURL, "/api/v1/message/"+url.PathEscape(messageGUID), password)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("parse BlueBubbles message URL: %w", err)
+	}
+	query := parsed.Query()
+	query.Set("with", "chats,participants,attachment,handle")
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
 func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string) (string, error) {
 	endpoint, err := buildBlueBubblesEndpoint(baseURL, "/api/v1/attachment/"+attachmentGUID+"/download", password)
 	if err != nil {
@@ -568,6 +790,7 @@ func (g *Gateway) rememberInboundMessage(msg webhookMessage, sessionKey, normali
 		SenderID:    normalizedSenderID,
 		DisplayName: displayName,
 		Text:        strings.TrimSpace(msg.Text),
+		Attachments: msg.Attachments,
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
 	})
