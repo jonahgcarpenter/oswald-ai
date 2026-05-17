@@ -27,13 +27,14 @@ Current layers:
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/accountlink/` — canonical user identity and cross-gateway account linking
 3. `internal/gateway/` — gateway bootstrap and implementations
-4. `internal/broker/` — request queue and worker pool
-5. `internal/agent/` — iterative tool-calling agent loop
-6. `internal/memory/` — in-process conversation retention and compaction
-7. `internal/tools/` — tool registry, builtin handlers, and schema loading
-8. `internal/mcpclient/` — optional MCP client sessions and discovered tools
-9. `internal/media/` — image validation and normalization
-10. `internal/ollama/` — Ollama client and request/response schema
+4. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+5. `internal/broker/` — request queue and worker pool
+6. `internal/agent/` — iterative tool-calling agent loop
+7. `internal/memory/` — in-process conversation retention and compaction
+8. `internal/tools/` — tool registry, builtin handlers, and schema loading
+9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
+10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+11. `internal/ollama/` — Ollama client and request/response schema
 
 ## Startup Flow
 
@@ -59,14 +60,15 @@ Current layers:
 Every request follows the same high-level path:
 
 1. A gateway receives user input
-2. The gateway derives routing metadata such as `SessionKey`, canonical `SenderID`, and `DisplayName`, and may attach current-turn images
+2. The gateway normalizes text, attachments, sender metadata, and reply context
 3. The gateway resolves or creates the canonical user identity through `internal/accountlink/`
-4. Account-link commands may be handled immediately by the gateway without reaching the agent loop
-5. The gateway submits a `broker.Request`
-6. A broker worker calls `(*Agent).Process()`
-7. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
-8. The final response is returned to the originating gateway
-9. The gateway sends the response back to the client, Discord channel, or iMessage chat
+4. Discord and iMessage pass the normalized message through `internal/routing.Decide()` to ignore, handle an account-link command, send a direct gateway fallback, or submit an LLM request
+5. Account-link commands are handled by the gateway without reaching the agent loop
+6. The gateway submits a `broker.Request`
+7. A broker worker calls `(*Agent).Process()`
+8. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+9. The final response is returned to the originating gateway
+10. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -101,13 +103,13 @@ Per request it does the following:
 5. Load retained session turns from `internal/memory`
 6. Compact older turns if the estimated prompt exceeds the active model budget
 7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
-8. Optionally write a per-request agent trace when `AGENT_TRACE_PATH` is set
-9. Call Ollama with all registered tools available
-10. If the model emits tool calls:
+8. Call Ollama with all registered tools available
+9. If the model emits tool calls:
     - execute each tool handler
     - append tool results as `tool` messages
     - repeat until no tool calls remain or the consecutive tool-failure limit is hit
-11. If tool failures exhaust the retry budget, make one final model call with tools disabled
+10. If tool failures exhaust the retry budget, make one final model call with tools disabled
+11. Optionally write a per-request agent trace when `AGENT_TRACE_PATH` is set
 12. Persist only the final user message and final assistant reply to session memory
 13. Return the final `AgentResponse`
 
@@ -123,6 +125,18 @@ Streaming behavior:
 - WebSocket clients can receive `thinking`, `content`, `status`, `tool_call`, and `tool_result` chunks while the request is running
 - Discord does not stream token-by-token; it waits for the final response
 - iMessage does not stream token-by-token; it waits for the final response
+
+## Shared Routing
+
+Gateway-neutral routing policy lives in `internal/routing/` and is used by Discord and iMessage.
+
+- `routing.Input` carries normalized text, channel type, mention state, account-command state, current-turn images, unsupported attachment labels, and optional reply context
+- `routing.Decide()` returns one of: ignore, submit to the LLM, handle an account-link command, or send a gateway fallback response directly
+- Group messages are ignored unless they mention Oswald, are replies to Oswald, or are account-link commands addressed to Oswald
+- Empty prompts with no usable images get a direct gateway fallback response
+- Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for Discord and iMessage
+- Reply context can include quoted text, replied-to images when image slots remain, unsupported attachment labels, and unavailable-message markers
+- WebSocket currently performs its own simpler routing path for JSON/plain-text prompts and account-link commands
 
 ## Three-Layer Memory Model
 
@@ -257,16 +271,17 @@ Behavior:
 
 Discord session keys use a hybrid strategy:
 
-- DM: `SenderID`
-- Guild channel or thread: `ChannelID:SenderID`
+- DM: `discord:dm:<discord-author-id>`
+- Guild channel or thread: `discord:<channel-id>:<discord-author-id>`
 
 This prevents cross-talk between users in the same Discord channel while preserving continuity in DMs.
 
 Reply handling:
 
 - Replies to non-bot messages inject quoted context into the prompt
-- Replies to Oswald messages try to reuse the same session when possible
-- A short-lived reply index tracks which session a prior Oswald message came from
+- Replies to Oswald messages can invoke Oswald without a fresh mention and inject the replied-to text as context
+- Discord can fetch a referenced message from the REST API when gateway payload reply data is incomplete
+- A short-lived reply index tracks recent inbound and Oswald-authored messages for reply reconstruction
 
 ### iMessage Gateway
 
@@ -286,6 +301,8 @@ Behavior:
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators and replies back through the BlueBubbles REST API
 - Retries BlueBubbles send failures with a fallback send method
+- Looks up contact display names through BlueBubbles and caches them briefly
+- Fetches replied-to message details from BlueBubbles when they are missing from the in-memory index
 - Tracks a short-lived in-memory message index so reply context can be reused across follow-up messages
 - Supports text-only, image-only, and text-plus-image messages
 - Supports `/connect` and `/disconnect` account-link commands
@@ -300,8 +317,8 @@ This preserves per-user continuity in direct chats while avoiding cross-talk ins
 Reply handling:
 
 - Replies to non-bot messages inject quoted context into the prompt
-- Replies to Oswald messages reuse session memory when the reply stays in the same session
-- Cross-session replies to prior Oswald messages inject quoted fallback context when needed
+- Replies to Oswald messages can invoke Oswald without a fresh mention and inject the replied-to text as context
+- Cross-session replies to prior Oswald messages use quoted context rather than switching to the original sender's session
 
 ## Tools
 
@@ -605,15 +622,20 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/agent/summarize.go`           | History compaction summarizer     |
 | `internal/broker/broker.go`             | Request queue and worker pool     |
 | `internal/memory/store.go`              | Session memory retention          |
+| `internal/memory/compact.go`            | Retention pruning and token estimates |
 | `internal/memory/budget.go`             | Context budget discovery          |
 | `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
+| `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
+| `internal/routing/types.go`             | Gateway-neutral routing types     |
 | `internal/ollama/client.go`             | Ollama HTTP client                |
 | `internal/tools/registry.go`            | Tool schema loading and execution |
 | `internal/tools/bootstrap.go`           | Builtin tool wiring               |
 | `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
 | `internal/tools/soulmemory/store.go`    | Soul file store                   |
 | `internal/accountlink/store.go`         | Canonical account link store      |
+| `internal/toolctx/toolctx.go`           | Request metadata propagation for tools |
 | `internal/media/images.go`              | Image normalization and validation |
+| `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
 | `internal/gateway/discord/gateway.go`   | Discord transport                 |
 | `internal/gateway/imessage/gateway.go`  | iMessage BlueBubbles transport    |

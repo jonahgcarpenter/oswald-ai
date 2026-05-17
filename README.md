@@ -17,37 +17,6 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Per-user persistent memory on disk and a live-editable soul file
 - Fully local runtime with no hosted model dependency
 
-## Prerequisites
-
-- Go 1.25+
-- Ollama running locally, default `http://localhost:11434`
-- SearXNG running locally, default `http://localhost:8888`, if you want web search
-- Optional Discord bot token for the Discord gateway
-- Optional BlueBubbles server for the iMessage gateway
-
-## Configuration
-
-### Environment variables:
-
-| Variable                       | Default                  | Purpose                                         |
-| ------------------------------ | ------------------------ | ----------------------------------------------- |
-| `OLLAMA_MODEL`                 | empty                    | Ollama model name                               |
-| `OLLAMA_URL`                   | `http://localhost:11434` | Ollama API base URL                             |
-| `PORT`                         | `8080`                   | WebSocket gateway port                          |
-| `DISCORD_TOKEN`                | empty                    | Enables Discord gateway when set                |
-| `BLUE_BUBBLES_URL`             | empty                    | Enables iMessage gateway when set               |
-| `BLUE_BUBBLES_PASSWORD`        | empty                    | Enables iMessage gateway when set               |
-| `IMESSAGE_PORT`                | `8090`                   | The port listening for BlueBubbles webhooks     |
-| `IMESSAGE_WEBHOOK_PATH`        | `/imessage/webhook`      | The endpoint listening for BlueBubbles webhooks |
-| `SEARXNG_URL`                  | `http://localhost:8888`  | SearXNG base URL                                |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                    | Github MCP                                      |
-| `WORKER_POOL_SIZE`             | `1`                      | Broker worker count                             |
-| `MAX_TOOL_FAILURE_RETRIES`     | `3`                      | Consecutive tool failure limit per request      |
-| `MEMORY_MAX_TURNS`             | `10`                     | Max retained session turn pairs; `0` disables   |
-| `MEMORY_MAX_AGE`               | `30m`                    | Max retained session age; `0` disables          |
-| `AGENT_TRACE_PATH`             | empty                    | Writes per-request agent trace markdown dumps   |
-| `LOG_LEVEL`                    | `info`                   | Log verbosity                                   |
-
 ## Memory
 
 Oswald uses three memory layers:
@@ -62,34 +31,35 @@ Oswald uses three memory layers:
 
 ### Discord/iMessage Bot
 
-#### In Server Channels or Group Chats
+In DMs or direct chats, send any message:
 
-Mention the bot to get a response:
-
-```
-@Oswald What is the capital of France?
-```
-
-#### In DMs
-
-Send any message directly—no mention required:
-
-```
+```text
 What is the current weather?
 ```
 
-#### Replying to Oswald
+In server channels or group chats, mention Oswald:
 
-You can reply to Oswald's previous message without mentioning:
-
+```text
+@Oswald What is the capital of France?
 ```
+
+You can also reply to a message and mention Oswald to include that message as context:
+
+```text
+[Replying to Jonah: "The capital of the US is New York"]
+@Oswald Is this true?
+```
+
+Replies to Oswald do not need another mention:
+
+```text
 [Reply to Oswald's message]
 Can you elaborate on that?
 ```
 
-Oswald will include the previous exchange as context automatically.
-
 ### WebSocket API
+
+Currently used for testing.
 
 Connect to `ws://localhost:8080/ws`:
 
