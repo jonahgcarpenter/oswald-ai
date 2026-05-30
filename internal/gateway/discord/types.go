@@ -55,10 +55,12 @@ type MessageCreate struct {
 		Username string `json:"username"`
 	} `json:"mentions,omitempty"`
 	Attachments       []Attachment `json:"attachments,omitempty"`
+	Embeds            []Embed      `json:"embeds,omitempty"`
 	ReferencedMessage *struct {
 		ID          string       `json:"id"`
 		Content     string       `json:"content"`
 		Attachments []Attachment `json:"attachments,omitempty"`
+		Embeds      []Embed      `json:"embeds,omitempty"`
 		Author      struct {
 			ID       string `json:"id"`
 			Username string `json:"username"`
@@ -71,10 +73,27 @@ type messageResponse struct {
 	ID          string       `json:"id"`
 	Content     string       `json:"content"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	Embeds      []Embed      `json:"embeds,omitempty"`
 	Author      struct {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 	} `json:"author"`
+}
+
+// Embed describes Discord link-preview media that can be treated like an image.
+type Embed struct {
+	Type      string     `json:"type,omitempty"`
+	URL       string     `json:"url,omitempty"`
+	Image     EmbedImage `json:"image,omitempty"`
+	Thumbnail EmbedImage `json:"thumbnail,omitempty"`
+}
+
+// EmbedImage describes an image-like Discord embed asset.
+type EmbedImage struct {
+	URL      string `json:"url,omitempty"`
+	ProxyURL string `json:"proxy_url,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
 }
 
 // Attachment describes a Discord message attachment relevant to gateway routing.
@@ -101,6 +120,7 @@ type replyContext struct {
 	DisplayName string
 	Text        string
 	Attachments []Attachment
+	Embeds      []Embed
 	IsFromBot   bool
 	CreatedAt   time.Time
 }

@@ -451,8 +451,16 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 
 	replyToID := ""
 	images, unsupported := dg.loadImages(msg.Attachments)
+	embedImageCount := 0
 	if len(msg.Attachments) > 0 {
 		log.Debug("gateway.attachment.processed", "processed discord attachments", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
+	}
+	if len(msg.Embeds) > 0 {
+		embedImages, embedUnsupported := dg.loadEmbedImagesLimit(msg.Embeds, media.MaxImagesPerRequest-len(images))
+		embedImageCount = len(embedImages)
+		images = append(images, embedImages...)
+		unsupported = append(unsupported, embedUnsupported...)
+		log.Debug("gateway.embed.processed", "processed discord embeds", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(embedImages)), config.F("downgraded_count", len(embedUnsupported)), config.F("declared_embed_count", len(msg.Embeds)))
 	}
 
 	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
@@ -468,6 +476,9 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	text = strings.TrimSpace(text)
 	text = re.ReplaceAllString(text, ":$1:")
 	text = resolveMentions(text, msg.Mentions)
+	if embedImageCount > 0 {
+		text = stripEmbedURLsFromText(text, msg.Embeds)
+	}
 
 	// Compute the session key using the hybrid strategy:
 	//   DMs (no GuildID):      SenderID           — continuous per-user memory
@@ -487,6 +498,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			DisplayName: msg.Author.Username,
 			Text:        text,
 			Attachments: msg.Attachments,
+			Embeds:      msg.Embeds,
 			IsFromBot:   false,
 			CreatedAt:   time.Now(),
 		})
@@ -534,6 +546,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		DisplayName: msg.Author.Username,
 		Text:        text,
 		Attachments: msg.Attachments,
+		Embeds:      msg.Embeds,
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
 	})
@@ -660,6 +673,19 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 				reply.Unsupported = discordAttachmentLabels(cached.Attachments)
 			}
 		}
+		if len(cached.Embeds) > 0 {
+			remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
+			if remainingImageSlots > 0 {
+				embedImages, embedUnsupported := dg.loadEmbedImagesLimit(cached.Embeds, remainingImageSlots)
+				reply.Images = append(reply.Images, embedImages...)
+				reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+				if len(embedImages) > 0 {
+					reply.Text = stripEmbedURLsFromText(reply.Text, cached.Embeds)
+				}
+			} else {
+				reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(cached.Embeds)...)
+			}
+		}
 		log.Debug("gateway.reply_context.applied", "applied discord cached reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", cached.IsFromBot), config.F("reply_image_count", len(reply.Images)))
 		return reply
 	}
@@ -682,6 +708,19 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 			reply.Unsupported = discordAttachmentLabels(referenced.Attachments)
 		}
 	}
+	if len(referenced.Embeds) > 0 {
+		remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
+		if remainingImageSlots > 0 {
+			embedImages, embedUnsupported := dg.loadEmbedImagesLimit(referenced.Embeds, remainingImageSlots)
+			reply.Images = append(reply.Images, embedImages...)
+			reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+			if len(embedImages) > 0 {
+				reply.Text = stripEmbedURLsFromText(reply.Text, referenced.Embeds)
+			}
+		} else {
+			reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(referenced.Embeds)...)
+		}
+	}
 	if quotedContent == "" && len(reply.Images) == 0 && len(reply.Unsupported) == 0 {
 		if fetched, ok := dg.fetchMessage(msg.ChannelID, referenced.ID, requestID); ok {
 			reply.SenderName = strings.TrimSpace(fetched.Author.Username)
@@ -696,6 +735,19 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 					reply.Images, reply.Unsupported = dg.loadImagesLimit(fetched.Attachments, remainingImageSlots)
 				} else {
 					reply.Unsupported = discordAttachmentLabels(fetched.Attachments)
+				}
+			}
+			if len(fetched.Embeds) > 0 {
+				remainingImageSlots := media.MaxImagesPerRequest - len(currentImages) - len(reply.Images)
+				if remainingImageSlots > 0 {
+					embedImages, embedUnsupported := dg.loadEmbedImagesLimit(fetched.Embeds, remainingImageSlots)
+					reply.Images = append(reply.Images, embedImages...)
+					reply.Unsupported = append(reply.Unsupported, embedUnsupported...)
+					if len(embedImages) > 0 {
+						reply.Text = stripEmbedURLsFromText(reply.Text, fetched.Embeds)
+					}
+				} else {
+					reply.Unsupported = append(reply.Unsupported, discordEmbedLabels(fetched.Embeds)...)
 				}
 			}
 		}
@@ -811,6 +863,109 @@ func discordAttachmentLabels(attachments []Attachment) []string {
 		labels = append(labels, media.AttachmentLabel(attachment.Filename, attachment.ContentType))
 	}
 	return labels
+}
+
+func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]ollama.InputImage, []string) {
+	if len(embeds) == 0 {
+		return nil, nil
+	}
+	if maxImages <= 0 {
+		return nil, discordEmbedLabels(embeds)
+	}
+
+	images := make([]ollama.InputImage, 0, len(embeds))
+	unsupported := make([]string, 0)
+	for _, embed := range embeds {
+		label := discordEmbedLabel(embed)
+		if len(images) >= maxImages {
+			unsupported = append(unsupported, label)
+			continue
+		}
+
+		assetURL := discordEmbedImageURL(embed)
+		if assetURL == "" {
+			continue
+		}
+		image, err := dg.fetchAttachmentImage("", assetURL, "", label)
+		if err != nil {
+			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.embed.rejected", "rejected discord embed image", config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if image.Data == "" {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		images = append(images, image)
+	}
+
+	if len(images) == 0 {
+		return nil, unsupported
+	}
+	return images, unsupported
+}
+
+func discordEmbedLabels(embeds []Embed) []string {
+	labels := make([]string, 0, len(embeds))
+	for _, embed := range embeds {
+		if discordEmbedImageURL(embed) != "" {
+			labels = append(labels, discordEmbedLabel(embed))
+		}
+	}
+	return labels
+}
+
+func discordEmbedLabel(embed Embed) string {
+	embedType := strings.TrimSpace(embed.Type)
+	if embedType == "" {
+		embedType = "link"
+	}
+	return media.AttachmentLabel("discord embed", embedType)
+}
+
+func discordEmbedImageURL(embed Embed) string {
+	if url := strings.TrimSpace(embed.Image.ProxyURL); url != "" {
+		return url
+	}
+	if url := strings.TrimSpace(embed.Image.URL); url != "" {
+		return url
+	}
+	if url := strings.TrimSpace(embed.Thumbnail.ProxyURL); url != "" {
+		return url
+	}
+	return strings.TrimSpace(embed.Thumbnail.URL)
+}
+
+func stripEmbedURLsFromText(text string, embeds []Embed) string {
+	for _, rawURL := range discordEmbedSourceURLs(embeds) {
+		text = strings.ReplaceAll(text, rawURL, "")
+	}
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func discordEmbedSourceURLs(embeds []Embed) []string {
+	urls := make([]string, 0, len(embeds)*5)
+	seen := make(map[string]struct{}, len(embeds)*5)
+	for _, embed := range embeds {
+		for _, rawURL := range []string{
+			embed.URL,
+			embed.Image.URL,
+			embed.Image.ProxyURL,
+			embed.Thumbnail.URL,
+			embed.Thumbnail.ProxyURL,
+		} {
+			rawURL = strings.TrimSpace(rawURL)
+			if rawURL == "" {
+				continue
+			}
+			if _, ok := seen[rawURL]; ok {
+				continue
+			}
+			seen[rawURL] = struct{}{}
+			urls = append(urls, rawURL)
+		}
+	}
+	return urls
 }
 
 func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (ollama.InputImage, error) {
