@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	_ "image/gif"
 	"image/jpeg"
 	_ "image/jpeg"
 	"image/png"
@@ -35,6 +36,7 @@ var normalizedImageMIMETypes = map[string]struct{}{
 var decodableImageMIMETypes = map[string]struct{}{
 	"image/jpeg":          {},
 	"image/png":           {},
+	"image/gif":           {},
 	"image/webp":          {},
 	"image/heic":          {},
 	"image/heif":          {},
