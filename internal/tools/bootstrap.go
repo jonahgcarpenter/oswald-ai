@@ -6,7 +6,9 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/sessionhistory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
@@ -17,14 +19,14 @@ import (
 // can share the same instances with the tool handlers.
 // chatClient and model are forwarded to the memory.recall handler so it can perform
 // LLM-based migration of old flat-format user memory files on first recall.
-func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, mcpManager *mcpclient.Manager, log *config.Logger) (*Registry, error) {
+func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient ollama.Chatter, model string, mcpManager *mcpclient.Manager, log *config.Logger) (*Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
 		return nil, err
 	}
 
-	if err := registerBuiltins(registry, cfg, soulStore, userMemStore, chatClient, model, log); err != nil {
+	if err := registerBuiltins(registry, cfg, soulStore, userMemStore, sessionStore, chatClient, model, log); err != nil {
 		return nil, err
 	}
 	if err := registerMCPTools(registry, mcpManager, log); err != nil {
@@ -36,7 +38,7 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, user
 }
 
 // registerBuiltins wires all builtin tools into the shared registry.
-func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, chatClient ollama.Chatter, model string, log *config.Logger) error {
+func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient ollama.Chatter, model string, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := registry.RegisterHandler("web.search", Handler(websearch.NewHandler(searchClient, log))); err != nil {
@@ -58,6 +60,11 @@ func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmem
 		return fmt.Errorf("failed to initialize memory.forget tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultUserMemoryPath))
+
+	if err := registry.RegisterHandler("session.recent", Handler(sessionhistory.NewRecentHandler(sessionStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize session.recent tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured session history tool", config.F("tool_name", "session.recent"))
 
 	if err := registry.RegisterHandler("soul.read", Handler(soulmemory.NewReadHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.read tool: %w", err)

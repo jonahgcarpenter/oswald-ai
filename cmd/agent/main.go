@@ -74,16 +74,6 @@ func main() {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP clients", config.ErrorField(err))
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.OllamaModel, mcpManager, rootLog)
-	if err != nil {
-		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
-	}
-
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, rootLog)
-	if err != nil {
-		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
-	}
-
 	memoryStore := memory.NewStore(memory.Options{
 		MaxTurns:      cfg.MemoryMaxTurns,
 		MaxAge:        cfg.MemoryMaxAge,
@@ -96,6 +86,27 @@ func main() {
 		config.F("context_window", budget.ContextWindow),
 		config.F("prompt_budget", budget.PromptBudget()),
 	)
+	if cfg.OllamaEmbeddingModel != "" {
+		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
+			config.F("embedding_model", cfg.OllamaEmbeddingModel),
+			config.F("recent_turn_count", 0),
+			config.F("max_relevant_turn_count", 3),
+			config.F("min_similarity", 0.70),
+			config.F("recent_policy", "tool_only"),
+		)
+	} else {
+		log.Debug("app.memory_vector.disabled", "semantic session-memory retrieval disabled")
+	}
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.OllamaModel, mcpManager, rootLog)
+	if err != nil {
+		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
+	}
+
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, rootLog)
+	if err != nil {
+		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
+	}
 
 	if cfg.AgentTracePath != "" {
 		log.Info("app.trace.enabled", "enabled agent trace dumps", config.F("path", cfg.AgentTracePath))
@@ -103,8 +114,10 @@ func main() {
 
 	agentEngine := agent.NewAgent(
 		llmClient,
+		llmClient,
 		toolRegistry,
 		cfg.OllamaModel,
+		cfg.OllamaEmbeddingModel,
 		soulStore,
 		userMemStore,
 		budget,

@@ -79,3 +79,15 @@ type ollamaChatResponse struct {
 	EvalCount          int           `json:"eval_count,omitempty"`
 	EvalDuration       int64         `json:"eval_duration,omitempty"`
 }
+
+// ollamaEmbedRequest represents the payload sent to Ollama's /api/embed endpoint.
+type ollamaEmbedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// ollamaEmbedResponse represents Ollama's reply from /api/embed.
+type ollamaEmbedResponse struct {
+	Model      string      `json:"model"`
+	Embeddings [][]float64 `json:"embeddings"`
+}

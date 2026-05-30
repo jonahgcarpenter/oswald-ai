@@ -19,6 +19,12 @@ import (
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
 
+const (
+	semanticRecentTurns      = 0
+	semanticMaxRelevantTurns = 3
+	semanticMinSimilarity    = 0.70
+)
+
 // StreamChunkType identifies the kind of content in a StreamChunk.
 type StreamChunkType string
 
@@ -214,10 +220,12 @@ type AgentResponse struct {
 // calls tools from the registry and generates the final response.
 type Agent struct {
 	chatClient            ollama.Chatter
+	embeddingClient       ollama.Embedder
 	registry              *tools.Registry
 	memory                *memory.Store
 	budget                memory.ContextBudget
 	model                 string
+	embeddingModel        string
 	soul                  *soulmemory.Store
 	userMemory            *usermemory.Store
 	summarizer            *OllamaSummarizer
@@ -230,8 +238,10 @@ type Agent struct {
 // soul store, conversation memory store, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient ollama.Chatter,
+	embeddingClient ollama.Embedder,
 	registry *tools.Registry,
 	model string,
+	embeddingModel string,
 	soul *soulmemory.Store,
 	userMemory *usermemory.Store,
 	budget memory.ContextBudget,
@@ -242,10 +252,12 @@ func NewAgent(
 ) *Agent {
 	return &Agent{
 		chatClient:            chatClient,
+		embeddingClient:       embeddingClient,
 		registry:              registry,
 		memory:                memoryStore,
 		budget:                budget,
 		model:                 model,
+		embeddingModel:        strings.TrimSpace(embeddingModel),
 		soul:                  soul,
 		userMemory:            userMemory,
 		summarizer:            NewOllamaSummarizer(chatClient, model, log),
@@ -253,6 +265,75 @@ func NewAgent(
 		maxToolFailureRetries: maxToolFailureRetries,
 		log:                   log,
 	}
+}
+
+func (a *Agent) semanticMemoryEnabled() bool {
+	return a.embeddingClient != nil && strings.TrimSpace(a.embeddingModel) != ""
+}
+
+func (a *Agent) embedText(ctx context.Context, text string) ([]float64, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, fmt.Errorf("cannot embed empty text")
+	}
+	resp, err := a.embeddingClient.Embed(ctx, ollama.EmbedRequest{
+		Model: a.embeddingModel,
+		Input: text,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Embeddings) == 0 || len(resp.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("embedding response contained no vector")
+	}
+	return resp.Embeddings[0], nil
+}
+
+func memoryEmbeddingText(user string, _ string) string {
+	return strings.TrimSpace("User: " + strings.TrimSpace(user))
+}
+
+func stripReplyContext(prompt string) (string, bool) {
+	prompt = strings.TrimSpace(prompt)
+	if !strings.HasPrefix(prompt, "[Replying ") {
+		return prompt, false
+	}
+	parts := strings.SplitN(prompt, "\n\n", 2)
+	if len(parts) < 2 {
+		return "", true
+	}
+	return strings.TrimSpace(parts[1]), true
+}
+
+func sessionMemoryUserContent(prompt string, imageCount int) string {
+	content, hadReplyContext := stripReplyContext(prompt)
+	if content == "" && hadReplyContext {
+		content = "[User replied to a prior message]"
+	}
+	if imageCount > 0 {
+		content = strings.TrimSpace(content + fmt.Sprintf("\n\n[Attached %d image(s)]", imageCount))
+	}
+	return strings.TrimSpace(content)
+}
+
+func semanticSelectionTraces(details []memory.RetrievalDetail) []debug.SemanticMemorySelectionTrace {
+	if len(details) == 0 {
+		return nil
+	}
+	traces := make([]debug.SemanticMemorySelectionTrace, 0, len(details))
+	for _, detail := range details {
+		traces = append(traces, debug.SemanticMemorySelectionTrace{
+			Index:          detail.Index,
+			CreatedAt:      detail.CreatedAt,
+			UserChars:      detail.UserChars,
+			AssistantChars: detail.AssistantChars,
+			Similarity:     detail.Similarity,
+			HasSimilarity:  detail.HasSimilarity,
+			Included:       detail.Included,
+			Reason:         detail.Reason,
+		})
+	}
+	return traces
 }
 
 // truncate returns s shortened to at most max runes, appending "..." if cut.
@@ -450,14 +531,93 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	// Retrieve retained conversation turns for this session. TTL and max-turn
 	// pruning are applied destructively inside the store before history is used.
-	turns := a.memory.Turns(sessionKey)
+	// When embeddings are configured, only strongly relevant turns are included;
+	// vague follow-ups can use session.recent instead of automatic history replay.
+	semanticSelection := false
+	semanticTrace := debug.SemanticMemoryTrace{
+		Enabled:              a.semanticMemoryEnabled(),
+		EmbeddingModel:       a.embeddingModel,
+		RecentTurnLimit:      semanticRecentTurns,
+		MaxRelevantTurnLimit: semanticMaxRelevantTurns,
+		MinSimilarity:        semanticMinSimilarity,
+	}
+	var turns []memory.Turn
+	if a.semanticMemoryEnabled() {
+		semanticSelection = true
+		includeRecent := false
+		semanticTrace.IncludeRecent = includeRecent
+		retrievalOpts := memory.RetrievalOptions{
+			RecentTurns:      semanticRecentTurns,
+			MaxRelevantTurns: semanticMaxRelevantTurns,
+			MinSimilarity:    semanticMinSimilarity,
+			IncludeRecent:    includeRecent,
+		}
+		semanticQueryText, hadReplyContext := stripReplyContext(userPrompt)
+		if semanticQueryText == "" {
+			semanticQueryText = userPrompt
+		}
+		semanticTrace.QueryHadReplyContext = hadReplyContext
+		embedStartedAt := time.Now()
+		queryEmbedding, err := a.embedText(ctx, semanticQueryText)
+		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
+		semanticTrace.QueryAttempted = true
+		semanticTrace.QueryDurationMS = embedDurationMS
+		if err != nil {
+			retrieval := a.memory.RelevantTurns(sessionKey, nil, retrievalOpts)
+			turns = retrieval.Turns
+			semanticTrace.QueryStatus = "degraded"
+			semanticTrace.QueryError = err.Error()
+			semanticTrace.CandidateTurnCount = retrieval.CandidateTurnCount
+			semanticTrace.SelectedTurnCount = len(retrieval.Turns)
+			semanticTrace.RecentTurnCount = retrieval.RecentTurnCount
+			semanticTrace.SemanticTurnCount = retrieval.SemanticTurnCount
+			semanticTrace.Selections = semanticSelectionTraces(retrieval.Details)
+			reqLog.Warn("agent.memory.embedding.query_failed", "failed to embed query for semantic memory retrieval",
+				config.F("embedding_model", a.embeddingModel),
+				config.F("duration_ms", embedDurationMS),
+				config.F("candidate_turn_count", retrieval.CandidateTurnCount),
+				config.F("selected_turn_count", len(retrieval.Turns)),
+				config.F("recent_turn_count", retrieval.RecentTurnCount),
+				config.F("include_recent", includeRecent),
+				config.F("status", "degraded"),
+				config.ErrorField(err),
+			)
+		} else {
+			retrieval := a.memory.RelevantTurns(sessionKey, queryEmbedding, retrievalOpts)
+			turns = retrieval.Turns
+			semanticTrace.QueryStatus = "ok"
+			semanticTrace.QueryEmbeddingDimension = len(queryEmbedding)
+			semanticTrace.CandidateTurnCount = retrieval.CandidateTurnCount
+			semanticTrace.SelectedTurnCount = len(retrieval.Turns)
+			semanticTrace.RecentTurnCount = retrieval.RecentTurnCount
+			semanticTrace.SemanticTurnCount = retrieval.SemanticTurnCount
+			semanticTrace.Selections = semanticSelectionTraces(retrieval.Details)
+			reqLog.Info("agent.memory.vector.retrieved", "selected semantic session memory",
+				config.F("embedding_model", a.embeddingModel),
+				config.F("embedding_dimension_count", len(queryEmbedding)),
+				config.F("duration_ms", embedDurationMS),
+				config.F("candidate_turn_count", retrieval.CandidateTurnCount),
+				config.F("selected_turn_count", len(retrieval.Turns)),
+				config.F("recent_turn_count", retrieval.RecentTurnCount),
+				config.F("semantic_turn_count", retrieval.SemanticTurnCount),
+				config.F("include_recent", includeRecent),
+				config.F("max_relevant_turn_count", retrievalOpts.MaxRelevantTurns),
+				config.F("min_similarity", retrievalOpts.MinSimilarity),
+				config.F("status", "ok"),
+			)
+		}
+	} else {
+		turns = a.memory.Turns(sessionKey)
+	}
 
 	// If the estimated prompt would exceed the active model budget, destructively
 	// compact the oldest retained turns into a synthetic turn pair that remains
 	// in ordinary conversation history.
 	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, reqLog, dynamicSystemPrompt, turns, userPrompt, userImages)
 	if compacted {
-		a.memory.ReplaceTurns(sessionKey, compactedTurns)
+		if !semanticSelection {
+			a.memory.ReplaceTurns(sessionKey, compactedTurns)
+		}
 		turns = compactedTurns
 	}
 	trimmedHistory := memory.FlattenTurns(turns)
@@ -702,6 +862,36 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		messages = append(messages, lastResp.Message)
 	}
 
+	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
+	var turnEmbedding []float64
+	if finalContent != "" && a.semanticMemoryEnabled() {
+		embedStartedAt := time.Now()
+		embedding, err := a.embedText(ctx, memoryEmbeddingText(userMemoryContent, finalContent))
+		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
+		semanticTrace.StoreAttempted = true
+		semanticTrace.StoreDurationMS = embedDurationMS
+		if err != nil {
+			semanticTrace.StoreStatus = "degraded"
+			semanticTrace.StoreError = err.Error()
+			reqLog.Warn("agent.memory.embedding.turn_failed", "failed to embed completed turn for semantic memory retrieval",
+				config.F("embedding_model", a.embeddingModel),
+				config.F("duration_ms", embedDurationMS),
+				config.F("status", "degraded"),
+				config.ErrorField(err),
+			)
+		} else {
+			turnEmbedding = embedding
+			semanticTrace.StoreStatus = "ok"
+			semanticTrace.StoreEmbeddingDimension = len(turnEmbedding)
+			reqLog.Info("agent.memory.vector.stored", "stored semantic session-memory embedding",
+				config.F("embedding_model", a.embeddingModel),
+				config.F("embedding_dimension_count", len(turnEmbedding)),
+				config.F("duration_ms", embedDurationMS),
+				config.F("status", "ok"),
+			)
+		}
+	}
+
 	if a.agentTracePath != "" {
 		if dumpErr := debug.DumpAgentTrace(debug.AgentTrace{
 			Dir:                        a.agentTracePath,
@@ -716,6 +906,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			EstimatedAfter:             prune.EstimatedAfter,
 			RemovedPairs:               prune.RemovedPairs,
 			RequestImages:              userImages,
+			SemanticMemory:             semanticTrace,
 			ToolExecutions:             toolExecutions,
 			FinalResponse:              finalContent,
 			FinalThinking:              finalThinking,
@@ -732,14 +923,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
 	if finalContent != "" {
-		userMemoryContent := userPrompt
-		if len(userImages) > 0 {
-			userMemoryContent = strings.TrimSpace(userMemoryContent + fmt.Sprintf("\n\n[Attached %d image(s)]", len(userImages)))
-		}
 		a.memory.AppendTurn(
 			sessionKey,
 			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
 			ollama.ChatMessage{Role: "assistant", Content: finalContent},
+			turnEmbedding,
 		)
 	}
 

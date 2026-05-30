@@ -16,6 +16,35 @@ type Options struct {
 	PromptBudget  int
 }
 
+// RetrievalOptions controls request-time semantic memory selection.
+type RetrievalOptions struct {
+	RecentTurns      int
+	MaxRelevantTurns int
+	MinSimilarity    float64
+	IncludeRecent    bool
+}
+
+// RetrievalResult reports which retained turns were selected for a request.
+type RetrievalResult struct {
+	Turns              []Turn
+	CandidateTurnCount int
+	RecentTurnCount    int
+	SemanticTurnCount  int
+	Details            []RetrievalDetail
+}
+
+// RetrievalDetail reports how one retained turn was handled by semantic retrieval.
+type RetrievalDetail struct {
+	Index          int
+	CreatedAt      time.Time
+	UserChars      int
+	AssistantChars int
+	Similarity     float64
+	HasSimilarity  bool
+	Included       bool
+	Reason         string
+}
+
 // Turn stores a single conversational exchange and when it entered memory.
 // It is exported so the agent can compact retained turns when prompt budget
 // pressure requires replacing older history with a shorter synthetic turn.
@@ -23,6 +52,7 @@ type Turn struct {
 	CreatedAt time.Time
 	User      ollama.ChatMessage
 	Assistant ollama.ChatMessage
+	Embedding []float64
 }
 
 // session holds the accumulated conversation turns for a single session.
@@ -90,6 +120,33 @@ func (s *Store) Turns(sessionKey string) []Turn {
 	return keptTurns
 }
 
+// RecentTurns returns a window of completed exchanges from newest to older using
+// one-based offset semantics: offset 1 starts at the newest retained turn.
+func (s *Store) RecentTurns(sessionKey string, offset int, count int) []Turn {
+	turns := s.Turns(sessionKey)
+	if len(turns) == 0 || count <= 0 {
+		return nil
+	}
+	if offset < 1 {
+		offset = 1
+	}
+
+	startIndex := len(turns) - offset
+	if startIndex < 0 {
+		return nil
+	}
+
+	result := make([]Turn, 0, count)
+	for i := 0; i < count; i++ {
+		idx := startIndex - i
+		if idx < 0 {
+			break
+		}
+		result = append(result, turns[idx])
+	}
+	return result
+}
+
 // ReplaceTurns overwrites the retained turn pairs for a session after
 // destructively applying TTL and max-turn pruning to the provided slice.
 func (s *Store) ReplaceTurns(sessionKey string, turns []Turn) {
@@ -121,7 +178,7 @@ func (s *Store) ReplaceTurns(sessionKey string, turns []Turn) {
 
 // AppendTurn adds a user/assistant turn pair to the session identified by sessionKey.
 // If sessionKey is empty, AppendTurn is a no-op.
-func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant ollama.ChatMessage) {
+func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant ollama.ChatMessage, embedding []float64) {
 	if sessionKey == "" {
 		return
 	}
@@ -143,6 +200,7 @@ func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant
 		CreatedAt: now,
 		User:      user,
 		Assistant: assistant,
+		Embedding: append([]float64(nil), embedding...),
 	})
 	postAppend := PruneTurns(now, prunedTurns, s.options)
 	prunedTurns = postAppend.Kept
