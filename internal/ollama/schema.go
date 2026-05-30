@@ -80,6 +80,18 @@ type ChatResponse struct {
 	EvalCount          int
 }
 
+// EmbedRequest is the payload for Ollama's embedding endpoint.
+type EmbedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// EmbedResponse contains vectors returned by Ollama's embedding endpoint.
+type EmbedResponse struct {
+	Model      string
+	Embeddings [][]float64
+}
+
 // ShowRequest requests model metadata from Ollama's /api/show endpoint.
 type ShowRequest struct {
 	Model   string `json:"model"`
@@ -96,4 +108,9 @@ type ShowResponse struct {
 // Chatter describes the single Ollama capability the agent depends on.
 type Chatter interface {
 	Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error)
+}
+
+// Embedder describes the Ollama embedding capability used for semantic memory retrieval.
+type Embedder interface {
+	Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
 }

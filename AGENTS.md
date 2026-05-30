@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin tools:
 
 - `web.search`
 - `memory.remember`
@@ -13,6 +13,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `memory.forget`
 - `soul.read`
 - `soul.patch`
+- `session.recent`
 
 Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
 
@@ -47,9 +48,9 @@ Current layers:
 5. Create the soul store and persistent user-memory store
 6. Create the account-link service and shared `/connect` and `/disconnect` command handler
 7. Initialize optional MCP clients
-8. Load tool schemas from `config/tools/*.md`, register builtin handlers, and register any discovered MCP tools
-9. Build enabled gateways from config
-10. Create the in-process conversation memory store
+8. Create the in-process conversation memory store
+9. Load tool schemas from `config/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+10. Build enabled gateways from config
 11. Create the agent
 12. Start the broker worker pool
 13. Start each gateway in its own goroutine
@@ -66,7 +67,7 @@ Every request follows the same high-level path:
 5. Account-link commands are handled by the gateway without reaching the agent loop
 6. The gateway submits a `broker.Request`
 7. A broker worker calls `(*Agent).Process()`
-8. The agent builds the prompt, includes any current-turn images on the final user message, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
 9. The final response is returned to the originating gateway
 10. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
@@ -100,9 +101,9 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
    - current date and time
-5. Load retained session turns from `internal/memory`
-6. Compact older turns if the estimated prompt exceeds the active model budget
-7. Build the Ollama message array: system prompt, retained history, current user prompt, and any current-turn images
+5. Load retained session turns from `internal/memory`; when `OLLAMA_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
+6. Compact older selected turns if the estimated prompt exceeds the active model budget
+7. Build the Ollama message array: system prompt, selected retained history, current user prompt, and any current-turn images
 8. Call Ollama with all registered tools available
 9. If the model emits tool calls:
     - execute each tool handler
@@ -110,13 +111,14 @@ Per request it does the following:
     - repeat until no tool calls remain or the consecutive tool-failure limit is hit
 10. If tool failures exhaust the retry budget, make one final model call with tools disabled
 11. Optionally write a per-request agent trace when `AGENT_TRACE_PATH` is set
-12. Persist only the final user message and final assistant reply to session memory
+12. Persist only the cleaned final user message and final assistant reply to session memory
 13. Return the final `AgentResponse`
 
 Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
+- Reply context is sent directly on the current prompt, but stripped from stored session memory and semantic query text to avoid reintroducing the same quoted message later
 - Agent trace dumps include image counts and metadata, not base64 payloads
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 
@@ -179,6 +181,12 @@ Oswald keeps three distinct memory layers.
 - Stored only in memory until process exit
 - Keyed by a gateway-provided `SessionKey`
 - Stores only final user/assistant turn pairs
+- When `OLLAMA_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
+- When `OLLAMA_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
+- Semantic retrieval embeds the cleaned current user message, strips leading reply-context wrappers, and includes up to three retained turns with cosine similarity at or above `0.70`
+- No recent turn is included automatically when semantic retrieval is enabled
+- The model can call `session.recent` to inspect recent completed exchanges when the current prompt is a vague follow-up and semantic context is not already present
+- If query embedding fails while semantic retrieval is enabled, the agent degrades to no retained history instead of replaying all retained history
 - Tool messages and intermediate reasoning are intentionally not persisted
 
 Retention behavior:
@@ -190,9 +198,10 @@ Retention behavior:
 Prompt-budget behavior:
 
 - The agent estimates prompt size before calling Ollama
-- If retained history would exceed budget, the oldest turns are summarized into a synthetic replacement turn
-- That compacted turn is written back into session memory and gets a fresh timestamp
-- Compaction is destructive and still counts toward `MEMORY_MAX_TURNS`
+- If selected retained history would exceed budget, the oldest selected turns are summarized into a synthetic replacement turn
+- When semantic retrieval is disabled, that compacted turn is written back into session memory and gets a fresh timestamp
+- When semantic retrieval is enabled, request-time compaction affects only the selected context for that request and does not overwrite unrelated retained turns
+- Persisted compaction is destructive and still counts toward `MEMORY_MAX_TURNS`
 
 ## Context Budget Discovery
 
@@ -336,6 +345,14 @@ Current builtin tools:
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
+- `session.recent` — read recent completed exchanges from the current in-process session
+
+`session.recent` arguments:
+
+- `offset`: one-based recent exchange offset; `1` is the newest completed exchange
+- `count`: number of exchanges to return, clamped to `1` through `3`
+
+The tool is read-only and scoped to the current request's `session_id` from `toolctx.MetadataFromContext`.
 
 Optional external tools:
 
@@ -378,6 +395,7 @@ Notes:
 - Ollama is the only model backend
 - `/api/show` is used at startup for context-budget discovery
 - `/api/chat` is used for normal requests, tool calling, and streaming
+- `/api/embed` is used when `OLLAMA_EMBEDDING_MODEL` is set for semantic session-memory retrieval
 - The client maps between internal app types and Ollama's wire format
 - Streaming responses accumulate both `thinking` and visible content
 - Current-turn images are sent to Ollama on the user message `images` field when provided by a gateway
@@ -419,6 +437,7 @@ Each trace includes:
 - raw tool results injected back into the model
 - final response content and accumulated thinking
 - final model metrics
+- semantic-memory retrieval metadata, including embedding model, selected turn counts, per-candidate similarity, inclusion reason, and whether reply context was stripped
 - builtin tool definitions included in the request
 - MCP tool definitions grouped by server
 
@@ -429,10 +448,11 @@ Implementation: `internal/debug/agent_trace.go`
 ```bash
 go run ./cmd/agent/main.go
 go build -o ./tmp/main ./cmd/agent/main.go
+go test ./...
 gofmt -w .
 ```
 
-There are no tests yet.
+There are no dedicated test files yet, but `go test ./...` should still compile every package.
 
 ## Logging
 
@@ -604,6 +624,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                      | Enables the GitHub MCP client and read-only `github.*` tools            |
 | `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                                                     |
 | `OLLAMA_MODEL`             | empty                          | Model name passed directly to Ollama; required at startup               |
+| `OLLAMA_EMBEDDING_MODEL`   | empty                          | Optional Ollama embedding model for semantic session-memory retrieval   |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
 | `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
 | `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
@@ -622,6 +643,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/agent/summarize.go`           | History compaction summarizer     |
 | `internal/broker/broker.go`             | Request queue and worker pool     |
 | `internal/memory/store.go`              | Session memory retention          |
+| `internal/memory/retrieval.go`          | Semantic session-memory selection |
 | `internal/memory/compact.go`            | Retention pruning and token estimates |
 | `internal/memory/budget.go`             | Context budget discovery          |
 | `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
@@ -630,6 +652,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/ollama/client.go`             | Ollama HTTP client                |
 | `internal/tools/registry.go`            | Tool schema loading and execution |
 | `internal/tools/bootstrap.go`           | Builtin tool wiring               |
+| `internal/tools/sessionhistory/`        | `session.recent` runtime handler  |
 | `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
 | `internal/tools/soulmemory/store.go`    | Soul file store                   |
 | `internal/accountlink/store.go`         | Canonical account link store      |
@@ -676,7 +699,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only six builtin tools ship locally; extra tools require optional MCP integration
+- Only seven builtin tools ship locally; extra tools require optional MCP integration
 - GitHub is the only MCP server integration today
 - Ollama is the only LLM backend
 

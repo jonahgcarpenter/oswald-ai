@@ -42,6 +42,44 @@ type TraceMCPServer struct {
 	Tools  []TraceTool
 }
 
+// SemanticMemoryTrace records vector-memory behavior for one agent request.
+type SemanticMemoryTrace struct {
+	Enabled                 bool
+	EmbeddingModel          string
+	RecentTurnLimit         int
+	IncludeRecent           bool
+	MaxRelevantTurnLimit    int
+	MinSimilarity           float64
+	QueryAttempted          bool
+	QueryHadReplyContext    bool
+	QueryStatus             string
+	QueryDurationMS         int64
+	QueryEmbeddingDimension int
+	CandidateTurnCount      int
+	SelectedTurnCount       int
+	RecentTurnCount         int
+	SemanticTurnCount       int
+	QueryError              string
+	StoreAttempted          bool
+	StoreStatus             string
+	StoreDurationMS         int64
+	StoreEmbeddingDimension int
+	StoreError              string
+	Selections              []SemanticMemorySelectionTrace
+}
+
+// SemanticMemorySelectionTrace records why a retained turn was selected or skipped.
+type SemanticMemorySelectionTrace struct {
+	Index          int
+	CreatedAt      time.Time
+	UserChars      int
+	AssistantChars int
+	Similarity     float64
+	HasSimilarity  bool
+	Included       bool
+	Reason         string
+}
+
 // AgentTrace contains the final trace payload for a single agent request.
 type AgentTrace struct {
 	Dir                        string
@@ -56,6 +94,7 @@ type AgentTrace struct {
 	EstimatedAfter             int
 	RemovedPairs               int
 	RequestImages              []ollama.InputImage
+	SemanticMemory             SemanticMemoryTrace
 	ToolExecutions             []ToolExecutionTrace
 	FinalResponse              string
 	FinalThinking              string
@@ -98,6 +137,10 @@ func DumpAgentTrace(trace AgentTrace) error {
 	fmt.Fprintf(&sb, "| Tool failure budget exhausted | %t |\n", trace.ToolFailureBudgetExhausted)
 	fmt.Fprintf(&sb, "| Current request images | %d |\n", len(trace.RequestImages))
 	sb.WriteString("\n---\n\n")
+
+	if trace.SemanticMemory.Enabled {
+		writeSemanticMemoryTrace(&sb, trace.SemanticMemory)
+	}
 
 	fmt.Fprintf(&sb, "## Full Message Transcript (%d messages)\n\n", len(trace.Messages))
 	pendingToolCalls := make([]ollama.ToolCall, 0)
@@ -215,6 +258,62 @@ func DumpAgentTrace(trace AgentTrace) error {
 	}
 
 	return nil
+}
+
+func writeSemanticMemoryTrace(sb *strings.Builder, trace SemanticMemoryTrace) {
+	sb.WriteString("## Semantic Memory\n\n")
+	sb.WriteString("| Field | Value |\n")
+	sb.WriteString("|---|---|\n")
+	fmt.Fprintf(sb, "| Enabled | %t |\n", trace.Enabled)
+	fmt.Fprintf(sb, "| Embedding model | `%s` |\n", trace.EmbeddingModel)
+	fmt.Fprintf(sb, "| Recent turn limit | %d |\n", trace.RecentTurnLimit)
+	fmt.Fprintf(sb, "| Include recent automatically | %t |\n", trace.IncludeRecent)
+	fmt.Fprintf(sb, "| Max relevant turn limit | %d |\n", trace.MaxRelevantTurnLimit)
+	fmt.Fprintf(sb, "| Min similarity | %.2f |\n", trace.MinSimilarity)
+	fmt.Fprintf(sb, "| Query attempted | %t |\n", trace.QueryAttempted)
+	fmt.Fprintf(sb, "| Query stripped reply context | %t |\n", trace.QueryHadReplyContext)
+	fmt.Fprintf(sb, "| Query status | `%s` |\n", trace.QueryStatus)
+	fmt.Fprintf(sb, "| Query duration | %d ms |\n", trace.QueryDurationMS)
+	fmt.Fprintf(sb, "| Query embedding dimensions | %d |\n", trace.QueryEmbeddingDimension)
+	fmt.Fprintf(sb, "| Candidate turns | %d |\n", trace.CandidateTurnCount)
+	fmt.Fprintf(sb, "| Selected turns | %d |\n", trace.SelectedTurnCount)
+	fmt.Fprintf(sb, "| Recent turns selected | %d |\n", trace.RecentTurnCount)
+	fmt.Fprintf(sb, "| Semantic turns selected | %d |\n", trace.SemanticTurnCount)
+	if trace.QueryError != "" {
+		fmt.Fprintf(sb, "| Query error | `%s` |\n", trace.QueryError)
+	}
+	fmt.Fprintf(sb, "| Store attempted | %t |\n", trace.StoreAttempted)
+	fmt.Fprintf(sb, "| Store status | `%s` |\n", trace.StoreStatus)
+	fmt.Fprintf(sb, "| Store duration | %d ms |\n", trace.StoreDurationMS)
+	fmt.Fprintf(sb, "| Store embedding dimensions | %d |\n", trace.StoreEmbeddingDimension)
+	if trace.StoreError != "" {
+		fmt.Fprintf(sb, "| Store error | `%s` |\n", trace.StoreError)
+	}
+	if len(trace.Selections) > 0 {
+		sb.WriteString("\n### Candidate Selection\n\n")
+		sb.WriteString("| Turn | Created | User chars | Assistant chars | Similarity | Included | Reason |\n")
+		sb.WriteString("|---|---|---:|---:|---:|---|---|\n")
+		for _, selection := range trace.Selections {
+			similarity := "n/a"
+			if selection.HasSimilarity {
+				similarity = fmt.Sprintf("%.3f", selection.Similarity)
+			}
+			reason := selection.Reason
+			if reason == "" {
+				reason = "skipped"
+			}
+			fmt.Fprintf(sb, "| %d | %s | %d | %d | %s | %t | `%s` |\n",
+				selection.Index+1,
+				selection.CreatedAt.UTC().Format(time.RFC3339),
+				selection.UserChars,
+				selection.AssistantChars,
+				similarity,
+				selection.Included,
+				reason,
+			)
+		}
+	}
+	sb.WriteString("\n---\n\n")
 }
 
 // SanitizeFilePart returns at most maxLen runes of s with any character that

@@ -18,6 +18,7 @@ type Config struct {
 	GitHubMCPToken        string        // GitHub PAT used to authenticate to the GitHub MCP server
 	OllamaURL             string        // Ollama API base URL (default: "http://localhost:11434")
 	OllamaModel           string        // Ollama model name; required — startup fails if empty
+	OllamaEmbeddingModel  string        // Optional Ollama embedding model used for semantic session-memory retrieval
 	DiscordToken          string        // Discord bot token; Discord gateway disabled if empty
 	SearxngURL            string        // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxToolFailureRetries int           // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
@@ -50,6 +51,7 @@ func Load() *Config {
 		GitHubMCPToken:        getEnv("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
 		OllamaURL:             getEnv("OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:           getEnv("OLLAMA_MODEL", ""),
+		OllamaEmbeddingModel:  getEnv("OLLAMA_EMBEDDING_MODEL", ""),
 		DiscordToken:          getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:            getEnv("SEARXNG_URL", "http://localhost:8888"),
 		MaxToolFailureRetries: getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),

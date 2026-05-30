@@ -80,6 +80,70 @@ func (c *Client) Show(ctx context.Context, req ShowRequest) (*ShowResponse, erro
 	return &showResp, nil
 }
 
+// Embed sends text to Ollama's /api/embed endpoint and returns its vector representation.
+func (c *Client) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/embed", c.BaseURL)
+
+	ollamaReq := ollamaEmbedRequest{
+		Model: req.Model,
+		Input: req.Input,
+	}
+	payloadBytes, err := json.Marshal(ollamaReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal embed request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create embed request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("Ollama embed API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embed response body: %w", err)
+	}
+
+	meta := toolctx.MetadataFromContext(ctx)
+	requestLog := c.log.With(
+		config.F("request_id", meta.RequestID),
+		config.F("gateway", meta.Gateway),
+		config.F("user_id", meta.SenderID),
+		config.F("session_id", meta.SessionID),
+		config.F("model", req.Model),
+	)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		requestLog.Error("provider.ollama.embed.http_error", "ollama embed returned non-2xx",
+			config.F("operation", "embed"),
+			config.F("http_status", resp.StatusCode),
+		)
+		return nil, fmt.Errorf("Ollama embed returned HTTP %d", resp.StatusCode)
+	}
+
+	var ollamaResp ollamaEmbedResponse
+	if err := json.Unmarshal(rawBody, &ollamaResp); err != nil {
+		requestLog.Error("provider.ollama.embed.decode_error", "failed to decode ollama embed response",
+			config.F("operation", "embed"),
+			config.ErrorField(err),
+		)
+		return nil, fmt.Errorf("failed to decode embed response: %w", err)
+	}
+	if len(ollamaResp.Embeddings) == 0 {
+		return nil, fmt.Errorf("ollama embed response contained no embeddings")
+	}
+
+	return &EmbedResponse{
+		Model:      ollamaResp.Model,
+		Embeddings: ollamaResp.Embeddings,
+	}, nil
+}
+
 // mapToOllamaMessages converts ChatMessage values to Ollama's internal chat message type.
 func mapToOllamaMessages(msgs []ChatMessage) []ollamaMessage {
 	result := make([]ollamaMessage, len(msgs))
