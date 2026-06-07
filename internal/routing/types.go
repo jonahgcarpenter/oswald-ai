@@ -1,6 +1,6 @@
 package routing
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
 
 // Action describes how a gateway should handle a normalized inbound message.
 type Action string
@@ -28,7 +28,7 @@ type Input struct {
 	MentionsBot        bool
 	IsAccountCommand   bool
 	Text               string
-	CurrentImages      []ollama.InputImage
+	CurrentImages      []llm.InputImage
 	CurrentUnsupported []string
 	Reply              *ReplyContext
 }
@@ -38,7 +38,7 @@ type ReplyContext struct {
 	SenderName            string
 	Text                  string
 	IsFromBot             bool
-	Images                []ollama.InputImage
+	Images                []llm.InputImage
 	Unsupported           []string
 	IsUnavailable         bool
 	AttachmentUnavailable bool
@@ -48,7 +48,7 @@ type ReplyContext struct {
 type Decision struct {
 	Action       Action
 	Prompt       string
-	Images       []ollama.InputImage
+	Images       []llm.InputImage
 	ResponseText string
 	Reason       string
 }

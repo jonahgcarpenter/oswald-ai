@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 // Decide applies the shared gateway policy for deciding if and how a message reaches the LLM.
@@ -34,7 +34,7 @@ func Decide(input Input) Decision {
 }
 
 // BuildPrompt builds the exact current-turn text sent to the LLM.
-func BuildPrompt(text string, images []ollama.InputImage, unsupported []string, reply *ReplyContext) string {
+func BuildPrompt(text string, images []llm.InputImage, unsupported []string, reply *ReplyContext) string {
 	parts := make([]string, 0, 3)
 	if replyText := formatReplyContext(reply); replyText != "" {
 		parts = append(parts, replyText)
@@ -66,8 +66,8 @@ func UnsupportedFilesNote(labels []string) string {
 	return fmt.Sprintf("[User sent unsupported attachments: %s]", strings.Join(labels, ", "))
 }
 
-func combineImages(currentImages []ollama.InputImage, currentUnsupported []string, reply *ReplyContext) ([]ollama.InputImage, []string) {
-	images := append([]ollama.InputImage(nil), currentImages...)
+func combineImages(currentImages []llm.InputImage, currentUnsupported []string, reply *ReplyContext) ([]llm.InputImage, []string) {
+	images := append([]llm.InputImage(nil), currentImages...)
 	unsupported := compactLabels(currentUnsupported)
 	if reply == nil {
 		return images, unsupported

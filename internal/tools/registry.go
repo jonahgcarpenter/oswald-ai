@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 // Handler is the execution function for a single tool.
@@ -35,7 +35,7 @@ const (
 )
 
 // Spec holds the fully parsed definition from a single tool markdown file.
-// Name and Description are sent to the model via the ollama.Tool schema.
+// Name and Description are sent to the model via the LLM tool schema.
 type Spec struct {
 	Name        string
 	Description string
@@ -167,16 +167,16 @@ func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
 	return r.RegisterHandler(spec.Name, handler)
 }
 
-// OllamaTools converts all loaded Specs into the []ollama.Tool slice
+// LLMTools converts all loaded Specs into the []llm.Tool slice
 // passed to ChatRequest.Tools. All loaded specs are included regardless of
 // whether a handler has been registered.
-func (r *Registry) OllamaTools() []ollama.Tool {
-	tools := make([]ollama.Tool, 0, len(r.specs))
+func (r *Registry) LLMTools() []llm.Tool {
+	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
-		props := make(map[string]ollama.ToolParameterProperty, len(spec.Parameters))
+		props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
 		required := []string{}
 		for _, p := range spec.Parameters {
-			props[p.Name] = ollama.ToolParameterProperty{
+			props[p.Name] = llm.ToolParameterProperty{
 				Type:        p.Type,
 				Description: p.Description,
 				Enum:        p.Enum,
@@ -185,12 +185,12 @@ func (r *Registry) OllamaTools() []ollama.Tool {
 				required = append(required, p.Name)
 			}
 		}
-		tools = append(tools, ollama.Tool{
+		tools = append(tools, llm.Tool{
 			Type: "function",
-			Function: ollama.ToolDefinition{
+			Function: llm.ToolDefinition{
 				Name:        spec.Name,
-				Description: ollamaToolDescription(spec),
-				Parameters: ollama.ToolParameters{
+				Description: toolDescription(spec),
+				Parameters: llm.ToolParameters{
 					Type:       "object",
 					Properties: props,
 					Required:   required,
@@ -301,7 +301,7 @@ func specSortKey(spec Spec) int {
 	}
 }
 
-func ollamaToolDescription(spec Spec) string {
+func toolDescription(spec Spec) string {
 	description := strings.TrimSpace(spec.Description)
 	if spec.Source != ToolSourceMCP {
 		return description

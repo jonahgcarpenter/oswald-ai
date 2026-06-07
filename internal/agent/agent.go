@@ -7,9 +7,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/debug"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
@@ -199,12 +198,12 @@ func soulToolAction(toolName string) string {
 
 // ModelMetrics holds performance data from a single LLM call.
 type ModelMetrics struct {
-	Model              string  `json:"model"`
-	TotalDuration      int64   `json:"total_duration_ms"`
-	LoadDuration       int64   `json:"load_duration_ms"`
-	PromptEvalDuration int64   `json:"prompt_eval_duration_ms"`
-	EvalDuration       int64   `json:"eval_duration_ms"`
-	TokensPerSecond    float64 `json:"tokens_per_second"`
+	Model            string  `json:"model"`
+	PromptTokens     int     `json:"prompt_tokens,omitempty"`
+	CompletionTokens int     `json:"completion_tokens,omitempty"`
+	TotalTokens      int     `json:"total_tokens,omitempty"`
+	DurationMS       int64   `json:"duration_ms,omitempty"`
+	TokensPerSecond  float64 `json:"tokens_per_second"`
 }
 
 // AgentResponse is the final payload returned to the gateway after processing.
@@ -219,8 +218,8 @@ type AgentResponse struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient            ollama.Chatter
-	embeddingClient       ollama.Embedder
+	chatClient            llm.Chatter
+	embeddingClient       llm.Embedder
 	registry              *tools.Registry
 	memory                *memory.Store
 	budget                memory.ContextBudget
@@ -228,17 +227,16 @@ type Agent struct {
 	embeddingModel        string
 	soul                  *soulmemory.Store
 	userMemory            *usermemory.Store
-	summarizer            *OllamaSummarizer
-	agentTracePath        string // directory for per-request agent trace dumps; empty disables
+	summarizer            *Summarizer
 	maxToolFailureRetries int
 	log                   *config.Logger
 }
 
-// NewAgent initializes the Agent with an Ollama chat client, tool registry, model name,
+// NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
 // soul store, conversation memory store, tool failure retry budget, and logger.
 func NewAgent(
-	chatClient ollama.Chatter,
-	embeddingClient ollama.Embedder,
+	chatClient llm.Chatter,
+	embeddingClient llm.Embedder,
 	registry *tools.Registry,
 	model string,
 	embeddingModel string,
@@ -247,7 +245,6 @@ func NewAgent(
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
 	memoryStore *memory.Store,
-	agentTracePath string,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
@@ -260,8 +257,7 @@ func NewAgent(
 		embeddingModel:        strings.TrimSpace(embeddingModel),
 		soul:                  soul,
 		userMemory:            userMemory,
-		summarizer:            NewOllamaSummarizer(chatClient, model, log),
-		agentTracePath:        agentTracePath,
+		summarizer:            NewSummarizer(chatClient, model, log),
 		maxToolFailureRetries: maxToolFailureRetries,
 		log:                   log,
 	}
@@ -276,7 +272,7 @@ func (a *Agent) embedText(ctx context.Context, text string) ([]float64, error) {
 	if text == "" {
 		return nil, fmt.Errorf("cannot embed empty text")
 	}
-	resp, err := a.embeddingClient.Embed(ctx, ollama.EmbedRequest{
+	resp, err := a.embeddingClient.Embed(ctx, llm.EmbedRequest{
 		Model: a.embeddingModel,
 		Input: text,
 	})
@@ -316,26 +312,6 @@ func sessionMemoryUserContent(prompt string, imageCount int) string {
 	return strings.TrimSpace(content)
 }
 
-func semanticSelectionTraces(details []memory.RetrievalDetail) []debug.SemanticMemorySelectionTrace {
-	if len(details) == 0 {
-		return nil
-	}
-	traces := make([]debug.SemanticMemorySelectionTrace, 0, len(details))
-	for _, detail := range details {
-		traces = append(traces, debug.SemanticMemorySelectionTrace{
-			Index:          detail.Index,
-			CreatedAt:      detail.CreatedAt,
-			UserChars:      detail.UserChars,
-			AssistantChars: detail.AssistantChars,
-			Similarity:     detail.Similarity,
-			HasSimilarity:  detail.HasSimilarity,
-			Included:       detail.Included,
-			Reason:         detail.Reason,
-		})
-	}
-	return traces
-}
-
 // truncate returns s shortened to at most max runes, appending "..." if cut.
 func truncate(s string, max int) string {
 	r := []rune(s)
@@ -345,72 +321,50 @@ func truncate(s string, max int) string {
 	return string(r[:max]) + "..."
 }
 
-// mapMetrics converts an *ollama.ChatResponse into a *ModelMetrics summary for reporting.
-// Returns nil if the response is missing or has no evaluation duration (partial failure).
-// Converts nanosecond timings to milliseconds and calculates tokens/second throughput.
-func mapMetrics(resp *ollama.ChatResponse) *ModelMetrics {
-	if resp == nil || resp.EvalDuration <= 0 {
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// mapMetrics converts an LLM response into a model metrics summary.
+func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
+	if resp == nil {
 		return nil
 	}
-	tps := float64(resp.EvalCount) / (float64(resp.EvalDuration) / 1e9)
+	tps := 0.0
+	if resp.DurationMS > 0 && resp.CompletionTokens > 0 {
+		tps = float64(resp.CompletionTokens) / (float64(resp.DurationMS) / 1000)
+	}
 	return &ModelMetrics{
-		Model:              resp.Model,
-		TotalDuration:      resp.TotalDuration / 1e6,
-		LoadDuration:       resp.LoadDuration / 1e6,
-		PromptEvalDuration: resp.PromptEvalDuration / 1e6,
-		EvalDuration:       resp.EvalDuration / 1e6,
-		TokensPerSecond:    tps,
+		Model:            resp.Model,
+		PromptTokens:     resp.PromptTokens,
+		CompletionTokens: resp.CompletionTokens,
+		TotalTokens:      resp.TotalTokens,
+		DurationMS:       resp.DurationMS,
+		TokensPerSecond:  tps,
 	}
 }
 
 func makeCompactedTurn(summary string, now time.Time) memory.Turn {
 	return memory.Turn{
 		CreatedAt: now.UTC(),
-		User: ollama.ChatMessage{
+		User: llm.ChatMessage{
 			Role:    "user",
 			Content: compactedHistoryUserPrompt,
 		},
-		Assistant: ollama.ChatMessage{
+		Assistant: llm.ChatMessage{
 			Role:    "assistant",
 			Content: summary,
 		},
 	}
 }
 
-func traceToolsFromCatalog(entries []tools.CatalogEntry) []debug.TraceTool {
-	out := make([]debug.TraceTool, 0, len(entries))
-	for _, entry := range entries {
-		params := make([]debug.TraceToolParameter, 0, len(entry.Parameters))
-		for _, param := range entry.Parameters {
-			params = append(params, debug.TraceToolParameter{
-				Name:        param.Name,
-				Type:        param.Type,
-				Required:    param.Required,
-				Description: param.Description,
-			})
-		}
-		out = append(out, debug.TraceTool{
-			Name:        entry.Name,
-			Description: entry.Description,
-			Parameters:  params,
-		})
-	}
-	return out
-}
-
-func traceMCPServersFromCatalog(groups []tools.CatalogServerGroup) []debug.TraceMCPServer {
-	out := make([]debug.TraceMCPServer, 0, len(groups))
-	for _, group := range groups {
-		out = append(out, debug.TraceMCPServer{
-			Server: group.Server,
-			Tools:  traceToolsFromCatalog(group.Tools),
-		})
-	}
-	return out
-}
-
-func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []ollama.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
-	tools := a.registry.OllamaTools()
+func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []llm.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
+	tools := a.registry.LLMTools()
 	currentTurns := append([]memory.Turn(nil), turns...)
 	persisted := false
 	result := memory.PromptPruneResult{
@@ -485,7 +439,7 @@ func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, syste
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(requestID string, gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []ollama.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+func (a *Agent) Process(requestID string, gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []llm.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
 	reqLog.Debug("agent.request.start", "agent request started",
@@ -522,9 +476,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 	promptParts = append(promptParts, soulContent)
 
-	if speakerLine := a.currentSpeakerLine(reqLog, senderID); speakerLine != "" {
+	speakerLine := a.currentSpeakerLine(reqLog, senderID)
+	if speakerLine != "" {
 		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
 	}
+	requestUser := firstNonEmpty(speakerLine, displayName, senderID)
 	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
@@ -534,44 +490,26 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	// When embeddings are configured, only strongly relevant turns are included;
 	// vague follow-ups can use session.recent instead of automatic history replay.
 	semanticSelection := false
-	semanticTrace := debug.SemanticMemoryTrace{
-		Enabled:              a.semanticMemoryEnabled(),
-		EmbeddingModel:       a.embeddingModel,
-		RecentTurnLimit:      semanticRecentTurns,
-		MaxRelevantTurnLimit: semanticMaxRelevantTurns,
-		MinSimilarity:        semanticMinSimilarity,
-	}
 	var turns []memory.Turn
 	if a.semanticMemoryEnabled() {
 		semanticSelection = true
 		includeRecent := false
-		semanticTrace.IncludeRecent = includeRecent
 		retrievalOpts := memory.RetrievalOptions{
 			RecentTurns:      semanticRecentTurns,
 			MaxRelevantTurns: semanticMaxRelevantTurns,
 			MinSimilarity:    semanticMinSimilarity,
 			IncludeRecent:    includeRecent,
 		}
-		semanticQueryText, hadReplyContext := stripReplyContext(userPrompt)
+		semanticQueryText, _ := stripReplyContext(userPrompt)
 		if semanticQueryText == "" {
 			semanticQueryText = userPrompt
 		}
-		semanticTrace.QueryHadReplyContext = hadReplyContext
 		embedStartedAt := time.Now()
 		queryEmbedding, err := a.embedText(ctx, semanticQueryText)
 		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
-		semanticTrace.QueryAttempted = true
-		semanticTrace.QueryDurationMS = embedDurationMS
 		if err != nil {
 			retrieval := a.memory.RelevantTurns(sessionKey, nil, retrievalOpts)
 			turns = retrieval.Turns
-			semanticTrace.QueryStatus = "degraded"
-			semanticTrace.QueryError = err.Error()
-			semanticTrace.CandidateTurnCount = retrieval.CandidateTurnCount
-			semanticTrace.SelectedTurnCount = len(retrieval.Turns)
-			semanticTrace.RecentTurnCount = retrieval.RecentTurnCount
-			semanticTrace.SemanticTurnCount = retrieval.SemanticTurnCount
-			semanticTrace.Selections = semanticSelectionTraces(retrieval.Details)
 			reqLog.Warn("agent.memory.embedding.query_failed", "failed to embed query for semantic memory retrieval",
 				config.F("embedding_model", a.embeddingModel),
 				config.F("duration_ms", embedDurationMS),
@@ -585,13 +523,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		} else {
 			retrieval := a.memory.RelevantTurns(sessionKey, queryEmbedding, retrievalOpts)
 			turns = retrieval.Turns
-			semanticTrace.QueryStatus = "ok"
-			semanticTrace.QueryEmbeddingDimension = len(queryEmbedding)
-			semanticTrace.CandidateTurnCount = retrieval.CandidateTurnCount
-			semanticTrace.SelectedTurnCount = len(retrieval.Turns)
-			semanticTrace.RecentTurnCount = retrieval.RecentTurnCount
-			semanticTrace.SemanticTurnCount = retrieval.SemanticTurnCount
-			semanticTrace.Selections = semanticSelectionTraces(retrieval.Details)
 			reqLog.Info("agent.memory.vector.retrieved", "selected semantic session memory",
 				config.F("embedding_model", a.embeddingModel),
 				config.F("embedding_dimension_count", len(queryEmbedding)),
@@ -624,13 +555,17 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	messageImages := make([]string, 0, len(userImages))
 	for _, image := range userImages {
-		messageImages = append(messageImages, image.Data)
+		mimeType := strings.TrimSpace(image.MimeType)
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		messageImages = append(messageImages, fmt.Sprintf("data:%s;base64,%s", mimeType, image.Data))
 	}
 
-	messages := make([]ollama.ChatMessage, 0, 2+len(trimmedHistory))
-	messages = append(messages, ollama.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
+	messages := make([]llm.ChatMessage, 0, 2+len(trimmedHistory))
+	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
 	messages = append(messages, trimmedHistory...)
-	messages = append(messages, ollama.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
+	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
 
 	if len(trimmedHistory) > 0 {
 		reqLog.Debug("agent.memory.loaded", "loaded retained memory",
@@ -653,9 +588,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		)
 	}
 
-	req := ollama.ChatRequest{
+	req := llm.ChatRequest{
 		Model:  a.model,
-		Tools:  a.registry.OllamaTools(),
+		User:   requestUser,
+		Tools:  a.registry.LLMTools(),
 		Stream: streamCallback != nil,
 	}
 
@@ -664,7 +600,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	// appear in the final response turn (when no tool calls are made).
 	var accumulatedThinking strings.Builder
 	var accumulatedContent strings.Builder
-	toolExecutions := make([]debug.ToolExecutionTrace, 0)
+	toolExecutionCount := 0
 
 	// consecutiveToolFailures tracks back-to-back tool execution failures for
 	// this request. A successful tool call resets the counter.
@@ -678,9 +614,9 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
 	// deciding to call a tool. The stream pauses naturally while tools execute.
-	var chatCallback func(ollama.ChatMessage)
+	var chatCallback func(llm.ChatMessage)
 	if streamCallback != nil {
-		chatCallback = func(chunk ollama.ChatMessage) {
+		chatCallback = func(chunk llm.ChatMessage) {
 			if chunk.Thinking != "" {
 				accumulatedThinking.WriteString(chunk.Thinking)
 				streamCallback(StreamChunk{Type: ChunkThinking, Text: chunk.Thinking})
@@ -692,7 +628,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
-	var lastResp *ollama.ChatResponse
+	var lastResp *llm.ChatResponse
 	toolFailureBudgetExhausted := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
@@ -721,10 +657,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 
 		lastResp = resp
-		if iteration == 1 && resp.PromptEvalCount > 0 {
+		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
 				config.F("estimated_after", prune.EstimatedAfter),
-				config.F("actual_prompt_tokens", resp.PromptEvalCount),
+				config.F("actual_prompt_tokens", resp.PromptTokens),
 			)
 		}
 
@@ -750,12 +686,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		// multiple to be safe.
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
-			toolStartedAt := time.Now()
-			traceEntry := debug.ToolExecutionTrace{
-				Iteration: iteration,
-				Name:      toolName,
-				Arguments: tc.Function.Arguments,
+			toolCallID := tc.ID
+			if toolCallID == "" {
+				toolCallID = fmt.Sprintf("call_%d_%d", iteration, toolExecutionCount+1)
 			}
+			toolStartedAt := time.Now()
 
 			// Emit a structured tool-call chunk so UIs can render the invocation.
 			if streamCallback != nil {
@@ -782,7 +717,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 					config.ErrorField(execErr),
 				)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
-				traceEntry.Error = execErr.Error()
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result
@@ -795,8 +729,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
-			traceEntry.Result = toolContent
-			toolExecutions = append(toolExecutions, traceEntry)
+			toolExecutionCount++
 			if streamCallback != nil {
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
@@ -804,10 +737,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				})
 			}
 
-			messages = append(messages, ollama.ChatMessage{
-				Role:     "tool",
-				ToolName: toolName,
-				Content:  toolContent,
+			messages = append(messages, llm.ChatMessage{
+				Role:       "tool",
+				ToolName:   toolName,
+				ToolCallID: toolCallID,
+				Content:    toolContent,
 			})
 
 			if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
@@ -840,13 +774,13 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 		lastResp = resp
 		reqLog.Debug("agent.loop.complete", "completed agent loop after disabling tools",
-			config.F("iteration_count", len(toolExecutions)+1),
+			config.F("iteration_count", toolExecutionCount+1),
 			config.F("failure_streak", consecutiveToolFailures),
 			config.F("status", "degraded"),
 		)
 	}
 
-	// Extract the final response content. The Ollama client already handles
+	// Extract the final response content. The LLM client already handles
 	// thinking-to-content promotion for non-streaming calls.
 	// For streaming, we tracked content separately via the callback above.
 	finalContent := accumulatedContent.String()
@@ -868,11 +802,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		embedStartedAt := time.Now()
 		embedding, err := a.embedText(ctx, memoryEmbeddingText(userMemoryContent, finalContent))
 		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
-		semanticTrace.StoreAttempted = true
-		semanticTrace.StoreDurationMS = embedDurationMS
 		if err != nil {
-			semanticTrace.StoreStatus = "degraded"
-			semanticTrace.StoreError = err.Error()
 			reqLog.Warn("agent.memory.embedding.turn_failed", "failed to embed completed turn for semantic memory retrieval",
 				config.F("embedding_model", a.embeddingModel),
 				config.F("duration_ms", embedDurationMS),
@@ -881,8 +811,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			)
 		} else {
 			turnEmbedding = embedding
-			semanticTrace.StoreStatus = "ok"
-			semanticTrace.StoreEmbeddingDimension = len(turnEmbedding)
 			reqLog.Info("agent.memory.vector.stored", "stored semantic session-memory embedding",
 				config.F("embedding_model", a.embeddingModel),
 				config.F("embedding_dimension_count", len(turnEmbedding)),
@@ -892,50 +820,23 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
-	if a.agentTracePath != "" {
-		if dumpErr := debug.DumpAgentTrace(debug.AgentTrace{
-			Dir:                        a.agentTracePath,
-			SessionKey:                 sessionKey,
-			Model:                      a.model,
-			Messages:                   messages,
-			BuiltinTools:               traceToolsFromCatalog(a.registry.BuiltinCatalog()),
-			MCPServers:                 traceMCPServersFromCatalog(a.registry.MCPCatalogByServer()),
-			ContextWindow:              a.budget.ContextWindow,
-			PromptBudget:               a.budget.PromptBudget(),
-			EstimatedBefore:            prune.EstimatedBefore,
-			EstimatedAfter:             prune.EstimatedAfter,
-			RemovedPairs:               prune.RemovedPairs,
-			RequestImages:              userImages,
-			SemanticMemory:             semanticTrace,
-			ToolExecutions:             toolExecutions,
-			FinalResponse:              finalContent,
-			FinalThinking:              finalThinking,
-			FinalModelResponse:         lastResp,
-			ToolFailureBudgetExhausted: toolFailureBudgetExhausted,
-		}); dumpErr != nil {
-			reqLog.Warn("agent.trace.write_failed", "failed to write agent trace", config.ErrorField(dumpErr))
-		} else {
-			reqLog.Debug("agent.trace.written", "wrote agent trace", config.F("path", a.agentTracePath))
-		}
-	}
-
 	// Persist the user prompt and the assistant's final response to memory.
 	// Tool-call intermediaries are intentionally excluded to keep history lean —
 	// only the conversational exchange (not the internal reasoning steps) is retained.
 	if finalContent != "" {
 		a.memory.AppendTurn(
 			sessionKey,
-			ollama.ChatMessage{Role: "user", Content: userMemoryContent},
-			ollama.ChatMessage{Role: "assistant", Content: finalContent},
+			llm.ChatMessage{Role: "user", Content: userMemoryContent},
+			llm.ChatMessage{Role: "assistant", Content: finalContent},
 			turnEmbedding,
 		)
 	}
 
 	reqLog.Debug("agent.response.complete", "completed agent response",
-		config.F("iteration_count", len(toolExecutions)+1),
+		config.F("iteration_count", toolExecutionCount+1),
 		config.F("response_chars", len(finalContent)),
 		config.F("thinking_chars", len(finalThinking)),
-		config.F("tool_call_count", len(toolExecutions)),
+		config.F("tool_call_count", toolExecutionCount),
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("tool_failure_budget_exhausted", toolFailureBudgetExhausted),
 		config.F("status", "ok"),

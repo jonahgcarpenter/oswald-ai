@@ -16,8 +16,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
 
@@ -649,7 +649,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}
 }
 
-func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []ollama.InputImage, requestID string) *routing.ReplyContext {
+func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID string) *routing.ReplyContext {
 	log := dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
 	referenced := msg.ReferencedMessage
 	if referenced == nil {
@@ -809,11 +809,11 @@ func isAccountCommand(input string) bool {
 	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
 }
 
-func (dg *Gateway) loadImages(attachments []Attachment) ([]ollama.InputImage, []string) {
+func (dg *Gateway) loadImages(attachments []Attachment) ([]llm.InputImage, []string) {
 	return dg.loadImagesLimit(attachments, media.MaxImagesPerRequest)
 }
 
-func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]ollama.InputImage, []string) {
+func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]llm.InputImage, []string) {
 	if len(attachments) == 0 {
 		return nil, nil
 	}
@@ -821,7 +821,7 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]o
 		return nil, discordAttachmentLabels(attachments)
 	}
 
-	images := make([]ollama.InputImage, 0, len(attachments))
+	images := make([]llm.InputImage, 0, len(attachments))
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
@@ -865,7 +865,7 @@ func discordAttachmentLabels(attachments []Attachment) []string {
 	return labels
 }
 
-func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]ollama.InputImage, []string) {
+func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.InputImage, []string) {
 	if len(embeds) == 0 {
 		return nil, nil
 	}
@@ -873,7 +873,7 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]ollama
 		return nil, discordEmbedLabels(embeds)
 	}
 
-	images := make([]ollama.InputImage, 0, len(embeds))
+	images := make([]llm.InputImage, 0, len(embeds))
 	unsupported := make([]string, 0)
 	for _, embed := range embeds {
 		label := discordEmbedLabel(embed)
@@ -968,35 +968,35 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 	return urls
 }
 
-func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (ollama.InputImage, error) {
+func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (llm.InputImage, error) {
 	if strings.TrimSpace(rawURL) == "" {
-		return ollama.InputImage{}, nil
+		return llm.InputImage{}, nil
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Get(rawURL)
 	if err != nil {
-		return ollama.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("filename", filename), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
-		return ollama.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
+		return llm.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
 	if err != nil {
-		return ollama.InputImage{}, fmt.Errorf("read attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("read attachment %q: %w", filename, err)
 	}
 	if len(body) > media.MaxImageBytes {
-		return ollama.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
+		return llm.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
 	}
 
 	result, err := media.NormalizeInputImageFromBytes(resp.Header, declaredMIME, body, filename)
 	if err != nil {
-		return ollama.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
 	}
 	dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("width", result.Width), config.F("height", result.Height), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil

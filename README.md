@@ -9,9 +9,9 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 ## Features
 
-- Iterative tool-calling agent loop on top of Ollama
+- Iterative tool-calling agent loop on top of Bifrost's OpenAI-compatible API
 - iMessage, Discord, and WebSocket gateway
-- Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, `soul.patch`, and `session.recent` tools
 - MCP integration starting with Github
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
@@ -28,6 +28,21 @@ Oswald uses three memory layers:
 `AGENTS.md` documents the full runtime and architecture in detail.
 
 ## Usage
+
+Configure Bifrost before startup:
+
+```bash
+export BIFROST_URL=http://localhost:8080
+export BIFROST_MODEL=<bifrost-route-or-model>
+```
+
+Optional semantic session-memory retrieval uses Bifrost embeddings:
+
+```bash
+export BIFROST_EMBEDDING_MODEL=<embedding-route-or-model>
+```
+
+If Bifrost routes to an Ollama provider and does not report token limits, Oswald can still query the backing Ollama `/api/show` endpoint for context metadata via `OLLAMA_PROVIDER_URL`.
 
 ### Discord/iMessage Bot
 
@@ -72,7 +87,7 @@ What is Bitcoins current price?
 
 # Receive streaming chunks, then final JSON:
 # "Bitcoin is currently..."
-# {"model":"llama2-uncensored:7b","response":"..."}
+# {"model":"<bifrost-route-or-model>","response":"..."}
 ```
 
 ## Roadmap

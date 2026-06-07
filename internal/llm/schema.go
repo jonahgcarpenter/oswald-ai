@@ -1,4 +1,4 @@
-package ollama
+package llm
 
 import "context"
 
@@ -10,25 +10,27 @@ type ToolFunction struct {
 
 // ToolCall represents a single tool call emitted by the model.
 type ToolCall struct {
+	ID       string       `json:"id,omitempty"`
 	Function ToolFunction `json:"function"`
 }
 
 // InputImage is a validated image payload attached to a user request.
-// Data must contain the base64-encoded image bytes expected by Ollama.
+// Data must contain base64-encoded normalized image bytes.
 type InputImage struct {
 	MimeType string `json:"mime_type,omitempty"`
 	Data     string `json:"data"`
 	Source   string `json:"source,omitempty"`
 }
 
-// ChatMessage is a single turn in a conversation (system, user, assistant, or tool).
+// ChatMessage is a single turn in a conversation.
 type ChatMessage struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	Images    []string   `json:"images,omitempty"`
-	Thinking  string     `json:"thinking,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolName  string     `json:"tool_name,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	Images     []string   `json:"images,omitempty"`
+	Thinking   string     `json:"thinking,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolName   string     `json:"tool_name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolParameterProperty describes a single property within a tool's parameter schema.
@@ -58,9 +60,10 @@ type Tool struct {
 	Function ToolDefinition `json:"function"`
 }
 
-// ChatRequest is the payload for a chat-style Ollama request.
+// ChatRequest is the provider-neutral payload for a chat-style LLM request.
 type ChatRequest struct {
 	Model    string        `json:"model"`
+	User     string        `json:"user,omitempty"`
 	Messages []ChatMessage `json:"messages"`
 	Tools    []Tool        `json:"tools,omitempty"`
 	Format   string        `json:"format,omitempty"`
@@ -69,48 +72,33 @@ type ChatRequest struct {
 
 // ChatResponse is the standardized reply from a chat LLM call.
 type ChatResponse struct {
-	Model              string
-	Message            ChatMessage
-	PromptEvalCount    int
-	DoneReason         string
-	TotalDuration      int64
-	LoadDuration       int64
-	PromptEvalDuration int64
-	EvalDuration       int64
-	EvalCount          int
+	Model            string
+	Message          ChatMessage
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	DurationMS       int64
+	DoneReason       string
 }
 
-// EmbedRequest is the payload for Ollama's embedding endpoint.
+// EmbedRequest is the provider-neutral payload for an embedding request.
 type EmbedRequest struct {
 	Model string `json:"model"`
 	Input string `json:"input"`
 }
 
-// EmbedResponse contains vectors returned by Ollama's embedding endpoint.
+// EmbedResponse contains vectors returned by an embedding endpoint.
 type EmbedResponse struct {
 	Model      string
 	Embeddings [][]float64
 }
 
-// ShowRequest requests model metadata from Ollama's /api/show endpoint.
-type ShowRequest struct {
-	Model   string `json:"model"`
-	Verbose bool   `json:"verbose,omitempty"`
-}
-
-// ShowResponse contains model metadata returned by Ollama's /api/show endpoint.
-type ShowResponse struct {
-	Parameters   string                 `json:"parameters,omitempty"`
-	Capabilities []string               `json:"capabilities,omitempty"`
-	ModelInfo    map[string]interface{} `json:"model_info,omitempty"`
-}
-
-// Chatter describes the single Ollama capability the agent depends on.
+// Chatter describes the chat capability the agent depends on.
 type Chatter interface {
 	Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error)
 }
 
-// Embedder describes the Ollama embedding capability used for semantic memory retrieval.
+// Embedder describes the embedding capability used for semantic memory retrieval.
 type Embedder interface {
 	Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error)
 }

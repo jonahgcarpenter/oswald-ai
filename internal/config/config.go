@@ -16,9 +16,11 @@ type Config struct {
 	BlueBubblesURL        string        // BlueBubbles server base URL; iMessage gateway disabled if empty
 	BlueBubblesPassword   string        // BlueBubbles server password/token for REST API auth
 	GitHubMCPToken        string        // GitHub PAT used to authenticate to the GitHub MCP server
-	OllamaURL             string        // Ollama API base URL (default: "http://localhost:11434")
-	OllamaModel           string        // Ollama model name; required — startup fails if empty
-	OllamaEmbeddingModel  string        // Optional Ollama embedding model used for semantic session-memory retrieval
+	BifrostURL            string        // Bifrost API base URL (default: "http://localhost:8080")
+	BifrostModel          string        // Bifrost model name; required — startup fails if empty
+	BifrostEmbeddingModel string        // Optional Bifrost embedding model used for semantic session-memory retrieval
+	BifrostAPIKey         string        // Optional bearer token for Bifrost requests
+	OllamaProviderURL     string        // Ollama provider URL used only for model metadata fallback
 	DiscordToken          string        // Discord bot token; Discord gateway disabled if empty
 	SearxngURL            string        // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxToolFailureRetries int           // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
@@ -26,7 +28,6 @@ type Config struct {
 	LogLevel              Level         // Logging verbosity (default: LevelInfo)
 	MemoryMaxTurns        int           // Maximum retained conversation turn pairs per session; 0 disables the limit
 	MemoryMaxAge          time.Duration // Maximum age for retained conversation turn pairs; 0 disables expiry
-	AgentTracePath        string        // Optional directory path; when set, each request's full agent trace is written to a Markdown file for inspection
 }
 
 const (
@@ -49,9 +50,11 @@ func Load() *Config {
 		BlueBubblesURL:        getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:   getEnv("BLUEBUBBLES_PASSWORD", ""),
 		GitHubMCPToken:        getEnv("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
-		OllamaURL:             getEnv("OLLAMA_URL", "http://localhost:11434"),
-		OllamaModel:           getEnv("OLLAMA_MODEL", ""),
-		OllamaEmbeddingModel:  getEnv("OLLAMA_EMBEDDING_MODEL", ""),
+		BifrostURL:            getEnv("BIFROST_URL", "http://localhost:8080"),
+		BifrostModel:          getEnv("BIFROST_MODEL", ""),
+		BifrostEmbeddingModel: getEnv("BIFROST_EMBEDDING_MODEL", ""),
+		BifrostAPIKey:         getEnv("BIFROST_API_KEY", ""),
+		OllamaProviderURL:     getEnv("OLLAMA_PROVIDER_URL", "http://localhost:11434"),
 		DiscordToken:          getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:            getEnv("SEARXNG_URL", "http://localhost:8888"),
 		MaxToolFailureRetries: getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
@@ -59,7 +62,6 @@ func Load() *Config {
 		LogLevel:              ParseLevel(getEnv("LOG_LEVEL", "info")),
 		MemoryMaxTurns:        getEnvInt("MEMORY_MAX_TURNS", 10),
 		MemoryMaxAge:          getEnvDuration("MEMORY_MAX_AGE", 30*time.Minute),
-		AgentTracePath:        getEnv("AGENT_TRACE_PATH", ""),
 	}
 }
 
