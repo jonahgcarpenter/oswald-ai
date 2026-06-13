@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const fallbackErrorText = "An error occurred, but the details could not be shown safely."
+const fallbackErrorText = "An error occurred, but I can't tell you that shit."
 
 var (
 	ipv4RE        = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?::\d{1,5})?\b`)
