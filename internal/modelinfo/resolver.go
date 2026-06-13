@@ -13,7 +13,7 @@ const (
 	defaultOutputTokens  = 1024
 )
 
-// Details describes model metadata discovered from Bifrost or a backing provider.
+// Details describes model metadata discovered from the LLM gateway or a backing provider.
 type Details struct {
 	Name            string
 	Provider        string
@@ -24,40 +24,40 @@ type Details struct {
 	Confidence      string
 }
 
-// Resolve discovers model metadata through Bifrost, then provider-specific fallbacks.
+// Resolve discovers model metadata through the LLM gateway, then provider-specific fallbacks.
 func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Details, error) {
 	fallback := Details{
-		Name:            cfg.BifrostModel,
+		Name:            cfg.LLMGatewayModel,
 		MaxOutputTokens: defaultOutputTokens,
 		ContextWindow:   defaultContextWindow,
 		Source:          "fallback",
 		Confidence:      "low",
 	}
 
-	bifrost, err := ResolveFromBifrost(ctx, cfg.BifrostURL, cfg.BifrostAPIKey, cfg.BifrostModel, log)
+	gateway, err := ResolveFromGateway(ctx, cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayModel, log)
 	if err != nil {
-		log.Server("modelinfo").Warn("modelinfo.bifrost.resolve_failed", "failed to resolve model details from bifrost", config.F("model", cfg.BifrostModel), config.F("status", "degraded"), config.ErrorField(err))
-		return fallback, fmt.Errorf("modelinfo: bifrost details unavailable: %w", err)
+		log.Server("modelinfo").Warn("modelinfo.gateway.resolve_failed", "failed to resolve model details from LLM gateway", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
+		return fallback, fmt.Errorf("modelinfo: LLM gateway details unavailable: %w", err)
 	}
 
-	if hasUsableLimits(bifrost) {
-		return normalizeDetails(bifrost), nil
+	if hasUsableLimits(gateway) {
+		return normalizeDetails(gateway), nil
 	}
 
-	if strings.EqualFold(strings.TrimSpace(bifrost.Provider), "ollama") {
-		ollama, ollamaErr := ResolveFromOllama(ctx, cfg.OllamaProviderURL, bifrost.Name, log)
+	if strings.EqualFold(strings.TrimSpace(gateway.Provider), "ollama") {
+		ollama, ollamaErr := ResolveFromOllama(ctx, cfg.OllamaProviderURL, gateway.Name, log)
 		if ollamaErr == nil && ollama.ContextWindow > 0 {
 			ollama.Provider = "ollama"
-			ollama.Name = firstNonEmpty(ollama.Name, bifrost.Name, cfg.BifrostModel)
+			ollama.Name = firstNonEmpty(ollama.Name, gateway.Name, cfg.LLMGatewayModel)
 			return normalizeDetails(ollama), nil
 		}
 		if ollamaErr != nil {
-			log.Server("modelinfo").Warn("modelinfo.provider.ollama.resolve_failed", "failed to resolve model details from ollama provider", config.F("model", bifrost.Name), config.F("status", "degraded"), config.ErrorField(ollamaErr))
+			log.Server("modelinfo").Warn("modelinfo.provider.ollama.resolve_failed", "failed to resolve model details from ollama provider", config.F("model", gateway.Name), config.F("status", "degraded"), config.ErrorField(ollamaErr))
 		}
 	}
 
-	fallback.Name = firstNonEmpty(bifrost.Name, cfg.BifrostModel)
-	fallback.Provider = bifrost.Provider
+	fallback.Name = firstNonEmpty(gateway.Name, cfg.LLMGatewayModel)
+	fallback.Provider = gateway.Provider
 	return fallback, nil
 }
 

@@ -29,27 +29,27 @@ func main() {
 	log := rootLog.Server("app")
 	log.Debug("app.config.loaded", "loaded runtime configuration", config.F("log_level", cfg.LogLevel.String()))
 
-	if cfg.BifrostModel == "" {
-		log.Fatal("app.config.invalid", "missing required BIFROST_MODEL environment variable")
+	if cfg.LLMGatewayModel == "" {
+		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_MODEL environment variable")
 	}
-	log.Info("app.model.selected", "selected Bifrost model", config.F("model", cfg.BifrostModel))
+	log.Info("app.model.selected", "selected LLM gateway model", config.F("model", cfg.LLMGatewayModel))
 
-	if cfg.BifrostURL == "" {
-		log.Fatal("app.config.invalid", "missing required BIFROST_URL configuration")
+	if cfg.LLMGatewayURL == "" {
+		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_URL configuration")
 	}
 
-	llmClient := llm.NewBifrostClient(cfg.BifrostURL, cfg.BifrostAPIKey, rootLog.Server("provider.bifrost"))
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, rootLog.Server("provider.gateway"))
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
 	budget := memory.ContextBudgetFromModelDetails(details)
 	if budgetErr != nil {
 		log.Warn("app.context_budget.resolve_failed", "failed to discover context budget",
-			config.F("model", cfg.BifrostModel),
+			config.F("model", cfg.LLMGatewayModel),
 			config.ErrorField(budgetErr),
 		)
 	}
 	log.Info("app.context_budget.resolved", "resolved context budget",
-		config.F("model", cfg.BifrostModel),
+		config.F("model", cfg.LLMGatewayModel),
 		config.F("provider", details.Provider),
 		config.F("context_window", budget.ContextWindow),
 		config.F("prompt_budget", budget.PromptBudget()),
@@ -89,9 +89,9 @@ func main() {
 		config.F("context_window", budget.ContextWindow),
 		config.F("prompt_budget", budget.PromptBudget()),
 	)
-	if cfg.BifrostEmbeddingModel != "" {
+	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
-			config.F("embedding_model", cfg.BifrostEmbeddingModel),
+			config.F("embedding_model", cfg.LLMGatewayEmbeddingModel),
 			config.F("recent_turn_count", 0),
 			config.F("max_relevant_turn_count", 3),
 			config.F("min_similarity", 0.70),
@@ -101,7 +101,7 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic session-memory retrieval disabled")
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.BifrostModel, mcpManager, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
@@ -115,8 +115,8 @@ func main() {
 		llmClient,
 		llmClient,
 		toolRegistry,
-		cfg.BifrostModel,
-		cfg.BifrostEmbeddingModel,
+		cfg.LLMGatewayModel,
+		cfg.LLMGatewayEmbeddingModel,
 		soulStore,
 		userMemStore,
 		budget,

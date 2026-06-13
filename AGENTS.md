@@ -4,7 +4,7 @@ This file is the internal reference for how Oswald AI works today.
 
 ## Project Overview
 
-Oswald AI is a pure Go application built around a single Bifrost-backed agent loop.
+Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
 It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin tools:
 
 - `web.search`
@@ -17,7 +17,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
 
-Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Bifrost model route supports images.
+Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
@@ -35,8 +35,8 @@ Current layers:
 8. `internal/tools/` — tool registry, builtin handlers, and schema loading
 9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
 10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-11. `internal/llm/` — Bifrost/OpenAI-compatible client and provider-neutral request/response schema
-12. `internal/modelinfo/` — Bifrost-first model metadata discovery with Ollama provider fallback
+11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+12. `internal/modelinfo/` — LLM gateway-first model metadata discovery with Ollama provider fallback
 
 ## Startup Flow
 
@@ -44,8 +44,8 @@ Current layers:
 
 1. Load environment config
 2. Create the shared logger
-3. Create the Bifrost client
-4. Discover context budget from Bifrost `/api/models/details`, with direct Ollama `/api/show` only when Bifrost reports `provider=ollama` without token limits
+3. Create the LLM gateway client
+4. Discover context budget from the LLM gateway `/api/models/details`, with direct Ollama `/api/show` only when the gateway reports `provider=ollama` without token limits
 5. Create the soul store and persistent user-memory store
 6. Create the account-link service and shared `/connect` and `/disconnect` command handler
 7. Initialize optional MCP clients
@@ -68,7 +68,7 @@ Every request follows the same high-level path:
 5. Account-link commands are handled by the gateway without reaching the agent loop
 6. The gateway submits a `broker.Request`
 7. A broker worker calls `(*Agent).Process()`
-8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs Bifrost chat completions, executes tool calls if requested, and loops until the model stops calling tools
+8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 9. The final response is returned to the originating gateway
 10. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
@@ -102,10 +102,10 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
    - current date and time
-5. Load retained session turns from `internal/memory`; when `BIFROST_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
+5. Load retained session turns from `internal/memory`; when `LLM_GATEWAY_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
 6. Compact older selected turns if the estimated prompt exceeds the active model budget
 7. Build the chat message array: system prompt, selected retained history, current user prompt, and any current-turn images
-8. Call Bifrost with all registered tools available
+8. Call the LLM gateway with all registered tools available
 9. If the model emits tool calls:
     - execute each tool handler
     - append tool results as `tool` messages
@@ -180,8 +180,8 @@ Oswald keeps three distinct memory layers.
 - Stored only in memory until process exit
 - Keyed by a gateway-provided `SessionKey`
 - Stores only final user/assistant turn pairs
-- When `BIFROST_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
-- When `BIFROST_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
+- When `LLM_GATEWAY_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
+- When `LLM_GATEWAY_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
 - Semantic retrieval embeds the cleaned current user message, strips leading reply-context wrappers, and includes up to three retained turns with cosine similarity at or above `0.70`
 - No recent turn is included automatically when semantic retrieval is enabled
 - The model can call `session.recent` to inspect recent completed exchanges when the current prompt is a vague follow-up and semantic context is not already present
@@ -196,7 +196,7 @@ Retention behavior:
 
 Prompt-budget behavior:
 
-- The agent estimates prompt size before calling Bifrost
+- The agent estimates prompt size before calling the LLM gateway
 - If selected retained history would exceed budget, the oldest selected turns are summarized into a synthetic replacement turn
 - When semantic retrieval is disabled, that compacted turn is written back into session memory and gets a fresh timestamp
 - When semantic retrieval is enabled, request-time compaction affects only the selected context for that request and does not overwrite unrelated retained turns
@@ -206,9 +206,9 @@ Prompt-budget behavior:
 
 Context budgeting lives in `internal/memory/budget.go`.
 
-- At startup the app queries Bifrost `/api/models/details`
-- `max_input_tokens` from Bifrost is preferred for prompt budget
-- When Bifrost reports `provider=ollama` without token limits, direct Ollama `/api/show` is queried as a metadata fallback
+- At startup the app queries the LLM gateway `/api/models/details`
+- `max_input_tokens` from the LLM gateway is preferred for prompt budget
+- When the LLM gateway reports `provider=ollama` without token limits, direct Ollama `/api/show` is queried as a metadata fallback
 - `num_ctx` from Ollama model parameters is preferred in that fallback
 - `*.context_length` from Ollama model metadata is the fallback
 - If discovery fails, package defaults are used
@@ -383,26 +383,26 @@ The registry:
 - Consecutive failures are tracked per request
 - Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
 
-## Bifrost Integration
+## LLM Gateway Integration
 
 Files:
 
-- `internal/llm/bifrost.go`
+- `internal/llm/gateway.go`
 - `internal/llm/schema.go`
 - `internal/llm/types.go`
 - `internal/modelinfo/`
 
 Notes:
 
-- Bifrost is the model gateway
+- The LLM gateway is the model gateway
 - `/api/models/details` is used at startup for context-budget discovery
-- Direct Ollama `/api/show` is used only as a metadata fallback when Bifrost identifies an Ollama-backed route without token limits
+- Direct Ollama `/api/show` is used only as a metadata fallback when the LLM gateway identifies an Ollama-backed route without token limits
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
-- `/v1/embeddings` is used when `BIFROST_EMBEDDING_MODEL` is set for semantic session-memory retrieval
-- The client maps between internal app types and Bifrost's OpenAI-compatible wire format
+- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic session-memory retrieval
+- The client maps between internal app types and the gateway's OpenAI-compatible wire format
 - Streaming responses accumulate both `thinking` and visible content
-- Current-turn images are sent to Bifrost as OpenAI-compatible image URL content blocks when provided by a gateway
-- Gateways normalize accepted source images into JPEG or PNG before they reach Bifrost
+- Current-turn images are sent to the LLM gateway as OpenAI-compatible image URL content blocks when provided by a gateway
+- Gateways normalize accepted source images into JPEG or PNG before they reach the LLM gateway
 
 ## Image Validation
 
@@ -416,7 +416,7 @@ Image validation is centralized in `internal/media/images.go`.
   - `image/heif`
   - `image/heic-sequence`
   - `image/heif-sequence`
-- Normalized output formats sent to Bifrost:
+- Normalized output formats sent to the LLM gateway:
   - `image/jpeg`
   - `image/png`
 - Maximum images per request: `4`
@@ -535,7 +535,7 @@ Examples:
 - `app.start`
 - `broker.request.rejected`
 - `gateway.request.received`
-- `provider.ollama.chat.http_error`
+- `provider.gateway.chat.http_error`
 - `agent.request.start`
 - `agent.loop.iteration`
 - `agent.tool.failure`
@@ -605,10 +605,10 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `BLUEBUBBLES_URL`          | empty                          | BlueBubbles server base URL; enables iMessage when paired with password |
 | `BLUEBUBBLES_PASSWORD`     | empty                          | BlueBubbles server password/token used for iMessage REST API auth       |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                      | Enables the GitHub MCP client and read-only `github.*` tools            |
-| `BIFROST_URL`              | `http://localhost:8080`        | Bifrost API base URL                                                    |
-| `BIFROST_MODEL`            | empty                          | Model name passed to Bifrost; required at startup                       |
-| `BIFROST_EMBEDDING_MODEL`  | empty                          | Optional Bifrost embedding model for semantic session-memory retrieval  |
-| `BIFROST_API_KEY`          | empty                          | Optional bearer token for Bifrost requests                              |
+| `LLM_GATEWAY_URL`              | `http://localhost:8080`        | LLM gateway API base URL                                                |
+| `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
+| `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
+| `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
 | `OLLAMA_PROVIDER_URL`      | `http://localhost:11434`       | Ollama URL used only for model metadata fallback                        |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
 | `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
@@ -633,7 +633,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
 | `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
 | `internal/routing/types.go`             | Gateway-neutral routing types     |
-| `internal/llm/bifrost.go`               | Bifrost HTTP client               |
+| `internal/llm/gateway.go`               | LLM gateway HTTP client           |
 | `internal/modelinfo/`                   | Model metadata discovery          |
 | `internal/tools/registry.go`            | Tool schema loading and execution |
 | `internal/tools/bootstrap.go`           | Builtin tool wiring               |
@@ -685,7 +685,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only seven builtin tools ship locally; extra tools require optional MCP integration
 - GitHub is the only MCP server integration today
-- Bifrost is the LLM gateway; direct Ollama access is used only for metadata fallback
+- The OpenAI-compatible LLM gateway is the model gateway; direct Ollama access is used only for metadata fallback
 
 Account-linking note:
 

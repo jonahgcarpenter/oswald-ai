@@ -9,7 +9,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 ## Features
 
-- Iterative tool-calling agent loop on top of Bifrost's OpenAI-compatible API
+- Iterative tool-calling agent loop on top of an OpenAI-compatible LLM gateway
 - iMessage, Discord, and WebSocket gateway
 - Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, `soul.patch`, and `session.recent` tools
 - MCP integration starting with Github
@@ -29,20 +29,20 @@ Oswald uses three memory layers:
 
 ## Usage
 
-Configure Bifrost before startup:
+Configure the LLM gateway before startup:
 
 ```bash
-export BIFROST_URL=http://localhost:8080
-export BIFROST_MODEL=<bifrost-route-or-model>
+export LLM_GATEWAY_URL=http://localhost:8080
+export LLM_GATEWAY_MODEL=<gateway-route-or-model>
 ```
 
-Optional semantic session-memory retrieval uses Bifrost embeddings:
+Optional semantic session-memory retrieval uses gateway embeddings:
 
 ```bash
-export BIFROST_EMBEDDING_MODEL=<embedding-route-or-model>
+export LLM_GATEWAY_EMBEDDING_MODEL=<embedding-route-or-model>
 ```
 
-If Bifrost routes to an Ollama provider and does not report token limits, Oswald can still query the backing Ollama `/api/show` endpoint for context metadata via `OLLAMA_PROVIDER_URL`.
+If the LLM gateway routes to an Ollama provider and does not report token limits, Oswald can still query the backing Ollama `/api/show` endpoint for context metadata via `OLLAMA_PROVIDER_URL`.
 
 ### Discord/iMessage Bot
 
@@ -87,7 +87,7 @@ What is Bitcoins current price?
 
 # Receive streaming chunks, then final JSON:
 # "Bitcoin is currently..."
-# {"model":"<bifrost-route-or-model>","response":"..."}
+# {"model":"<gateway-route-or-model>","response":"..."}
 ```
 
 ## Roadmap

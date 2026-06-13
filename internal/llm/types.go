@@ -1,93 +1,93 @@
 package llm
 
-type bifrostToolFunction struct {
+type gatewayToolFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
 
-type bifrostToolCall struct {
+type gatewayToolCall struct {
 	ID       string              `json:"id,omitempty"`
 	Index    int                 `json:"index,omitempty"`
 	Type     string              `json:"type,omitempty"`
-	Function bifrostToolFunction `json:"function"`
+	Function gatewayToolFunction `json:"function"`
 }
 
-type bifrostImageURL struct {
+type gatewayImageURL struct {
 	URL string `json:"url"`
 }
 
-type bifrostContentPart struct {
+type gatewayContentPart struct {
 	Type     string           `json:"type"`
 	Text     string           `json:"text,omitempty"`
-	ImageURL *bifrostImageURL `json:"image_url,omitempty"`
+	ImageURL *gatewayImageURL `json:"image_url,omitempty"`
 }
 
-type bifrostMessage struct {
+type gatewayMessage struct {
 	Role             string            `json:"role"`
 	Content          interface{}       `json:"content,omitempty"`
 	Thinking         string            `json:"thinking,omitempty"`
 	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []bifrostToolCall `json:"tool_calls,omitempty"`
+	ToolCalls        []gatewayToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string            `json:"tool_call_id,omitempty"`
 }
 
-type bifrostResponseFormat struct {
+type gatewayResponseFormat struct {
 	Type string `json:"type"`
 }
 
-type bifrostChatRequest struct {
+type gatewayChatRequest struct {
 	Model          string                 `json:"model"`
 	User           string                 `json:"user,omitempty"`
-	Messages       []bifrostMessage       `json:"messages"`
+	Messages       []gatewayMessage       `json:"messages"`
 	Tools          []Tool                 `json:"tools,omitempty"`
-	ResponseFormat *bifrostResponseFormat `json:"response_format,omitempty"`
+	ResponseFormat *gatewayResponseFormat `json:"response_format,omitempty"`
 	Stream         bool                   `json:"stream"`
 }
 
-type bifrostChatResponse struct {
+type gatewayChatResponse struct {
 	ID      string                `json:"id,omitempty"`
 	Model   string                `json:"model,omitempty"`
-	Choices []bifrostChoice       `json:"choices"`
-	Usage   bifrostUsage          `json:"usage,omitempty"`
-	Error   *bifrostErrorResponse `json:"error,omitempty"`
+	Choices []gatewayChoice       `json:"choices"`
+	Usage   gatewayUsage          `json:"usage,omitempty"`
+	Error   *gatewayErrorResponse `json:"error,omitempty"`
 }
 
-type bifrostChoice struct {
+type gatewayChoice struct {
 	Index        int            `json:"index,omitempty"`
-	Message      bifrostMessage `json:"message,omitempty"`
-	Delta        bifrostMessage `json:"delta,omitempty"`
+	Message      gatewayMessage `json:"message,omitempty"`
+	Delta        gatewayMessage `json:"delta,omitempty"`
 	FinishReason string         `json:"finish_reason,omitempty"`
 }
 
-type bifrostUsage struct {
+type gatewayUsage struct {
 	PromptTokens     int `json:"prompt_tokens,omitempty"`
 	CompletionTokens int `json:"completion_tokens,omitempty"`
 	TotalTokens      int `json:"total_tokens,omitempty"`
 }
 
-type bifrostErrorResponse struct {
+type gatewayErrorResponse struct {
 	Message string `json:"message,omitempty"`
 	Type    string `json:"type,omitempty"`
 	Code    string `json:"code,omitempty"`
 }
 
-type bifrostStreamToolCall struct {
+type gatewayStreamToolCall struct {
 	ID        string
 	Name      string
 	Arguments string
 }
 
-type bifrostEmbeddingRequest struct {
+type gatewayEmbeddingRequest struct {
 	Model string `json:"model"`
 	Input string `json:"input"`
 }
 
-type bifrostEmbeddingResponse struct {
+type gatewayEmbeddingResponse struct {
 	Model string                  `json:"model,omitempty"`
-	Data  []bifrostEmbeddingDatum `json:"data"`
-	Error *bifrostErrorResponse   `json:"error,omitempty"`
+	Data  []gatewayEmbeddingDatum `json:"data"`
+	Error *gatewayErrorResponse   `json:"error,omitempty"`
 }
 
-type bifrostEmbeddingDatum struct {
+type gatewayEmbeddingDatum struct {
 	Embedding []float64 `json:"embedding"`
 }
