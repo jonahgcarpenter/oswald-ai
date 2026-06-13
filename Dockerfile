@@ -32,6 +32,6 @@ COPY --from=builder --chown=oswald-ai:oswald-group /app/data/ ./data/
 
 USER oswald-ai
 
-EXPOSE 8080
+EXPOSE 8000
 
 CMD ["./oswald-agent"]

@@ -45,7 +45,7 @@ func Load() *Config {
 	godotenv.Load() // nolint: errcheck
 
 	return &Config{
-		Port:                     getEnv("PORT", "8080"),
+		Port:                     getEnv("PORT", "8000"),
 		IMessagePort:             getEnv("IMESSAGE_PORT", "8090"),
 		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
 		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),

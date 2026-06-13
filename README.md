@@ -76,11 +76,11 @@ Can you elaborate on that?
 
 Currently used for testing.
 
-Connect to `ws://localhost:8080/ws`:
+Connect to `ws://localhost:8000/ws`:
 
 ```bash
 # Using websocat
-websocat ws://localhost:8080/ws
+websocat ws://localhost:8000/ws
 
 # Send a prompt
 What is Bitcoins current price?
