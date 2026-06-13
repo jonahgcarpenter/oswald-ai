@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	defaultContextWindow = 4096
-	defaultOutputTokens  = 1024
+	defaultContextWindow = 32768
+	defaultOutputTokens  = 8192
 )
 
 // Details describes model metadata discovered from OpenRouter and environment overrides.
