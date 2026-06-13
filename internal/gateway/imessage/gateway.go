@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
@@ -121,7 +121,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		return
 	}
 
-	normalizedSenderID, err := accountlink.NormalizeIdentifier("imessage", msg.Handle.Address)
+	normalizedSenderID, err := accountlinking.NormalizeIdentifier("imessage", msg.Handle.Address)
 	if err != nil {
 		log.Error("gateway.account.normalize_failed", "failed to normalize imessage account", config.F("request_id", requestID), config.ErrorField(err))
 		return
@@ -149,11 +149,11 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 	mentionsBot := mentionRE.MatchString(text)
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
-	currentIsAccountCommand := isAccountCommand(textWithoutMention)
+	currentIsCommand := g.Commands.IsCommand(textWithoutMention)
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
-			if isGroup && !mentionsBot && !replyCtx.IsFromBot && !currentIsAccountCommand {
+			if isGroup && !mentionsBot && !replyCtx.IsFromBot && !currentIsCommand {
 				g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 				return
 			}
@@ -190,7 +190,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		IsDirect:           !isGroup,
 		IsGroup:            isGroup,
 		MentionsBot:        mentionsBot,
-		IsAccountCommand:   currentIsAccountCommand,
+		IsCommand:          currentIsCommand,
 		Text:               textWithoutMention,
 		CurrentImages:      images,
 		CurrentUnsupported: unsupported,
@@ -480,7 +480,7 @@ func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID, sess
 	ctx.SenderID = address
 	ctx.DisplayName = address
 	if address != "" {
-		if normalizedSenderID, err := accountlink.NormalizeIdentifier("imessage", address); err != nil {
+		if normalizedSenderID, err := accountlinking.NormalizeIdentifier("imessage", address); err != nil {
 			log.Debug("gateway.reply_lookup.normalize_failed", "failed to normalize imessage reply sender", config.F("request_id", requestID), config.F("message_guid", data.GUID), config.F("status", "degraded"), config.ErrorField(err))
 		} else {
 			ctx.SenderID = normalizedSenderID
@@ -853,12 +853,6 @@ func (m webhookMessage) replyTargetGUID() string {
 		return m.ReplyToGUID
 	}
 	return ""
-}
-
-// isAccountCommand reports whether input is an account-link management command.
-func isAccountCommand(input string) bool {
-	trimmed := strings.TrimSpace(input)
-	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
 }
 
 func attachmentFormats(attachments []attachment) string {

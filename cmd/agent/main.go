@@ -6,9 +6,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -67,9 +68,10 @@ func main() {
 	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, rootLog.Server("memory.user"))
 	log.Debug("app.memory_user.configured", "configured user memory path", config.F("path", config.DefaultUserMemoryPath))
 
-	accountLinkService := accountlink.NewService(config.DefaultAccountLinkPath, userMemStore, rootLog.Server("account_link"))
+	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, rootLog.Server("account_link"))
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
-	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
+	accountLinkCommands := accountlinking.NewCommandHandler(accountLinkService)
+	commandRouter := commands.NewRouter(accountLinkCommands)
 	log.Debug("app.account_link.configured", "configured account link store", config.F("path", config.DefaultAccountLinkPath))
 
 	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
@@ -106,7 +108,7 @@ func main() {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, accountLinkCommands, rootLog)
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, commandRouter, rootLog)
 	if err != nil {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}

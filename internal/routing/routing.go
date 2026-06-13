@@ -13,11 +13,11 @@ func Decide(input Input) Decision {
 	text := strings.TrimSpace(input.Text)
 	reply := input.Reply
 
-	if input.IsAccountCommand {
+	if input.IsCommand {
 		if input.IsGroup && !input.MentionsBot {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
-		return Decision{Action: ActionCommand, Prompt: text, Reason: "account_command"}
+		return Decision{Action: ActionCommand, Prompt: text, Reason: "command"}
 	}
 
 	if input.IsGroup && !input.MentionsBot && (reply == nil || !reply.IsFromBot) {

@@ -1,4 +1,4 @@
-package accountlink
+package accountlinking
 
 import (
 	"fmt"
@@ -17,13 +17,24 @@ func NewCommandHandler(links *Service) *CommandHandler {
 	return &CommandHandler{links: links}
 }
 
+// CanHandle reports whether input is one of the account-link commands.
+func (h *CommandHandler) CanHandle(input string) bool {
+	fields := strings.Fields(strings.TrimSpace(input))
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "/connect", "/disconnect":
+		return true
+	default:
+		return false
+	}
+}
+
 // Handle processes account-link commands for a canonical user.
 func (h *CommandHandler) Handle(canonicalUserID, input string) (string, bool, error) {
 	trimmed := strings.TrimSpace(input)
-	if trimmed == "" {
-		return "", false, nil
-	}
-	if !strings.HasPrefix(trimmed, "/") {
+	if !h.CanHandle(trimmed) {
 		return "", false, nil
 	}
 

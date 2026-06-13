@@ -3,7 +3,8 @@ package gateway
 import (
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
@@ -11,13 +12,13 @@ import (
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, commands *accountlink.CommandHandler, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, commandRouter *commands.Router, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
 	services := []Service{
 		&localws.Gateway{
 			Port:     cfg.Port,
 			Links:    links,
-			Commands: commands,
+			Commands: commandRouter,
 			Log:      log,
 		},
 	}
@@ -26,7 +27,7 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 		services = append(services, &discord.Gateway{
 			Token:    cfg.DiscordToken,
 			Links:    links,
-			Commands: commands,
+			Commands: commandRouter,
 			Log:      log,
 		})
 	}
@@ -38,7 +39,7 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlink.Service, comma
 			BlueBubblesURL:      cfg.BlueBubblesURL,
 			BlueBubblesPassword: cfg.BlueBubblesPassword,
 			Links:               links,
-			Commands:            commands,
+			Commands:            commandRouter,
 			Log:                 log,
 		})
 	}

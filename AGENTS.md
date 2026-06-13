@@ -26,17 +26,18 @@ There is no JavaScript, TypeScript, or frontend code in this repository.
 Current layers:
 
 1. `cmd/agent/main.go` — startup wiring
-2. `internal/accountlink/` — canonical user identity and cross-gateway account linking
-3. `internal/gateway/` — gateway bootstrap and implementations
-4. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
-5. `internal/broker/` — request queue and worker pool
-6. `internal/agent/` — iterative tool-calling agent loop
-7. `internal/memory/` — in-process conversation retention and compaction
-8. `internal/tools/` — tool registry, builtin handlers, and schema loading
-9. `internal/mcp/` — optional MCP client sessions and discovered tools
-10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-12. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
+2. `internal/commands/` — shared command routing and command implementations
+3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
+4. `internal/gateway/` — gateway bootstrap and implementations
+5. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+6. `internal/broker/` — request queue and worker pool
+7. `internal/agent/` — iterative tool-calling agent loop
+8. `internal/memory/` — in-process conversation retention and compaction
+9. `internal/tools/` — tool registry, builtin handlers, and schema loading
+10. `internal/mcp/` — optional MCP client sessions and discovered tools
+11. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+12. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+13. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
 
 ## Startup Flow
 
@@ -47,7 +48,7 @@ Current layers:
 3. Create the LLM gateway client
 4. Discover context budget from OpenRouter model metadata, with `MODEL_*` environment overrides taking precedence
 5. Create the soul store and persistent user-memory store
-6. Create the account-link service and shared `/connect` and `/disconnect` command handler
+6. Create the account-link service, shared `/connect` and `/disconnect` command handler, and command router
 7. Initialize optional MCP clients
 8. Create the in-process conversation memory store
 9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
@@ -63,8 +64,8 @@ Every request follows the same high-level path:
 
 1. A gateway receives user input
 2. The gateway normalizes text, attachments, sender metadata, and reply context
-3. The gateway resolves or creates the canonical user identity through `internal/accountlink/`
-4. Discord and iMessage pass the normalized message through `internal/routing.Decide()` to ignore, handle an account-link command, send a direct gateway fallback, or submit an LLM request
+3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
+4. Discord and iMessage pass the normalized message through `internal/routing.Decide()` to ignore, handle a command, send a direct gateway fallback, or submit an LLM request
 5. Account-link commands are handled by the gateway without reaching the agent loop
 6. The gateway submits a `broker.Request`
 7. A broker worker calls `(*Agent).Process()`
@@ -131,13 +132,13 @@ Streaming behavior:
 
 Gateway-neutral routing policy lives in `internal/routing/` and is used by Discord and iMessage.
 
-- `routing.Input` carries normalized text, channel type, mention state, account-command state, current-turn images, unsupported attachment labels, and optional reply context
-- `routing.Decide()` returns one of: ignore, submit to the LLM, handle an account-link command, or send a gateway fallback response directly
-- Group messages are ignored unless they mention Oswald, are replies to Oswald, or are account-link commands addressed to Oswald
+- `routing.Input` carries normalized text, channel type, mention state, command state, current-turn images, unsupported attachment labels, and optional reply context
+- `routing.Decide()` returns one of: ignore, submit to the LLM, handle a command, or send a gateway fallback response directly
+- Group messages are ignored unless they mention Oswald, are replies to Oswald, or are commands addressed to Oswald
 - Empty prompts with no usable images get a direct gateway fallback response
 - Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for Discord and iMessage
 - Reply context can include quoted text, replied-to images when image slots remain, unsupported attachment labels, and unavailable-message markers
-- WebSocket currently performs its own simpler routing path for JSON/plain-text prompts and account-link commands
+- WebSocket currently performs its own simpler routing path for JSON/plain-text prompts and commands
 
 ## Three-Layer Memory Model
 
@@ -308,7 +309,7 @@ Behavior:
 - Ignores self-authored messages and payloads with neither text nor attachments
 - Normalizes iMessage handles into canonical phone-number or email identifiers
 - Resolves account links using contact display names when available, with identifier fallback
-- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
+- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, commands, or replies to Oswald
 - Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators and replies back through the BlueBubbles REST API
@@ -644,7 +645,8 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/tools/builtin/sessionhistory/` | `session.recent` runtime handler |
 | `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store |
 | `internal/tools/builtin/soul/store.go`  | Soul file store                   |
-| `internal/accountlink/store.go`         | Canonical account link store      |
+| `internal/commands/router.go`        | Shared command router             |
+| `internal/commands/accountlinking/store.go` | Canonical account link store      |
 | `internal/requestctx/requestctx.go`     | Request metadata propagation through context |
 | `internal/media/images.go`              | Image normalization and validation |
 | `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |

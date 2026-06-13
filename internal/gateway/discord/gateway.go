@@ -13,8 +13,8 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
@@ -490,7 +490,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
 	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
-	if msg.GuildID != "" && !mentionsBot && !isReplyToBot && !isAccountCommand(text) {
+	isCommand := dg.Commands.IsCommand(text)
+	if msg.GuildID != "" && !mentionsBot && !isReplyToBot && !isCommand {
 		dg.rememberReply(msg.ID, replyContext{
 			SessionKey:  sessionKey,
 			ChannelID:   msg.ChannelID,
@@ -505,7 +506,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		return
 	}
 
-	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
+	normalizedAuthorID, normErr := accountlinking.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
 		log.Error("gateway.account.normalize_failed", "failed to normalize discord account", config.F("request_id", requestID), config.ErrorField(normErr))
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
@@ -533,7 +534,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		IsDirect:           msg.GuildID == "",
 		IsGroup:            msg.GuildID != "",
 		MentionsBot:        mentionsBot,
-		IsAccountCommand:   isAccountCommand(text),
+		IsCommand:          isCommand,
 		Text:               text,
 		CurrentImages:      images,
 		CurrentUnsupported: unsupported,
@@ -802,11 +803,6 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 	}
 	log.Debug("gateway.reply_lookup.fetched", "fetched discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("attachment_count", len(result.Attachments)), config.F("status", "ok"))
 	return result, true
-}
-
-func isAccountCommand(input string) bool {
-	trimmed := strings.TrimSpace(input)
-	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
 }
 
 func (dg *Gateway) loadImages(attachments []Attachment) ([]llm.InputImage, []string) {

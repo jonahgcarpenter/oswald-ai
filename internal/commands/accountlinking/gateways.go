@@ -1,4 +1,4 @@
-package accountlink
+package accountlinking
 
 import (
 	"fmt"

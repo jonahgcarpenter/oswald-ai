@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
@@ -86,7 +86,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			sessionIdentity = remoteAddr
 			userID = remoteAddr
 		}
-		normalizedUserID, normErr := accountlink.NormalizeIdentifier("websocket", userID)
+		normalizedUserID, normErr := accountlinking.NormalizeIdentifier("websocket", userID)
 		if normErr != nil {
 			errorPayload := agent.AgentResponse{Error: normErr.Error()}
 			errBytes, _ := json.Marshal(errorPayload)

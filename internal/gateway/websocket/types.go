@@ -5,15 +5,16 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 // Gateway handles local WebSocket connections for testing and client access.
 type Gateway struct {
 	Port     string
-	Links    *accountlink.Service
-	Commands *accountlink.CommandHandler
+	Links    *accountlinking.Service
+	Commands *commands.Router
 	Log      *config.Logger
 }
 
