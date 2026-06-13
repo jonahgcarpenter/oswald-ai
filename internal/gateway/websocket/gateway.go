@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
@@ -57,6 +58,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		// clients keep working without modification.
 		var userPrompt, userID, displayName string
 		var userImages []llm.InputImage
+		var userUnsupported []string
 		var incoming IncomingMessage
 		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
@@ -64,6 +66,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			displayName = incoming.DisplayName
 			images, unsupported := wg.decodeIncomingImages(incoming.Images)
 			userImages = images
+			userUnsupported = unsupported
 			if len(incoming.Images) > 0 {
 				log.Debug("gateway.attachment.processed", "processed websocket attachments",
 					config.F("request_id", requestID),
@@ -73,7 +76,6 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 					config.F("declared_format_count", len(incoming.Images)),
 				)
 			}
-			userPrompt = media.AugmentPromptWithUnsupportedFiles(userPrompt, unsupported)
 		} else {
 			userPrompt = string(message)
 			userID = remoteAddr
@@ -109,26 +111,6 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			continue
 		}
 
-		if commandResponse, handled, commandErr := wg.Commands.Handle(canonicalUserID, userPrompt); handled {
-			if commandErr != nil {
-				log.Error("gateway.command.failed", "websocket account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
-				commandResponse = "Failed to process account linking command."
-			}
-			payload := agent.AgentResponse{Response: commandResponse}
-			respBytes, _ := json.Marshal(payload)
-			conn.WriteMessage(messageType, respBytes) // nolint: errcheck
-			continue
-		}
-
-		log.Debug("gateway.request.received", "received websocket request",
-			config.F("request_id", requestID),
-			config.F("gateway", "websocket"),
-			config.F("session_id", sessionKey),
-			config.F("user_id", canonicalUserID),
-			config.F("prompt_chars", len(userPrompt)),
-			config.F("image_count", len(userImages)),
-		)
-
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
 			if firstChunk {
@@ -143,40 +125,25 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
-		req := &broker.Request{
-			RequestID:    requestID,
-			Channel:      "websocket",
-			ChatID:       sessionKey,
-			SenderID:     canonicalUserID,
-			DisplayName:  displayName,
-			SessionKey:   sessionKey,
-			Prompt:       userPrompt,
-			Images:       userImages,
-			StreamFunc:   streamFunc,
-			ResponseChan: make(chan broker.Result, 1),
-		}
-		b.Submit(req)
-		result := <-req.ResponseChan
-
-		if result.Err != nil {
-			log.Error("gateway.response.failed", "websocket engine processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
-			errorPayload := agent.AgentResponse{Error: "Internal engine timeout or failure"}
-			errBytes, _ := json.Marshal(errorPayload)
-			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-			continue
-		}
-
-		jsonBytes, err := json.Marshal(result.Response)
-		if err != nil {
-			log.Error("gateway.response.failed", "failed to marshal websocket response", config.F("request_id", requestID), config.ErrorField(err))
-			continue
-		}
-
-		log.Debug("gateway.response.sent", "sent websocket response", config.F("request_id", requestID), config.F("content_chars", len(jsonBytes)), config.F("model", result.Response.Model), config.F("status", "ok"))
-		if err = conn.WriteMessage(messageType, jsonBytes); err != nil {
-			log.Warn("gateway.write_failed", "websocket write failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
-			break
-		}
+		gatewayruntime.Execute(gatewayruntime.Request{
+			RequestID:   requestID,
+			Gateway:     "websocket",
+			ChatID:      sessionKey,
+			SenderID:    canonicalUserID,
+			DisplayName: displayName,
+			SessionKey:  sessionKey,
+			IsDirect:    true,
+			IsMention:   true,
+			IsCommand:   wg.Commands.IsCommand(userPrompt),
+			Text:        userPrompt,
+			Images:      userImages,
+			Unsupported: userUnsupported,
+			StreamFunc:  streamFunc,
+		}, gatewayruntime.Dependencies{
+			Broker:   b,
+			Commands: wg.Commands,
+			Log:      wg.Log,
+		}, &runtimeResponder{conn: conn, messageType: messageType})
 	}
 }
 

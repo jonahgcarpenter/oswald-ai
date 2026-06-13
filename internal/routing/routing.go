@@ -14,13 +14,13 @@ func Decide(input Input) Decision {
 	reply := input.Reply
 
 	if input.IsCommand {
-		if input.IsGroup && !input.MentionsBot {
+		if input.IsGroup && !input.IsMention {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{Action: ActionCommand, Prompt: text, Reason: "command"}
 	}
 
-	if input.IsGroup && !input.MentionsBot && (reply == nil || !reply.IsFromBot) {
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommand) {
 		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
 	}
 
@@ -31,6 +31,11 @@ func Decide(input Input) Decision {
 	}
 
 	return Decision{Action: ActionLLM, Prompt: prompt, Images: images, Reason: "llm"}
+}
+
+// ShouldIgnoreUninvokedGroup reports whether a group message lacks any gateway-normalized invocation.
+func ShouldIgnoreUninvokedGroup(isGroup, isMention, isReplyToBot, isCommand bool) bool {
+	return isGroup && !isMention && !isReplyToBot && !isCommand
 }
 
 // BuildPrompt builds the exact current-turn text sent to the LLM.

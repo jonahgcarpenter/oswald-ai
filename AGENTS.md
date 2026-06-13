@@ -28,7 +28,7 @@ Current layers:
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/commands/` — shared command routing and command implementations
 3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
-4. `internal/gateway/` — gateway bootstrap and implementations
+4. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
 5. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
 6. `internal/broker/` — request queue and worker pool
 7. `internal/agent/` — iterative tool-calling agent loop
@@ -65,13 +65,14 @@ Every request follows the same high-level path:
 1. A gateway receives user input
 2. The gateway normalizes text, attachments, sender metadata, and reply context
 3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
-4. Discord and iMessage pass the normalized message through `internal/routing.Decide()` to ignore, handle a command, send a direct gateway fallback, or submit an LLM request
-5. Account-link commands are handled by the gateway without reaching the agent loop
-6. The gateway submits a `broker.Request`
-7. A broker worker calls `(*Agent).Process()`
-8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
-9. The final response is returned to the originating gateway
-10. The gateway sends the response back to the client, Discord channel, or iMessage chat
+4. The gateway builds a `runtime.Request` with normalized gateway facts like `IsMention`, `IsReplyToBot`, and `IsCommand`
+5. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
+6. Account-link commands are handled by the shared command router without reaching the agent loop
+7. The runtime submits a `broker.Request` when the request should reach the LLM
+8. A broker worker calls `(*Agent).Process()`
+9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+10. The final response is returned to the shared runtime
+11. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -130,15 +131,17 @@ Streaming behavior:
 
 ## Shared Routing
 
-Gateway-neutral routing policy lives in `internal/routing/` and is used by Discord and iMessage.
+Gateway-neutral routing policy lives in `internal/routing/` and shared gateway execution lives in `internal/gateway/runtime/`.
 
-- `routing.Input` carries normalized text, channel type, mention state, command state, current-turn images, unsupported attachment labels, and optional reply context
+- Concrete gateways own transport-specific parsing: mention detection, reply lookup, attachment downloads, account identity extraction, and response sending
+- `runtime.Request` carries normalized text, channel type, mention state, reply-to-bot state, command state, current-turn images, unsupported attachment labels, and optional reply context
 - `routing.Decide()` returns one of: ignore, submit to the LLM, handle a command, or send a gateway fallback response directly
 - Group messages are ignored unless they mention Oswald, are replies to Oswald, or are commands addressed to Oswald
+- `runtime.Execute()` applies routing decisions, executes commands, submits broker requests, and calls the gateway-specific responder
 - Empty prompts with no usable images get a direct gateway fallback response
-- Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for Discord and iMessage
+- Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for every gateway
 - Reply context can include quoted text, replied-to images when image slots remain, unsupported attachment labels, and unavailable-message markers
-- WebSocket currently performs its own simpler routing path for JSON/plain-text prompts and commands
+- WebSocket uses the same shared runtime as Discord and iMessage, with streaming delivered through its gateway-specific responder
 
 ## Three-Layer Memory Model
 
@@ -635,7 +638,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/memory/compact.go`            | Retention pruning and token estimates |
 | `internal/memory/budget.go`             | Context budget discovery          |
 | `internal/mcp/manager.go`               | MCP client bootstrap and catalog  |
-| `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
+| `internal/routing/routing.go`           | Shared gateway routing policy |
 | `internal/routing/types.go`             | Gateway-neutral routing types     |
 | `internal/llm/gateway.go`               | LLM gateway HTTP client           |
 | `internal/modelinfo/`                   | Model metadata discovery          |
@@ -649,6 +652,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/commands/accountlinking/store.go` | Canonical account link store      |
 | `internal/requestctx/requestctx.go`     | Request metadata propagation through context |
 | `internal/media/images.go`              | Image normalization and validation |
+| `internal/gateway/runtime/`             | Shared gateway request execution  |
 | `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
 | `internal/gateway/discord/gateway.go`   | Discord transport                 |
@@ -675,8 +679,10 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 1. Create `internal/gateway/<name>/`
 2. Implement `gateway.Service`
-3. Wire it in `internal/gateway/bootstrap.go`
-4. Do not import concrete gateway packages directly in `cmd/agent/main.go`
+3. Normalize inbound messages into `runtime.Request`
+4. Implement a gateway-specific `runtime.Responder`
+5. Wire it in `internal/gateway/bootstrap.go`
+6. Do not import concrete gateway packages directly in `cmd/agent/main.go`
 
 ### Changing Personality
 

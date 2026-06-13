@@ -25,7 +25,8 @@ type Input struct {
 	SessionKey         string
 	IsDirect           bool
 	IsGroup            bool
-	MentionsBot        bool
+	IsMention          bool
+	IsReplyToBot       bool
 	IsCommand          bool
 	Text               string
 	CurrentImages      []llm.InputImage

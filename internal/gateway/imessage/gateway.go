@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -150,10 +151,12 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	mentionsBot := mentionRE.MatchString(text)
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
 	currentIsCommand := g.Commands.IsCommand(textWithoutMention)
+	currentIsReplyToBot := false
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
-			if isGroup && !mentionsBot && !replyCtx.IsFromBot && !currentIsCommand {
+			currentIsReplyToBot = replyCtx.IsFromBot
+			if routing.ShouldIgnoreUninvokedGroup(isGroup, mentionsBot, replyCtx.IsFromBot, currentIsCommand) {
 				g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 				return
 			}
@@ -181,96 +184,35 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		}
 	}
 
-	decision := routing.Decide(routing.Input{
-		Gateway:            "imessage",
-		ChatID:             chat.GUID,
-		SenderID:           canonicalUserID,
-		DisplayName:        displayName,
-		SessionKey:         sessionKey,
-		IsDirect:           !isGroup,
-		IsGroup:            isGroup,
-		MentionsBot:        mentionsBot,
-		IsCommand:          currentIsCommand,
-		Text:               textWithoutMention,
-		CurrentImages:      images,
-		CurrentUnsupported: unsupported,
-		Reply:              reply,
-	})
-	if decision.Action == routing.ActionIgnore {
-		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-		return
-	}
-
-	if err := g.startTyping(chat.GUID); err != nil {
-		log.Debug("gateway.typing.start_failed", "failed to start imessage typing indicator", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"), config.ErrorField(err))
-	}
-
-	if decision.Action == routing.ActionGatewayFallback {
-		messageGUID, err := g.sendTextReply(chat.GUID, decision.ResponseText, selectedMessageGUID, 0)
-		if err != nil {
-			log.Error("gateway.response.failed", "failed to send imessage empty prompt response", config.F("request_id", requestID), config.ErrorField(err))
-		} else {
-			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, decision.ResponseText)
-		}
-		g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-		return
-	}
-
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-	log.Debug("gateway.request.received", "received imessage request", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(decision.Images)), config.F("is_group", isGroup), config.F("is_reply", replyGUID != ""), config.F("prompt_chars", len(decision.Prompt)))
-
-	if decision.Action == routing.ActionCommand {
-		commandResponse, handled, commandErr := g.Commands.Handle(canonicalUserID, decision.Prompt)
-		if !handled {
-			return
-		}
-		if commandErr != nil {
-			log.Error("gateway.command.failed", "imessage account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
-			commandResponse = "Failed to process account linking command."
-		}
-		messageGUID, err := g.sendTextReply(chat.GUID, commandResponse, selectedMessageGUID, 0)
-		if err != nil {
-			log.Error("gateway.response.failed", "failed to send imessage command response", config.F("request_id", requestID), config.ErrorField(err))
-		} else {
-			g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, commandResponse)
-		}
-		return
-	}
-
-	req := &broker.Request{
+	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
-		Channel:      "imessage",
+		Gateway:      "imessage",
 		ChatID:       chat.GUID,
 		SenderID:     canonicalUserID,
 		DisplayName:  displayName,
 		SessionKey:   sessionKey,
-		Prompt:       decision.Prompt,
-		Images:       decision.Images,
-		StreamFunc:   nil,
-		ResponseChan: make(chan broker.Result, 1),
-	}
-	g.Broker.Submit(req)
-	result := <-req.ResponseChan
-
-	responseText := ""
-	if result.Err != nil {
-		log.Error("gateway.response.failed", "imessage agent processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
-		responseText = "Sorry, I encountered an internal error processing that."
-	} else if result.Response != nil {
-		responseText = strings.TrimSpace(result.Response.Response)
-	}
-	if responseText == "" {
-		log.Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("status", "degraded"))
-		return
-	}
-
-	messageGUID, err := g.sendTextReply(chat.GUID, responseText, selectedMessageGUID, 0)
-	if err != nil {
-		log.Error("gateway.send.failed", "imessage send failed", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.ErrorField(err))
-		return
-	}
-	log.Debug("gateway.response.sent", "sent imessage response", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("response_chars", len(responseText)), config.F("status", "ok"))
-	g.rememberBotMessage(messageGUID, sessionKey, chat.GUID, normalizedSenderID, responseText)
+		IsDirect:     !isGroup,
+		IsGroup:      isGroup,
+		IsMention:    mentionsBot,
+		IsReplyToBot: currentIsReplyToBot,
+		IsCommand:    currentIsCommand,
+		Text:         textWithoutMention,
+		Images:       images,
+		Unsupported:  unsupported,
+		Reply:        reply,
+	}, gatewayruntime.Dependencies{
+		Broker:   g.Broker,
+		Commands: g.Commands,
+		Log:      g.Log,
+	}, &runtimeResponder{
+		gateway:             g,
+		requestID:           requestID,
+		chatGUID:            chat.GUID,
+		selectedMessageGUID: selectedMessageGUID,
+		sessionKey:          sessionKey,
+		senderID:            normalizedSenderID,
+	})
 }
 
 func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, error) {
