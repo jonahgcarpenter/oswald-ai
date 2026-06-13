@@ -33,7 +33,7 @@ Current layers:
 6. `internal/agent/` — iterative tool-calling agent loop
 7. `internal/memory/` — in-process conversation retention and compaction
 8. `internal/tools/` — tool registry, builtin handlers, and schema loading
-9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
+9. `internal/mcp/` — optional MCP client sessions and discovered tools
 10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
 12. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
@@ -337,7 +337,7 @@ Reply handling:
 Tools are split into schema and runtime layers.
 
 - Schemas are loaded from `data/tools/*.md`
-- Runtime handlers are wired in `internal/tools/bootstrap.go`
+- Runtime handlers are wired through `internal/tools/bootstrap.go`, `internal/tools/builtin/`, and `internal/tools/mcp/`
 - Additional tool definitions can be discovered dynamically from connected MCP servers
 
 Current builtin tools:
@@ -355,7 +355,7 @@ Current builtin tools:
 - `offset`: one-based recent exchange offset; `1` is the newest completed exchange
 - `count`: number of exchanges to return, clamped to `1` through `3`
 
-The tool is read-only and scoped to the current request's `session_id` from `toolctx.MetadataFromContext`.
+The tool is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
 
 Optional external tools:
 
@@ -373,7 +373,7 @@ The registry:
 
 ### MCP Integration
 
-- MCP client startup lives in `internal/mcpclient/`
+- MCP client startup lives in `internal/mcp/`
 - GitHub is the only MCP server integration today
 - The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
 - Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
@@ -633,18 +633,19 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/memory/retrieval.go`          | Semantic session-memory selection |
 | `internal/memory/compact.go`            | Retention pruning and token estimates |
 | `internal/memory/budget.go`             | Context budget discovery          |
-| `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
+| `internal/mcp/manager.go`               | MCP client bootstrap and catalog  |
 | `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
 | `internal/routing/types.go`             | Gateway-neutral routing types     |
 | `internal/llm/gateway.go`               | LLM gateway HTTP client           |
 | `internal/modelinfo/`                   | Model metadata discovery          |
-| `internal/tools/registry.go`            | Tool schema loading and execution |
-| `internal/tools/bootstrap.go`           | Builtin tool wiring               |
-| `internal/tools/sessionhistory/`        | `session.recent` runtime handler  |
-| `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
-| `internal/tools/soulmemory/store.go`    | Soul file store                   |
+| `internal/tools/registry/`              | Tool schema loading and execution |
+| `internal/tools/bootstrap.go`           | Tool registry assembly            |
+| `internal/tools/builtin/`               | Builtin tool wiring and handlers  |
+| `internal/tools/builtin/sessionhistory/` | `session.recent` runtime handler |
+| `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store |
+| `internal/tools/builtin/soul/store.go`  | Soul file store                   |
 | `internal/accountlink/store.go`         | Canonical account link store      |
-| `internal/toolctx/toolctx.go`           | Request metadata propagation for tools |
+| `internal/requestctx/requestctx.go`     | Request metadata propagation through context |
 | `internal/media/images.go`              | Image normalization and validation |
 | `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
@@ -666,7 +667,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 1. Add a schema file to `data/tools/<name>.md`
 2. Add runtime code under `internal/tools/<name>/` if needed
-3. Register the handler in `internal/tools/bootstrap.go`
+3. Register the handler in `internal/tools/builtin/`
 
 ### Adding a Gateway
 

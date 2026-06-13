@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 // SearchResult holds a single result returned by a web search.
@@ -90,7 +90,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 			return "", fmt.Errorf("query parameter was empty")
 		}
 
-		meta := toolctx.MetadataFromContext(ctx)
+		meta := requestctx.MetadataFromContext(ctx)
 		log.Agent("agent.tool.web.search", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
 			"agent.tool.web.search.start",
 			"starting web search tool",

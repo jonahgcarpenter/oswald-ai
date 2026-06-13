@@ -1,4 +1,4 @@
-package soulmemory
+package soul
 
 import (
 	"context"
@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 }
 

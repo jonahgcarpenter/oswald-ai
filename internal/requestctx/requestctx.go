@@ -1,6 +1,6 @@
-// Package toolctx provides context key helpers for passing request-scoped
+// Package requestctx provides context key helpers for passing request-scoped
 // metadata through the tool execution pipeline.
-package toolctx
+package requestctx
 
 import "context"
 

@@ -1,4 +1,4 @@
-package soulmemory
+package soul
 
 import (
 	"fmt"

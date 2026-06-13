@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 // GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
@@ -212,7 +212,7 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (*EmbedResp
 		return nil, fmt.Errorf("failed to read embedding response body: %w", err)
 	}
 
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	requestLog := c.log.With(config.F("request_id", meta.RequestID), config.F("gateway", meta.Gateway), config.F("user_id", meta.SenderID), config.F("session_id", meta.SessionID), config.F("model", req.Model))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := bodySnippet(rawBody)
@@ -271,7 +271,7 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 }
 
 func (c *GatewayClient) requestLog(ctx context.Context, model string) *config.Logger {
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	return c.log.With(config.F("request_id", meta.RequestID), config.F("gateway", meta.Gateway), config.F("user_id", meta.SenderID), config.F("session_id", meta.SessionID), config.F("model", model))
 }
 

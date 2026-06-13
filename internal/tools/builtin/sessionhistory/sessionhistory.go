@@ -7,7 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 const maxRecentCount = 3
@@ -15,7 +15,7 @@ const maxRecentCount = 3
 // NewRecentHandler returns a Handler for the session.recent tool.
 func NewRecentHandler(store *memory.Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		meta := toolctx.MetadataFromContext(ctx)
+		meta := requestctx.MetadataFromContext(ctx)
 		if meta.SessionID == "" {
 			return "", fmt.Errorf("session.recent: no session identity available in this context")
 		}

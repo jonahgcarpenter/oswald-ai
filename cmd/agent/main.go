@@ -12,12 +12,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 func main() {
@@ -59,7 +59,7 @@ func main() {
 	// The soul store is shared between the tool registry (so the agent can edit
 	// its soul via the soul.* tools) and the agent itself (so it can read
 	// the current soul on every request as its system prompt).
-	soulStore := soulmemory.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
+	soulStore := soul.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
 	// The user memory store is owned by the tool registry so the memory.* tool
@@ -72,7 +72,7 @@ func main() {
 	accountLinkCommands := accountlink.NewCommandHandler(accountLinkService)
 	log.Debug("app.account_link.configured", "configured account link store", config.F("path", config.DefaultAccountLinkPath))
 
-	mcpManager, err := mcpclient.NewManagerFromConfig(context.Background(), cfg, rootLog)
+	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
 	if err != nil {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP clients", config.ErrorField(err))
 	}

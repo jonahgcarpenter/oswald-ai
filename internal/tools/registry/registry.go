@@ -1,4 +1,4 @@
-package tools
+package registry
 
 import (
 	"context"
@@ -68,9 +68,9 @@ type Registry struct {
 	log      *config.Logger
 }
 
-// NewRegistry creates an empty Registry. Call LoadFromDirectory to populate
+// New creates an empty Registry. Call LoadFromDirectory to populate
 // it with tool definitions, then RegisterHandler for each tool that needs execution.
-func NewRegistry(log *config.Logger) *Registry {
+func New(log *config.Logger) *Registry {
 	return &Registry{
 		specs:    make(map[string]Spec),
 		handlers: make(map[string]Handler),
@@ -78,9 +78,9 @@ func NewRegistry(log *config.Logger) *Registry {
 	}
 }
 
-// NewRegistryFromDirectory creates a Registry and loads tool definitions from dir.
-func NewRegistryFromDirectory(dir string, log *config.Logger) (*Registry, error) {
-	registry := NewRegistry(log)
+// NewFromDirectory creates a Registry and loads tool definitions from dir.
+func NewFromDirectory(dir string, log *config.Logger) (*Registry, error) {
+	registry := New(log)
 	if err := registry.LoadFromDirectory(dir); err != nil {
 		return nil, fmt.Errorf("failed to load tool definitions: %w", err)
 	}

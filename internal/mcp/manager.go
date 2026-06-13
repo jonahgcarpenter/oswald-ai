@@ -1,4 +1,4 @@
-package mcpclient
+package mcp
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	githubmcp "github.com/jonahgcarpenter/oswald-ai/internal/mcpclient/github"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	githubmcp "github.com/jonahgcarpenter/oswald-ai/internal/mcp/github"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -151,7 +151,7 @@ func githubToolSpec(tool *gomcp.Tool, session *gomcp.ClientSession, log *config.
 		Server:      "github",
 		Parameters:  params,
 		Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
-			meta := toolctx.MetadataFromContext(ctx)
+			meta := requestctx.MetadataFromContext(ctx)
 			reqLog := log.Agent("agent.tool.mcp.github", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 			reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", toolName), config.F("server", "github"))
 

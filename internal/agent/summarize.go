@@ -8,7 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 // maxSummaryChars caps compacted history length to keep it from consuming too
@@ -79,7 +79,7 @@ func (s *Summarizer) Summarize(ctx context.Context, turns []memory.Turn) (string
 		result = string(runes[:maxSummaryChars])
 	}
 
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	s.log.Agent("agent.summarizer", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
 		"agent.summarizer.generated",
 		"generated history summary",

@@ -7,11 +7,11 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 }
 
@@ -20,7 +20,7 @@ func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 // agent, so the model never needs to pass user identity as an argument.
 func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := toolctx.SenderIDFromContext(ctx)
+		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.remember: no user identity available in this context")
 		}
@@ -45,7 +45,7 @@ func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Conte
 // migrated content is written back to disk so the migration only fires once.
 func NewRecallHandler(store *Store, chatClient llm.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := toolctx.SenderIDFromContext(ctx)
+		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.recall: no user identity available in this context")
 		}
@@ -62,7 +62,7 @@ func NewRecallHandler(store *Store, chatClient llm.Chatter, model string, log *c
 // agent, so the model never needs to pass user identity as an argument.
 func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := toolctx.SenderIDFromContext(ctx)
+		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.forget: no user identity available in this context")
 		}
