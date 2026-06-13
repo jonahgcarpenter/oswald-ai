@@ -6,8 +6,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
 
-const agentErrorText = "Sorry, I encountered an internal error processing that."
-
 // Execute applies shared routing policy, command handling, and broker submission.
 func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	log := deps.Log.Server("gateway.runtime", config.F("gateway", req.Gateway))
@@ -44,7 +42,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		}
 		if err != nil {
 			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))
-			response = "Failed to process command."
+			response = safeErrorText(err)
 		}
 		sendErr := responder.SendCommandResponse(response)
 		if sendErr != nil {
@@ -90,7 +88,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 
 	if result.Err != nil {
 		log.Error("gateway.response.failed", "agent processing failed", config.F("request_id", req.RequestID), config.ErrorField(result.Err))
-		err := responder.SendAgentError(agentErrorText)
+		err := responder.SendAgentError(safeErrorText(result.Err))
 		if err != nil {
 			log.Error("gateway.send.failed", "failed to send agent error response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
 		}
