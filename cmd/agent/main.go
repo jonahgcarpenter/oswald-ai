@@ -11,9 +11,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
@@ -28,26 +29,28 @@ func main() {
 	log := rootLog.Server("app")
 	log.Debug("app.config.loaded", "loaded runtime configuration", config.F("log_level", cfg.LogLevel.String()))
 
-	if cfg.OllamaModel == "" {
-		log.Fatal("app.config.invalid", "missing required OLLAMA_MODEL environment variable")
+	if cfg.LLMGatewayModel == "" {
+		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_MODEL environment variable")
 	}
-	log.Info("app.model.selected", "selected Ollama model", config.F("model", cfg.OllamaModel))
+	log.Info("app.model.selected", "selected LLM gateway model", config.F("model", cfg.LLMGatewayModel))
 
-	if cfg.OllamaURL == "" {
-		log.Fatal("app.config.invalid", "missing required OLLAMA_URL configuration")
+	if cfg.LLMGatewayURL == "" {
+		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_URL configuration")
 	}
 
-	llmClient := ollama.NewClient(cfg.OllamaURL, rootLog.Server("provider.ollama"))
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, rootLog.Server("provider.gateway"))
 
-	budget, budgetErr := memory.ResolveContextBudget(context.Background(), llmClient, cfg.OllamaModel)
+	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
+	budget := memory.ContextBudgetFromModelDetails(details)
 	if budgetErr != nil {
 		log.Warn("app.context_budget.resolve_failed", "failed to discover context budget",
-			config.F("model", cfg.OllamaModel),
+			config.F("model", cfg.LLMGatewayModel),
 			config.ErrorField(budgetErr),
 		)
 	}
 	log.Info("app.context_budget.resolved", "resolved context budget",
-		config.F("model", cfg.OllamaModel),
+		config.F("model", cfg.LLMGatewayModel),
+		config.F("provider", details.Provider),
 		config.F("context_window", budget.ContextWindow),
 		config.F("prompt_budget", budget.PromptBudget()),
 		config.F("source", budget.Source),
@@ -86,9 +89,9 @@ func main() {
 		config.F("context_window", budget.ContextWindow),
 		config.F("prompt_budget", budget.PromptBudget()),
 	)
-	if cfg.OllamaEmbeddingModel != "" {
+	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
-			config.F("embedding_model", cfg.OllamaEmbeddingModel),
+			config.F("embedding_model", cfg.LLMGatewayEmbeddingModel),
 			config.F("recent_turn_count", 0),
 			config.F("max_relevant_turn_count", 3),
 			config.F("min_similarity", 0.70),
@@ -98,7 +101,7 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic session-memory retrieval disabled")
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.OllamaModel, mcpManager, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
@@ -108,22 +111,17 @@ func main() {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}
 
-	if cfg.AgentTracePath != "" {
-		log.Info("app.trace.enabled", "enabled agent trace dumps", config.F("path", cfg.AgentTracePath))
-	}
-
 	agentEngine := agent.NewAgent(
 		llmClient,
 		llmClient,
 		toolRegistry,
-		cfg.OllamaModel,
-		cfg.OllamaEmbeddingModel,
+		cfg.LLMGatewayModel,
+		cfg.LLMGatewayEmbeddingModel,
 		soulStore,
 		userMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
 		memoryStore,
-		cfg.AgentTracePath,
 		rootLog,
 	)
 

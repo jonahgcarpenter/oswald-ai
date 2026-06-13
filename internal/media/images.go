@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	_ "github.com/jdeng/goheif"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	_ "golang.org/x/image/webp"
 )
 
@@ -44,9 +44,9 @@ var decodableImageMIMETypes = map[string]struct{}{
 	"image/heif-sequence": {},
 }
 
-// NormalizationResult describes how a raw image payload was normalized for Ollama.
+// NormalizationResult describes how a raw image payload was normalized for the LLM provider.
 type NormalizationResult struct {
-	Image            ollama.InputImage
+	Image            llm.InputImage
 	DetectedMIME     string
 	DecodedFormat    string
 	Width            int
@@ -67,38 +67,38 @@ func LooksLikeImageMIME(mimeType string) bool {
 	return strings.HasPrefix(mimeType, "image/")
 }
 
-// BuildInputImage validates and normalizes a base64 image payload for Ollama.
-func BuildInputImage(mimeType, encodedData, source string) (ollama.InputImage, error) {
+// BuildInputImage validates and normalizes a base64 image payload for the LLM provider.
+func BuildInputImage(mimeType, encodedData, source string) (llm.InputImage, error) {
 	payload := base64Payload(encodedData)
 	if payload == "" {
-		return ollama.InputImage{}, fmt.Errorf("image payload is empty")
+		return llm.InputImage{}, fmt.Errorf("image payload is empty")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
-		return ollama.InputImage{}, fmt.Errorf("image payload is not valid base64")
+		return llm.InputImage{}, fmt.Errorf("image payload is not valid base64")
 	}
 	if len(decoded) > MaxImageBytes {
-		return ollama.InputImage{}, fmt.Errorf("image payload exceeds %d bytes", MaxImageBytes)
+		return llm.InputImage{}, fmt.Errorf("image payload exceeds %d bytes", MaxImageBytes)
 	}
 
 	result, err := NormalizeInputImageFromBytes(nil, mimeType, decoded, source)
 	if err != nil {
-		return ollama.InputImage{}, err
+		return llm.InputImage{}, err
 	}
 	return result.Image, nil
 }
 
-// BuildInputImageFromBytes validates and normalizes raw image bytes for Ollama.
-func BuildInputImageFromBytes(mimeType string, data []byte, source string) (ollama.InputImage, error) {
+// BuildInputImageFromBytes validates and normalizes raw image bytes for the LLM provider.
+func BuildInputImageFromBytes(mimeType string, data []byte, source string) (llm.InputImage, error) {
 	result, err := NormalizeInputImageFromBytes(nil, mimeType, data, source)
 	if err != nil {
-		return ollama.InputImage{}, err
+		return llm.InputImage{}, err
 	}
 	return result.Image, nil
 }
 
 // NormalizeInputImageFromBytes decodes a raw image, preserves alpha with PNG,
-// and otherwise re-encodes to JPEG before returning the Ollama payload.
+// and otherwise re-encodes to JPEG before returning the LLM payload.
 func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data []byte, source string) (NormalizationResult, error) {
 	if len(data) == 0 {
 		return NormalizationResult{}, fmt.Errorf("image payload is empty")
@@ -129,7 +129,7 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 	}
 
 	return NormalizationResult{
-		Image: ollama.InputImage{
+		Image: llm.InputImage{
 			MimeType: normalizedMIME,
 			Data:     base64.StdEncoding.EncodeToString(normalizedBytes),
 			Source:   source,

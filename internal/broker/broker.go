@@ -5,7 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 const (
@@ -26,7 +26,7 @@ type Request struct {
 	DisplayName  string                  // Human-readable display name for the sender (optional)
 	SessionKey   string                  // Unique conversation context key
 	Prompt       string                  // The user's message text
-	Images       []ollama.InputImage     // Optional: current-turn image attachments for multimodal models
+	Images       []llm.InputImage        // Optional: current-turn image attachments for multimodal models
 	StreamFunc   func(agent.StreamChunk) // Optional: streaming callback (nil for non-streaming gateways)
 	ResponseChan chan Result             // Broker writes the final result here; must be buffered(1)
 }

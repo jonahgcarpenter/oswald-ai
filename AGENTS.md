@@ -4,7 +4,7 @@ This file is the internal reference for how Oswald AI works today.
 
 ## Project Overview
 
-Oswald AI is a pure Go application built around a single Ollama-backed agent loop.
+Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
 It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin tools:
 
 - `web.search`
@@ -17,7 +17,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
 
-Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active Ollama model supports images.
+Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
 
@@ -35,7 +35,8 @@ Current layers:
 8. `internal/tools/` — tool registry, builtin handlers, and schema loading
 9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
 10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-11. `internal/ollama/` — Ollama client and request/response schema
+11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+12. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
 
 ## Startup Flow
 
@@ -43,8 +44,8 @@ Current layers:
 
 1. Load environment config
 2. Create the shared logger
-3. Create the Ollama client
-4. Discover context budget from Ollama `/api/show`
+3. Create the LLM gateway client
+4. Discover context budget from OpenRouter model metadata, with `MODEL_*` environment overrides taking precedence
 5. Create the soul store and persistent user-memory store
 6. Create the account-link service and shared `/connect` and `/disconnect` command handler
 7. Initialize optional MCP clients
@@ -67,7 +68,7 @@ Every request follows the same high-level path:
 5. Account-link commands are handled by the gateway without reaching the agent loop
 6. The gateway submits a `broker.Request`
 7. A broker worker calls `(*Agent).Process()`
-8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs Ollama, executes tool calls if requested, and loops until the model stops calling tools
+8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 9. The final response is returned to the originating gateway
 10. The gateway sends the response back to the client, Discord channel, or iMessage chat
 
@@ -101,25 +102,23 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
    - current date and time
-5. Load retained session turns from `internal/memory`; when `OLLAMA_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
+5. Load retained session turns from `internal/memory`; when `LLM_GATEWAY_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
 6. Compact older selected turns if the estimated prompt exceeds the active model budget
-7. Build the Ollama message array: system prompt, selected retained history, current user prompt, and any current-turn images
-8. Call Ollama with all registered tools available
+7. Build the chat message array: system prompt, selected retained history, current user prompt, and any current-turn images
+8. Call the LLM gateway with all registered tools available
 9. If the model emits tool calls:
     - execute each tool handler
     - append tool results as `tool` messages
     - repeat until no tool calls remain or the consecutive tool-failure limit is hit
 10. If tool failures exhaust the retry budget, make one final model call with tools disabled
-11. Optionally write a per-request agent trace when `AGENT_TRACE_PATH` is set
-12. Persist only the cleaned final user message and final assistant reply to session memory
-13. Return the final `AgentResponse`
+11. Persist only the cleaned final user message and final assistant reply to session memory
+12. Return the final `AgentResponse`
 
 Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and semantic query text to avoid reintroducing the same quoted message later
-- Agent trace dumps include image counts and metadata, not base64 payloads
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 
 Streaming behavior:
@@ -181,8 +180,8 @@ Oswald keeps three distinct memory layers.
 - Stored only in memory until process exit
 - Keyed by a gateway-provided `SessionKey`
 - Stores only final user/assistant turn pairs
-- When `OLLAMA_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
-- When `OLLAMA_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
+- When `LLM_GATEWAY_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
+- When `LLM_GATEWAY_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
 - Semantic retrieval embeds the cleaned current user message, strips leading reply-context wrappers, and includes up to three retained turns with cosine similarity at or above `0.70`
 - No recent turn is included automatically when semantic retrieval is enabled
 - The model can call `session.recent` to inspect recent completed exchanges when the current prompt is a vague follow-up and semantic context is not already present
@@ -197,7 +196,7 @@ Retention behavior:
 
 Prompt-budget behavior:
 
-- The agent estimates prompt size before calling Ollama
+- The agent estimates prompt size before calling the LLM gateway
 - If selected retained history would exceed budget, the oldest selected turns are summarized into a synthetic replacement turn
 - When semantic retrieval is disabled, that compacted turn is written back into session memory and gets a fresh timestamp
 - When semantic retrieval is enabled, request-time compaction affects only the selected context for that request and does not overwrite unrelated retained turns
@@ -207,10 +206,14 @@ Prompt-budget behavior:
 
 Context budgeting lives in `internal/memory/budget.go`.
 
-- At startup the app queries Ollama `/api/show`
-- `num_ctx` from model parameters is preferred
-- `*.context_length` from model metadata is the fallback
-- If discovery fails, package defaults are used
+- At startup the app queries `https://openrouter.ai/api/v1/models`
+- Models are matched by `hugging_face_id` against `LLM_GATEWAY_MODEL`, first exactly and then with trimmed case-insensitive matching
+- `top_provider.context_length` provides the context window when no environment override is set
+- `top_provider.max_completion_tokens` provides the response reserve when no environment override is set
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` override discovered values field-by-field
+- Max input tokens are derived as context window minus max output tokens when possible
+- OpenRouter lookup still runs when overrides are set; differing discovered values are logged as override discrepancies
+- If discovery and overrides do not provide a field, package defaults are used
 
 The prompt budget is the context window minus reserves for:
 
@@ -363,7 +366,7 @@ Optional external tools:
 The registry:
 
 - loads markdown specs from disk
-- converts them into Ollama tool schemas
+- converts them into LLM tool schemas
 - maps tool names to handlers
 - executes handlers when the model issues tool calls
 - keeps builtin tools and MCP-discovered tools in the same runtime catalog
@@ -374,7 +377,7 @@ The registry:
 - GitHub is the only MCP server integration today
 - The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
 - Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
-- MCP tools are surfaced to the model with a `github.` prefix and traced separately in agent trace dumps
+- MCP tools are surfaced to the model with a `github.` prefix
 
 ### Tool Failure Handling
 
@@ -382,24 +385,26 @@ The registry:
 - Consecutive failures are tracked per request
 - Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
 
-## Ollama Integration
+## LLM Gateway Integration
 
 Files:
 
-- `internal/ollama/client.go`
-- `internal/ollama/schema.go`
-- `internal/ollama/types.go`
+- `internal/llm/gateway.go`
+- `internal/llm/schema.go`
+- `internal/llm/types.go`
+- `internal/modelinfo/`
 
 Notes:
 
-- Ollama is the only model backend
-- `/api/show` is used at startup for context-budget discovery
-- `/api/chat` is used for normal requests, tool calling, and streaming
-- `/api/embed` is used when `OLLAMA_EMBEDDING_MODEL` is set for semantic session-memory retrieval
-- The client maps between internal app types and Ollama's wire format
+- The LLM gateway is the model gateway
+- OpenRouter's public model catalog is used at startup for context-budget discovery
+- `MODEL_*` environment overrides take precedence over discovered model metadata
+- `/v1/chat/completions` is used for normal requests, tool calling, and streaming
+- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic session-memory retrieval
+- The client maps between internal app types and the gateway's OpenAI-compatible wire format
 - Streaming responses accumulate both `thinking` and visible content
-- Current-turn images are sent to Ollama on the user message `images` field when provided by a gateway
-- Gateways normalize accepted source images into JPEG or PNG before they reach Ollama
+- Current-turn images are sent to the LLM gateway as OpenAI-compatible image URL content blocks when provided by a gateway
+- Gateways normalize accepted source images into JPEG or PNG before they reach the LLM gateway
 
 ## Image Validation
 
@@ -413,7 +418,7 @@ Image validation is centralized in `internal/media/images.go`.
   - `image/heif`
   - `image/heic-sequence`
   - `image/heif-sequence`
-- Normalized output formats sent to Ollama:
+- Normalized output formats sent to the LLM gateway:
   - `image/jpeg`
   - `image/png`
 - Maximum images per request: `4`
@@ -422,26 +427,6 @@ Image validation is centralized in `internal/media/images.go`.
 - Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type`, content sniffing, and HEIC/HEIF signature detection
 - Decoded images are re-encoded as PNG when transparency must be preserved; otherwise they are re-encoded as JPEG
 - Any attachment that fails these checks is treated as an unsupported file and surfaced to the model via a short prompt note rather than a hard request failure
-
-## Agent Trace Dumps
-
-Set `AGENT_TRACE_PATH` to enable per-request markdown agent trace dumps.
-
-Each trace includes:
-
-- model and session metadata
-- estimated token counts before and after pruning
-- number of compacted turn pairs
-- the full message transcript for the entire agent loop
-- raw tool calls emitted by the model
-- raw tool results injected back into the model
-- final response content and accumulated thinking
-- final model metrics
-- semantic-memory retrieval metadata, including embedding model, selected turn counts, per-candidate similarity, inclusion reason, and whether reply context was stripped
-- builtin tool definitions included in the request
-- MCP tool definitions grouped by server
-
-Implementation: `internal/debug/agent_trace.go`
 
 ## Build, Run, and Verification
 
@@ -552,7 +537,7 @@ Examples:
 - `app.start`
 - `broker.request.rejected`
 - `gateway.request.received`
-- `provider.ollama.chat.http_error`
+- `provider.gateway.chat.http_error`
 - `agent.request.start`
 - `agent.loop.iteration`
 - `agent.tool.failure`
@@ -622,9 +607,12 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `BLUEBUBBLES_URL`          | empty                          | BlueBubbles server base URL; enables iMessage when paired with password |
 | `BLUEBUBBLES_PASSWORD`     | empty                          | BlueBubbles server password/token used for iMessage REST API auth       |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                      | Enables the GitHub MCP client and read-only `github.*` tools            |
-| `OLLAMA_URL`               | `http://localhost:11434`       | Ollama API base URL                                                     |
-| `OLLAMA_MODEL`             | empty                          | Model name passed directly to Ollama; required at startup               |
-| `OLLAMA_EMBEDDING_MODEL`   | empty                          | Optional Ollama embedding model for semantic session-memory retrieval   |
+| `LLM_GATEWAY_URL`              | `http://localhost:8080`        | LLM gateway API base URL                                                |
+| `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
+| `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
+| `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
+| `MODEL_CONTEXT_WINDOW`     | `0`                            | Optional context-window override for prompt budgeting                   |
+| `MODEL_MAX_OUTPUT_TOKENS`  | `0`                            | Optional output-token reserve override for prompt budgeting             |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
 | `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
 | `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
@@ -632,7 +620,6 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `LOG_LEVEL`                | `info`                         | Logging verbosity                                                       |
 | `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables the cap                   |
 | `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables expiry                           |
-| `AGENT_TRACE_PATH`         | empty                          | Directory for per-request agent trace markdown dumps                    |
 
 ## Key Files
 
@@ -649,7 +636,8 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
 | `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
 | `internal/routing/types.go`             | Gateway-neutral routing types     |
-| `internal/ollama/client.go`             | Ollama HTTP client                |
+| `internal/llm/gateway.go`               | LLM gateway HTTP client           |
+| `internal/modelinfo/`                   | Model metadata discovery          |
 | `internal/tools/registry.go`            | Tool schema loading and execution |
 | `internal/tools/bootstrap.go`           | Builtin tool wiring               |
 | `internal/tools/sessionhistory/`        | `session.recent` runtime handler  |
@@ -662,7 +650,6 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
 | `internal/gateway/discord/gateway.go`   | Discord transport                 |
 | `internal/gateway/imessage/gateway.go`  | iMessage BlueBubbles transport    |
-| `internal/debug/agent_trace.go`         | Agent trace dump writer           |
 
 ## Code Style
 
@@ -701,7 +688,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only seven builtin tools ship locally; extra tools require optional MCP integration
 - GitHub is the only MCP server integration today
-- Ollama is the only LLM backend
+- The OpenAI-compatible LLM gateway is the model gateway; model metadata comes from OpenRouter and optional `MODEL_*` overrides
 
 Account-linking note:
 

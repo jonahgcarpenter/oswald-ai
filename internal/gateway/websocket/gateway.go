@@ -11,8 +11,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 )
 
 // Name returns the human-readable gateway name.
@@ -56,7 +56,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
 		// clients keep working without modification.
 		var userPrompt, userID, displayName string
-		var userImages []ollama.InputImage
+		var userImages []llm.InputImage
 		var incoming IncomingMessage
 		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
@@ -180,12 +180,12 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 	}
 }
 
-func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]ollama.InputImage, []string) {
+func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]llm.InputImage, []string) {
 	if len(images) == 0 {
 		return nil, nil
 	}
 
-	validated := make([]ollama.InputImage, 0, len(images))
+	validated := make([]llm.InputImage, 0, len(images))
 	unsupported := make([]string, 0)
 	for _, image := range images {
 		if len(validated) >= media.MaxImagesPerRequest {

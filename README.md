@@ -9,9 +9,9 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 ## Features
 
-- Iterative tool-calling agent loop on top of Ollama
+- Iterative tool-calling agent loop on top of an OpenAI-compatible LLM gateway
 - iMessage, Discord, and WebSocket gateway
-- Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, `soul.patch`, and `session.recent` tools
 - MCP integration starting with Github
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file
@@ -28,6 +28,21 @@ Oswald uses three memory layers:
 `AGENTS.md` documents the full runtime and architecture in detail.
 
 ## Usage
+
+Configure the LLM gateway before startup:
+
+```bash
+export LLM_GATEWAY_URL=http://localhost:8080
+export LLM_GATEWAY_MODEL=<gateway-route-or-model>
+```
+
+Optional semantic session-memory retrieval uses gateway embeddings:
+
+```bash
+export LLM_GATEWAY_EMBEDDING_MODEL=<embedding-route-or-model>
+```
+
+At startup, Oswald looks up model context metadata from OpenRouter by matching `LLM_GATEWAY_MODEL` against `hugging_face_id`. You can override discovered budget values with `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS`; max input tokens are derived from those values.
 
 ### Discord/iMessage Bot
 
@@ -72,7 +87,7 @@ What is Bitcoins current price?
 
 # Receive streaming chunks, then final JSON:
 # "Bitcoin is currently..."
-# {"model":"llama2-uncensored:7b","response":"..."}
+# {"model":"<gateway-route-or-model>","response":"..."}
 ```
 
 ## Roadmap

@@ -5,9 +5,9 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcpclient"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/sessionhistory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
@@ -19,7 +19,7 @@ import (
 // can share the same instances with the tool handlers.
 // chatClient and model are forwarded to the memory.recall handler so it can perform
 // LLM-based migration of old flat-format user memory files on first recall.
-func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient ollama.Chatter, model string, mcpManager *mcpclient.Manager, log *config.Logger) (*Registry, error) {
+func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient llm.Chatter, model string, mcpManager *mcpclient.Manager, log *config.Logger) (*Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	registry, err := NewRegistryFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
@@ -38,7 +38,7 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soulmemory.Store, user
 }
 
 // registerBuiltins wires all builtin tools into the shared registry.
-func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient ollama.Chatter, model string, log *config.Logger) error {
+func registerBuiltins(registry *Registry, cfg *config.Config, soulStore *soulmemory.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient llm.Chatter, model string, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := registry.RegisterHandler("web.search", Handler(websearch.NewHandler(searchClient, log))); err != nil {

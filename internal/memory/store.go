@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 // Options controls in-process conversation retention.
@@ -50,8 +50,8 @@ type RetrievalDetail struct {
 // pressure requires replacing older history with a shorter synthetic turn.
 type Turn struct {
 	CreatedAt time.Time
-	User      ollama.ChatMessage
-	Assistant ollama.ChatMessage
+	User      llm.ChatMessage
+	Assistant llm.ChatMessage
 	Embedding []float64
 }
 
@@ -81,7 +81,7 @@ func NewStore(options Options, log *config.Logger) *Store {
 
 // History returns the retained user/assistant messages for the given session
 // after destructively applying TTL and max-turn pruning.
-func (s *Store) History(sessionKey string) []ollama.ChatMessage {
+func (s *Store) History(sessionKey string) []llm.ChatMessage {
 	return FlattenTurns(s.Turns(sessionKey))
 }
 
@@ -178,7 +178,7 @@ func (s *Store) ReplaceTurns(sessionKey string, turns []Turn) {
 
 // AppendTurn adds a user/assistant turn pair to the session identified by sessionKey.
 // If sessionKey is empty, AppendTurn is a no-op.
-func (s *Store) AppendTurn(sessionKey string, user ollama.ChatMessage, assistant ollama.ChatMessage, embedding []float64) {
+func (s *Store) AppendTurn(sessionKey string, user llm.ChatMessage, assistant llm.ChatMessage, embedding []float64) {
 	if sessionKey == "" {
 		return
 	}
@@ -239,13 +239,13 @@ func sanitizeOptions(options Options) Options {
 }
 
 // FlattenTurns converts retained turn pairs into the interleaved user/assistant
-// chat-history format expected by Ollama requests.
-func FlattenTurns(turns []Turn) []ollama.ChatMessage {
+// chat-history format expected by the LLM provider.
+func FlattenTurns(turns []Turn) []llm.ChatMessage {
 	if len(turns) == 0 {
 		return nil
 	}
 
-	history := make([]ollama.ChatMessage, 0, len(turns)*2)
+	history := make([]llm.ChatMessage, 0, len(turns)*2)
 	for _, entry := range turns {
 		history = append(history, entry.User, entry.Assistant)
 	}

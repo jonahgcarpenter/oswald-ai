@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
@@ -43,7 +43,7 @@ func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Conte
 // recall is called on a memory file that pre-dates the category system. The LLM
 // is asked to classify each flat fact into the correct category section. The
 // migrated content is written back to disk so the migration only fires once.
-func NewRecallHandler(store *Store, chatClient ollama.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewRecallHandler(store *Store, chatClient llm.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		userID := toolctx.SenderIDFromContext(ctx)
 		if userID == "" {
@@ -95,7 +95,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 // If the memory file is in the old flat format (no ## category headers), an LLM
 // call is made to categorize the facts. The result is written back to disk before
 // being returned so the migration only happens once.
-func handleRecall(ctx context.Context, store *Store, chatClient ollama.Chatter, model string, log *config.Logger, userID, category string) (string, error) {
+func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, model string, log *config.Logger, userID, category string) (string, error) {
 	// Read the raw file first to check whether migration is needed.
 	raw, err := store.Read(userID)
 	if err != nil {
@@ -182,7 +182,7 @@ func needsMigration(content string) bool {
 // migrateWithLLM asks the model to classify each fact from a flat-format memory
 // file into the correct category section and returns the result in the new
 // categorized Markdown format. The caller is responsible for writing it to disk.
-func migrateWithLLM(ctx context.Context, chatClient ollama.Chatter, model, raw string, log *config.Logger) (string, error) {
+func migrateWithLLM(ctx context.Context, chatClient llm.Chatter, model, raw string, log *config.Logger) (string, error) {
 	prompt := `You are reorganizing a user memory file into categorized sections.
 
 The four valid categories are:
@@ -214,9 +214,9 @@ Memory file to reorganize:
 
 ` + raw
 
-	req := ollama.ChatRequest{
+	req := llm.ChatRequest{
 		Model: model,
-		Messages: []ollama.ChatMessage{
+		Messages: []llm.ChatMessage{
 			{Role: "user", Content: prompt},
 		},
 		Stream: false,

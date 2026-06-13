@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/ollama"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
 )
 
@@ -15,20 +15,20 @@ import (
 // much of the context budget across many compaction cycles.
 const maxSummaryChars = 2000
 
-// OllamaSummarizer generates compacted conversation summaries using the same
-// Ollama model as the main agent. It is invoked synchronously when prompt
+// Summarizer generates compacted conversation summaries using the same
+// model as the main agent. It is invoked synchronously when prompt
 // budget pressure requires older retained turns to be collapsed into a single
 // replacement turn pair.
-type OllamaSummarizer struct {
-	client ollama.Chatter
+type Summarizer struct {
+	client llm.Chatter
 	model  string
 	log    *config.Logger
 }
 
-// NewOllamaSummarizer creates a new OllamaSummarizer backed by the given Ollama
-// chat client and model. The summarizer uses no tools and no streaming.
-func NewOllamaSummarizer(client ollama.Chatter, model string, log *config.Logger) *OllamaSummarizer {
-	return &OllamaSummarizer{
+// NewSummarizer creates a new Summarizer backed by the given chat client and model.
+// The summarizer uses no tools and no streaming.
+func NewSummarizer(client llm.Chatter, model string, log *config.Logger) *Summarizer {
+	return &Summarizer{
 		client: client,
 		model:  model,
 		log:    log,
@@ -38,7 +38,7 @@ func NewOllamaSummarizer(client ollama.Chatter, model string, log *config.Logger
 // Summarize distills the given conversation turns into a concise compacted
 // history summary. The result is capped at maxSummaryChars to prevent
 // unbounded growth across repeated compaction cycles.
-func (s *OllamaSummarizer) Summarize(ctx context.Context, turns []memory.Turn) (string, error) {
+func (s *Summarizer) Summarize(ctx context.Context, turns []memory.Turn) (string, error) {
 	if len(turns) == 0 {
 		return "", nil
 	}
@@ -55,9 +55,9 @@ func (s *OllamaSummarizer) Summarize(ctx context.Context, turns []memory.Turn) (
 		"Write a concise 2-4 sentence summary that preserves key facts, names, decisions, requests, and ongoing topics. Do not invent or infer anything not stated. Output only the summary text, no preamble.",
 	}, "\n\n")
 
-	req := ollama.ChatRequest{
+	req := llm.ChatRequest{
 		Model: s.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []llm.ChatMessage{
 			{Role: "user", Content: summaryPrompt},
 		},
 		Stream: false,
@@ -65,7 +65,7 @@ func (s *OllamaSummarizer) Summarize(ctx context.Context, turns []memory.Turn) (
 
 	resp, err := s.client.Chat(ctx, req, nil)
 	if err != nil {
-		return "", fmt.Errorf("summarizer: ollama call failed: %w", err)
+		return "", fmt.Errorf("summarizer: model call failed: %w", err)
 	}
 
 	result := strings.TrimSpace(resp.Message.Content)
