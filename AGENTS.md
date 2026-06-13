@@ -36,7 +36,7 @@ Current layers:
 9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
 10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-12. `internal/modelinfo/` — LLM gateway-first model metadata discovery with Ollama provider fallback
+12. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
 
 ## Startup Flow
 
@@ -45,7 +45,7 @@ Current layers:
 1. Load environment config
 2. Create the shared logger
 3. Create the LLM gateway client
-4. Discover context budget from the LLM gateway `/api/models/details`, with direct Ollama `/api/show` only when the gateway reports `provider=ollama` without token limits
+4. Discover context budget from OpenRouter model metadata, with `MODEL_*` environment overrides taking precedence
 5. Create the soul store and persistent user-memory store
 6. Create the account-link service and shared `/connect` and `/disconnect` command handler
 7. Initialize optional MCP clients
@@ -206,12 +206,14 @@ Prompt-budget behavior:
 
 Context budgeting lives in `internal/memory/budget.go`.
 
-- At startup the app queries the LLM gateway `/api/models/details`
-- `max_input_tokens` from the LLM gateway is preferred for prompt budget
-- When the LLM gateway reports `provider=ollama` without token limits, direct Ollama `/api/show` is queried as a metadata fallback
-- `num_ctx` from Ollama model parameters is preferred in that fallback
-- `*.context_length` from Ollama model metadata is the fallback
-- If discovery fails, package defaults are used
+- At startup the app queries `https://openrouter.ai/api/v1/models`
+- Models are matched by `hugging_face_id` against `LLM_GATEWAY_MODEL`, first exactly and then with trimmed case-insensitive matching
+- `top_provider.context_length` provides the context window when no environment override is set
+- `top_provider.max_completion_tokens` provides the response reserve when no environment override is set
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` override discovered values field-by-field
+- Max input tokens are derived as context window minus max output tokens when possible
+- OpenRouter lookup still runs when overrides are set; differing discovered values are logged as override discrepancies
+- If discovery and overrides do not provide a field, package defaults are used
 
 The prompt budget is the context window minus reserves for:
 
@@ -395,8 +397,8 @@ Files:
 Notes:
 
 - The LLM gateway is the model gateway
-- `/api/models/details` is used at startup for context-budget discovery
-- Direct Ollama `/api/show` is used only as a metadata fallback when the LLM gateway identifies an Ollama-backed route without token limits
+- OpenRouter's public model catalog is used at startup for context-budget discovery
+- `MODEL_*` environment overrides take precedence over discovered model metadata
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
 - `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic session-memory retrieval
 - The client maps between internal app types and the gateway's OpenAI-compatible wire format
@@ -609,7 +611,8 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
 | `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
 | `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
-| `OLLAMA_PROVIDER_URL`      | `http://localhost:11434`       | Ollama URL used only for model metadata fallback                        |
+| `MODEL_CONTEXT_WINDOW`     | `0`                            | Optional context-window override for prompt budgeting                   |
+| `MODEL_MAX_OUTPUT_TOKENS`  | `0`                            | Optional output-token reserve override for prompt budgeting             |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
 | `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
 | `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
@@ -685,7 +688,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only seven builtin tools ship locally; extra tools require optional MCP integration
 - GitHub is the only MCP server integration today
-- The OpenAI-compatible LLM gateway is the model gateway; direct Ollama access is used only for metadata fallback
+- The OpenAI-compatible LLM gateway is the model gateway; model metadata comes from OpenRouter and optional `MODEL_*` overrides
 
 Account-linking note:
 

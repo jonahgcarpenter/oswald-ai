@@ -3,7 +3,6 @@ package modelinfo
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
@@ -13,7 +12,7 @@ const (
 	defaultOutputTokens  = 1024
 )
 
-// Details describes model metadata discovered from the LLM gateway or a backing provider.
+// Details describes model metadata discovered from OpenRouter and environment overrides.
 type Details struct {
 	Name            string
 	Provider        string
@@ -24,57 +23,81 @@ type Details struct {
 	Confidence      string
 }
 
-// Resolve discovers model metadata through the LLM gateway, then provider-specific fallbacks.
+// Resolve discovers model metadata from OpenRouter, applies environment overrides,
+// then falls back to package defaults for any missing values.
 func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Details, error) {
-	fallback := Details{
-		Name:            cfg.LLMGatewayModel,
-		MaxOutputTokens: defaultOutputTokens,
-		ContextWindow:   defaultContextWindow,
-		Source:          "fallback",
-		Confidence:      "low",
-	}
-
-	gateway, err := ResolveFromGateway(ctx, cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayModel, log)
+	openRouter, err := ResolveFromOpenRouter(ctx, cfg.LLMGatewayModel, log)
 	if err != nil {
-		log.Server("modelinfo").Warn("modelinfo.gateway.resolve_failed", "failed to resolve model details from LLM gateway", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
-		return fallback, fmt.Errorf("modelinfo: LLM gateway details unavailable: %w", err)
+		log.Server("modelinfo").Warn("modelinfo.openrouter.resolve_failed", "failed to resolve model details from OpenRouter", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
 	}
 
-	if hasUsableLimits(gateway) {
-		return normalizeDetails(gateway), nil
-	}
-
-	if strings.EqualFold(strings.TrimSpace(gateway.Provider), "ollama") {
-		ollama, ollamaErr := ResolveFromOllama(ctx, cfg.OllamaProviderURL, gateway.Name, log)
-		if ollamaErr == nil && ollama.ContextWindow > 0 {
-			ollama.Provider = "ollama"
-			ollama.Name = firstNonEmpty(ollama.Name, gateway.Name, cfg.LLMGatewayModel)
-			return normalizeDetails(ollama), nil
-		}
-		if ollamaErr != nil {
-			log.Server("modelinfo").Warn("modelinfo.provider.ollama.resolve_failed", "failed to resolve model details from ollama provider", config.F("model", gateway.Name), config.F("status", "degraded"), config.ErrorField(ollamaErr))
+	details := openRouter
+	if err != nil {
+		details = Details{
+			Name:       cfg.LLMGatewayModel,
+			Provider:   "fallback",
+			Source:     "fallback",
+			Confidence: "low",
 		}
 	}
+	details.Name = cfg.LLMGatewayModel
+	applyEnvOverrides(&details, cfg, openRouter, err == nil, log)
 
-	fallback.Name = firstNonEmpty(gateway.Name, cfg.LLMGatewayModel)
-	fallback.Provider = gateway.Provider
-	return fallback, nil
+	details = normalizeDetails(details)
+	if err != nil {
+		return details, fmt.Errorf("modelinfo: OpenRouter details unavailable: %w", err)
+	}
+	return details, nil
 }
 
-func hasUsableLimits(details Details) bool {
-	return details.MaxInputTokens > 0 || details.ContextWindow > 0
+func applyEnvOverrides(details *Details, cfg *config.Config, openRouter Details, hasOpenRouter bool, log *config.Logger) {
+	sourceHasEnv := false
+	if cfg.ModelContextWindow > 0 {
+		logOverrideDiscrepancy(log, cfg.LLMGatewayModel, "context_window", cfg.ModelContextWindow, openRouter.ContextWindow, hasOpenRouter)
+		details.ContextWindow = cfg.ModelContextWindow
+		sourceHasEnv = true
+	}
+	if cfg.ModelMaxOutputTokens > 0 {
+		logOverrideDiscrepancy(log, cfg.LLMGatewayModel, "max_output_tokens", cfg.ModelMaxOutputTokens, openRouter.MaxOutputTokens, hasOpenRouter)
+		details.MaxOutputTokens = cfg.ModelMaxOutputTokens
+		sourceHasEnv = true
+	}
+	if !sourceHasEnv {
+		return
+	}
+
+	if hasOpenRouter {
+		source := openRouter.Source
+		if source == "" {
+			source = "openrouter.models.hugging_face_id"
+		}
+		details.Source = "env+" + source
+		details.Confidence = "high"
+		return
+	}
+	details.Source = "env"
+	details.Confidence = "low"
+	if details.Provider == "" || details.Provider == "fallback" {
+		details.Provider = "env"
+	}
+}
+
+func logOverrideDiscrepancy(log *config.Logger, model string, field string, envValue int, openRouterValue int, hasOpenRouter bool) {
+	if !hasOpenRouter || openRouterValue <= 0 || envValue == openRouterValue {
+		return
+	}
+	log.Server("modelinfo").Warn("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
 }
 
 func normalizeDetails(details Details) Details {
-	if details.MaxInputTokens > 0 && details.ContextWindow == 0 {
-		if details.MaxOutputTokens > 0 {
-			details.ContextWindow = details.MaxInputTokens + details.MaxOutputTokens
-		} else {
-			details.ContextWindow = details.MaxInputTokens + defaultOutputTokens
-		}
-	}
 	if details.ContextWindow <= 0 {
 		details.ContextWindow = defaultContextWindow
+	}
+	if details.MaxOutputTokens <= 0 {
+		details.MaxOutputTokens = defaultOutputTokens
+	}
+	if details.MaxInputTokens <= 0 && details.ContextWindow > details.MaxOutputTokens {
+		details.MaxInputTokens = details.ContextWindow - details.MaxOutputTokens
 	}
 	if details.Source == "" {
 		details.Source = "fallback"
@@ -83,13 +106,4 @@ func normalizeDetails(details Details) Details {
 		details.Confidence = "low"
 	}
 	return details
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

@@ -20,7 +20,8 @@ type Config struct {
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
-	OllamaProviderURL        string        // Ollama provider URL used only for model metadata fallback
+	ModelContextWindow       int           // Optional model context-window override for prompt budgeting
+	ModelMaxOutputTokens     int           // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string        // Discord bot token; Discord gateway disabled if empty
 	SearxngURL               string        // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxToolFailureRetries    int           // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
@@ -54,7 +55,8 @@ func Load() *Config {
 		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
-		OllamaProviderURL:        getEnv("OLLAMA_PROVIDER_URL", "http://localhost:11434"),
+		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
+		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8888"),
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),

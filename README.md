@@ -42,7 +42,7 @@ Optional semantic session-memory retrieval uses gateway embeddings:
 export LLM_GATEWAY_EMBEDDING_MODEL=<embedding-route-or-model>
 ```
 
-If the LLM gateway routes to an Ollama provider and does not report token limits, Oswald can still query the backing Ollama `/api/show` endpoint for context metadata via `OLLAMA_PROVIDER_URL`.
+At startup, Oswald looks up model context metadata from OpenRouter by matching `LLM_GATEWAY_MODEL` against `hugging_face_id`. You can override discovered budget values with `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS`; max input tokens are derived from those values.
 
 ### Discord/iMessage Bot
 
