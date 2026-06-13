@@ -50,7 +50,7 @@ Current layers:
 6. Create the account-link service and shared `/connect` and `/disconnect` command handler
 7. Initialize optional MCP clients
 8. Create the in-process conversation memory store
-9. Load tool schemas from `config/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
 10. Build enabled gateways from config
 11. Create the agent
 12. Start the broker worker pool
@@ -96,7 +96,7 @@ Per request it does the following:
 
 1. Create a request-scoped timeout of `3*time.Minute`
 2. Inject `SenderID` into context so tools can identify the current user
-3. Read `config/soul.md` fresh from disk
+3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
    - soul content
    - current speaker identity when available
@@ -145,20 +145,20 @@ Oswald keeps three distinct memory layers.
 
 | Layer                  | Storage                       | Purpose                                     | Mutable by agent |
 | ---------------------- | ----------------------------- | ------------------------------------------- | ---------------- |
-| Soul memory            | `config/soul.md`              | Identity, directives, personality           | Yes              |
-| Persistent user memory | `config/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
+| Soul memory            | `data/memory/soul/soul.md`  | Identity, directives, personality           | Yes              |
+| Persistent user memory | `data/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
 | Session chat memory    | In-process only               | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
-- Stored in `config/soul.md`
+- Stored in `data/memory/soul/soul.md`
 - Read fresh on every request
 - Edited through the `soul.*` tools
 - Changes take effect on the next request without restart
 
 ### Persistent User Memory
 
-- Stored in `config/memory/users/<id>.md`
+- Stored in `data/memory/users/<id>.md`
 - Managed by the `memory.*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories: `identity`, `system_rules`, `preferences`, `notes`
@@ -169,7 +169,7 @@ Oswald keeps three distinct memory layers.
 
 ### Account Links
 
-- Stored in `config/accounts/links.json`
+- Stored in `data/accounts/links.json`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
@@ -336,7 +336,7 @@ Reply handling:
 
 Tools are split into schema and runtime layers.
 
-- Schemas are loaded from `config/tools/*.md`
+- Schemas are loaded from `data/tools/*.md`
 - Runtime handlers are wired in `internal/tools/bootstrap.go`
 - Additional tool definitions can be discovered dynamically from connected MCP servers
 
@@ -664,7 +664,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ### Adding a Tool
 
-1. Add a schema file to `config/tools/<name>.md`
+1. Add a schema file to `data/tools/<name>.md`
 2. Add runtime code under `internal/tools/<name>/` if needed
 3. Register the handler in `internal/tools/bootstrap.go`
 
@@ -677,7 +677,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ### Changing Personality
 
-- Edit `config/soul.md` directly, or
+- Edit `data/memory/soul/soul.md` directly, or
 - let the agent update it through the `soul.*` tools
 
 Changes apply on the next request because the soul file is read fresh each time.
@@ -692,7 +692,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 Account-linking note:
 
-- `config/accounts/links.json` stores canonical users and linked external accounts
+- `data/accounts/links.json` stores canonical users and linked external accounts
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 

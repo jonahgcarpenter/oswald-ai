@@ -21,8 +21,8 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 Oswald uses three memory layers:
 
-- Soul memory: `config/soul.md`, read fresh on every request
-- Persistent user memory: `config/memory/users/*.md`, managed by `memory.*` tools
+- Soul memory: `data/memory/soul/soul.md`, read fresh on every request
+- Persistent user memory: `data/memory/users/*.md`, managed by `memory.*` tools
 - Session chat memory: in-process only, pruned by TTL and max-turn limits, then compacted again if prompt budget is exceeded
 
 `AGENTS.md` documents the full runtime and architecture in detail.

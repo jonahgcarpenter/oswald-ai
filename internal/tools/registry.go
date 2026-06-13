@@ -27,7 +27,7 @@ type ParamSpec struct {
 }
 
 const (
-	// ToolSourceBuiltin identifies tools defined locally in config/tools.
+	// ToolSourceBuiltin identifies tools defined locally in data/tools.
 	ToolSourceBuiltin = "builtin"
 
 	// ToolSourceMCP identifies tools discovered from connected MCP servers.
