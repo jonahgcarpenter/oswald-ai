@@ -9,7 +9,13 @@ type contextKey string
 const (
 	requestMetaKey contextKey = "request_meta"
 	senderIDKey    contextKey = "sender_id"
+	toolExposeKey  contextKey = "tool_exposer"
 )
+
+// ToolExposer records tools that should become visible for the active request.
+type ToolExposer interface {
+	ExposeTools(names []string)
+}
 
 // Metadata carries request-scoped fields needed by tools and provider logging.
 type Metadata struct {
@@ -43,4 +49,15 @@ func MetadataFromContext(ctx context.Context) Metadata {
 		meta.SenderID = SenderIDFromContext(ctx)
 	}
 	return meta
+}
+
+// WithToolExposer returns a copy of ctx with the active request's tool exposer attached.
+func WithToolExposer(ctx context.Context, exposer ToolExposer) context.Context {
+	return context.WithValue(ctx, toolExposeKey, exposer)
+}
+
+// ToolExposerFromContext extracts the active request's tool exposer from ctx.
+func ToolExposerFromContext(ctx context.Context) ToolExposer {
+	exposer, _ := ctx.Value(toolExposeKey).(ToolExposer)
+	return exposer
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/mcpbrowse"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/sessionhistory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -41,6 +42,16 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 		return fmt.Errorf("failed to initialize session.recent tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured session history tool", config.F("tool_name", "session.recent"))
+
+	if err := reg.RegisterHandler("mcp.servers", registry.Handler(mcpbrowse.NewServersHandler(reg, log))); err != nil {
+		return fmt.Errorf("failed to initialize mcp.servers tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.servers"))
+
+	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(reg, log))); err != nil {
+		return fmt.Errorf("failed to initialize mcp.tools tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.tools"))
 
 	if err := reg.RegisterHandler("soul.read", registry.Handler(soul.NewReadHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.read tool: %w", err)

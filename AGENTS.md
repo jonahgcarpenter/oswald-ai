@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin tools:
 
 - `web.search`
 - `memory.remember`
@@ -14,8 +14,10 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `soul.read`
 - `soul.patch`
 - `session.recent`
+- `mcp.servers`
+- `mcp.tools`
 
-Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
+Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured. Discovered MCP tools are hidden by default and become visible to the model only for the active request after `mcp.tools` lists them.
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -353,6 +355,8 @@ Current builtin tools:
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
 - `session.recent` — read recent completed exchanges from the current in-process session
+- `mcp.servers` — list connected MCP servers and read-only tool counts
+- `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
 
 `session.recent` arguments:
 
@@ -364,6 +368,7 @@ The tool is read-only and scoped to the current request's `session_id` from `req
 Optional external tools:
 
 - Read-only GitHub MCP tools are discovered at startup and registered under the `github.` namespace when `GITHUB_PERSONAL_ACCESS_TOKEN` is set
+- MCP-discovered tools are not included in the default LLM tool list; `mcp.tools` exposes only returned matches for direct calls during the current request
 
 ### Tool Registry
 
@@ -381,7 +386,7 @@ The registry:
 - GitHub is the only MCP server integration today
 - The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
 - Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
-- MCP tools are surfaced to the model with a `github.` prefix
+- MCP tools use namespaced names like `github.*` and are surfaced to the model only after request-local discovery through `mcp.tools`
 
 ### Tool Failure Handling
 
@@ -643,6 +648,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/llm/gateway.go`               | LLM gateway HTTP client           |
 | `internal/modelinfo/`                   | Model metadata discovery          |
 | `internal/tools/registry/`              | Tool schema loading and execution |
+| `internal/tools/runtime/`               | Request-local tool exposure state |
 | `internal/tools/bootstrap.go`           | Tool registry assembly            |
 | `internal/tools/builtin/`               | Builtin tool wiring and handlers  |
 | `internal/tools/builtin/sessionhistory/` | `session.recent` runtime handler |
@@ -695,7 +701,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only seven builtin tools ship locally; extra tools require optional MCP integration
+- Only nine builtin tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
 - GitHub is the only MCP server integration today
 - The OpenAI-compatible LLM gateway is the model gateway; model metadata comes from OpenRouter and optional `MODEL_*` overrides
 

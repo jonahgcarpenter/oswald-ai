@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
@@ -461,6 +462,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		Gateway:   gateway,
 		Model:     a.model,
 	})
+	toolExposure := toolruntime.NewExposure()
+	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 
 	// Read the soul file fresh on every request so that any edits the agent
 	// made via the soul.* tools take effect immediately.
@@ -591,7 +594,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	req := llm.ChatRequest{
 		Model:  a.model,
 		User:   requestUser,
-		Tools:  a.registry.LLMTools(),
 		Stream: streamCallback != nil,
 	}
 
@@ -640,6 +642,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		accumulatedContent.Reset()
 
 		req.Messages = messages
+		req.Tools = a.registry.LLMToolsForVisibility(toolExposure.Visibility())
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),

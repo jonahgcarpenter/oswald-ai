@@ -53,10 +53,9 @@ type CatalogEntry struct {
 	Parameters  []ParamSpec
 }
 
-// CatalogServerGroup contains MCP tools grouped under a single server.
-type CatalogServerGroup struct {
-	Server string
-	Tools  []CatalogEntry
+// ToolVisibility controls which non-default tools are sent to the model.
+type ToolVisibility struct {
+	ExposedMCPTools map[string]bool
 }
 
 // Registry maps tool names to their parsed Spec and registered Handler.
@@ -167,12 +166,21 @@ func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
 	return r.RegisterHandler(spec.Name, handler)
 }
 
-// LLMTools converts all loaded Specs into the []llm.Tool slice
-// passed to ChatRequest.Tools. All loaded specs are included regardless of
-// whether a handler has been registered.
+// LLMTools converts builtin Specs into the []llm.Tool slice passed to
+// ChatRequest.Tools. MCP specs are hidden until request-local discovery exposes them.
 func (r *Registry) LLMTools() []llm.Tool {
+	return r.LLMToolsForVisibility(ToolVisibility{})
+}
+
+// LLMToolsForVisibility converts loaded Specs into the []llm.Tool slice passed to
+// ChatRequest.Tools. Builtin tools are always included. MCP tools are included
+// only when explicitly named by the active request's visibility state.
+func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
+		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {
+			continue
+		}
 		props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
 		required := []string{}
 		for _, p := range spec.Parameters {
@@ -213,31 +221,16 @@ func (r *Registry) BuiltinCatalog() []CatalogEntry {
 	return entries
 }
 
-// MCPCatalogByServer returns MCP tool definitions grouped by server in stable order.
-func (r *Registry) MCPCatalogByServer() []CatalogServerGroup {
-	grouped := make(map[string][]CatalogEntry)
+// CatalogBySource returns tool definitions for source in stable order.
+func (r *Registry) CatalogBySource(source string) []CatalogEntry {
+	entries := make([]CatalogEntry, 0)
 	for _, spec := range r.orderedSpecs() {
-		if spec.Source != ToolSourceMCP {
+		if spec.Source != source {
 			continue
 		}
-		grouped[spec.Server] = append(grouped[spec.Server], catalogEntry(spec))
+		entries = append(entries, catalogEntry(spec))
 	}
-
-	servers := make([]string, 0, len(grouped))
-	for server := range grouped {
-		servers = append(servers, server)
-	}
-	sort.Strings(servers)
-
-	out := make([]CatalogServerGroup, 0, len(servers))
-	for _, server := range servers {
-		tools := grouped[server]
-		sort.Slice(tools, func(i, j int) bool {
-			return tools[i].Name < tools[j].Name
-		})
-		out = append(out, CatalogServerGroup{Server: server, Tools: tools})
-	}
-	return out
+	return entries
 }
 
 // Execute calls the registered handler for the named tool with the given arguments.
