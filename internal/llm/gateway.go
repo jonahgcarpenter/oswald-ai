@@ -19,15 +19,17 @@ import (
 type GatewayClient struct {
 	BaseURL    string
 	APIKey     string
+	VirtualKey string
 	HTTPClient *http.Client
 	log        *config.Logger
 }
 
-// NewGatewayClient creates an LLM gateway client with the given base URL, optional API key, and logger.
-func NewGatewayClient(baseURL, apiKey string, log *config.Logger) *GatewayClient {
+// NewGatewayClient creates an LLM gateway client with the given base URL, optional auth, and logger.
+func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
 	return &GatewayClient{
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		APIKey:  strings.TrimSpace(apiKey),
+		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		APIKey:     strings.TrimSpace(apiKey),
+		VirtualKey: strings.TrimSpace(virtualKey),
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
@@ -39,6 +41,9 @@ func (c *GatewayClient) applyHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if c.VirtualKey != "" {
+		req.Header.Set("x-bf-vk", c.VirtualKey)
 	}
 }
 

@@ -20,6 +20,7 @@ type Config struct {
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
+	LLMGatewayVirtualKey     string        // Optional Bifrost virtual key for LLM gateway requests
 	ModelContextWindow       int           // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int           // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string        // Discord bot token; Discord gateway disabled if empty
@@ -55,6 +56,7 @@ func Load() *Config {
 		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
+		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),

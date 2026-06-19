@@ -34,6 +34,8 @@ Configure the LLM gateway before startup:
 ```bash
 export LLM_GATEWAY_URL=http://localhost:8080
 export LLM_GATEWAY_MODEL=<gateway-route-or-model>
+# Optional, for Bifrost virtual-key protected routes:
+export LLM_GATEWAY_VIRTUAL_KEY=<bifrost-virtual-key>
 ```
 
 Optional semantic session-memory retrieval uses gateway embeddings:

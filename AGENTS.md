@@ -620,6 +620,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
 | `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
 | `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
+| `LLM_GATEWAY_VIRTUAL_KEY`      | empty                          | Optional Bifrost virtual key sent as `x-bf-vk` to the LLM gateway       |
 | `MODEL_CONTEXT_WINDOW`     | `0`                            | Optional context-window override for prompt budgeting                   |
 | `MODEL_MAX_OUTPUT_TOKENS`  | `0`                            | Optional output-token reserve override for prompt budgeting             |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |

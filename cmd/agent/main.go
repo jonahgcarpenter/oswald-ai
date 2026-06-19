@@ -39,7 +39,7 @@ func main() {
 		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_URL configuration")
 	}
 
-	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, rootLog.Server("provider.gateway"))
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog.Server("provider.gateway"))
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
 	budget := memory.ContextBudgetFromModelDetails(details)
