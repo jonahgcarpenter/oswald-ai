@@ -2,11 +2,14 @@ package routing
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
+
+var previewWhitespaceRE = regexp.MustCompile(`\s+`)
 
 // Decide applies the shared gateway policy for deciding if and how a message reaches the LLM.
 func Decide(input Input) Decision {
@@ -31,6 +34,35 @@ func Decide(input Input) Decision {
 	}
 
 	return Decision{Action: ActionLLM, Prompt: prompt, Images: images, Reason: "llm"}
+}
+
+// Preflight cheaply identifies messages that should be ignored before gateways
+// perform expensive attachment, account, or reply-context work.
+func Preflight(input PreflightInput) Decision {
+	if input.IsCommand {
+		if input.IsGroup && !input.IsMention {
+			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
+		}
+		return Decision{}
+	}
+
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommand) {
+		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
+	}
+	return Decision{}
+}
+
+// MessagePreview returns a single-line, rune-bounded preview safe for debug logs.
+func MessagePreview(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	preview := strings.TrimSpace(previewWhitespaceRE.ReplaceAllString(text, " "))
+	runes := []rune(preview)
+	if len(runes) <= limit {
+		return preview
+	}
+	return string(runes[:limit])
 }
 
 // ShouldIgnoreUninvokedGroup reports whether a group message lacks any gateway-normalized invocation.

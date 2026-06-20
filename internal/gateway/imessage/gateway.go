@@ -107,6 +107,46 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
 		return
 	}
+	if strings.TrimSpace(msg.Text) == "" && len(msg.Attachments) == 0 {
+		log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
+		return
+	}
+
+	text := strings.TrimSpace(msg.Text)
+	replyGUID := msg.replyTargetGUID()
+	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
+	selectedMessageGUID := ""
+	if isGroup {
+		selectedMessageGUID = msg.GUID
+	}
+	mentionsBot := mentionRE.MatchString(text)
+	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
+	currentIsCommand := g.Commands.IsCommand(textWithoutMention)
+	currentIsReplyToBot := false
+	if replyCtx, ok := g.lookupMessage(replyGUID); ok {
+		currentIsReplyToBot = replyCtx.IsFromBot
+	}
+	preflight := routing.Preflight(routing.PreflightInput{
+		IsGroup:      isGroup,
+		IsMention:    mentionsBot,
+		IsReplyToBot: currentIsReplyToBot,
+		IsCommand:    currentIsCommand,
+	})
+	if preflight.Action == routing.ActionIgnore {
+		log.Debug("gateway.message.ignored", "ignored imessage message",
+			config.F("request_id", requestID),
+			config.F("chat_id", chat.GUID),
+			config.F("user_id", strings.TrimSpace(msg.Handle.Address)),
+			config.F("is_group", isGroup),
+			config.F("is_mention", mentionsBot),
+			config.F("is_reply", replyGUID != ""),
+			config.F("is_command", currentIsCommand),
+			config.F("reason", preflight.Reason),
+			config.F("message_preview", routing.MessagePreview(msg.Text, 100)),
+		)
+		return
+	}
+
 	images, unsupported := g.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
 		log.Debug("gateway.attachment.processed", "processed imessage attachments", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
@@ -141,25 +181,10 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
-	text := strings.TrimSpace(msg.Text)
-	replyGUID := msg.replyTargetGUID()
-	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
-	selectedMessageGUID := ""
-	if isGroup {
-		selectedMessageGUID = msg.GUID
-	}
-	mentionsBot := mentionRE.MatchString(text)
-	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
-	currentIsCommand := g.Commands.IsCommand(textWithoutMention)
-	currentIsReplyToBot := false
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
 			currentIsReplyToBot = replyCtx.IsFromBot
-			if routing.ShouldIgnoreUninvokedGroup(isGroup, mentionsBot, replyCtx.IsFromBot, currentIsCommand) {
-				g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-				return
-			}
 			replyName := strings.TrimSpace(replyCtx.DisplayName)
 			if replyName == "" && replyCtx.IsFromBot {
 				replyName = "Oswald"
@@ -183,8 +208,8 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			reply = &routing.ReplyContext{IsUnavailable: true}
 		}
 	}
-
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
+
 	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
 		Gateway:      "imessage",

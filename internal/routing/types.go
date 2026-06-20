@@ -34,6 +34,14 @@ type Input struct {
 	Reply              *ReplyContext
 }
 
+// PreflightInput is the cheap gateway-neutral subset needed for early ignores.
+type PreflightInput struct {
+	IsGroup      bool
+	IsMention    bool
+	IsReplyToBot bool
+	IsCommand    bool
+}
+
 // ReplyContext is the gateway-neutral representation of a replied-to message.
 type ReplyContext struct {
 	SenderName            string
