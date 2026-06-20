@@ -450,7 +450,43 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}
 	requestID := config.NewRequestID()
 
+	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
+	mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
+	mentionsBot := strings.Contains(msg.Content, mention1) || strings.Contains(msg.Content, mention2)
+	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
 	replyToID := ""
+	if msg.GuildID != "" {
+		replyToID = msg.ID
+	}
+
+	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
+	text := strings.ReplaceAll(msg.Content, mention1, "")
+	text = strings.ReplaceAll(text, mention2, "")
+	text = strings.TrimSpace(text)
+	text = re.ReplaceAllString(text, ":$1:")
+	text = resolveMentions(text, msg.Mentions)
+	isCommand := dg.Commands.IsCommand(text)
+	preflight := routing.Preflight(routing.PreflightInput{
+		IsGroup:      msg.GuildID != "",
+		IsMention:    mentionsBot,
+		IsReplyToBot: isReplyToBot,
+		IsCommand:    isCommand,
+	})
+	if preflight.Action == routing.ActionIgnore {
+		log.Debug("gateway.message.ignored", "ignored discord message",
+			config.F("request_id", requestID),
+			config.F("chat_id", msg.ChannelID),
+			config.F("user_id", msg.Author.ID),
+			config.F("is_group", msg.GuildID != ""),
+			config.F("is_mention", mentionsBot),
+			config.F("is_reply", msg.ReferencedMessage != nil),
+			config.F("is_command", isCommand),
+			config.F("reason", preflight.Reason),
+			config.F("message_preview", routing.MessagePreview(msg.Content, 100)),
+		)
+		return
+	}
+
 	images, unsupported := dg.loadImages(msg.Attachments)
 	embedImageCount := 0
 	if len(msg.Attachments) > 0 {
@@ -463,20 +499,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		unsupported = append(unsupported, embedUnsupported...)
 		log.Debug("gateway.embed.processed", "processed discord embeds", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(embedImages)), config.F("downgraded_count", len(embedUnsupported)), config.F("declared_embed_count", len(msg.Embeds)))
 	}
-
-	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
-	mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
-	mentionsBot := strings.Contains(msg.Content, mention1) || strings.Contains(msg.Content, mention2)
-	if msg.GuildID != "" {
-		replyToID = msg.ID
-	}
-
-	re := regexp.MustCompile(`<a?:([^:]+):\d+>`)
-	text := strings.ReplaceAll(msg.Content, mention1, "")
-	text = strings.ReplaceAll(text, mention2, "")
-	text = strings.TrimSpace(text)
-	text = re.ReplaceAllString(text, ":$1:")
-	text = resolveMentions(text, msg.Mentions)
 	if embedImageCount > 0 {
 		text = stripEmbedURLsFromText(text, msg.Embeds)
 	}
@@ -490,8 +512,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	} else {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
-	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
-	isCommand := dg.Commands.IsCommand(text)
+	isCommand = dg.Commands.IsCommand(text)
 
 	normalizedAuthorID, normErr := accountlinking.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
@@ -511,6 +532,17 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	if msg.ReferencedMessage != nil {
 		reply = dg.resolveReplyContext(msg, re, images, requestID)
 	}
+	dg.rememberReply(msg.ID, replyContext{
+		SessionKey:  sessionKey,
+		ChannelID:   msg.ChannelID,
+		SenderID:    msg.Author.ID,
+		DisplayName: msg.Author.Username,
+		Text:        text,
+		Attachments: msg.Attachments,
+		Embeds:      msg.Embeds,
+		IsFromBot:   false,
+		CreatedAt:   time.Now(),
+	})
 
 	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
@@ -532,17 +564,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		Broker:   dg.Broker,
 		Commands: dg.Commands,
 		Log:      dg.Log,
-		Hooks: &decisionHooks{
-			gateway:     dg,
-			messageID:   msg.ID,
-			sessionKey:  sessionKey,
-			channelID:   msg.ChannelID,
-			senderID:    msg.Author.ID,
-			displayName: msg.Author.Username,
-			text:        text,
-			attachments: msg.Attachments,
-			embeds:      msg.Embeds,
-		},
 	}, &runtimeResponder{
 		gateway:    dg,
 		requestID:  requestID,
