@@ -25,6 +25,9 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		CurrentUnsupported: req.Unsupported,
 		Reply:              req.Reply,
 	})
+	if deps.Hooks != nil {
+		deps.Hooks.OnDecision(req, decision)
+	}
 
 	switch decision.Action {
 	case routing.ActionIgnore:

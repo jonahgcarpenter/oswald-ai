@@ -156,10 +156,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	if replyGUID != "" {
 		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
 			currentIsReplyToBot = replyCtx.IsFromBot
-			if routing.ShouldIgnoreUninvokedGroup(isGroup, mentionsBot, replyCtx.IsFromBot, currentIsCommand) {
-				g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-				return
-			}
 			replyName := strings.TrimSpace(replyCtx.DisplayName)
 			if replyName == "" && replyCtx.IsFromBot {
 				replyName = "Oswald"
@@ -184,7 +180,6 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		}
 	}
 
-	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
 		Gateway:      "imessage",
@@ -205,6 +200,13 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		Broker:   g.Broker,
 		Commands: g.Commands,
 		Log:      g.Log,
+		Hooks: &decisionHooks{
+			gateway:            g,
+			message:            msg,
+			sessionKey:         sessionKey,
+			normalizedSenderID: normalizedSenderID,
+			displayName:        displayName,
+		},
 	}, &runtimeResponder{
 		gateway:             g,
 		requestID:           requestID,

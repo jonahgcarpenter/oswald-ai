@@ -492,20 +492,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}
 	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
 	isCommand := dg.Commands.IsCommand(text)
-	if routing.ShouldIgnoreUninvokedGroup(msg.GuildID != "", mentionsBot, isReplyToBot, isCommand) {
-		dg.rememberReply(msg.ID, replyContext{
-			SessionKey:  sessionKey,
-			ChannelID:   msg.ChannelID,
-			SenderID:    msg.Author.ID,
-			DisplayName: msg.Author.Username,
-			Text:        text,
-			Attachments: msg.Attachments,
-			Embeds:      msg.Embeds,
-			IsFromBot:   false,
-			CreatedAt:   time.Now(),
-		})
-		return
-	}
 
 	normalizedAuthorID, normErr := accountlinking.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
@@ -525,18 +511,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	if msg.ReferencedMessage != nil {
 		reply = dg.resolveReplyContext(msg, re, images, requestID)
 	}
-
-	dg.rememberReply(msg.ID, replyContext{
-		SessionKey:  sessionKey,
-		ChannelID:   msg.ChannelID,
-		SenderID:    msg.Author.ID,
-		DisplayName: msg.Author.Username,
-		Text:        text,
-		Attachments: msg.Attachments,
-		Embeds:      msg.Embeds,
-		IsFromBot:   false,
-		CreatedAt:   time.Now(),
-	})
 
 	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
@@ -558,6 +532,17 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		Broker:   dg.Broker,
 		Commands: dg.Commands,
 		Log:      dg.Log,
+		Hooks: &decisionHooks{
+			gateway:     dg,
+			messageID:   msg.ID,
+			sessionKey:  sessionKey,
+			channelID:   msg.ChannelID,
+			senderID:    msg.Author.ID,
+			displayName: msg.Author.Username,
+			text:        text,
+			attachments: msg.Attachments,
+			embeds:      msg.Embeds,
+		},
 	}, &runtimeResponder{
 		gateway:    dg,
 		requestID:  requestID,

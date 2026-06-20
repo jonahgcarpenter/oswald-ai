@@ -14,6 +14,13 @@ type Dependencies struct {
 	Broker   *broker.Broker
 	Commands *commands.Router
 	Log      *config.Logger
+	Hooks    Hooks
+}
+
+// Hooks lets gateway implementations react to shared runtime decisions without
+// duplicating routing policy.
+type Hooks interface {
+	OnDecision(req Request, decision routing.Decision)
 }
 
 // Request is the gateway-neutral representation executed by the shared runtime.
