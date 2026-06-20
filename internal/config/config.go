@@ -60,7 +60,7 @@ func Load() *Config {
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
-		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8888"),
+		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8080"),
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
