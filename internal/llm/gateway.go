@@ -86,13 +86,11 @@ func mapToGatewayMessages(msgs []ChatMessage) []gatewayMessage {
 				parts = append(parts, gatewayContentPart{Type: "text", Text: m.Content})
 			}
 			for _, image := range m.Images {
-				mime := "image/jpeg"
-				data := image
-				if strings.Contains(image, ";base64,") {
-					parts = append(parts, gatewayContentPart{Type: "image_url", ImageURL: &gatewayImageURL{URL: image}})
-					continue
+				mimeType := strings.TrimSpace(image.MimeType)
+				if mimeType == "" {
+					mimeType = "image/jpeg"
 				}
-				parts = append(parts, gatewayContentPart{Type: "image_url", ImageURL: &gatewayImageURL{URL: fmt.Sprintf("data:%s;base64,%s", mime, data)}})
+				parts = append(parts, gatewayContentPart{Type: "image_url", ImageURL: &gatewayImageURL{URL: fmt.Sprintf("data:%s;base64,%s", mimeType, image.Data)}})
 			}
 			bm.Content = parts
 		} else {

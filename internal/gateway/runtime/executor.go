@@ -42,7 +42,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		}
 		if err != nil {
 			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))
-			response = safeErrorText(err)
+			response = config.SafeErrorText(err)
 		}
 		sendErr := responder.SendCommandResponse(response)
 		if sendErr != nil {
@@ -88,7 +88,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 
 	if result.Err != nil {
 		log.Error("gateway.response.failed", "agent processing failed", config.F("request_id", req.RequestID), config.ErrorField(result.Err))
-		err := responder.SendAgentError(safeErrorText(result.Err))
+		err := responder.SendAgentError(config.SafeErrorText(result.Err))
 		if err != nil {
 			log.Error("gateway.send.failed", "failed to send agent error response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
 		}

@@ -99,7 +99,7 @@ func (b *Broker) Submit(req *Request) {
 		)
 		req.ResponseChan <- Result{
 			Response: &agent.AgentResponse{
-				Response: "The queue is full, Try again later or help fragsap buy a new GPU to fix these issues.",
+				Response: config.SafeText("request rejected: broker queue full"),
 			},
 		}
 	}

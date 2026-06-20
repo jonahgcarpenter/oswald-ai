@@ -556,19 +556,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	}
 	trimmedHistory := memory.FlattenTurns(turns)
 
-	messageImages := make([]string, 0, len(userImages))
-	for _, image := range userImages {
-		mimeType := strings.TrimSpace(image.MimeType)
-		if mimeType == "" {
-			mimeType = "image/jpeg"
-		}
-		messageImages = append(messageImages, fmt.Sprintf("data:%s;base64,%s", mimeType, image.Data))
-	}
-
 	messages := make([]llm.ChatMessage, 0, 2+len(trimmedHistory))
 	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
 	messages = append(messages, trimmedHistory...)
-	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: messageImages})
+	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: userImages})
 
 	if len(trimmedHistory) > 0 {
 		reqLog.Debug("agent.memory.loaded", "loaded retained memory",
@@ -652,10 +643,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
+			errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
 			return &AgentResponse{
 				Model:    a.model,
-				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
-				Error:    fmt.Sprintf("Model failed: %v", err),
+				Response: errorText,
+				Error:    errorText,
 			}, nil
 		}
 
@@ -768,10 +760,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
+			errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
 			return &AgentResponse{
 				Model:    a.model,
-				Response: "Something broke, Try again or help fragsap buy a new GPU to fix these issues.",
-				Error:    fmt.Sprintf("Model failed: %v", err),
+				Response: errorText,
+				Error:    errorText,
 			}, nil
 		}
 

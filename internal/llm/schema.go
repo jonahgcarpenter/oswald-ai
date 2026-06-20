@@ -24,13 +24,13 @@ type InputImage struct {
 
 // ChatMessage is a single turn in a conversation.
 type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	Images     []string   `json:"images,omitempty"`
-	Thinking   string     `json:"thinking,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolName   string     `json:"tool_name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       string       `json:"role"`
+	Content    string       `json:"content"`
+	Images     []InputImage `json:"images,omitempty"`
+	Thinking   string       `json:"thinking,omitempty"`
+	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
+	ToolName   string       `json:"tool_name,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty"`
 }
 
 // ToolParameterProperty describes a single property within a tool's parameter schema.

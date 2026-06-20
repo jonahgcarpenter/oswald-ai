@@ -918,7 +918,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 	if err != nil {
 		return llm.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
 	}
-	dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("width", result.Width), config.F("height", result.Height), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
+	dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil
 }
 
