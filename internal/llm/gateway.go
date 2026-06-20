@@ -24,14 +24,14 @@ type GatewayClient struct {
 	log        *config.Logger
 }
 
-// NewGatewayClient creates an LLM gateway client with the given base URL, optional auth, and logger.
-func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
+// NewGatewayClient creates an LLM gateway client with the given base URL, optional auth, timeout, and logger.
+func NewGatewayClient(baseURL, apiKey, virtualKey string, timeout time.Duration, log *config.Logger) *GatewayClient {
 	return &GatewayClient{
 		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:     strings.TrimSpace(apiKey),
 		VirtualKey: strings.TrimSpace(virtualKey),
 		HTTPClient: &http.Client{
-			Timeout: 2 * time.Minute,
+			Timeout: timeout,
 		},
 		log: log,
 	}

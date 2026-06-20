@@ -230,6 +230,7 @@ type Agent struct {
 	userMemory            *usermemory.Store
 	summarizer            *Summarizer
 	maxToolFailureRetries int
+	requestTimeout        time.Duration
 	log                   *config.Logger
 }
 
@@ -245,6 +246,7 @@ func NewAgent(
 	userMemory *usermemory.Store,
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
+	requestTimeout time.Duration,
 	memoryStore *memory.Store,
 	log *config.Logger,
 ) *Agent {
@@ -260,6 +262,7 @@ func NewAgent(
 		userMemory:            userMemory,
 		summarizer:            NewSummarizer(chatClient, model, log),
 		maxToolFailureRetries: maxToolFailureRetries,
+		requestTimeout:        requestTimeout,
 		log:                   log,
 	}
 }
@@ -449,7 +452,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		config.F("image_count", len(userImages)),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), a.requestTimeout)
 	defer cancel()
 
 	// Inject the sender ID into the context so tool handlers can identify

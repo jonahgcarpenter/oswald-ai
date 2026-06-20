@@ -21,6 +21,7 @@ type Config struct {
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey     string        // Optional Bifrost virtual key for LLM gateway requests
+	LLMGatewayTimeout        time.Duration // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
 	ModelContextWindow       int           // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int           // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string        // Discord bot token; Discord gateway disabled if empty
@@ -57,6 +58,7 @@ func Load() *Config {
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
 		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
+		LLMGatewayTimeout:        getEnvDuration("LLM_GATEWAY_TIMEOUT", 180*time.Second),
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),

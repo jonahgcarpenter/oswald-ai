@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -39,7 +40,15 @@ func main() {
 		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_URL configuration")
 	}
 
-	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog.Server("provider.gateway"))
+	llmHTTPTimeout := cfg.LLMGatewayTimeout + 10*time.Second
+	agentRequestTimeout := cfg.LLMGatewayTimeout + 30*time.Second
+	log.Info("app.timeout.configured", "configured request timeouts",
+		config.F("llm_gateway_timeout", cfg.LLMGatewayTimeout.String()),
+		config.F("llm_http_timeout", llmHTTPTimeout.String()),
+		config.F("agent_request_timeout", agentRequestTimeout.String()),
+	)
+
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, llmHTTPTimeout, rootLog.Server("provider.gateway"))
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
 	budget := memory.ContextBudgetFromModelDetails(details)
@@ -123,6 +132,7 @@ func main() {
 		userMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
+		agentRequestTimeout,
 		memoryStore,
 		rootLog,
 	)
