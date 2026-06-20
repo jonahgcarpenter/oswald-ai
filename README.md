@@ -29,23 +29,6 @@ Oswald uses three memory layers:
 
 ## Usage
 
-Configure the LLM gateway before startup:
-
-```bash
-export LLM_GATEWAY_URL=http://localhost:8080
-export LLM_GATEWAY_MODEL=<gateway-route-or-model>
-# Optional, for Bifrost virtual-key protected routes:
-export LLM_GATEWAY_VIRTUAL_KEY=<bifrost-virtual-key>
-```
-
-Optional semantic session-memory retrieval uses gateway embeddings:
-
-```bash
-export LLM_GATEWAY_EMBEDDING_MODEL=<embedding-route-or-model>
-```
-
-At startup, Oswald looks up model context metadata from OpenRouter by matching `LLM_GATEWAY_MODEL` against `hugging_face_id`. You can override discovered budget values with `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS`; max input tokens are derived from those values.
-
 ### Discord/iMessage Bot
 
 In DMs or direct chats, send any message:
