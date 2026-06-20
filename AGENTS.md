@@ -111,9 +111,9 @@ Per request it does the following:
 7. Build the chat message array: system prompt, selected retained history, current user prompt, and any current-turn images
 8. Call the LLM gateway with all registered tools available
 9. If the model emits tool calls:
-    - execute each tool handler
-    - append tool results as `tool` messages
-    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
+   - execute each tool handler
+   - append tool results as `tool` messages
+   - repeat until no tool calls remain or the consecutive tool-failure limit is hit
 10. If tool failures exhaust the retry budget, make one final model call with tools disabled
 11. Persist only the cleaned final user message and final assistant reply to session memory
 12. Return the final `AgentResponse`
@@ -149,11 +149,11 @@ Gateway-neutral routing policy lives in `internal/routing/` and shared gateway e
 
 Oswald keeps three distinct memory layers.
 
-| Layer                  | Storage                       | Purpose                                     | Mutable by agent |
-| ---------------------- | ----------------------------- | ------------------------------------------- | ---------------- |
+| Layer                  | Storage                     | Purpose                                     | Mutable by agent |
+| ---------------------- | --------------------------- | ------------------------------------------- | ---------------- |
 | Soul memory            | `data/memory/soul/soul.md`  | Identity, directives, personality           | Yes              |
 | Persistent user memory | `data/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
-| Session chat memory    | In-process only               | Conversation history for the active session | Implicitly       |
+| Session chat memory    | In-process only             | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
@@ -608,62 +608,63 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ## Environment Variables
 
-| Variable                   | Default                        | Purpose                                                                 |
-| -------------------------- | ------------------------------ | ----------------------------------------------------------------------- |
-| `PORT`                     | `8080`                         | WebSocket gateway port                                                  |
-| `IMESSAGE_PORT`            | `8090`                         | HTTP port for the iMessage BlueBubbles webhook listener                 |
-| `IMESSAGE_WEBHOOK_PATH`    | `/imessage/webhook`            | HTTP path for incoming BlueBubbles webhooks                             |
-| `BLUEBUBBLES_URL`          | empty                          | BlueBubbles server base URL; enables iMessage when paired with password |
-| `BLUEBUBBLES_PASSWORD`     | empty                          | BlueBubbles server password/token used for iMessage REST API auth       |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                      | Enables the GitHub MCP client and read-only `github.*` tools            |
-| `LLM_GATEWAY_URL`              | `http://localhost:8080`        | LLM gateway API base URL                                                |
-| `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
-| `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
-| `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
-| `LLM_GATEWAY_VIRTUAL_KEY`      | empty                          | Optional Bifrost virtual key sent as `x-bf-vk` to the LLM gateway       |
-| `MODEL_CONTEXT_WINDOW`     | `0`                            | Optional context-window override for prompt budgeting                   |
-| `MODEL_MAX_OUTPUT_TOKENS`  | `0`                            | Optional output-token reserve override for prompt budgeting             |
-| `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
-| `DISCORD_TOKEN`            | empty                          | Enables Discord gateway                                                 |
-| `WORKER_POOL_SIZE`         | `1`                            | Broker worker count                                                     |
-| `MAX_TOOL_FAILURE_RETRIES` | `3`                            | Max consecutive tool failures before disabling tools for the request    |
-| `LOG_LEVEL`                | `info`                         | Logging verbosity                                                       |
-| `MEMORY_MAX_TURNS`         | `10`                           | Max retained session turn pairs; `0` disables the cap                   |
-| `MEMORY_MAX_AGE`           | `30m`                          | Max retained session age; `0` disables expiry                           |
+| Variable                       | Default                 | Purpose                                                                      |
+| ------------------------------ | ----------------------- | ---------------------------------------------------------------------------- |
+| `PORT`                         | `8000`                  | WebSocket gateway port                                                       |
+| `IMESSAGE_PORT`                | `8090`                  | HTTP port for the iMessage BlueBubbles webhook listener                      |
+| `IMESSAGE_WEBHOOK_PATH`        | `/imessage/webhook`     | HTTP path for incoming BlueBubbles webhooks                                  |
+| `BLUEBUBBLES_URL`              | empty                   | BlueBubbles server base URL; enables iMessage when paired with password      |
+| `BLUEBUBBLES_PASSWORD`         | empty                   | BlueBubbles server password/token used for iMessage REST API auth            |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                   | Enables the GitHub MCP client and read-only `github.*` tools                 |
+| `LLM_GATEWAY_URL`              | `http://localhost:8080` | LLM gateway API base URL                                                     |
+| `LLM_GATEWAY_MODEL`            | empty                   | Model name passed to the LLM gateway; required at startup                    |
+| `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                   | Optional LLM gateway embedding model for semantic session-memory retrieval   |
+| `LLM_GATEWAY_API_KEY`          | empty                   | Optional bearer token for LLM gateway requests                               |
+| `LLM_GATEWAY_VIRTUAL_KEY`      | empty                   | Optional Bifrost virtual key sent as `x-bf-vk` to the LLM gateway            |
+| `LLM_GATEWAY_TIMEOUT`          | `180s`                  | Expected upstream LLM gateway timeout; local guard timeouts derive from this |
+| `MODEL_CONTEXT_WINDOW`         | `0`                     | Optional context-window override for prompt budgeting                        |
+| `MODEL_MAX_OUTPUT_TOKENS`      | `0`                     | Optional output-token reserve override for prompt budgeting                  |
+| `SEARXNG_URL`                  | `http://localhost:8080` | SearXNG API base URL                                                         |
+| `DISCORD_TOKEN`                | empty                   | Enables Discord gateway                                                      |
+| `WORKER_POOL_SIZE`             | `1`                     | Broker worker count                                                          |
+| `MAX_TOOL_FAILURE_RETRIES`     | `3`                     | Max consecutive tool failures before disabling tools for the request         |
+| `LOG_LEVEL`                    | `info`                  | Logging verbosity                                                            |
+| `MEMORY_MAX_TURNS`             | `10`                    | Max retained session turn pairs; `0` disables the cap                        |
+| `MEMORY_MAX_AGE`               | `30m`                   | Max retained session age; `0` disables expiry                                |
 
 ## Key Files
 
-| File                                    | Purpose                           |
-| --------------------------------------- | --------------------------------- |
-| `cmd/agent/main.go`                     | Startup wiring and shutdown       |
-| `internal/agent/agent.go`               | Main agent loop                   |
-| `internal/agent/summarize.go`           | History compaction summarizer     |
-| `internal/broker/broker.go`             | Request queue and worker pool     |
-| `internal/memory/store.go`              | Session memory retention          |
-| `internal/memory/retrieval.go`          | Semantic session-memory selection |
-| `internal/memory/compact.go`            | Retention pruning and token estimates |
-| `internal/memory/budget.go`             | Context budget discovery          |
-| `internal/mcp/manager.go`               | MCP client bootstrap and catalog  |
-| `internal/routing/routing.go`           | Shared gateway routing policy |
-| `internal/routing/types.go`             | Gateway-neutral routing types     |
-| `internal/llm/gateway.go`               | LLM gateway HTTP client           |
-| `internal/modelinfo/`                   | Model metadata discovery          |
-| `internal/tools/registry/`              | Tool schema loading and execution |
-| `internal/tools/runtime/`               | Request-local tool exposure state |
-| `internal/tools/bootstrap.go`           | Tool registry assembly            |
-| `internal/tools/builtin/`               | Builtin tool wiring and handlers  |
-| `internal/tools/builtin/sessionhistory/` | `session.recent` runtime handler |
-| `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store |
-| `internal/tools/builtin/soul/store.go`  | Soul file store                   |
-| `internal/commands/router.go`        | Shared command router             |
-| `internal/commands/accountlinking/store.go` | Canonical account link store      |
-| `internal/requestctx/requestctx.go`     | Request metadata propagation through context |
-| `internal/media/images.go`              | Image normalization and validation |
-| `internal/gateway/runtime/`             | Shared gateway request execution  |
-| `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |
-| `internal/gateway/websocket/gateway.go` | WebSocket transport               |
-| `internal/gateway/discord/gateway.go`   | Discord transport                 |
-| `internal/gateway/imessage/gateway.go`  | iMessage BlueBubbles transport    |
+| File                                         | Purpose                                      |
+| -------------------------------------------- | -------------------------------------------- |
+| `cmd/agent/main.go`                          | Startup wiring and shutdown                  |
+| `internal/agent/agent.go`                    | Main agent loop                              |
+| `internal/agent/summarize.go`                | History compaction summarizer                |
+| `internal/broker/broker.go`                  | Request queue and worker pool                |
+| `internal/memory/store.go`                   | Session memory retention                     |
+| `internal/memory/retrieval.go`               | Semantic session-memory selection            |
+| `internal/memory/compact.go`                 | Retention pruning and token estimates        |
+| `internal/memory/budget.go`                  | Context budget discovery                     |
+| `internal/mcp/manager.go`                    | MCP client bootstrap and catalog             |
+| `internal/routing/routing.go`                | Shared gateway routing policy                |
+| `internal/routing/types.go`                  | Gateway-neutral routing types                |
+| `internal/llm/gateway.go`                    | LLM gateway HTTP client                      |
+| `internal/modelinfo/`                        | Model metadata discovery                     |
+| `internal/tools/registry/`                   | Tool schema loading and execution            |
+| `internal/tools/runtime/`                    | Request-local tool exposure state            |
+| `internal/tools/bootstrap.go`                | Tool registry assembly                       |
+| `internal/tools/builtin/`                    | Builtin tool wiring and handlers             |
+| `internal/tools/builtin/sessionhistory/`     | `session.recent` runtime handler             |
+| `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store             |
+| `internal/tools/builtin/soul/store.go`       | Soul file store                              |
+| `internal/commands/router.go`                | Shared command router                        |
+| `internal/commands/accountlinking/store.go`  | Canonical account link store                 |
+| `internal/requestctx/requestctx.go`          | Request metadata propagation through context |
+| `internal/media/images.go`                   | Image normalization and validation           |
+| `internal/gateway/runtime/`                  | Shared gateway request execution             |
+| `internal/gateway/bootstrap.go`              | Gateway bootstrap                            |
+| `internal/gateway/websocket/gateway.go`      | WebSocket transport                          |
+| `internal/gateway/discord/gateway.go`        | Discord transport                            |
+| `internal/gateway/imessage/gateway.go`       | iMessage BlueBubbles transport               |
 
 ## Code Style
 
