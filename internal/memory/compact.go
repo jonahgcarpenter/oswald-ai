@@ -101,7 +101,7 @@ func EstimatePromptTokens(systemPrompt string, history []llm.ChatMessage, userPr
 	for _, msg := range history {
 		total += estimateMessageTokens(msg)
 	}
-	total += estimateMessageTokens(llm.ChatMessage{Role: "user", Content: userPrompt, Images: make([]string, userImageCount)})
+	total += estimateMessageTokens(llm.ChatMessage{Role: "user", Content: userPrompt, Images: make([]llm.InputImage, userImageCount)})
 	total += estimateToolTokens(tools)
 	return total
 }

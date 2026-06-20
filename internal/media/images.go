@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
+	imagedraw "image/draw"
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/jpeg"
@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/jdeng/goheif"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 )
 
@@ -25,7 +26,9 @@ const (
 	MaxImagesPerRequest = 4
 	// MaxImageBytes limits each decoded image payload accepted from a gateway.
 	MaxImageBytes = 10 << 20
-	jpegQuality   = 90
+	// MaxNormalizedImageLongEdge limits the pixels sent to vision models while preserving useful detail.
+	MaxNormalizedImageLongEdge = 2560
+	jpegQuality                = 90
 )
 
 var normalizedImageMIMETypes = map[string]struct{}{
@@ -49,8 +52,13 @@ type NormalizationResult struct {
 	Image            llm.InputImage
 	DetectedMIME     string
 	DecodedFormat    string
+	OriginalWidth    int
+	OriginalHeight   int
 	Width            int
 	Height           int
+	WasResized       bool
+	NormalizedBytes  int
+	Base64Chars      int
 	PreservedAlpha   bool
 	UsedDeclaredMIME bool
 }
@@ -117,27 +125,39 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 		return NormalizationResult{}, fmt.Errorf("image payload decode failed for MIME type %q: %w", detectedMIME, err)
 	}
 
-	bounds := decoded.Bounds()
-	if bounds.Dx() <= 0 || bounds.Dy() <= 0 {
+	originalBounds := decoded.Bounds()
+	originalWidth := originalBounds.Dx()
+	originalHeight := originalBounds.Dy()
+	if originalWidth <= 0 || originalHeight <= 0 {
 		return NormalizationResult{}, fmt.Errorf("image payload has invalid dimensions for MIME type %q", detectedMIME)
 	}
 
-	hasAlpha := hasTransparency(decoded)
-	normalizedBytes, normalizedMIME, err := encodeNormalizedImage(decoded, hasAlpha)
+	normalizedImage, wasResized := resizeToFit(decoded, MaxNormalizedImageLongEdge)
+	normalizedBounds := normalizedImage.Bounds()
+	normalizedWidth := normalizedBounds.Dx()
+	normalizedHeight := normalizedBounds.Dy()
+	hasAlpha := hasTransparency(normalizedImage)
+	normalizedBytes, normalizedMIME, err := encodeNormalizedImage(normalizedImage, hasAlpha)
 	if err != nil {
 		return NormalizationResult{}, err
 	}
+	encoded := base64.StdEncoding.EncodeToString(normalizedBytes)
 
 	return NormalizationResult{
 		Image: llm.InputImage{
 			MimeType: normalizedMIME,
-			Data:     base64.StdEncoding.EncodeToString(normalizedBytes),
+			Data:     encoded,
 			Source:   source,
 		},
 		DetectedMIME:     detectedMIME,
 		DecodedFormat:    strings.TrimSpace(strings.ToLower(format)),
-		Width:            bounds.Dx(),
-		Height:           bounds.Dy(),
+		OriginalWidth:    originalWidth,
+		OriginalHeight:   originalHeight,
+		Width:            normalizedWidth,
+		Height:           normalizedHeight,
+		WasResized:       wasResized,
+		NormalizedBytes:  len(normalizedBytes),
+		Base64Chars:      len(encoded),
 		PreservedAlpha:   hasAlpha,
 		UsedDeclaredMIME: usedDeclaredMIME,
 	}, nil
@@ -207,6 +227,25 @@ func encodeNormalizedImage(img image.Image, preserveAlpha bool) ([]byte, string,
 	return buf.Bytes(), "image/jpeg", nil
 }
 
+func resizeToFit(img image.Image, maxLongEdge int) (image.Image, bool) {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+	if maxLongEdge <= 0 || width <= maxLongEdge && height <= maxLongEdge {
+		return img, false
+	}
+
+	scale := float64(maxLongEdge) / float64(width)
+	if height > width {
+		scale = float64(maxLongEdge) / float64(height)
+	}
+	newWidth := max(1, int(float64(width)*scale+0.5))
+	newHeight := max(1, int(float64(height)*scale+0.5))
+	resized := image.NewNRGBA(image.Rect(0, 0, newWidth, newHeight))
+	xdraw.CatmullRom.Scale(resized, resized.Bounds(), img, bounds, xdraw.Over, nil)
+	return resized, true
+}
+
 func hasTransparency(img image.Image) bool {
 	bounds := img.Bounds()
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -223,8 +262,8 @@ func hasTransparency(img image.Image) bool {
 func toNRGBA(img image.Image) *image.NRGBA {
 	bounds := img.Bounds()
 	out := image.NewNRGBA(bounds)
-	draw.Draw(out, bounds, &image.Uniform{C: color.Transparent}, image.Point{}, draw.Src)
-	draw.Draw(out, bounds, img, bounds.Min, draw.Over)
+	imagedraw.Draw(out, bounds, &image.Uniform{C: color.Transparent}, image.Point{}, imagedraw.Src)
+	imagedraw.Draw(out, bounds, img, bounds.Min, imagedraw.Over)
 	return out
 }
 

@@ -172,8 +172,13 @@ func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]llm.InputImag
 			config.F("detected_mime", result.DetectedMIME),
 			config.F("normalized_mime", result.Image.MimeType),
 			config.F("content_chars", decodedLen(image.Data)),
+			config.F("original_width", result.OriginalWidth),
+			config.F("original_height", result.OriginalHeight),
 			config.F("width", result.Width),
 			config.F("height", result.Height),
+			config.F("is_resized", result.WasResized),
+			config.F("normalized_bytes", result.NormalizedBytes),
+			config.F("base64_chars", result.Base64Chars),
 			config.F("preserved_alpha", result.PreservedAlpha),
 			config.F("used_declared_mime", result.UsedDeclaredMIME),
 		)
