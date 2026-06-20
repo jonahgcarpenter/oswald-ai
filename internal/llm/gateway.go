@@ -12,22 +12,24 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 // GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
 type GatewayClient struct {
 	BaseURL    string
 	APIKey     string
+	VirtualKey string
 	HTTPClient *http.Client
 	log        *config.Logger
 }
 
-// NewGatewayClient creates an LLM gateway client with the given base URL, optional API key, and logger.
-func NewGatewayClient(baseURL, apiKey string, log *config.Logger) *GatewayClient {
+// NewGatewayClient creates an LLM gateway client with the given base URL, optional auth, and logger.
+func NewGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
 	return &GatewayClient{
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		APIKey:  strings.TrimSpace(apiKey),
+		BaseURL:    strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		APIKey:     strings.TrimSpace(apiKey),
+		VirtualKey: strings.TrimSpace(virtualKey),
 		HTTPClient: &http.Client{
 			Timeout: 2 * time.Minute,
 		},
@@ -39,6 +41,9 @@ func (c *GatewayClient) applyHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	if c.VirtualKey != "" {
+		req.Header.Set("x-bf-vk", c.VirtualKey)
 	}
 }
 
@@ -212,7 +217,7 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (*EmbedResp
 		return nil, fmt.Errorf("failed to read embedding response body: %w", err)
 	}
 
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	requestLog := c.log.With(config.F("request_id", meta.RequestID), config.F("gateway", meta.Gateway), config.F("user_id", meta.SenderID), config.F("session_id", meta.SessionID), config.F("model", req.Model))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := bodySnippet(rawBody)
@@ -271,7 +276,7 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 }
 
 func (c *GatewayClient) requestLog(ctx context.Context, model string) *config.Logger {
-	meta := toolctx.MetadataFromContext(ctx)
+	meta := requestctx.MetadataFromContext(ctx)
 	return c.log.With(config.F("request_id", meta.RequestID), config.F("gateway", meta.Gateway), config.F("user_id", meta.SenderID), config.F("session_id", meta.SessionID), config.F("model", model))
 }
 

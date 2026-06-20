@@ -9,11 +9,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/soulmemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/usermemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/websearch"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
 const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
@@ -220,12 +221,12 @@ type AgentResponse struct {
 type Agent struct {
 	chatClient            llm.Chatter
 	embeddingClient       llm.Embedder
-	registry              *tools.Registry
+	registry              *registry.Registry
 	memory                *memory.Store
 	budget                memory.ContextBudget
 	model                 string
 	embeddingModel        string
-	soul                  *soulmemory.Store
+	soul                  *soul.Store
 	userMemory            *usermemory.Store
 	summarizer            *Summarizer
 	maxToolFailureRetries int
@@ -237,10 +238,10 @@ type Agent struct {
 func NewAgent(
 	chatClient llm.Chatter,
 	embeddingClient llm.Embedder,
-	registry *tools.Registry,
+	registry *registry.Registry,
 	model string,
 	embeddingModel string,
-	soul *soulmemory.Store,
+	soul *soul.Store,
 	userMemory *usermemory.Store,
 	budget memory.ContextBudget,
 	maxToolFailureRetries int,
@@ -453,14 +454,16 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	// Inject the sender ID into the context so tool handlers can identify
 	// which user this request belongs to without coupling to the session key.
-	ctx = toolctx.WithSenderID(ctx, senderID)
-	ctx = toolctx.WithMetadata(ctx, toolctx.Metadata{
+	ctx = requestctx.WithSenderID(ctx, senderID)
+	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
 		RequestID: requestID,
 		SessionID: sessionKey,
 		SenderID:  senderID,
 		Gateway:   gateway,
 		Model:     a.model,
 	})
+	toolExposure := toolruntime.NewExposure()
+	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 
 	// Read the soul file fresh on every request so that any edits the agent
 	// made via the soul.* tools take effect immediately.
@@ -591,7 +594,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	req := llm.ChatRequest{
 		Model:  a.model,
 		User:   requestUser,
-		Tools:  a.registry.LLMTools(),
 		Stream: streamCallback != nil,
 	}
 
@@ -640,6 +642,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		accumulatedContent.Reset()
 
 		req.Messages = messages
+		req.Tools = a.registry.LLMToolsForVisibility(toolExposure.Visibility())
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),

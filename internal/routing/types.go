@@ -10,7 +10,7 @@ const (
 	ActionIgnore Action = "ignore"
 	// ActionLLM means the gateway should submit the request to the broker.
 	ActionLLM Action = "llm"
-	// ActionCommand means the gateway should handle an account-link command.
+	// ActionCommand means the gateway should handle a command.
 	ActionCommand Action = "command"
 	// ActionGatewayFallback means the gateway should send ResponseText directly.
 	ActionGatewayFallback Action = "gateway_fallback"
@@ -25,8 +25,9 @@ type Input struct {
 	SessionKey         string
 	IsDirect           bool
 	IsGroup            bool
-	MentionsBot        bool
-	IsAccountCommand   bool
+	IsMention          bool
+	IsReplyToBot       bool
+	IsCommand          bool
 	Text               string
 	CurrentImages      []llm.InputImage
 	CurrentUnsupported []string

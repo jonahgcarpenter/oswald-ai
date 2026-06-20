@@ -6,8 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
@@ -29,8 +30,8 @@ type Gateway struct {
 	WebhookPath         string
 	BlueBubblesURL      string
 	BlueBubblesPassword string
-	Links               *accountlink.Service
-	Commands            *accountlink.CommandHandler
+	Links               *accountlinking.Service
+	Commands            *commands.Router
 	Log                 *config.Logger
 	Broker              *broker.Broker
 	HTTPClient          *http.Client

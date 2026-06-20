@@ -20,6 +20,7 @@ type Config struct {
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
+	LLMGatewayVirtualKey     string        // Optional Bifrost virtual key for LLM gateway requests
 	ModelContextWindow       int           // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int           // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string        // Discord bot token; Discord gateway disabled if empty
@@ -32,10 +33,10 @@ type Config struct {
 }
 
 const (
-	DefaultSoulPath        = "config/soul.md"
-	DefaultToolsConfigDir  = "config/tools"
-	DefaultUserMemoryPath  = "config/memory/users"
-	DefaultAccountLinkPath = "config/accounts/links.json"
+	DefaultSoulPath        = "data/memory/soul/soul.md"
+	DefaultToolsConfigDir  = "data/tools"
+	DefaultUserMemoryPath  = "data/memory/users"
+	DefaultAccountLinkPath = "data/accounts/links.json"
 )
 
 // Load reads configuration from environment variables, with .env file support.
@@ -45,7 +46,7 @@ func Load() *Config {
 	godotenv.Load() // nolint: errcheck
 
 	return &Config{
-		Port:                     getEnv("PORT", "8080"),
+		Port:                     getEnv("PORT", "8000"),
 		IMessagePort:             getEnv("IMESSAGE_PORT", "8090"),
 		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
 		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
@@ -55,6 +56,7 @@ func Load() *Config {
 		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
+		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),

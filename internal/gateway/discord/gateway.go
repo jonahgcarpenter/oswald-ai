@@ -13,9 +13,10 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accountlink"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -490,7 +491,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
 	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
-	if msg.GuildID != "" && !mentionsBot && !isReplyToBot && !isAccountCommand(text) {
+	isCommand := dg.Commands.IsCommand(text)
+	if routing.ShouldIgnoreUninvokedGroup(msg.GuildID != "", mentionsBot, isReplyToBot, isCommand) {
 		dg.rememberReply(msg.ID, replyContext{
 			SessionKey:  sessionKey,
 			ChannelID:   msg.ChannelID,
@@ -505,7 +507,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		return
 	}
 
-	normalizedAuthorID, normErr := accountlink.NormalizeIdentifier("discord", msg.Author.ID)
+	normalizedAuthorID, normErr := accountlinking.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
 		log.Error("gateway.account.normalize_failed", "failed to normalize discord account", config.F("request_id", requestID), config.ErrorField(normErr))
 		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID)
@@ -524,21 +526,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		reply = dg.resolveReplyContext(msg, re, images, requestID)
 	}
 
-	decision := routing.Decide(routing.Input{
-		Gateway:            "discord",
-		ChatID:             msg.ChannelID,
-		SenderID:           canonicalUserID,
-		DisplayName:        msg.Author.Username,
-		SessionKey:         sessionKey,
-		IsDirect:           msg.GuildID == "",
-		IsGroup:            msg.GuildID != "",
-		MentionsBot:        mentionsBot,
-		IsAccountCommand:   isAccountCommand(text),
-		Text:               text,
-		CurrentImages:      images,
-		CurrentUnsupported: unsupported,
-		Reply:              reply,
-	})
 	dg.rememberReply(msg.ID, replyContext{
 		SessionKey:  sessionKey,
 		ChannelID:   msg.ChannelID,
@@ -550,103 +537,35 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
 	})
-	if decision.Action == routing.ActionIgnore {
-		return
-	}
-	if decision.Action == routing.ActionGatewayFallback {
-		_, _ = dg.sendMessage(msg.ChannelID, decision.ResponseText, replyToID)
-		return
-	}
-	if decision.Action == routing.ActionCommand {
-		commandResponse, handled, commandErr := dg.Commands.Handle(canonicalUserID, decision.Prompt)
-		if !handled {
-			return
-		}
-		if commandErr != nil {
-			log.Error("gateway.command.failed", "discord account command failed", config.F("request_id", requestID), config.F("user_id", canonicalUserID), config.ErrorField(commandErr))
-			commandResponse = "Failed to process account linking command."
-		}
-		_, _ = dg.sendMessage(msg.ChannelID, commandResponse, replyToID)
-		return
-	}
 
-	log.Debug("gateway.request.received", "received discord request", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("session_id", sessionKey), config.F("user_id", canonicalUserID), config.F("image_count", len(decision.Images)), config.F("is_dm", msg.GuildID == ""), config.F("is_reply", msg.ReferencedMessage != nil), config.F("prompt_chars", len(decision.Prompt)))
-
-	stopTyping := make(chan struct{})
-	defer close(stopTyping)
-
-	go func() {
-		_ = dg.sendTyping(msg.ChannelID)
-		ticker := time.NewTicker(9 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				_ = dg.sendTyping(msg.ChannelID)
-			case <-stopTyping:
-				return
-			}
-		}
-	}()
-
-	req := &broker.Request{
+	gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID:    requestID,
-		Channel:      "discord",
+		Gateway:      "discord",
 		ChatID:       msg.ChannelID,
 		SenderID:     canonicalUserID,
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
-		Prompt:       decision.Prompt,
-		Images:       decision.Images,
-		StreamFunc:   nil,
-		ResponseChan: make(chan broker.Result, 1),
-	}
-	dg.Broker.Submit(req)
-	result := <-req.ResponseChan
-
-	if result.Err != nil {
-		log.Error("gateway.response.failed", "discord agent processing failed", config.F("request_id", requestID), config.ErrorField(result.Err))
-		_, _ = dg.sendMessage(msg.ChannelID, "Sorry, I encountered an internal error processing that.", replyToID)
-		return
-	}
-
-	finalPayload := result.Response
-	responseText := finalPayload.Response
-	chunks := splitMessage(responseText, 2000)
-	originCtx := replyContext{
-		SessionKey:  sessionKey,
-		ChannelID:   msg.ChannelID,
-		SenderID:    msg.Author.ID,
-		DisplayName: "Oswald",
-		Text:        responseText,
-		IsFromBot:   true,
-		CreatedAt:   time.Now(),
-	}
-
-	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", finalPayload.Model))
-
-	sentCount := 0
-	for i, chunk := range chunks {
-		currentReplyID := ""
-		if i == 0 {
-			currentReplyID = replyToID
-		}
-
-		sentMessageID, err := dg.sendMessage(msg.ChannelID, chunk, currentReplyID)
-		if err != nil {
-			log.Error("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", requestID), config.F("chunk_index", i+1), config.ErrorField(err))
-			break
-		}
-		sentCount++
-
-		chunkCtx := originCtx
-		chunkCtx.Text = chunk
-		dg.rememberReply(sentMessageID, chunkCtx)
-	}
-	if sentCount == len(chunks) {
-		log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
-	}
+		IsDirect:     msg.GuildID == "",
+		IsGroup:      msg.GuildID != "",
+		IsMention:    mentionsBot,
+		IsReplyToBot: isReplyToBot,
+		IsCommand:    isCommand,
+		Text:         text,
+		Images:       images,
+		Unsupported:  unsupported,
+		Reply:        reply,
+	}, gatewayruntime.Dependencies{
+		Broker:   dg.Broker,
+		Commands: dg.Commands,
+		Log:      dg.Log,
+	}, &runtimeResponder{
+		gateway:    dg,
+		requestID:  requestID,
+		channelID:  msg.ChannelID,
+		replyToID:  replyToID,
+		sessionKey: sessionKey,
+		authorID:   msg.Author.ID,
+	})
 }
 
 func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID string) *routing.ReplyContext {
@@ -802,11 +721,6 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 	}
 	log.Debug("gateway.reply_lookup.fetched", "fetched discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("attachment_count", len(result.Attachments)), config.F("status", "ok"))
 	return result, true
-}
-
-func isAccountCommand(input string) bool {
-	trimmed := strings.TrimSpace(input)
-	return strings.HasPrefix(trimmed, "/connect") || strings.HasPrefix(trimmed, "/disconnect")
 }
 
 func (dg *Gateway) loadImages(attachments []Attachment) ([]llm.InputImage, []string) {

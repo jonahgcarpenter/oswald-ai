@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin tools:
 
 - `web.search`
 - `memory.remember`
@@ -14,8 +14,10 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `soul.read`
 - `soul.patch`
 - `session.recent`
+- `mcp.servers`
+- `mcp.tools`
 
-Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured.
+Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured. Discovered MCP tools are hidden by default and become visible to the model only for the active request after `mcp.tools` lists them.
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -26,17 +28,18 @@ There is no JavaScript, TypeScript, or frontend code in this repository.
 Current layers:
 
 1. `cmd/agent/main.go` — startup wiring
-2. `internal/accountlink/` — canonical user identity and cross-gateway account linking
-3. `internal/gateway/` — gateway bootstrap and implementations
-4. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
-5. `internal/broker/` — request queue and worker pool
-6. `internal/agent/` — iterative tool-calling agent loop
-7. `internal/memory/` — in-process conversation retention and compaction
-8. `internal/tools/` — tool registry, builtin handlers, and schema loading
-9. `internal/mcpclient/` — optional MCP client sessions and discovered tools
-10. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-11. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-12. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
+2. `internal/commands/` — shared command routing and command implementations
+3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
+4. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
+5. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+6. `internal/broker/` — request queue and worker pool
+7. `internal/agent/` — iterative tool-calling agent loop
+8. `internal/memory/` — in-process conversation retention and compaction
+9. `internal/tools/` — tool registry, builtin handlers, and schema loading
+10. `internal/mcp/` — optional MCP client sessions and discovered tools
+11. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+12. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+13. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
 
 ## Startup Flow
 
@@ -47,10 +50,10 @@ Current layers:
 3. Create the LLM gateway client
 4. Discover context budget from OpenRouter model metadata, with `MODEL_*` environment overrides taking precedence
 5. Create the soul store and persistent user-memory store
-6. Create the account-link service and shared `/connect` and `/disconnect` command handler
+6. Create the account-link service, shared `/connect` and `/disconnect` command handler, and command router
 7. Initialize optional MCP clients
 8. Create the in-process conversation memory store
-9. Load tool schemas from `config/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
 10. Build enabled gateways from config
 11. Create the agent
 12. Start the broker worker pool
@@ -63,14 +66,15 @@ Every request follows the same high-level path:
 
 1. A gateway receives user input
 2. The gateway normalizes text, attachments, sender metadata, and reply context
-3. The gateway resolves or creates the canonical user identity through `internal/accountlink/`
-4. Discord and iMessage pass the normalized message through `internal/routing.Decide()` to ignore, handle an account-link command, send a direct gateway fallback, or submit an LLM request
-5. Account-link commands are handled by the gateway without reaching the agent loop
-6. The gateway submits a `broker.Request`
-7. A broker worker calls `(*Agent).Process()`
-8. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
-9. The final response is returned to the originating gateway
-10. The gateway sends the response back to the client, Discord channel, or iMessage chat
+3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
+4. The gateway builds a `runtime.Request` with normalized gateway facts like `IsMention`, `IsReplyToBot`, and `IsCommand`
+5. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
+6. Account-link commands are handled by the shared command router without reaching the agent loop
+7. The runtime submits a `broker.Request` when the request should reach the LLM
+8. A broker worker calls `(*Agent).Process()`
+9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+10. The final response is returned to the shared runtime
+11. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -96,7 +100,7 @@ Per request it does the following:
 
 1. Create a request-scoped timeout of `3*time.Minute`
 2. Inject `SenderID` into context so tools can identify the current user
-3. Read `config/soul.md` fresh from disk
+3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
    - soul content
    - current speaker identity when available
@@ -129,15 +133,17 @@ Streaming behavior:
 
 ## Shared Routing
 
-Gateway-neutral routing policy lives in `internal/routing/` and is used by Discord and iMessage.
+Gateway-neutral routing policy lives in `internal/routing/` and shared gateway execution lives in `internal/gateway/runtime/`.
 
-- `routing.Input` carries normalized text, channel type, mention state, account-command state, current-turn images, unsupported attachment labels, and optional reply context
-- `routing.Decide()` returns one of: ignore, submit to the LLM, handle an account-link command, or send a gateway fallback response directly
-- Group messages are ignored unless they mention Oswald, are replies to Oswald, or are account-link commands addressed to Oswald
+- Concrete gateways own transport-specific parsing: mention detection, reply lookup, attachment downloads, account identity extraction, and response sending
+- `runtime.Request` carries normalized text, channel type, mention state, reply-to-bot state, command state, current-turn images, unsupported attachment labels, and optional reply context
+- `routing.Decide()` returns one of: ignore, submit to the LLM, handle a command, or send a gateway fallback response directly
+- Group messages are ignored unless they mention Oswald, are replies to Oswald, or are commands addressed to Oswald
+- `runtime.Execute()` applies routing decisions, executes commands, submits broker requests, and calls the gateway-specific responder
 - Empty prompts with no usable images get a direct gateway fallback response
-- Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for Discord and iMessage
+- Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for every gateway
 - Reply context can include quoted text, replied-to images when image slots remain, unsupported attachment labels, and unavailable-message markers
-- WebSocket currently performs its own simpler routing path for JSON/plain-text prompts and account-link commands
+- WebSocket uses the same shared runtime as Discord and iMessage, with streaming delivered through its gateway-specific responder
 
 ## Three-Layer Memory Model
 
@@ -145,20 +151,20 @@ Oswald keeps three distinct memory layers.
 
 | Layer                  | Storage                       | Purpose                                     | Mutable by agent |
 | ---------------------- | ----------------------------- | ------------------------------------------- | ---------------- |
-| Soul memory            | `config/soul.md`              | Identity, directives, personality           | Yes              |
-| Persistent user memory | `config/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
+| Soul memory            | `data/memory/soul/soul.md`  | Identity, directives, personality           | Yes              |
+| Persistent user memory | `data/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
 | Session chat memory    | In-process only               | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
-- Stored in `config/soul.md`
+- Stored in `data/memory/soul/soul.md`
 - Read fresh on every request
 - Edited through the `soul.*` tools
 - Changes take effect on the next request without restart
 
 ### Persistent User Memory
 
-- Stored in `config/memory/users/<id>.md`
+- Stored in `data/memory/users/<id>.md`
 - Managed by the `memory.*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories: `identity`, `system_rules`, `preferences`, `notes`
@@ -169,7 +175,7 @@ Oswald keeps three distinct memory layers.
 
 ### Account Links
 
-- Stored in `config/accounts/links.json`
+- Stored in `data/accounts/links.json`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
@@ -308,7 +314,7 @@ Behavior:
 - Ignores self-authored messages and payloads with neither text nor attachments
 - Normalizes iMessage handles into canonical phone-number or email identifiers
 - Resolves account links using contact display names when available, with identifier fallback
-- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, account-link commands, or replies to Oswald
+- In direct chats, responds to all messages; in group chats, responds only to `@oswald`, commands, or replies to Oswald
 - Downloads supported image attachments from BlueBubbles by attachment GUID and includes them on the current user turn
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators and replies back through the BlueBubbles REST API
@@ -336,8 +342,8 @@ Reply handling:
 
 Tools are split into schema and runtime layers.
 
-- Schemas are loaded from `config/tools/*.md`
-- Runtime handlers are wired in `internal/tools/bootstrap.go`
+- Schemas are loaded from `data/tools/*.md`
+- Runtime handlers are wired through `internal/tools/bootstrap.go`, `internal/tools/builtin/`, and `internal/tools/mcp/`
 - Additional tool definitions can be discovered dynamically from connected MCP servers
 
 Current builtin tools:
@@ -349,17 +355,20 @@ Current builtin tools:
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
 - `session.recent` — read recent completed exchanges from the current in-process session
+- `mcp.servers` — list connected MCP servers and read-only tool counts
+- `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
 
 `session.recent` arguments:
 
 - `offset`: one-based recent exchange offset; `1` is the newest completed exchange
 - `count`: number of exchanges to return, clamped to `1` through `3`
 
-The tool is read-only and scoped to the current request's `session_id` from `toolctx.MetadataFromContext`.
+The tool is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
 
 Optional external tools:
 
 - Read-only GitHub MCP tools are discovered at startup and registered under the `github.` namespace when `GITHUB_PERSONAL_ACCESS_TOKEN` is set
+- MCP-discovered tools are not included in the default LLM tool list; `mcp.tools` exposes only returned matches for direct calls during the current request
 
 ### Tool Registry
 
@@ -373,11 +382,11 @@ The registry:
 
 ### MCP Integration
 
-- MCP client startup lives in `internal/mcpclient/`
+- MCP client startup lives in `internal/mcp/`
 - GitHub is the only MCP server integration today
 - The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
 - Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
-- MCP tools are surfaced to the model with a `github.` prefix
+- MCP tools use namespaced names like `github.*` and are surfaced to the model only after request-local discovery through `mcp.tools`
 
 ### Tool Failure Handling
 
@@ -611,6 +620,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `LLM_GATEWAY_MODEL`            | empty                          | Model name passed to the LLM gateway; required at startup               |
 | `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                          | Optional LLM gateway embedding model for semantic session-memory retrieval |
 | `LLM_GATEWAY_API_KEY`          | empty                          | Optional bearer token for LLM gateway requests                          |
+| `LLM_GATEWAY_VIRTUAL_KEY`      | empty                          | Optional Bifrost virtual key sent as `x-bf-vk` to the LLM gateway       |
 | `MODEL_CONTEXT_WINDOW`     | `0`                            | Optional context-window override for prompt budgeting                   |
 | `MODEL_MAX_OUTPUT_TOKENS`  | `0`                            | Optional output-token reserve override for prompt budgeting             |
 | `SEARXNG_URL`              | `http://localhost:8888`        | SearXNG API base URL                                                    |
@@ -633,19 +643,23 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 | `internal/memory/retrieval.go`          | Semantic session-memory selection |
 | `internal/memory/compact.go`            | Retention pruning and token estimates |
 | `internal/memory/budget.go`             | Context budget discovery          |
-| `internal/mcpclient/manager.go`         | MCP client bootstrap and catalog  |
-| `internal/routing/routing.go`           | Shared Discord/iMessage routing policy |
+| `internal/mcp/manager.go`               | MCP client bootstrap and catalog  |
+| `internal/routing/routing.go`           | Shared gateway routing policy |
 | `internal/routing/types.go`             | Gateway-neutral routing types     |
 | `internal/llm/gateway.go`               | LLM gateway HTTP client           |
 | `internal/modelinfo/`                   | Model metadata discovery          |
-| `internal/tools/registry.go`            | Tool schema loading and execution |
-| `internal/tools/bootstrap.go`           | Builtin tool wiring               |
-| `internal/tools/sessionhistory/`        | `session.recent` runtime handler  |
-| `internal/tools/usermemory/store.go`    | Persistent per-user memory store  |
-| `internal/tools/soulmemory/store.go`    | Soul file store                   |
-| `internal/accountlink/store.go`         | Canonical account link store      |
-| `internal/toolctx/toolctx.go`           | Request metadata propagation for tools |
+| `internal/tools/registry/`              | Tool schema loading and execution |
+| `internal/tools/runtime/`               | Request-local tool exposure state |
+| `internal/tools/bootstrap.go`           | Tool registry assembly            |
+| `internal/tools/builtin/`               | Builtin tool wiring and handlers  |
+| `internal/tools/builtin/sessionhistory/` | `session.recent` runtime handler |
+| `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store |
+| `internal/tools/builtin/soul/store.go`  | Soul file store                   |
+| `internal/commands/router.go`        | Shared command router             |
+| `internal/commands/accountlinking/store.go` | Canonical account link store      |
+| `internal/requestctx/requestctx.go`     | Request metadata propagation through context |
 | `internal/media/images.go`              | Image normalization and validation |
+| `internal/gateway/runtime/`             | Shared gateway request execution  |
 | `internal/gateway/bootstrap.go`         | Gateway bootstrap                 |
 | `internal/gateway/websocket/gateway.go` | WebSocket transport               |
 | `internal/gateway/discord/gateway.go`   | Discord transport                 |
@@ -664,20 +678,22 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ### Adding a Tool
 
-1. Add a schema file to `config/tools/<name>.md`
+1. Add a schema file to `data/tools/<name>.md`
 2. Add runtime code under `internal/tools/<name>/` if needed
-3. Register the handler in `internal/tools/bootstrap.go`
+3. Register the handler in `internal/tools/builtin/`
 
 ### Adding a Gateway
 
 1. Create `internal/gateway/<name>/`
 2. Implement `gateway.Service`
-3. Wire it in `internal/gateway/bootstrap.go`
-4. Do not import concrete gateway packages directly in `cmd/agent/main.go`
+3. Normalize inbound messages into `runtime.Request`
+4. Implement a gateway-specific `runtime.Responder`
+5. Wire it in `internal/gateway/bootstrap.go`
+6. Do not import concrete gateway packages directly in `cmd/agent/main.go`
 
 ### Changing Personality
 
-- Edit `config/soul.md` directly, or
+- Edit `data/memory/soul/soul.md` directly, or
 - let the agent update it through the `soul.*` tools
 
 Changes apply on the next request because the soul file is read fresh each time.
@@ -686,13 +702,13 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is in-process only and does not survive restart
 - WebSocket gateway has no authentication layer
-- Only seven builtin tools ship locally; extra tools require optional MCP integration
+- Only nine builtin tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
 - GitHub is the only MCP server integration today
 - The OpenAI-compatible LLM gateway is the model gateway; model metadata comes from OpenRouter and optional `MODEL_*` overrides
 
 Account-linking note:
 
-- `config/accounts/links.json` stores canonical users and linked external accounts
+- `data/accounts/links.json` stores canonical users and linked external accounts
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 

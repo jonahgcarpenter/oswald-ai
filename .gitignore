@@ -3,5 +3,5 @@ tmp/
 .env
 
 # Users
-config/memory/
-config/accounts/
+data/memory/users/
+data/accounts/

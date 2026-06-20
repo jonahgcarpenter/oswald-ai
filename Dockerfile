@@ -8,8 +8,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
-COPY config/tools/ ./config/tools/
-COPY config/soul.md ./config/soul.md
+COPY data/tools/ ./data/tools/
+COPY data/memory/soul/soul.md ./data/memory/soul/soul.md
 COPY internal/ ./internal/
 
 RUN CGO_ENABLED=1 go build -o oswald-agent ./cmd/agent/main.go
@@ -28,10 +28,10 @@ COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
 
 RUN chmod +x ./oswald-agent
 
-COPY --from=builder --chown=oswald-ai:oswald-group /app/config/ ./config/
+COPY --from=builder --chown=oswald-ai:oswald-group /app/data/ ./data/
 
 USER oswald-ai
 
-EXPOSE 8080
+EXPOSE 8000
 
 CMD ["./oswald-agent"]
