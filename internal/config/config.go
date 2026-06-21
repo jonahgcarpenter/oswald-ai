@@ -37,7 +37,7 @@ const (
 	DefaultSoulPath              = "data/memory/soul/soul.md"
 	DefaultToolsConfigDir        = "data/tools"
 	DefaultUserMemoryPath        = "data/memory/users"
-	DefaultAccountLinkPath       = "/data/database/oswald.db"
+	DefaultAccountLinkPath       = "data/database/oswald.db"
 	DefaultLegacyAccountLinkPath = "data/accounts/links.json"
 )
 
