@@ -55,3 +55,33 @@ func TestMapToGatewayMessagesSerializesImagesAsDataURLs(t *testing.T) {
 		t.Fatalf("unexpected image URL %q", got.Content[1].ImageURL.URL)
 	}
 }
+
+func TestMapFromGatewayMessageDecodesToolArgumentsAndThinking(t *testing.T) {
+	msg := mapFromGatewayMessage(gatewayMessage{
+		Role:             "assistant",
+		Content:          []interface{}{map[string]interface{}{"type": "text", "text": "hello"}, map[string]interface{}{"type": "image_url"}},
+		ReasoningContent: "reasoning",
+		Thinking:         "thinking",
+		ToolCalls: []gatewayToolCall{{ID: "call-1", Function: gatewayToolFunction{
+			Name:      "test.tool",
+			Arguments: `{"value":42}`,
+		}}},
+	})
+
+	if msg.Content != "hello" || msg.Thinking != "reasoning" {
+		t.Fatalf("unexpected message content/thinking: %+v", msg)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "test.tool" || msg.ToolCalls[0].Function.Arguments["value"].(float64) != 42 {
+		t.Fatalf("unexpected tool calls: %+v", msg.ToolCalls)
+	}
+}
+
+func TestDecodeToolArgumentsFallsBackToRaw(t *testing.T) {
+	got := decodeToolArguments("not-json")
+	if got["_raw"] != "not-json" {
+		t.Fatalf("unexpected decoded args: %+v", got)
+	}
+	if responseFormat("json").Type != "json_object" {
+		t.Fatal("expected json alias to json_object")
+	}
+}
