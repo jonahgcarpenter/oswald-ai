@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,20 +27,24 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	if resp.Response != "final answer" {
 		t.Fatalf("unexpected response %q", resp.Response)
 	}
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one chat call, got %d", len(chat.requests))
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one primary chat call, got %d", len(primary))
 	}
-	lastMessage := chat.requests[0].Messages[len(chat.requests[0].Messages)-1]
+	lastMessage := primary[0].Messages[len(primary[0].Messages)-1]
 	if len(lastMessage.Images) != 1 {
 		t.Fatalf("expected current-turn image in prompt, got %+v", lastMessage.Images)
 	}
 
-	turns := store.Turns("session-1")
+	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(turns) != 1 {
 		t.Fatalf("expected one persisted turn, got %d", len(turns))
 	}
 	wantUser := "new prompt\n\n[Attached 1 image(s)]"
-	if turns[0].User.Content != wantUser || turns[0].Assistant.Content != "final answer" {
+	if turns[0].UserText != wantUser || turns[0].AssistantText != "final answer" {
 		t.Fatalf("unexpected stored turn: %+v", turns[0])
 	}
 }
@@ -70,10 +75,11 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	if resp.Response != "tool-backed answer" || resp.Thinking != "thinking" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
-	if len(chat.requests) != 2 {
-		t.Fatalf("expected two chat calls, got %d", len(chat.requests))
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 2 {
+		t.Fatalf("expected two primary chat calls, got %d", len(primary))
 	}
-	secondMessages := chat.requests[1].Messages
+	secondMessages := primary[1].Messages
 	toolMsg := secondMessages[len(secondMessages)-1]
 	if toolMsg.Role != "tool" || toolMsg.ToolCallID != "call-1" || toolMsg.Content != "lookup result" {
 		t.Fatalf("unexpected tool message: %+v", toolMsg)
@@ -114,39 +120,47 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	if resp.Response != "finished without tools" {
 		t.Fatalf("unexpected response %q", resp.Response)
 	}
-	if len(chat.requests) != 2 {
-		t.Fatalf("expected final no-tools call, got %d calls", len(chat.requests))
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 2 {
+		t.Fatalf("expected final no-tools call, got %d calls", len(primary))
 	}
-	if len(chat.requests[1].Tools) != 0 {
-		t.Fatalf("expected tools disabled, got %+v", chat.requests[1].Tools)
+	if len(primary[1].Tools) != 0 {
+		t.Fatalf("expected tools disabled, got %+v", primary[1].Tools)
 	}
 }
 
 func TestProcessUsesFakeEmbeddingsForSemanticMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
-	embedder := &fakeEmbedder{vectors: [][]float64{{1, 0}, {1, 0}}}
+	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {1, 0}, {1, 0}, {1, 0}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
 	agent.embeddingModel = "embed-model"
-	store.ReplaceTurns("session-1", []memory.Turn{
-		{CreatedAt: time.Now().Add(-2 * time.Minute), User: llm.ChatMessage{Role: "user", Content: "irrelevant"}, Assistant: llm.ChatMessage{Role: "assistant", Content: "old a"}, Embedding: []float64{0, 1}},
-		{CreatedAt: time.Now().Add(-1 * time.Minute), User: llm.ChatMessage{Role: "user", Content: "relevant"}, Assistant: llm.ChatMessage{Role: "assistant", Content: "old b"}, Embedding: []float64{1, 0}},
-	})
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "irrelevant", "old a", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "relevant", "old b", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"recent one", "recent two", "recent three", "recent four"} {
+		if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", text, "recent answer", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if len(embedder.inputs) != 2 {
-		t.Fatalf("expected query and turn embeddings, got %d", len(embedder.inputs))
+	if len(embedder.inputs) < 3 {
+		t.Fatalf("expected seed and query embeddings, got %d", len(embedder.inputs))
 	}
-	messages := chat.requests[0].Messages
+	messages := primaryRequests(chat.requests)[0].Messages
 	foundRelevant := false
 	foundIrrelevant := false
 	for _, msg := range messages {
-		if msg.Content == "relevant" {
+		if msg.Content != "" && contains(msg.Content, "relevant") {
 			foundRelevant = true
 		}
-		if msg.Content == "irrelevant" {
+		if msg.Content != "" && contains(msg.Content, "irrelevant") {
 			foundIrrelevant = true
 		}
 	}
@@ -169,6 +183,9 @@ type fakeChatter struct {
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
+	if req.Format == "json_object" {
+		return &llm.ChatResponse{Model: req.Model, Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
+	}
 	if len(f.responses) == 0 {
 		return nil, errors.New("no fake response")
 	}
@@ -200,7 +217,7 @@ func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.Embe
 	return &llm.EmbedResponse{Model: req.Model, Embeddings: [][]float64{vec}}, nil
 }
 
-func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *memory.Store) {
+func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *usermemory.Store) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	if reg == nil {
@@ -211,8 +228,26 @@ func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *re
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
-	userStore := usermemory.NewStore(filepath.Join(dir, "users"), log)
+	userStore, err := usermemory.NewSQLiteStore(filepath.Join(dir, "oswald.db"), embedder, "embed-model", log)
+	if err != nil {
+		t.Fatalf("user store: %v", err)
+	}
 	store := memory.NewStore(memory.Options{}, log)
 	agent := NewAgent(chat, embedder, reg, "test-model", "", soulStore, userStore, memory.ContextBudget{PromptLimit: 100000}, 3, time.Minute, store, log)
-	return agent, store
+	return agent, userStore
+}
+
+func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {
+	out := make([]llm.ChatRequest, 0, len(requests))
+	for _, req := range requests {
+		if req.Format == "json_object" {
+			continue
+		}
+		out = append(out, req)
+	}
+	return out
+}
+
+func contains(value, needle string) bool {
+	return strings.Contains(value, needle)
 }

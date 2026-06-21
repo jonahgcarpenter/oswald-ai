@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
@@ -15,156 +15,133 @@ func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 }
 
-// NewRememberHandler returns a Handler for the memory.remember tool.
-// The target user is determined from the sender ID injected into ctx by the
-// agent, so the model never needs to pass user identity as an argument.
-func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+// NewSaveHandler returns a Handler for explicit user-requested memory saves.
+func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
-			return "", fmt.Errorf("memory.remember: no user identity available in this context")
+			return "", fmt.Errorf("memory.save: no user identity available in this context")
 		}
-
-		statement, _ := args["statement"].(string)
-		statement = strings.TrimSpace(statement)
-
-		evidence, _ := args["evidence"].(string)
-		evidence = strings.TrimSpace(evidence)
-
-		category, _ := args["category"].(string)
-		category = strings.TrimSpace(strings.ToLower(category))
-
-		return handleRemember(ctx, store, requestLog(log, ctx), userID, statement, evidence, category)
+		meta := requestctx.MetadataFromContext(ctx)
+		statement := stringArg(args, "statement")
+		if statement == "" {
+			return "", fmt.Errorf("memory.save: statement is required")
+		}
+		evidence := stringArg(args, "evidence")
+		if evidence == "" {
+			evidence = "The user explicitly asked this to be remembered"
+		}
+		ttlDays := intArg(args, "ttl_days", 0)
+		ttl := time.Duration(0)
+		if ttlDays > 0 {
+			ttl = time.Duration(ttlDays) * 24 * time.Hour
+		}
+		entry, err := store.SaveMemory(ctx, userID, SaveRequest{
+			Scope:           stringArg(args, "scope"),
+			Category:        stringArg(args, "category"),
+			Statement:       statement,
+			Evidence:        evidence,
+			Confidence:      floatArg(args, "confidence", 0.9),
+			Importance:      intArg(args, "importance", 3),
+			SourceSessionID: meta.SessionID,
+			TTL:             ttl,
+			Supersedes:      stringArg(args, "supersedes"),
+		})
+		if err != nil {
+			return "", err
+		}
+		requestLog(log, ctx).Debug("agent.tool.memory.saved", "saved memory", config.F("tool_name", "memory.save"), config.F("scope", entry.Scope), config.F("category", entry.Category))
+		return fmt.Sprintf("Saved %s memory (%s): %s", entry.Scope, entry.Category, entry.Statement), nil
 	}
 }
 
-// NewRecallHandler returns a Handler for the memory.recall tool.
-// chatClient and model are used to perform a one-time LLM-based migration when
-// recall is called on a memory file that pre-dates the category system. The LLM
-// is asked to classify each flat fact into the correct category section. The
-// migrated content is written back to disk so the migration only fires once.
-func NewRecallHandler(store *Store, chatClient llm.Chatter, model string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+// NewSearchHandler returns a Handler for memory search.
+func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
-			return "", fmt.Errorf("memory.recall: no user identity available in this context")
+			return "", fmt.Errorf("memory.search: no user identity available in this context")
 		}
-
-		category, _ := args["category"].(string)
-		category = strings.TrimSpace(strings.ToLower(category))
-		query, _ := args["query"].(string)
-		query = strings.TrimSpace(query)
-		limit := intFromArg(args["limit"], 5)
-
-		return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category, query, limit)
+		entries, err := store.Search(ctx, userID, stringArg(args, "scope"), stringArg(args, "category"), stringArg(args, "query"), intArg(args, "limit", 8))
+		if err != nil {
+			return "", err
+		}
+		if len(entries) == 0 {
+			return "No matching memories found for this user.", nil
+		}
+		requestLog(log, ctx).Debug("agent.tool.memory.searched", "searched memory", config.F("tool_name", "memory.search"), config.F("returned_count", len(entries)))
+		return RenderMemory("", entries), nil
 	}
 }
 
-// NewForgetHandler returns a Handler for the memory.forget tool.
-// The target user is determined from the sender ID injected into ctx by the
-// agent, so the model never needs to pass user identity as an argument.
+// NewListHandler returns a Handler for listing active memory.
+func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		userID := requestctx.SenderIDFromContext(ctx)
+		if userID == "" {
+			return "", fmt.Errorf("memory.list: no user identity available in this context")
+		}
+		entries, err := store.ListMemories(userID, stringArg(args, "scope"), stringArg(args, "category"), intArg(args, "limit", 25))
+		if err != nil {
+			return "", err
+		}
+		if len(entries) == 0 {
+			return "No active memories found for this user.", nil
+		}
+		intro, _ := store.ReadIntro(userID)
+		requestLog(log, ctx).Debug("agent.tool.memory.listed", "listed memory", config.F("tool_name", "memory.list"), config.F("returned_count", len(entries)))
+		return RenderMemory(intro, entries), nil
+	}
+}
+
+// NewForgetHandler returns a Handler for deleting active memories.
 func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		userID := requestctx.SenderIDFromContext(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.forget: no user identity available in this context")
 		}
-
-		statement, _ := args["statement"].(string)
-		statement = strings.TrimSpace(statement)
-
-		return handleForget(store, requestLog(log, ctx), userID, statement)
-	}
-}
-
-func handleRemember(ctx context.Context, store *Store, log *config.Logger, userID, statement, evidence, category string) (string, error) {
-	if statement == "" {
-		return "", fmt.Errorf("memory.remember: statement is required")
-	}
-	if evidence == "" {
-		return "", fmt.Errorf("memory.remember: evidence is required")
-	}
-
-	if err := store.SetWithContext(ctx, userID, statement, evidence, category); err != nil {
-		return "", err
-	}
-
-	cat := normalizeCategory(category)
-	log.Debug("agent.tool.memory.remembered", "remembered persistent memory", config.F("tool_name", "memory.remember"), config.F("user_id", userID), config.F("category", cat))
-	return fmt.Sprintf("Remembered: %s (category: %s)", statement, cat), nil
-}
-
-// handleRecall returns the user's stored memory, filtered by category if provided.
-// If the memory file is in the old flat format (no ## category headers), an LLM
-// call is made to categorize the facts. The result is written back to disk before
-// being returned so the migration only happens once.
-func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, model string, log *config.Logger, userID, category, query string, limit int) (string, error) {
-	// Read the raw file first to check whether migration is needed.
-	raw, err := store.Read(userID)
-	if err != nil {
-		return "", err
-	}
-
-	if raw == "" {
-		log.Debug("agent.tool.memory.not_found", "no persistent memory found", config.F("tool_name", "memory.recall"), config.F("user_id", userID))
-		return "No persistent memory found for this user.", nil
-	}
-
-	if query != "" {
-		content, err := store.Search(ctx, userID, category, query, limit)
-		if err != nil {
-			log.Warn("agent.tool.memory.semantic_recall_failed", "semantic persistent memory recall failed", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(err))
-		} else if strings.TrimSpace(content) != "" {
-			log.Debug("agent.tool.memory.semantic_recalled", "recalled semantic persistent memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
-			return content, nil
-		} else {
-			return "No semantically matching persistent memory found for this user.", nil
+		target := stringArg(args, "statement")
+		if target == "" {
+			target = stringArg(args, "target")
 		}
-	}
-
-	// If the file is in old flat format (no ## category headers), run the
-	// LLM migration to classify each fact into the correct category.
-	if needsMigration(raw) {
-		log.Debug("agent.tool.memory.migration.started", "started persistent memory migration", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("source", "legacy_format"))
-		migrated, migErr := migrateWithLLM(ctx, chatClient, model, raw, log)
-		if migErr != nil {
-			// Migration failed — return the raw content with a note so the
-			// model at least sees the data and can work with it.
-			log.Warn("agent.tool.memory.migration.failed", "persistent memory migration failed", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("action", "return_raw"), config.F("status", "degraded"), config.ErrorField(migErr))
-			return "Note: Memory file could not be automatically categorized. Raw content follows:\n\n" + raw, nil
+		if target == "" {
+			return "", fmt.Errorf("memory.forget: statement or target is required")
 		}
-
-		// Persist the migrated file so this only happens once.
-		if writeErr := store.WriteFull(userID, migrated); writeErr != nil {
-			log.Warn("agent.tool.memory.migration.persist_failed", "failed to persist migrated memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(writeErr))
-			// Still return the migrated content even if the write failed.
-		} else {
-			log.Debug("agent.tool.memory.migration.completed", "completed persistent memory migration", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "ok"))
-		}
-		raw = migrated
-	}
-
-	// Category-filtered recall.
-	if category != "" {
-		content, err := store.ReadCategory(userID, category)
+		count, err := store.Forget(userID, target, stringArg(args, "scope"))
 		if err != nil {
 			return "", err
 		}
-		if content == "" {
-			log.Debug("agent.tool.memory.not_found", "no persistent memory found in category", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category))
-			return fmt.Sprintf("No stored facts in category %q for this user.", category), nil
+		requestLog(log, ctx).Debug("agent.tool.memory.forgot", "forgot memory", config.F("tool_name", "memory.forget"), config.F("deleted_count", count))
+		if count == 0 {
+			return "No matching active memories were found.", nil
 		}
-		log.Debug("agent.tool.memory.recalled", "recalled persistent memory category", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
-		return content, nil
+		return fmt.Sprintf("Deleted %d matching memory entry(s).", count), nil
 	}
-
-	// Full recall — return everything.
-	log.Debug("agent.tool.memory.recalled", "recalled all persistent memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("scope", "all"), config.F("content_chars", len(raw)))
-	return raw, nil
 }
 
-func intFromArg(value interface{}, fallback int) int {
-	switch v := value.(type) {
+// Backward-compatible wrappers for old internal tests/callers.
+func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return NewSaveHandler(store, log)
+}
+
+func NewRecallHandler(store *Store, _ interface{}, _ string, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	return NewSearchHandler(store, log)
+}
+
+func stringArg(args map[string]interface{}, key string) string {
+	if args == nil {
+		return ""
+	}
+	value, _ := args[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func intArg(args map[string]interface{}, key string, fallback int) int {
+	if args == nil || args[key] == nil {
+		return fallback
+	}
+	switch v := args[key].(type) {
 	case int:
 		return v
 	case int64:
@@ -173,111 +150,28 @@ func intFromArg(value interface{}, fallback int) int {
 		return int(v)
 	case float32:
 		return int(v)
-	default:
+	case string:
+		var parsed int
+		if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &parsed); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func floatArg(args map[string]interface{}, key string, fallback float64) float64 {
+	if args == nil || args[key] == nil {
 		return fallback
 	}
-}
-
-func handleForget(store *Store, log *config.Logger, userID, statement string) (string, error) {
-	if statement == "" {
-		return "", fmt.Errorf("memory.forget: statement is required (use \"all\" to wipe everything)")
+	switch v := args[key].(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
 	}
-
-	if strings.ToLower(statement) == "all" {
-		if err := store.DeleteAll(userID); err != nil {
-			return "", err
-		}
-		log.Debug("agent.tool.memory.wiped", "wiped all persistent memory", config.F("tool_name", "memory.forget"), config.F("user_id", userID))
-		return "All persistent memory for this user has been cleared.", nil
-	}
-
-	if err := store.Delete(userID, statement); err != nil {
-		return "", err
-	}
-
-	log.Debug("agent.tool.memory.forgot", "forgot persistent memory statement", config.F("tool_name", "memory.forget"), config.F("user_id", userID))
-	return fmt.Sprintf("Forgotten: %s", statement), nil
-}
-
-// needsMigration reports whether content is in the old flat format that
-// predates the category section system. A file is considered categorized if it
-// contains at least one "## " heading line.
-func needsMigration(content string) bool {
-	if strings.Contains(content, "\n## ") {
-		return false
-	}
-	return len(parseEntries(memoryBody(content))) > 0
-}
-
-// migrateWithLLM asks the model to classify each fact from a flat-format memory
-// file into the correct category section and returns the result in the new
-// categorized Markdown format. The caller is responsible for writing it to disk.
-func migrateWithLLM(ctx context.Context, chatClient llm.Chatter, model, raw string, log *config.Logger) (string, error) {
-	prompt := `You are reorganizing a user memory file into categorized sections.
-
-The four valid categories are:
-- identity   — name, pronouns, age, location, occupation
-- system_rules — explicit, non-negotiable instructions ("always do X", "never do Y") and corrections to AI behavior
-- preferences — likes, dislikes, communication style, settings
-- notes      — everything else
-
-Below is the existing memory file content. Reorganize every fact into the correct category using this exact Markdown format. Preserve each statement line and its "- Evidence:" line exactly as written — do not paraphrase, add, or remove any facts.
-
-Output ONLY the categorized Markdown starting with "# User Memory". No preamble, no explanation, nothing else.
-
-Example output format:
-# User Memory
-
-## Identity
-
-The user's name is Alex.
-
-- Evidence: User stated "my name is Alex". Date: [2026-01-01].
-
-## Notes
-
-The user mentioned they enjoy hiking.
-
-- Evidence: User said "I love hiking on weekends". Date: [2026-01-02].
-
-Memory file to reorganize:
-
-` + raw
-
-	req := llm.ChatRequest{
-		Model: model,
-		Messages: []llm.ChatMessage{
-			{Role: "user", Content: prompt},
-		},
-		Stream: false,
-	}
-
-	resp, err := chatClient.Chat(ctx, req, nil)
-	if err != nil {
-		return "", fmt.Errorf("LLM migration call failed: %w", err)
-	}
-
-	result := strings.TrimSpace(resp.Message.Content)
-	if result == "" {
-		return "", fmt.Errorf("LLM migration returned empty response")
-	}
-
-	// Validate the response looks plausible: must start with "# User Memory"
-	// and contain at least one "## " category heading and one "- Evidence:" line.
-	if !strings.HasPrefix(result, "# User Memory") ||
-		!strings.Contains(result, "\n## ") ||
-		!strings.Contains(result, "- Evidence:") {
-		log.Warn("agent.tool.memory.validation_failed", "persistent memory migration validation failed", config.F("tool_name", "memory.recall"), config.F("preview", result[:min(len(result), 200)]), config.F("status", "error"))
-		return "", fmt.Errorf("LLM migration response did not match expected format")
-	}
-
-	return result, nil
-}
-
-// min returns the smaller of two ints.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return fallback
 }

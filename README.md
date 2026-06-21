@@ -11,7 +11,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 
 - Iterative tool-calling agent loop on top of an OpenAI-compatible LLM gateway
 - iMessage, Discord, and WebSocket gateway
-- Builtin `web.search`, `memory.remember`, `memory.recall`, `memory.forget`, `soul.read`, `soul.patch`, and `session.recent` tools
+- Builtin `web.search`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, `soul.patch`, and `session.summary` tools
 - MCP integration starting with Github
 - In-process chat memory with TTL, max-turn retention, and prompt-budget compaction
 - Per-user persistent memory on disk and a live-editable soul file

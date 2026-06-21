@@ -42,8 +42,9 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 	if plain.Response != "ws response" {
 		t.Fatalf("unexpected plain response: %+v", plain)
 	}
-	if len(chat.requests) != 1 || chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content != "hello websocket" {
-		t.Fatalf("unexpected chat requests: %+v", chat.requests)
+	primary := primaryWSRequests(chat.requests)
+	if len(primary) != 1 || primary[0].Messages[len(primary[0].Messages)-1].Content != "hello websocket" {
+		t.Fatalf("unexpected chat requests: %+v", primary)
 	}
 
 	if err := conn.WriteJSON(IncomingMessage{UserID: "alice", Prompt: "/ping"}); err != nil {
@@ -53,8 +54,8 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 	if cmd.Response != "pong" {
 		t.Fatalf("unexpected command response: %+v", cmd)
 	}
-	if len(chat.requests) != 1 {
-		t.Fatalf("command should not call LLM, got %d calls", len(chat.requests))
+	if len(primaryWSRequests(chat.requests)) != 1 {
+		t.Fatalf("command should not call LLM, got %d calls", len(primaryWSRequests(chat.requests)))
 	}
 }
 
@@ -81,10 +82,11 @@ func TestWebSocketGatewayStructuredImageDowngrade(t *testing.T) {
 	if resp.Response != "ws response" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one chat request, got %d", len(chat.requests))
+	primary := primaryWSRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one chat request, got %d", len(primary))
 	}
-	prompt := chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
 	if !strings.Contains(prompt, "describe this") || !strings.Contains(prompt, "unsupported attachment: bad.png") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
@@ -94,7 +96,20 @@ type wsFakeChatter struct{ requests []llm.ChatRequest }
 
 func (f *wsFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
+	if req.Format == "json_object" {
+		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
+	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ws response"}}, nil
+}
+
+func primaryWSRequests(requests []llm.ChatRequest) []llm.ChatRequest {
+	out := make([]llm.ChatRequest, 0, len(requests))
+	for _, req := range requests {
+		if req.Format != "json_object" {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 type wsPingHandler struct{}

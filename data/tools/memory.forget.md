@@ -2,10 +2,11 @@
 
 ## Description
 
-Remove persistent memory about the current user across all conversations.
+Delete active short-term or long-term memory about the current user. Only use when the user asks you to forget something or correct stored memory.
 
 ## Parameters
 
-| Name      | Type   | Required | Description                                                                                          |
-| --------- | ------ | -------- | ---------------------------------------------------------------------------------------------------- |
-| statement | string | yes      | The exact memory statement to remove; use `all` to wipe the user's entire memory profile only when explicitly asked. |
+| Name      | Type   | Required | Description                                                                                                           |
+| --------- | ------ | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| statement | string | yes      | Exact memory statement to remove; use `all` to wipe all user memories only when explicitly asked.                     |
+| scope     | string | no       | Optional scope filter: `short_term` or `long_term`. Omit to delete matching active memories in either scope.          |

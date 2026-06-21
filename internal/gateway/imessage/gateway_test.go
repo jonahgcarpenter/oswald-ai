@@ -36,10 +36,11 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
 	})
 
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %d", len(chat.requests))
+	primary := primaryIMessageRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	last := chat.requests[0].Messages[len(chat.requests[0].Messages)-1]
+	last := primary[0].Messages[len(primary[0].Messages)-1]
 	if last.Content != "hello imessage" {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
@@ -64,8 +65,8 @@ func TestIMessageIgnoresUnmentionedGroupMessage(t *testing.T) {
 		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
 	})
 
-	if len(chat.requests) != 0 {
-		t.Fatalf("expected no LLM request, got %d", len(chat.requests))
+	if len(primaryIMessageRequests(chat.requests)) != 0 {
+		t.Fatalf("expected no LLM request, got %d", len(primaryIMessageRequests(chat.requests)))
 	}
 	if len(bb.sentMessages()) != 0 {
 		t.Fatalf("expected no sent messages, got %+v", bb.sentMessages())
@@ -87,10 +88,11 @@ func TestIMessageReplyToBotIncludesReplyContext(t *testing.T) {
 		Chats:       []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
 	})
 
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %d", len(chat.requests))
+	primary := primaryIMessageRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	prompt := chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
 	if !strings.Contains(prompt, "[Replying to Oswald: \"prior bot answer\"]") || !strings.Contains(prompt, "follow up") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
@@ -122,7 +124,20 @@ func (f *imFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.mu.Unlock()
+	if req.Format == "json_object" {
+		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
+	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "imessage response"}}, nil
+}
+
+func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
+	out := make([]llm.ChatRequest, 0, len(requests))
+	for _, req := range requests {
+		if req.Format != "json_object" {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 type fakeBlueBubbles struct {

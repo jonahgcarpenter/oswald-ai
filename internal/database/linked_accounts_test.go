@@ -31,7 +31,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	if _, err := db.SQL().Exec(`INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, "usr_test", "You are speaking with Test User.", formatDBTime(now), formatDBTime(now)); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO user_memory_entries (canonical_user_id, category, statement, statement_key, evidence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, "usr_test", "preferences", "The user likes purple.", "the user likes purple.", "test evidence", formatDBTime(now), formatDBTime(now)); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "the user likes purple.", "test evidence", 0.9, 3, "active", formatDBTime(now), formatDBTime(now)); err != nil {
 		t.Fatalf("insert entry: %v", err)
 	}
 
@@ -49,7 +49,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 		t.Fatalf("count profiles: %v", err)
 	}
 	var entryCount int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM user_memory_entries WHERE canonical_user_id = ?`, "usr_test").Scan(&entryCount); err != nil {
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?`, "usr_test").Scan(&entryCount); err != nil {
 		t.Fatalf("count entries: %v", err)
 	}
 	if profileCount != 1 || entryCount != 1 {

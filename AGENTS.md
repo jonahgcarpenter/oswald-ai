@@ -8,12 +8,12 @@ Oswald AI is a pure Go application built around a single LLM gateway-backed agen
 It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin tools:
 
 - `web.search`
-- `memory.remember`
-- `memory.recall`
+- `memory.save`
+- `memory.search`
+- `memory.list`
 - `memory.forget`
 - `soul.read`
 - `soul.patch`
-- `session.recent`
 - `mcp.servers`
 - `mcp.tools`
 
@@ -72,7 +72,7 @@ Every request follows the same high-level path:
 6. Account-link commands are handled by the shared command router without reaching the agent loop
 7. The runtime submits a `broker.Request` when the request should reach the LLM
 8. A broker worker calls `(*Agent).Process()`
-9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 10. The final response is returned to the shared runtime
 11. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
@@ -106,7 +106,7 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
    - current date and time
-5. Load retained session turns from `internal/memory`; when `LLM_GATEWAY_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
+5. Load structured retrieved memory context from SQLite-backed session and user memory stores
 6. Compact older selected turns if the estimated prompt exceeds the active model budget
 7. Build the chat message array: system prompt, selected retained history, current user prompt, and any current-turn images
 8. Call the LLM gateway with all registered tools available
@@ -191,7 +191,7 @@ Oswald keeps three distinct memory layers.
 - When `LLM_GATEWAY_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
 - Semantic retrieval embeds the cleaned current user message, strips leading reply-context wrappers, and includes up to three retained turns with cosine similarity at or above `0.70`
 - No recent turn is included automatically when semantic retrieval is enabled
-- The model can call `session.recent` to inspect recent completed exchanges when the current prompt is a vague follow-up and semantic context is not already present
+- Recent completed exchanges are automatically included in the structured retrieved-memory block when budget permits
 - If query embedding fails while semantic retrieval is enabled, the agent degrades to no retained history instead of replaying all retained history
 - Tool messages and intermediate reasoning are intentionally not persisted
 
@@ -350,21 +350,17 @@ Tools are split into schema and runtime layers.
 Current builtin tools:
 
 - `web.search` — SearXNG-backed search
-- `memory.remember` — store or update user facts
-- `memory.recall` — retrieve stored user facts
+- `memory.save` — explicitly store or update user facts
+- `memory.search` — retrieve relevant stored user facts
+- `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-- `session.recent` — read recent completed exchanges from the current in-process session
+- `session.summary` — read the current rolling session summary
 - `mcp.servers` — list connected MCP servers and read-only tool counts
 - `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
 
-`session.recent` arguments:
-
-- `offset`: one-based recent exchange offset; `1` is the newest completed exchange
-- `count`: number of exchanges to return, clamped to `1` through `3`
-
-The tool is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
+`session.summary` is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
 
 Optional external tools:
 
@@ -635,7 +631,7 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | `internal/tools/runtime/`                    | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                | Tool registry assembly                       |
 | `internal/tools/builtin/`                    | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/sessionhistory/`     | `session.recent` runtime handler             |
+| `internal/tools/builtin/sessionhistory/`     | `session.summary` runtime handler            |
 | `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store             |
 | `internal/tools/builtin/soul/store.go`       | Soul file store                              |
 | `internal/commands/router.go`                | Shared command router                        |
