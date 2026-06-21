@@ -608,29 +608,7 @@ Avoid reintroducing printf-style freeform logs. New logs should be added as stru
 
 ## Environment Variables
 
-| Variable                       | Default                 | Purpose                                                                      |
-| ------------------------------ | ----------------------- | ---------------------------------------------------------------------------- |
-| `PORT`                         | `8000`                  | WebSocket gateway port                                                       |
-| `IMESSAGE_PORT`                | `8090`                  | HTTP port for the iMessage BlueBubbles webhook listener                      |
-| `IMESSAGE_WEBHOOK_PATH`        | `/imessage/webhook`     | HTTP path for incoming BlueBubbles webhooks                                  |
-| `BLUEBUBBLES_URL`              | empty                   | BlueBubbles server base URL; enables iMessage when paired with password      |
-| `BLUEBUBBLES_PASSWORD`         | empty                   | BlueBubbles server password/token used for iMessage REST API auth            |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | empty                   | Enables the GitHub MCP client and read-only `github.*` tools                 |
-| `LLM_GATEWAY_URL`              | `http://localhost:8080` | LLM gateway API base URL                                                     |
-| `LLM_GATEWAY_MODEL`            | empty                   | Model name passed to the LLM gateway; required at startup                    |
-| `LLM_GATEWAY_EMBEDDING_MODEL`  | empty                   | Optional LLM gateway embedding model for semantic session-memory retrieval   |
-| `LLM_GATEWAY_API_KEY`          | empty                   | Optional bearer token for LLM gateway requests                               |
-| `LLM_GATEWAY_VIRTUAL_KEY`      | empty                   | Optional Bifrost virtual key sent as `x-bf-vk` to the LLM gateway            |
-| `LLM_GATEWAY_TIMEOUT`          | `180s`                  | Expected upstream LLM gateway timeout; local guard timeouts derive from this |
-| `MODEL_CONTEXT_WINDOW`         | `0`                     | Optional context-window override for prompt budgeting                        |
-| `MODEL_MAX_OUTPUT_TOKENS`      | `0`                     | Optional output-token reserve override for prompt budgeting                  |
-| `SEARXNG_URL`                  | `http://localhost:8080` | SearXNG API base URL                                                         |
-| `DISCORD_TOKEN`                | empty                   | Enables Discord gateway                                                      |
-| `WORKER_POOL_SIZE`             | `1`                     | Broker worker count                                                          |
-| `MAX_TOOL_FAILURE_RETRIES`     | `3`                     | Max consecutive tool failures before disabling tools for the request         |
-| `LOG_LEVEL`                    | `info`                  | Logging verbosity                                                            |
-| `MEMORY_MAX_TURNS`             | `10`                    | Max retained session turn pairs; `0` disables the cap                        |
-| `MEMORY_MAX_AGE`               | `30m`                   | Max retained session age; `0` disables expiry                                |
+Use `.env.example` as the canonical configuration reference for variable names, defaults, and local setup examples. When adding or changing runtime configuration, update `.env.example` alongside `internal/config/config.go`.
 
 ## Key Files
 
