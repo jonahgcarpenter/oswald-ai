@@ -46,8 +46,11 @@ func TestNormalizeInputImageResizesLargeLandscapeJPEG(t *testing.T) {
 	if result.OriginalWidth != 4032 || result.OriginalHeight != 3024 {
 		t.Fatalf("unexpected original dimensions: %dx%d", result.OriginalWidth, result.OriginalHeight)
 	}
-	if result.Width != MaxNormalizedImageLongEdge || result.Height != 1920 {
-		t.Fatalf("unexpected normalized dimensions: %dx%d", result.Width, result.Height)
+	if result.Width > MaxNormalizedImageLongEdge || result.Height > MaxNormalizedImageLongEdge {
+		t.Fatalf("normalized dimensions exceed cap: %dx%d", result.Width, result.Height)
+	}
+	if result.NormalizedBytes > MaxNormalizedImageBytes {
+		t.Fatalf("normalized bytes = %d, want <= %d", result.NormalizedBytes, MaxNormalizedImageBytes)
 	}
 	if result.Image.MimeType != "image/jpeg" {
 		t.Fatalf("expected image/jpeg, got %q", result.Image.MimeType)
@@ -65,8 +68,11 @@ func TestNormalizeInputImageResizesLargePortraitJPEG(t *testing.T) {
 	if !result.WasResized {
 		t.Fatal("expected portrait image to resize")
 	}
-	if result.Width != 1920 || result.Height != MaxNormalizedImageLongEdge {
-		t.Fatalf("unexpected normalized dimensions: %dx%d", result.Width, result.Height)
+	if result.Width > MaxNormalizedImageLongEdge || result.Height > MaxNormalizedImageLongEdge {
+		t.Fatalf("normalized dimensions exceed cap: %dx%d", result.Width, result.Height)
+	}
+	if result.NormalizedBytes > MaxNormalizedImageBytes {
+		t.Fatalf("normalized bytes = %d, want <= %d", result.NormalizedBytes, MaxNormalizedImageBytes)
 	}
 }
 
@@ -87,11 +93,33 @@ func TestNormalizeInputImagePreservesTransparentPNG(t *testing.T) {
 	if result.Image.MimeType != "image/png" {
 		t.Fatalf("expected image/png, got %q", result.Image.MimeType)
 	}
-	if result.Width != MaxNormalizedImageLongEdge || result.Height != 1707 {
-		t.Fatalf("unexpected normalized dimensions: %dx%d", result.Width, result.Height)
+	if result.Width > MaxNormalizedImageLongEdge || result.Height > MaxNormalizedImageLongEdge {
+		t.Fatalf("normalized dimensions exceed cap: %dx%d", result.Width, result.Height)
+	}
+	if result.NormalizedBytes > MaxNormalizedImageBytes {
+		t.Fatalf("normalized bytes = %d, want <= %d", result.NormalizedBytes, MaxNormalizedImageBytes)
 	}
 	if _, err := base64.StdEncoding.DecodeString(result.Image.Data); err != nil {
 		t.Fatalf("normalized payload is not valid base64: %v", err)
+	}
+}
+
+func TestNormalizeInputImageDownscalesToOutputByteCap(t *testing.T) {
+	raw := encodeNoisyTestJPEG(t, 2200, 1600)
+
+	result, err := NormalizeInputImageFromBytes(nil, "image/jpeg", raw, "noisy.jpg")
+	if err != nil {
+		t.Fatalf("normalize noisy jpeg: %v", err)
+	}
+
+	if result.NormalizedBytes > MaxNormalizedImageBytes {
+		t.Fatalf("normalized bytes = %d, want <= %d", result.NormalizedBytes, MaxNormalizedImageBytes)
+	}
+	if result.Width >= MaxNormalizedImageLongEdge {
+		t.Fatalf("expected byte cap to force extra downscale below long edge cap, got %dx%d", result.Width, result.Height)
+	}
+	if result.Image.MimeType != "image/jpeg" {
+		t.Fatalf("expected image/jpeg, got %q", result.Image.MimeType)
 	}
 }
 
@@ -113,6 +141,28 @@ func encodeTestPNG(t *testing.T, width, height int, transparent bool) []byte {
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatalf("encode test png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func encodeNoisyTestJPEG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	var state uint32 = 1
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			state = state*1664525 + 1013904223
+			r := uint8(state >> 24)
+			state = state*1664525 + 1013904223
+			g := uint8(state >> 24)
+			state = state*1664525 + 1013904223
+			b := uint8(state >> 24)
+			img.SetRGBA(x, y, color.RGBA{R: r, G: g, B: b, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+		t.Fatalf("encode noisy test jpeg: %v", err)
 	}
 	return buf.Bytes()
 }

@@ -12,6 +12,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	_ "image/png"
+	"math"
 	"net/http"
 	"strings"
 
@@ -28,7 +29,9 @@ const (
 	MaxImageBytes = 10 << 20
 	// MaxNormalizedImageLongEdge limits the pixels sent to vision models while preserving useful detail.
 	MaxNormalizedImageLongEdge = 2560
-	jpegQuality                = 90
+	// MaxNormalizedImageBytes limits the final encoded payload sent to vision models.
+	MaxNormalizedImageBytes = 280 << 10
+	jpegQuality             = 90
 )
 
 var normalizedImageMIMETypes = map[string]struct{}{
@@ -132,15 +135,14 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 		return NormalizationResult{}, fmt.Errorf("image payload has invalid dimensions for MIME type %q", detectedMIME)
 	}
 
-	normalizedImage, wasResized := resizeToFit(decoded, MaxNormalizedImageLongEdge)
+	normalizedImage, wasResized, normalizedBytes, normalizedMIME, err := normalizeEncodedImage(decoded, MaxNormalizedImageLongEdge, MaxNormalizedImageBytes)
+	if err != nil {
+		return NormalizationResult{}, err
+	}
 	normalizedBounds := normalizedImage.Bounds()
 	normalizedWidth := normalizedBounds.Dx()
 	normalizedHeight := normalizedBounds.Dy()
 	hasAlpha := hasTransparency(normalizedImage)
-	normalizedBytes, normalizedMIME, err := encodeNormalizedImage(normalizedImage, hasAlpha)
-	if err != nil {
-		return NormalizationResult{}, err
-	}
 	encoded := base64.StdEncoding.EncodeToString(normalizedBytes)
 
 	return NormalizationResult{
@@ -161,6 +163,45 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 		PreservedAlpha:   hasAlpha,
 		UsedDeclaredMIME: usedDeclaredMIME,
 	}, nil
+}
+
+func normalizeEncodedImage(img image.Image, maxLongEdge int, maxBytes int) (image.Image, bool, []byte, string, error) {
+	currentMaxEdge := maxLongEdge
+	wasResized := false
+
+	for {
+		normalizedImage, resized := resizeToFit(img, currentMaxEdge)
+		wasResized = wasResized || resized
+		hasAlpha := hasTransparency(normalizedImage)
+		normalizedBytes, normalizedMIME, err := encodeNormalizedImage(normalizedImage, hasAlpha)
+		if err != nil {
+			return nil, false, nil, "", err
+		}
+		if maxBytes <= 0 || len(normalizedBytes) <= maxBytes {
+			return normalizedImage, wasResized, normalizedBytes, normalizedMIME, nil
+		}
+
+		bounds := normalizedImage.Bounds()
+		longEdge := max(bounds.Dx(), bounds.Dy())
+		if longEdge <= 1 {
+			return nil, false, nil, "", fmt.Errorf("normalized image exceeds %d bytes at minimum dimensions", maxBytes)
+		}
+
+		shrink := 0.95 * sqrtRatio(maxBytes, len(normalizedBytes))
+		nextMaxEdge := max(1, int(float64(longEdge)*shrink))
+		if nextMaxEdge >= longEdge {
+			nextMaxEdge = longEdge - 1
+		}
+		currentMaxEdge = nextMaxEdge
+		wasResized = true
+	}
+}
+
+func sqrtRatio(target, actual int) float64 {
+	if target <= 0 || actual <= 0 {
+		return 1
+	}
+	return math.Sqrt(float64(target) / float64(actual))
 }
 
 // DetectMIMEType returns a supported image MIME type derived from the payload.
