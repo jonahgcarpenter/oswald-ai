@@ -124,6 +124,7 @@ Multimodal request notes:
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and semantic query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
+- Gateway/runtime, routing, memory, command, tool, LLM mapping, image normalization, and fake-client agent loop behavior are covered by local Go tests that do not call a live LLM
 
 Streaming behavior:
 
@@ -422,6 +423,7 @@ Image validation is centralized in `internal/media/images.go`.
 - Accepted source image formats:
   - `image/jpeg`
   - `image/png`
+  - `image/gif`
   - `image/webp`
   - `image/heic`
   - `image/heif`
@@ -431,7 +433,9 @@ Image validation is centralized in `internal/media/images.go`.
   - `image/jpeg`
   - `image/png`
 - Maximum images per request: `4`
-- Maximum size per image: `10 MiB`
+- Maximum accepted source payload per image: `10 MiB`
+- Maximum normalized long edge before provider submission: `2560` pixels
+- Maximum normalized encoded payload before provider submission: `280 KiB`; images that still exceed this after initial normalization are downscaled further until they fit
 - WebSocket validates the declared MIME type and base64 payload supplied by the client
 - Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type`, content sniffing, and HEIC/HEIF signature detection
 - Decoded images are re-encoded as PNG when transparency must be preserved; otherwise they are re-encoded as JPEG
@@ -446,7 +450,7 @@ go test ./...
 gofmt -w .
 ```
 
-There are no dedicated test files yet, but `go test ./...` should still compile every package.
+The repository includes local tests for the agent loop with fake LLM clients, shared gateway runtime, WebSocket/Discord/iMessage gateway behavior with fake transports, account linking, memory, routing, tool registry/runtime, media normalization, model metadata helpers, config sanitization, and LLM request/response mapping. `go test ./...` should pass without live gateway credentials or LLM calls.
 
 ## Logging
 
