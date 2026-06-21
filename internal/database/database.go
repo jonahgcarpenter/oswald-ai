@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -24,9 +25,16 @@ func Open(path string, log *config.Logger) (*DB, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
+	sqlite_vec.Auto()
+
 	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	var vecVersion string
+	if err := db.QueryRow(`SELECT vec_version()`).Scan(&vecVersion); err != nil {
+		db.Close() // nolint:errcheck
+		return nil, fmt.Errorf("failed to initialize sqlite-vec: %w", err)
 	}
 
 	store := &DB{path: path, log: log, db: db}
@@ -35,6 +43,14 @@ func Open(path string, log *config.Logger) (*DB, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// SQL returns the underlying database handle for package-specific stores.
+func (d *DB) SQL() *sql.DB {
+	if d == nil {
+		return nil
+	}
+	return d.db
 }
 
 // Close closes the database connection.
@@ -53,6 +69,9 @@ func (d *DB) initialize() error {
 		return err
 	}
 	if err := d.initializeLinkedAccounts(); err != nil {
+		return err
+	}
+	if err := d.initializeUserMemory(); err != nil {
 		return err
 	}
 	return nil

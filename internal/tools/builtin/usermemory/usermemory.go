@@ -34,7 +34,7 @@ func NewRememberHandler(store *Store, log *config.Logger) func(ctx context.Conte
 		category, _ := args["category"].(string)
 		category = strings.TrimSpace(strings.ToLower(category))
 
-		return handleRemember(store, requestLog(log, ctx), userID, statement, evidence, category)
+		return handleRemember(ctx, store, requestLog(log, ctx), userID, statement, evidence, category)
 	}
 }
 
@@ -52,8 +52,11 @@ func NewRecallHandler(store *Store, chatClient llm.Chatter, model string, log *c
 
 		category, _ := args["category"].(string)
 		category = strings.TrimSpace(strings.ToLower(category))
+		query, _ := args["query"].(string)
+		query = strings.TrimSpace(query)
+		limit := intFromArg(args["limit"], 5)
 
-		return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category)
+		return handleRecall(ctx, store, chatClient, model, requestLog(log, ctx), userID, category, query, limit)
 	}
 }
 
@@ -74,7 +77,7 @@ func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context
 	}
 }
 
-func handleRemember(store *Store, log *config.Logger, userID, statement, evidence, category string) (string, error) {
+func handleRemember(ctx context.Context, store *Store, log *config.Logger, userID, statement, evidence, category string) (string, error) {
 	if statement == "" {
 		return "", fmt.Errorf("memory.remember: statement is required")
 	}
@@ -82,7 +85,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 		return "", fmt.Errorf("memory.remember: evidence is required")
 	}
 
-	if err := store.Set(userID, statement, evidence, category); err != nil {
+	if err := store.SetWithContext(ctx, userID, statement, evidence, category); err != nil {
 		return "", err
 	}
 
@@ -95,7 +98,7 @@ func handleRemember(store *Store, log *config.Logger, userID, statement, evidenc
 // If the memory file is in the old flat format (no ## category headers), an LLM
 // call is made to categorize the facts. The result is written back to disk before
 // being returned so the migration only happens once.
-func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, model string, log *config.Logger, userID, category string) (string, error) {
+func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, model string, log *config.Logger, userID, category, query string, limit int) (string, error) {
 	// Read the raw file first to check whether migration is needed.
 	raw, err := store.Read(userID)
 	if err != nil {
@@ -105,6 +108,18 @@ func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, mod
 	if raw == "" {
 		log.Debug("agent.tool.memory.not_found", "no persistent memory found", config.F("tool_name", "memory.recall"), config.F("user_id", userID))
 		return "No persistent memory found for this user.", nil
+	}
+
+	if query != "" {
+		content, err := store.Search(ctx, userID, category, query, limit)
+		if err != nil {
+			log.Warn("agent.tool.memory.semantic_recall_failed", "semantic persistent memory recall failed", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(err))
+		} else if strings.TrimSpace(content) != "" {
+			log.Debug("agent.tool.memory.semantic_recalled", "recalled semantic persistent memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("category", category), config.F("content_chars", len(content)))
+			return content, nil
+		} else {
+			return "No semantically matching persistent memory found for this user.", nil
+		}
 	}
 
 	// If the file is in old flat format (no ## category headers), run the
@@ -146,6 +161,21 @@ func handleRecall(ctx context.Context, store *Store, chatClient llm.Chatter, mod
 	// Full recall — return everything.
 	log.Debug("agent.tool.memory.recalled", "recalled all persistent memory", config.F("tool_name", "memory.recall"), config.F("user_id", userID), config.F("scope", "all"), config.F("content_chars", len(raw)))
 	return raw, nil
+}
+
+func intFromArg(value interface{}, fallback int) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	default:
+		return fallback
+	}
 }
 
 func handleForget(store *Store, log *config.Logger, userID, statement string) (string, error) {

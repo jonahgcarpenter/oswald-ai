@@ -74,14 +74,26 @@ func main() {
 
 	// The user memory store is owned by the tool registry so the memory.* tool
 	// handlers can remember, recall, and forget facts on behalf of the model.
-	userMemStore := usermemory.NewStore(config.DefaultUserMemoryPath, rootLog.Server("memory.user"))
-	log.Debug("app.memory_user.configured", "configured user memory path", config.F("path", config.DefaultUserMemoryPath))
+	userMemStore, err := usermemory.NewSQLiteStore(config.DefaultAccountLinkPath, config.DefaultUserMemoryPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
+	if err != nil {
+		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))
+	}
+	defer userMemStore.Close() // nolint:errcheck
+	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath), config.F("legacy_path", config.DefaultUserMemoryPath))
 
 	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, rootLog.Server("account_link"))
 	if err := accountLinkService.Initialize(); err != nil {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
+	if err := userMemStore.MigrateLegacyMarkdown(); err != nil {
+		log.Fatal("app.memory_user.legacy_migration_failed", "failed to migrate legacy user memory", config.ErrorField(err))
+	}
+	if cfg.LLMGatewayEmbeddingModel != "" {
+		if err := userMemStore.BackfillEmbeddings(context.Background()); err != nil {
+			log.Warn("app.memory_user.embedding_backfill_failed", "failed to backfill user memory embeddings", config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}
 	accountLinkCommands := accountlinking.NewCommandHandler(accountLinkService)
 	commandRouter := commands.NewRouter(accountLinkCommands)
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))

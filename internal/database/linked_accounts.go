@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -108,7 +109,9 @@ func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 	return data, nil
 }
 
-// ReplaceAccountLinks atomically replaces all account-link rows.
+// ReplaceAccountLinks atomically replaces all account-link rows without
+// deleting unchanged account_users. User memory rows reference account_users, so
+// wholesale deletes would cascade and erase persistent memories.
 func (d *DB) ReplaceAccountLinks(data AccountLinkData) error {
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -119,11 +122,14 @@ func (d *DB) ReplaceAccountLinks(data AccountLinkData) error {
 	if _, err := tx.Exec(`DELETE FROM linked_accounts`); err != nil {
 		return fmt.Errorf("failed to clear linked accounts: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM account_users`); err != nil {
-		return fmt.Errorf("failed to clear account users: %w", err)
-	}
 
-	userStmt, err := tx.Prepare(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`)
+	userStmt, err := tx.Prepare(`
+INSERT INTO account_users (canonical_user_id, created_at, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(canonical_user_id) DO UPDATE SET
+	created_at = excluded.created_at,
+	updated_at = excluded.updated_at
+`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare account user insert: %w", err)
 	}
@@ -152,9 +158,32 @@ func (d *DB) ReplaceAccountLinks(data AccountLinkData) error {
 			}
 		}
 	}
+	if err := deleteStaleAccountUsers(tx, userIDs); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit account link transaction: %w", err)
+	}
+	return nil
+}
+
+func deleteStaleAccountUsers(tx *sql.Tx, userIDs []string) error {
+	if len(userIDs) == 0 {
+		if _, err := tx.Exec(`DELETE FROM account_users`); err != nil {
+			return fmt.Errorf("failed to remove stale account users: %w", err)
+		}
+		return nil
+	}
+	placeholders := make([]string, len(userIDs))
+	args := make([]interface{}, len(userIDs))
+	for i, userID := range userIDs {
+		placeholders[i] = "?"
+		args[i] = userID
+	}
+	query := `DELETE FROM account_users WHERE canonical_user_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	if _, err := tx.Exec(query, args...); err != nil {
+		return fmt.Errorf("failed to remove stale account users: %w", err)
 	}
 	return nil
 }
