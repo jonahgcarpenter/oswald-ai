@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -14,9 +15,17 @@ import (
 
 // Manager owns the configured MCP client sessions for the lifetime of the app.
 type Manager struct {
-	servers []*server
-	log     *config.Logger
+	servers     []*server
+	serverInfos []ServerInfo
+	log         *config.Logger
 }
+
+const (
+	serverStatusConnected = "connected"
+	serverStatusError     = "error"
+
+	githubServerDescription = "GitHub repository, issue, pull request, code search, user, and discussion inspection. Access is limited by the configured GitHub token permissions; this deployment is expected to use a read-only token."
+)
 
 // NewManagerFromConfig initializes all eager MCP servers enabled by config.
 func NewManagerFromConfig(ctx context.Context, cfg *config.Config, log *config.Logger) (*Manager, error) {
@@ -28,9 +37,23 @@ func NewManagerFromConfig(ctx context.Context, cfg *config.Config, log *config.L
 
 	githubServer, err := newGitHubServer(ctx, cfg, log)
 	if err != nil {
-		return nil, err
+		reason := config.SafeErrorText(err)
+		manager.serverInfos = append(manager.serverInfos, ServerInfo{
+			Name:        "github",
+			Description: githubServerDescription,
+			Status:      serverStatusError,
+			Reason:      reason,
+		})
+		manager.log.Warn("mcp.bootstrap.server_failed", "configured MCP server unavailable", config.F("server", "github"), config.F("status", "error"), config.ErrorField(err))
+		return manager, nil
 	}
 	manager.servers = append(manager.servers, githubServer)
+	manager.serverInfos = append(manager.serverInfos, ServerInfo{
+		Name:        "github",
+		Description: githubServerDescription,
+		Status:      serverStatusConnected,
+		ToolCount:   len(githubServer.tools),
+	})
 	manager.log.Info("mcp.bootstrap.enabled", "enabled MCP servers", config.F("server_count", len(manager.servers)), config.F("servers", manager.ServerNames()))
 	return manager, nil
 }
@@ -42,6 +65,32 @@ func (m *Manager) ToolSpecs() []ToolSpec {
 		out = append(out, srv.tools...)
 	}
 	return out
+}
+
+// ServerInfos returns configured MCP server metadata in stable order.
+func (m *Manager) ServerInfos() []ServerInfo {
+	if m == nil {
+		return nil
+	}
+	out := append([]ServerInfo(nil), m.serverInfos...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// ServerInfo returns configured MCP server metadata by name.
+func (m *Manager) ServerInfo(name string) (ServerInfo, bool) {
+	if m == nil {
+		return ServerInfo{}, false
+	}
+	name = strings.TrimSpace(strings.ToLower(name))
+	for _, info := range m.serverInfos {
+		if strings.ToLower(info.Name) == name {
+			return info, true
+		}
+	}
+	return ServerInfo{}, false
 }
 
 // ServerCount returns the number of connected MCP servers.

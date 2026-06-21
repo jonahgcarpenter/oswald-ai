@@ -23,6 +23,15 @@ type ToolSpec struct {
 	Handler     Handler
 }
 
+// ServerInfo describes a configured MCP server and its current availability.
+type ServerInfo struct {
+	Name        string
+	Description string
+	Status      string
+	ToolCount   int
+	Reason      string
+}
+
 type server struct {
 	name  string
 	tools []ToolSpec

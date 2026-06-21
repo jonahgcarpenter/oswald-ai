@@ -2,7 +2,7 @@
 
 ## Description
 
-List connected MCP servers and their read-only tool counts. Use this when external MCP-backed capabilities may be needed and the visible builtin tools are insufficient.
+List configured MCP servers, including their status, descriptions, and available tool counts. Use this when external MCP-backed capabilities may be needed and the visible builtin tools are insufficient.
 
 ## Parameters
 

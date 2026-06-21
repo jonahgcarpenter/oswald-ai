@@ -7,32 +7,44 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
-// NewServersHandler returns a handler that lists connected MCP servers.
-func NewServersHandler(reg *registry.Registry, log *config.Logger) registry.Handler {
+// NewServersHandler returns a handler that lists configured MCP servers.
+func NewServersHandler(manager *mcpmanager.Manager, log *config.Logger) registry.Handler {
 	return func(ctx context.Context, arguments map[string]interface{}) (string, error) {
 		meta := requestctx.MetadataFromContext(ctx)
 		reqLog := log.Agent("agent.tool.mcp.servers", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
-		servers := listServers(reg)
+		servers := manager.ServerInfos()
 		reqLog.Debug("agent.tool.mcp.servers", "listed MCP servers", config.F("server_count", len(servers)))
 		if len(servers) == 0 {
-			return "No MCP servers are connected.", nil
+			return "No MCP servers are configured.", nil
 		}
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "Connected MCP servers:\n")
+		fmt.Fprintf(&b, "Configured MCP servers:\n")
 		for i, server := range servers {
-			fmt.Fprintf(&b, "%d. %s (%d read-only tools)\n", i+1, server.Server, server.ToolCount)
+			fmt.Fprintf(&b, "%d. %s\n", i+1, server.Name)
+			fmt.Fprintf(&b, "Status: %s\n", server.Status)
+			fmt.Fprintf(&b, "Tools: %d\n", server.ToolCount)
+			if server.Description != "" {
+				fmt.Fprintf(&b, "Description: %s\n", server.Description)
+			}
+			if server.Reason != "" {
+				fmt.Fprintf(&b, "Reason: %s\n", server.Reason)
+			}
+			if i < len(servers)-1 {
+				fmt.Fprintf(&b, "\n")
+			}
 		}
 		return strings.TrimSpace(b.String()), nil
 	}
 }
 
 // NewToolsHandler returns a handler that lists and exposes MCP tools for this request.
-func NewToolsHandler(reg *registry.Registry, log *config.Logger) registry.Handler {
+func NewToolsHandler(reg *registry.Registry, manager *mcpmanager.Manager, log *config.Logger) registry.Handler {
 	return func(ctx context.Context, arguments map[string]interface{}) (string, error) {
 		server := strings.TrimSpace(stringArg(arguments, "server"))
 		if server == "" {
@@ -40,10 +52,23 @@ func NewToolsHandler(reg *registry.Registry, log *config.Logger) registry.Handle
 		}
 		query := strings.TrimSpace(stringArg(arguments, "query"))
 		limit := intArg(arguments, "limit", 8)
+		serverInfo, ok := manager.ServerInfo(server)
+		if !ok {
+			return fmt.Sprintf("No configured MCP server named %q. Use mcp.servers to list configured servers.", server), nil
+		}
+		if serverInfo.Status != "connected" {
+			if serverInfo.Reason != "" {
+				return fmt.Sprintf("MCP server %q is configured but unavailable: %s", serverInfo.Name, serverInfo.Reason), nil
+			}
+			return fmt.Sprintf("MCP server %q is configured but unavailable.", serverInfo.Name), nil
+		}
 
-		tools := searchTools(reg, server, query, limit)
+		tools := searchTools(reg, serverInfo.Name, query, limit)
 		if len(tools) == 0 {
-			return fmt.Sprintf("No MCP tools matched server %q.", server), nil
+			if query != "" {
+				return fmt.Sprintf("No MCP tools matched server %q for query %q.", serverInfo.Name, query), nil
+			}
+			return fmt.Sprintf("No MCP tools matched server %q.", serverInfo.Name), nil
 		}
 
 		names := make([]string, 0, len(tools))
@@ -57,10 +82,10 @@ func NewToolsHandler(reg *registry.Registry, log *config.Logger) registry.Handle
 
 		meta := requestctx.MetadataFromContext(ctx)
 		reqLog := log.Agent("agent.tool.mcp.tools", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
-		reqLog.Debug("agent.tool.mcp.tools", "listed MCP tools", config.F("server", server), config.F("query", query), config.F("tool_count", len(tools)))
+		reqLog.Debug("agent.tool.mcp.tools", "listed MCP tools", config.F("server", serverInfo.Name), config.F("query", query), config.F("tool_count", len(tools)))
 
 		var b strings.Builder
-		fmt.Fprintf(&b, "Available MCP tools from %s", server)
+		fmt.Fprintf(&b, "Available MCP tools from %s", serverInfo.Name)
 		if query != "" {
 			fmt.Fprintf(&b, " matching %q", query)
 		}
@@ -79,33 +104,9 @@ func NewToolsHandler(reg *registry.Registry, log *config.Logger) registry.Handle
 				fmt.Fprintf(&b, "\n")
 			}
 		}
-		fmt.Fprintf(&b, "\n\nThese tools are now available for direct tool calls in this request.")
+		fmt.Fprintf(&b, "\n\nThese tools are now available for direct tool calls in this request. Tool descriptions and parameters are provided by the MCP server.")
 		return strings.TrimSpace(b.String()), nil
 	}
-}
-
-type serverSummary struct {
-	Server    string
-	ToolCount int
-}
-
-func listServers(reg *registry.Registry) []serverSummary {
-	counts := make(map[string]int)
-	for _, tool := range reg.CatalogBySource(registry.ToolSourceMCP) {
-		counts[tool.Server]++
-	}
-
-	servers := make([]string, 0, len(counts))
-	for server := range counts {
-		servers = append(servers, server)
-	}
-	sort.Strings(servers)
-
-	summaries := make([]serverSummary, 0, len(servers))
-	for _, server := range servers {
-		summaries = append(summaries, serverSummary{Server: server, ToolCount: counts[server]})
-	}
-	return summaries
 }
 
 func searchTools(reg *registry.Registry, server, query string, limit int) []registry.CatalogEntry {

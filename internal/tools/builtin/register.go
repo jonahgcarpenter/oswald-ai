@@ -5,6 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/mcpbrowse"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/sessionhistory"
@@ -15,7 +16,7 @@ import (
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient llm.Chatter, model string, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, sessionStore *memory.Store, chatClient llm.Chatter, model string, mcpManager *mcpmanager.Manager, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := reg.RegisterHandler("web.search", registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
@@ -43,12 +44,12 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured session history tool", config.F("tool_name", "session.recent"))
 
-	if err := reg.RegisterHandler("mcp.servers", registry.Handler(mcpbrowse.NewServersHandler(reg, log))); err != nil {
+	if err := reg.RegisterHandler("mcp.servers", registry.Handler(mcpbrowse.NewServersHandler(mcpManager, log))); err != nil {
 		return fmt.Errorf("failed to initialize mcp.servers tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.servers"))
 
-	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(reg, log))); err != nil {
+	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(reg, mcpManager, log))); err != nil {
 		return fmt.Errorf("failed to initialize mcp.tools tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.tools"))

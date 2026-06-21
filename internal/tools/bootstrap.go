@@ -26,7 +26,7 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemSto
 		return nil, err
 	}
 
-	if err := builtin.Register(reg, cfg, soulStore, userMemStore, sessionStore, chatClient, model, log); err != nil {
+	if err := builtin.Register(reg, cfg, soulStore, userMemStore, sessionStore, chatClient, model, mcpManager, log); err != nil {
 		return nil, err
 	}
 	if err := toolmcp.Register(reg, mcpManager, log); err != nil {
