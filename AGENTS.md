@@ -176,7 +176,7 @@ Oswald keeps three distinct memory layers.
 
 ### Account Links
 
-- Stored in `data/accounts/links.json`
+- Stored in `/data/database/oswald.db`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
@@ -691,7 +691,8 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 Account-linking note:
 
-- `data/accounts/links.json` stores canonical users and linked external accounts
+- `/data/database/oswald.db` stores canonical users and linked external accounts
+- Existing `data/accounts/links.json` files are migrated into SQLite at startup when the database is empty
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 

@@ -1,28 +1,14 @@
 package accountlinking
 
-import "time"
+import "github.com/jonahgcarpenter/oswald-ai/internal/database"
 
 // LinkedAccount records a single external gateway identity linked to a canonical user.
-type LinkedAccount struct {
-	Gateway     string    `json:"gateway"`
-	Identifier  string    `json:"identifier"`
-	DisplayName string    `json:"display_name"`
-	LinkedAt    time.Time `json:"linked_at"`
-	Verified    bool      `json:"verified"`
-}
+type LinkedAccount = database.LinkedAccount
 
 // UserRecord stores the linked accounts for a canonical Oswald user.
-type UserRecord struct {
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Accounts  []LinkedAccount `json:"accounts"`
-}
+type UserRecord = database.AccountUser
 
-type fileData struct {
-	Version      int                   `json:"version"`
-	Users        map[string]UserRecord `json:"users"`
-	AccountIndex map[string]string     `json:"account_index"`
-}
+type fileData = database.AccountLinkData
 
 // LinkResult describes the outcome of linking an external account.
 type LinkResult struct {

@@ -13,7 +13,7 @@ import (
 func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	links := accountlinking.NewService(filepath.Join(dir, "links.json"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
+	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
 
 	services, err := NewServicesFromConfig(&config.Config{Port: "8000"}, links, commands.NewRouter(), log)
 	if err != nil {

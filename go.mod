@@ -6,6 +6,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jdeng/goheif v0.0.0-20260407171156-9bf5264f67af
 	github.com/joho/godotenv v1.5.1
+	github.com/mattn/go-sqlite3 v1.14.46
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	golang.org/x/image v0.39.0
 )

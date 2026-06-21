@@ -78,10 +78,13 @@ func main() {
 	log.Debug("app.memory_user.configured", "configured user memory path", config.F("path", config.DefaultUserMemoryPath))
 
 	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, rootLog.Server("account_link"))
+	if err := accountLinkService.Initialize(); err != nil {
+		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
+	}
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	accountLinkCommands := accountlinking.NewCommandHandler(accountLinkService)
 	commandRouter := commands.NewRouter(accountLinkCommands)
-	log.Debug("app.account_link.configured", "configured account link store", config.F("path", config.DefaultAccountLinkPath))
+	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
 	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
 	if err != nil {
