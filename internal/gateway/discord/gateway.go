@@ -694,7 +694,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 		return messageResponse{}, false
 	}
 
-	url := fmt.Sprintf("%s/channels/%s/messages/%s", apiBaseURL, channelID, messageID)
+	url := fmt.Sprintf("%s/channels/%s/messages/%s", dg.apiBaseURL(), channelID, messageID)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		log.Debug("gateway.reply_lookup.failed", "failed to build discord reply lookup request", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
@@ -702,8 +702,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 	}
 	req.Header.Set("Authorization", "Bot "+dg.Token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dg.httpClient(10 * time.Second).Do(req)
 	if err != nil {
 		log.Debug("gateway.reply_lookup.failed", "failed to fetch discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
 		return messageResponse{}, false
@@ -893,8 +892,7 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 		return llm.InputImage{}, nil
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(rawURL)
+	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
 	if err != nil {
 		return llm.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
 	}
@@ -936,7 +934,7 @@ func attachmentFormats(attachments []Attachment) string {
 
 // sendTyping posts a typing indicator to Discord.
 func (dg *Gateway) sendTyping(channelID string) error {
-	url := fmt.Sprintf("%s/channels/%s/typing", apiBaseURL, channelID)
+	url := fmt.Sprintf("%s/channels/%s/typing", dg.apiBaseURL(), channelID)
 
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
@@ -945,8 +943,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	req.Header.Set("Authorization", "Bot "+dg.Token)
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dg.httpClient(5 * time.Second).Do(req)
 	if err != nil {
 		return err
 	}
@@ -963,7 +960,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 // sendMessage posts a message to a Discord channel and returns the created
 // Discord message ID when available.
 func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, error) {
-	url := fmt.Sprintf("%s/channels/%s/messages", apiBaseURL, channelID)
+	url := fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), channelID)
 
 	payload := map[string]interface{}{
 		"content": content,
@@ -985,8 +982,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 	req.Header.Set("Authorization", "Bot "+dg.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := dg.httpClient(10 * time.Second).Do(req)
 	if err != nil {
 		return "", err
 	}

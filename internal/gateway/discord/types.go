@@ -2,6 +2,7 @@ package discord
 
 import (
 	"encoding/json"
+	"net/http"
 	"sync"
 	"time"
 
@@ -134,6 +135,8 @@ type Gateway struct {
 	Links      *accountlinking.Service
 	Commands   *commands.Router
 	Log        *config.Logger
+	APIBaseURL string
+	HTTPClient *http.Client
 	replyMu    sync.RWMutex
 	replyIndex map[string]replyContext
 	sessionMu  sync.RWMutex
@@ -141,4 +144,18 @@ type Gateway struct {
 	resumeURL  string
 	lastSeq    *int
 	hbAcked    bool
+}
+
+func (dg *Gateway) apiBaseURL() string {
+	if dg.APIBaseURL != "" {
+		return dg.APIBaseURL
+	}
+	return apiBaseURL
+}
+
+func (dg *Gateway) httpClient(timeout time.Duration) *http.Client {
+	if dg.HTTPClient != nil {
+		return dg.HTTPClient
+	}
+	return &http.Client{Timeout: timeout}
 }
