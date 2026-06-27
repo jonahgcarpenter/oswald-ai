@@ -1,6 +1,6 @@
 FROM golang:1.26-alpine AS builder
 
-RUN apk add --no-cache git build-base
+RUN apk add --no-cache git build-base sqlite-dev
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ FROM alpine:3.23
 
 LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
 
-RUN apk add --no-cache ca-certificates tzdata libstdc++
+RUN apk add --no-cache ca-certificates tzdata libstdc++ sqlite-libs
 
 RUN addgroup -S oswald-group && adduser -S oswald-ai -G oswald-group
 RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
