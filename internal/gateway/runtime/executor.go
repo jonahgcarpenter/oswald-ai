@@ -5,7 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	admincmd "github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
@@ -52,7 +52,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			return Outcome{Action: decision.Action, Reason: "access_check_failed", Err: err}
 		}
 		if isBanned {
-			err := responder.SendFallback(admincmd.BannedMessage(banReason))
+			err := responder.SendFallback(usermanagement.BannedMessage(banReason))
 			if err != nil {
 				log.Error("gateway.response.failed", "failed to send banned response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
 			}

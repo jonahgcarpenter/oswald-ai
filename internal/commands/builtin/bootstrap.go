@@ -6,7 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 )
 
 // NewService creates the application command service with all built-in commands.
@@ -16,7 +16,7 @@ func NewService(users *accountlinking.Service) (*commands.Service, error) {
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})
 	}
-	for _, handler := range admin.New(users) {
+	for _, handler := range usermanagement.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler, Middleware: []commands.Middleware{commands.RequireAdmin(users)}})
 	}
 	service, err := commands.NewServiceWithCommands(registrations...)

@@ -1,4 +1,4 @@
-package admin
+package usermanagement
 
 import (
 	"context"
