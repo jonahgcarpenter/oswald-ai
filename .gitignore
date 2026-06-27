@@ -2,7 +2,8 @@
 tmp/ 
 .env
 
-# Users
-data/memory/users/
-data/accounts/
-data/database/
+# database
+*.db
+
+# bkp
+bkp/

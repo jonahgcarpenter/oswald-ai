@@ -1,11 +1,11 @@
 FROM golang:1.25-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    build-essential \
-    libsqlite3-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+  git \
+  build-essential \
+  libsqlite3-dev \
+  pkg-config \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -24,11 +24,12 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    tzdata \
-    libsqlite3-0 \
-    libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
+  ca-certificates \
+  tzdata \
+  libsqlite3-0 \
+  sqlite3 \
+  libstdc++6 \
+  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system oswald-group && useradd --system --gid oswald-group oswald-ai
 RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
