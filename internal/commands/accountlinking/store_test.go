@@ -190,6 +190,109 @@ func TestServiceMigratesLegacyJSON(t *testing.T) {
 	}
 }
 
+func TestServiceAdminBanAndListUsers(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "100", "Admin")
+	if err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+	targetID, err := links.EnsureAccount("discord", "200", "Target")
+	if err != nil {
+		t.Fatalf("ensure target: %v", err)
+	}
+
+	if err := links.SetAdmin(adminID, adminID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+	if err := links.SetAdmin(adminID, adminID, false); err == nil || !strings.Contains(err.Error(), "cannot remove admin from yourself") {
+		t.Fatalf("expected self unadmin error, got %v", err)
+	}
+	if err := links.BanUser(adminID, adminID, "bad"); err == nil || !strings.Contains(err.Error(), "cannot ban yourself") {
+		t.Fatalf("expected self ban error, got %v", err)
+	}
+	if err := links.BanUser(adminID, targetID, "spam"); err != nil {
+		t.Fatalf("ban target: %v", err)
+	}
+
+	isAdmin, err := links.IsAdmin(adminID)
+	if err != nil || !isAdmin {
+		t.Fatalf("expected admin true, got %v err=%v", isAdmin, err)
+	}
+	isBanned, err := links.IsBanned(targetID)
+	if err != nil || !isBanned {
+		t.Fatalf("expected banned true, got %v err=%v", isBanned, err)
+	}
+
+	users, err := links.ListUsers()
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("expected 2 users, got %+v", users)
+	}
+	foundTarget := false
+	for _, user := range users {
+		if user.CanonicalUserID == targetID {
+			foundTarget = true
+			if !user.IsBanned || user.BanReason != "spam" || !strings.Contains(user.Intro, "Target") {
+				t.Fatalf("unexpected target summary: %+v", user)
+			}
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("target not found in users: %+v", users)
+	}
+
+	if err := links.UnbanUser(adminID, targetID); err != nil {
+		t.Fatalf("unban target: %v", err)
+	}
+	isBanned, err = links.IsBanned(targetID)
+	if err != nil || isBanned {
+		t.Fatalf("expected banned false, got %v err=%v", isBanned, err)
+	}
+}
+
+func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
+	links := newTestService(t)
+	targetID, err := links.EnsureAccount("discord", "300", "Target")
+	if err != nil {
+		t.Fatalf("ensure target: %v", err)
+	}
+	sourceID, err := links.EnsureAccount("websocket", "source", "Source")
+	if err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	if err := links.SetAdmin(sourceID, sourceID, true); err != nil {
+		t.Fatalf("set source admin: %v", err)
+	}
+	if err := links.BanUser(targetID, sourceID, "merged ban"); err != nil {
+		t.Fatalf("ban source: %v", err)
+	}
+
+	result, err := links.LinkAccount(targetID, "websocket", "source", "")
+	if err != nil {
+		t.Fatalf("merge link: %v", err)
+	}
+	if !result.Merged {
+		t.Fatalf("expected merge result: %+v", result)
+	}
+	isAdmin, err := links.IsAdmin(targetID)
+	if err != nil || !isAdmin {
+		t.Fatalf("expected merged admin true, got %v err=%v", isAdmin, err)
+	}
+	isBanned, err := links.IsBanned(targetID)
+	if err != nil || !isBanned {
+		t.Fatalf("expected merged banned true, got %v err=%v", isBanned, err)
+	}
+	user, ok, err := links.User(targetID)
+	if err != nil || !ok {
+		t.Fatalf("merged user lookup ok=%v err=%v", ok, err)
+	}
+	if user.BanReason != "merged ban" {
+		t.Fatalf("expected ban metadata preserved, got %+v", user)
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()

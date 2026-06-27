@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	admincmd "github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
@@ -35,7 +36,28 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			log.Error("gateway.response.failed", "failed to send gateway fallback", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
 		}
 		return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
-	case routing.ActionCommand:
+	}
+
+	if deps.Access != nil && req.SenderID != "" {
+		isBanned, banReason, err := deps.Access.BanStatus(req.SenderID)
+		if err != nil {
+			log.Error("gateway.access_check.failed", "failed to check user access", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))
+			sendErr := responder.SendAgentError(config.SafeErrorText(err))
+			if sendErr != nil {
+				log.Error("gateway.send.failed", "failed to send access error response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(sendErr))
+			}
+			return Outcome{Action: decision.Action, Reason: "access_check_failed", Err: err}
+		}
+		if isBanned {
+			err := responder.SendFallback(admincmd.BannedMessage(banReason))
+			if err != nil {
+				log.Error("gateway.response.failed", "failed to send banned response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
+			}
+			return Outcome{Action: decision.Action, Reason: "user_banned", Err: err}
+		}
+	}
+
+	if decision.Action == routing.ActionCommand {
 		response, handled, err := deps.Commands.Handle(req.SenderID, decision.Prompt)
 		if !handled {
 			return Outcome{Action: decision.Action, Reason: decision.Reason}

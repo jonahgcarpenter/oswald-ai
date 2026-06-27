@@ -563,6 +563,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	}, gatewayruntime.Dependencies{
 		Broker:   dg.Broker,
 		Commands: dg.Commands,
+		Access:   dg.Links,
 		Log:      dg.Log,
 	}, &runtimeResponder{
 		gateway:    dg,

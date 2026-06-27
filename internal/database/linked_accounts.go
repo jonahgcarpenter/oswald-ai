@@ -52,15 +52,17 @@ func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 		AccountIndex: make(map[string]string),
 	}
 
-	userRows, err := d.db.Query(`SELECT canonical_user_id, created_at, updated_at FROM account_users`)
+	userRows, err := d.db.Query(`SELECT canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason FROM account_users`)
 	if err != nil {
 		return AccountLinkData{}, fmt.Errorf("failed to read account users: %w", err)
 	}
 	defer userRows.Close()
 
 	for userRows.Next() {
-		var canonicalID, createdRaw, updatedRaw string
-		if err := userRows.Scan(&canonicalID, &createdRaw, &updatedRaw); err != nil {
+		var canonicalID, createdRaw, updatedRaw, bannedRaw string
+		var user AccountUser
+		var isAdmin, isBanned int
+		if err := userRows.Scan(&canonicalID, &createdRaw, &updatedRaw, &isAdmin, &isBanned, &bannedRaw, &user.BannedBy, &user.BanReason); err != nil {
 			return AccountLinkData{}, fmt.Errorf("failed to scan account user: %w", err)
 		}
 		createdAt, err := parseDBTime(createdRaw)
@@ -71,7 +73,18 @@ func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 		if err != nil {
 			return AccountLinkData{}, err
 		}
-		data.Users[canonicalID] = AccountUser{CreatedAt: createdAt, UpdatedAt: updatedAt}
+		user.CreatedAt = createdAt
+		user.UpdatedAt = updatedAt
+		user.IsAdmin = isAdmin != 0
+		user.IsBanned = isBanned != 0
+		if bannedRaw != "" {
+			bannedAt, err := parseDBTime(bannedRaw)
+			if err != nil {
+				return AccountLinkData{}, err
+			}
+			user.BannedAt = bannedAt
+		}
+		data.Users[canonicalID] = user
 	}
 	if err := userRows.Err(); err != nil {
 		return AccountLinkData{}, fmt.Errorf("failed to read account users: %w", err)
@@ -124,11 +137,16 @@ func (d *DB) ReplaceAccountLinks(data AccountLinkData) error {
 	}
 
 	userStmt, err := tx.Prepare(`
-INSERT INTO account_users (canonical_user_id, created_at, updated_at)
-VALUES (?, ?, ?)
+INSERT INTO account_users (canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(canonical_user_id) DO UPDATE SET
 	created_at = excluded.created_at,
-	updated_at = excluded.updated_at
+	updated_at = excluded.updated_at,
+	is_admin = excluded.is_admin,
+	is_banned = excluded.is_banned,
+	banned_at = excluded.banned_at,
+	banned_by = excluded.banned_by,
+	ban_reason = excluded.ban_reason
 `)
 	if err != nil {
 		return fmt.Errorf("failed to prepare account user insert: %w", err)
@@ -149,7 +167,7 @@ ON CONFLICT(canonical_user_id) DO UPDATE SET
 
 	for _, canonicalID := range userIDs {
 		user := data.Users[canonicalID]
-		if _, err := userStmt.Exec(canonicalID, formatDBTime(user.CreatedAt), formatDBTime(user.UpdatedAt)); err != nil {
+		if _, err := userStmt.Exec(canonicalID, formatDBTime(user.CreatedAt), formatDBTime(user.UpdatedAt), boolToInt(user.IsAdmin), boolToInt(user.IsBanned), formatOptionalDBTime(user.BannedAt), user.BannedBy, user.BanReason); err != nil {
 			return fmt.Errorf("failed to save account user: %w", err)
 		}
 		for _, account := range user.Accounts {
@@ -204,6 +222,13 @@ func accountKey(gateway, identifier string) string {
 func formatDBTime(t time.Time) string {
 	if t.IsZero() {
 		return time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func formatOptionalDBTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
 	}
 	return t.UTC().Format(time.RFC3339Nano)
 }

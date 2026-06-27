@@ -50,6 +50,26 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsBannedUsersBeforeCommandOrLLM(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	deps.Access = fakeAccess{banned: true, reason: "spam"}
+
+	cmdResponder := &fakeResponder{}
+	cmd := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", IsCommand: true, Text: "/ping"}, deps, cmdResponder)
+	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command != "" {
+		t.Fatalf("unexpected banned command outcome=%+v responder=%+v", cmd, cmdResponder)
+	}
+
+	deps.Access = fakeAccess{banned: true}
+	llmResponder := &fakeResponder{}
+	llm := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", IsMention: true, Text: "hello"}, deps, llmResponder)
+	if llm.Reason != "user_banned" || llmResponder.fallback != "You are banned from using Oswald.\nReason: No reason provided." || llmResponder.started || llmResponder.agent != nil {
+		t.Fatalf("unexpected banned llm outcome=%+v responder=%+v", llm, llmResponder)
+	}
+}
+
 type fakeResponder struct {
 	started  bool
 	cleaned  bool
@@ -90,6 +110,15 @@ func (pingHandler) CanHandle(input string) bool { return input == "/ping" }
 
 func (pingHandler) Handle(userID, input string) (string, bool, error) {
 	return "pong:" + userID + ":" + input, true, nil
+}
+
+type fakeAccess struct {
+	banned bool
+	reason string
+}
+
+func (a fakeAccess) BanStatus(string) (bool, string, error) {
+	return a.banned, a.reason, nil
 }
 
 type runtimeFakeChatter struct{}

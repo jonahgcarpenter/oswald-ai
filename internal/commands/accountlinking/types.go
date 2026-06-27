@@ -1,6 +1,10 @@
 package accountlinking
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/database"
+import (
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+)
 
 // LinkedAccount records a single external gateway identity linked to a canonical user.
 type LinkedAccount = database.LinkedAccount
@@ -16,4 +20,17 @@ type LinkResult struct {
 	AlreadyLinked   bool
 	Merged          bool
 	LinkedAccount   LinkedAccount
+}
+
+// UserSummary is the command-facing view of a canonical user.
+type UserSummary struct {
+	CanonicalUserID string
+	Intro           string
+	Accounts        []LinkedAccount
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	IsAdmin         bool
+	IsBanned        bool
+	BannedBy        string
+	BanReason       string
 }

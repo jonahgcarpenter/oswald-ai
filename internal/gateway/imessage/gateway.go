@@ -229,6 +229,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}, gatewayruntime.Dependencies{
 		Broker:   g.Broker,
 		Commands: g.Commands,
+		Access:   g.Links,
 		Log:      g.Log,
 	}, &runtimeResponder{
 		gateway:             g,

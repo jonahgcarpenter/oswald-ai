@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	admincmd "github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -86,8 +87,9 @@ func main() {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
+	adminCommands := admincmd.NewCommandHandler(accountLinkService)
 	accountLinkCommands := accountlinking.NewCommandHandler(accountLinkService)
-	commandRouter := commands.NewRouter(accountLinkCommands)
+	commandRouter := commands.NewRouter(adminCommands, accountLinkCommands)
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
 	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
