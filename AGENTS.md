@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin model tools:
 
 - `web.search`
 - `memory.save`
@@ -19,6 +19,8 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured. Discovered MCP tools are hidden by default and become visible to the model only for the active request after `mcp.tools` lists them.
 
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, and admin-only user-management commands: `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, and `/unban`.
+
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
 There is no JavaScript, TypeScript, or frontend code in this repository.
@@ -30,34 +32,37 @@ Current layers:
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/commands/` — shared command routing and command implementations
 3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
-4. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
-5. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
-6. `internal/broker/` — request queue and worker pool
-7. `internal/agent/` — iterative tool-calling agent loop
-8. `internal/promptbudget/` — model context budget and prompt token estimates
-9. `internal/tools/` — tool registry, builtin handlers, and schema loading
-10. `internal/mcp/` — optional MCP client sessions and discovered tools
-11. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-12. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-13. `internal/modelinfo/` — OpenRouter model metadata discovery with environment overrides
+4. `internal/commands/usermanagement/` — admin, ban, and canonical-user inspection commands
+5. `internal/database/` — SQLite schema, account-link persistence, user memory tables, and sqlite-vec setup
+6. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
+7. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+8. `internal/broker/` — request queue and worker pool
+9. `internal/agent/` — iterative tool-calling agent loop
+10. `internal/promptbudget/` — model context budget and prompt token estimates
+11. `internal/tools/` — tool registry, builtin handlers, and schema loading
+12. `internal/mcp/` — optional MCP client sessions and discovered tools
+13. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+14. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+15. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
 
 ## Startup Flow
 
 `cmd/agent/main.go` performs startup in this order:
 
 1. Load environment config
-2. Create the shared logger
-3. Create the LLM gateway client
-4. Discover context budget from OpenRouter model metadata, with `MODEL_*` environment overrides taking precedence
-5. Create the soul store and persistent user-memory store
-6. Create the account-link service, shared `/connect` and `/disconnect` command handler, and command router
-7. Initialize optional MCP clients
-8. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
-9. Build enabled gateways from config
-10. Create the agent
-11. Start the broker worker pool
-12. Start each gateway in its own goroutine
-13. Wait for shutdown signal, drain the broker, and close MCP clients
+2. Create the shared logger and validate required LLM gateway settings
+3. Derive local HTTP and agent request timeouts from `LLM_GATEWAY_TIMEOUT`
+4. Create the LLM gateway client
+5. Resolve context budget from `MODEL_*` environment overrides or package defaults
+6. Create the soul store and SQLite-backed persistent user-memory store
+7. Create the account-link service and command service with `/help`, `/connect`, `/disconnect`, and admin user-management commands
+8. Initialize optional MCP clients
+9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+10. Build enabled gateways from config
+11. Create the agent
+12. Start the broker worker pool
+13. Start each gateway in its own goroutine
+14. Wait for shutdown signal, drain the broker, and close MCP clients
 
 ## Request Lifecycle
 
@@ -68,12 +73,13 @@ Every request follows the same high-level path:
 3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
 4. The gateway builds a `runtime.Request` with normalized gateway facts like `IsMention`, `IsReplyToBot`, and `IsCommand`
 5. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
-6. Account-link commands are handled by the shared command router without reaching the agent loop
-7. The runtime submits a `broker.Request` when the request should reach the LLM
-8. A broker worker calls `(*Agent).Process()`
-9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
-10. The final response is returned to the shared runtime
-11. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
+6. The runtime checks the canonical user's ban status before executing commands or submitting to the agent
+7. Slash commands are handled by the shared command service without reaching the agent loop
+8. The runtime submits a `broker.Request` when the request should reach the LLM
+9. A broker worker calls `(*Agent).Process()`
+10. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+11. The final response is returned to the shared runtime
+12. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -97,31 +103,32 @@ The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`.
 
 Per request it does the following:
 
-1. Create a request-scoped timeout of `3*time.Minute`
+1. Create a request-scoped timeout from `LLM_GATEWAY_TIMEOUT + 30s` (`210s` by default)
 2. Inject `SenderID` into context so tools can identify the current user
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
+   - current date and time
    - soul content
    - current speaker identity when available
    - user `system_rules` memory when available
-   - current date and time
-5. Load structured retrieved memory context from SQLite-backed session and user memory stores
+5. Load automatic retrieved context from recent SQLite-backed session turns
 6. Estimate prompt size against the active model budget
 7. Build the chat message array: system prompt, retrieved SQLite session context, current user prompt, and any current-turn images
-8. Call the LLM gateway with all registered tools available
+8. Call the LLM gateway with default-visible tools plus any MCP-discovered tools exposed for this request
 9. If the model emits tool calls:
    - execute each tool handler
    - append tool results as `tool` messages
    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
 10. If tool failures exhaust the retry budget, make one final model call with tools disabled
-11. Persist only the cleaned final user message and final assistant reply to session memory
+11. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to session memory
 12. Return the final `AgentResponse`
 
 Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
-- Reply context is sent directly on the current prompt, but stripped from stored session memory and semantic query text to avoid reintroducing the same quoted message later
+- Session turns are stored with a `24h` TTL and up to four recent completed exchanges are injected automatically when budget permits
+- Reply context is sent directly on the current prompt, but stripped from stored session memory and memory query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 - Gateway/runtime, routing, memory, command, tool, LLM mapping, image normalization, and fake-client agent loop behavior are covered by local Go tests that do not call a live LLM
 
@@ -149,11 +156,11 @@ Gateway-neutral routing policy lives in `internal/routing/` and shared gateway e
 
 Oswald keeps three distinct memory layers.
 
-| Layer                  | Storage                     | Purpose                                     | Mutable by agent |
-| ---------------------- | --------------------------- | ------------------------------------------- | ---------------- |
-| Soul memory            | `data/memory/soul/soul.md`  | Identity, directives, personality           | Yes              |
-| Persistent user memory | SQLite `memory_entries`     | Facts about a user that survive restart     | Yes              |
-| Session chat memory    | SQLite `session_turns`      | Conversation history for the active session | Implicitly       |
+| Layer                  | Storage                    | Purpose                                     | Mutable by agent |
+| ---------------------- | -------------------------- | ------------------------------------------- | ---------------- |
+| Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | Yes              |
+| Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart     | Yes              |
+| Session chat memory    | SQLite `session_turns`     | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
@@ -173,10 +180,11 @@ Oswald keeps three distinct memory layers.
 
 ### Account Links
 
-- Stored in `/data/database/oswald.db`
+- Stored in `data/database/oswald.db`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
+- Admin and ban state is stored on canonical users and managed by `/admin`, `/unadmin`, `/ban`, and `/unban`
 - Linking can merge two canonical users when the requested external account is already attached elsewhere and the gateway sets do not conflict
 
 ### Session Chat Memory
@@ -193,18 +201,14 @@ Prompt-budget behavior:
 - The agent estimates prompt size before calling the LLM gateway
 - If the assembled prompt exceeds the budget, the request still proceeds with a warning log; session turns are not compacted or rewritten
 
-## Context Budget Discovery
+## Context Budget Resolution
 
 Context budgeting lives in `internal/promptbudget/`.
 
-- At startup the app queries `https://openrouter.ai/api/v1/models`
-- Models are matched by `hugging_face_id` against `LLM_GATEWAY_MODEL`, first exactly and then with trimmed case-insensitive matching
-- `top_provider.context_length` provides the context window when no environment override is set
-- `top_provider.max_completion_tokens` provides the response reserve when no environment override is set
-- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` override discovered values field-by-field
+- Bifrost is the runtime LLM gateway; Oswald does not depend on live model-provider access during tests
+- `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` provide explicit context-budget overrides
 - Max input tokens are derived as context window minus max output tokens when possible
-- OpenRouter lookup still runs when overrides are set; differing discovered values are logged as override discrepancies
-- If discovery and overrides do not provide a field, package defaults are used
+- If overrides do not provide a field, package defaults are used
 
 The prompt budget is the context window minus reserves for:
 
@@ -374,7 +378,7 @@ The registry:
 - Consecutive failures are tracked per request
 - Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
 
-## LLM Gateway Integration
+## Bifrost Gateway Integration
 
 Files:
 
@@ -385,9 +389,9 @@ Files:
 
 Notes:
 
-- The LLM gateway is the model gateway
-- OpenRouter's public model catalog is used at startup for context-budget discovery
-- `MODEL_*` environment overrides take precedence over discovered model metadata
+- Bifrost is the LLM gateway and model router
+- `LLM_GATEWAY_URL` points at Bifrost, and `LLM_GATEWAY_VIRTUAL_KEY` can select a Bifrost virtual key
+- `MODEL_*` environment overrides take precedence over package defaults for prompt budgeting
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
 - `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic user-memory retrieval
 - The client maps between internal app types and the gateway's OpenAI-compatible wire format
@@ -429,7 +433,15 @@ go test ./...
 gofmt -w .
 ```
 
-The repository includes local tests for the agent loop with fake LLM clients, shared gateway runtime, WebSocket/Discord/iMessage gateway behavior with fake transports, account linking, memory, routing, tool registry/runtime, media normalization, model metadata helpers, config sanitization, and LLM request/response mapping. `go test ./...` should pass without live gateway credentials or LLM calls.
+## Test Standards
+
+Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no Bifrost, LLM, gateway, Discord, BlueBubbles, GitHub MCP, SearXNG, or embedding service access.
+
+- Use fake LLM clients, fake gateway transports, `httptest` servers, temporary directories, and isolated temporary SQLite databases
+- Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `SEARXNG_URL`, or model budget variables in tests
+- Do not make live network calls from normal unit tests; external integrations must be mocked or guarded behind explicit opt-in checks
+- Tests may validate request/response mapping and error handling, but they should not depend on a real model response
+- Keep test data deterministic and avoid relying on existing files under `data/database/`, `data/accounts/`, or user memory directories
 
 ## Logging
 
@@ -595,32 +607,35 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 
 ## Key Files
 
-| File                                         | Purpose                                      |
-| -------------------------------------------- | -------------------------------------------- |
-| `cmd/agent/main.go`                          | Startup wiring and shutdown                  |
-| `internal/agent/agent.go`                    | Main agent loop                              |
-| `internal/broker/broker.go`                  | Request queue and worker pool                |
-| `internal/promptbudget/`                     | Context budget and prompt token estimates    |
-| `internal/mcp/manager.go`                    | MCP client bootstrap and catalog             |
-| `internal/routing/routing.go`                | Shared gateway routing policy                |
-| `internal/routing/types.go`                  | Gateway-neutral routing types                |
-| `internal/llm/gateway.go`                    | LLM gateway HTTP client                      |
-| `internal/modelinfo/`                        | Model metadata discovery                     |
-| `internal/tools/registry/`                   | Tool schema loading and execution            |
-| `internal/tools/runtime/`                    | Request-local tool exposure state            |
-| `internal/tools/bootstrap.go`                | Tool registry assembly                       |
-| `internal/tools/builtin/`                    | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store             |
-| `internal/tools/builtin/soul/store.go`       | Soul file store                              |
-| `internal/commands/router.go`                | Shared command router                        |
-| `internal/commands/accountlinking/store.go`  | Canonical account link store                 |
-| `internal/requestctx/requestctx.go`          | Request metadata propagation through context |
-| `internal/media/images.go`                   | Image normalization and validation           |
-| `internal/gateway/runtime/`                  | Shared gateway request execution             |
-| `internal/gateway/bootstrap.go`              | Gateway bootstrap                            |
-| `internal/gateway/websocket/gateway.go`      | WebSocket transport                          |
-| `internal/gateway/discord/gateway.go`        | Discord transport                            |
-| `internal/gateway/imessage/gateway.go`       | iMessage BlueBubbles transport               |
+| File                                           | Purpose                                      |
+| ---------------------------------------------- | -------------------------------------------- |
+| `cmd/agent/main.go`                            | Startup wiring and shutdown                  |
+| `internal/agent/agent.go`                      | Main agent loop                              |
+| `internal/broker/broker.go`                    | Request queue and worker pool                |
+| `internal/promptbudget/`                       | Context budget and prompt token estimates    |
+| `internal/mcp/manager.go`                      | MCP client bootstrap and catalog             |
+| `internal/routing/routing.go`                  | Shared gateway routing policy                |
+| `internal/routing/types.go`                    | Gateway-neutral routing types                |
+| `internal/llm/gateway.go`                      | LLM gateway HTTP client                      |
+| `internal/modelinfo/`                          | Model metadata discovery                     |
+| `internal/database/`                           | SQLite schema and database helpers           |
+| `internal/tools/registry/`                     | Tool schema loading and execution            |
+| `internal/tools/runtime/`                      | Request-local tool exposure state            |
+| `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
+| `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |
+| `internal/tools/builtin/usermemory/store.go`   | Persistent per-user memory store             |
+| `internal/tools/builtin/soul/store.go`         | Soul file store                              |
+| `internal/commands/service.go`                 | Shared command service                       |
+| `internal/commands/parser.go`                  | Slash-command parser                         |
+| `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
+| `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
+| `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
+| `internal/media/images.go`                     | Image normalization and validation           |
+| `internal/gateway/runtime/`                    | Shared gateway request execution             |
+| `internal/gateway/bootstrap.go`                | Gateway bootstrap                            |
+| `internal/gateway/websocket/gateway.go`        | WebSocket transport                          |
+| `internal/gateway/discord/gateway.go`          | Discord transport                            |
+| `internal/gateway/imessage/gateway.go`         | iMessage BlueBubbles transport               |
 
 ## Code Style
 
@@ -659,13 +674,13 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is stored in SQLite `session_turns` with TTL expiry
 - WebSocket gateway has no authentication layer
-- Only nine builtin tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
+- Only nine builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
 - GitHub is the only MCP server integration today
-- The OpenAI-compatible LLM gateway is the model gateway; model metadata comes from OpenRouter and optional `MODEL_*` overrides
+- Bifrost is the OpenAI-compatible LLM gateway; prompt budgeting uses optional `MODEL_*` overrides or package defaults
 
 Account-linking note:
 
-- `/data/database/oswald.db` stores canonical users and linked external accounts
+- `data/database/oswald.db` stores canonical users and linked external accounts
 - Existing `data/accounts/links.json` files are migrated into SQLite at startup when the database is empty
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
