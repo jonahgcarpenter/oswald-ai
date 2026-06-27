@@ -1,6 +1,11 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.25-bookworm AS builder
 
-RUN apk add --no-cache git build-base sqlite-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    libsqlite3-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -14,13 +19,18 @@ COPY internal/ ./internal/
 
 RUN CGO_ENABLED=1 go build -o oswald-agent ./cmd/agent/main.go
 
-FROM alpine:3.23
+FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
 
-RUN apk add --no-cache ca-certificates tzdata libstdc++ sqlite-libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    libsqlite3-0 \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN addgroup -S oswald-group && adduser -S oswald-ai -G oswald-group
+RUN groupadd --system oswald-group && useradd --system --gid oswald-group oswald-ai
 RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
 
 WORKDIR /home/oswald-ai/
