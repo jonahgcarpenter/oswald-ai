@@ -121,7 +121,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 	mentionsBot := mentionRE.MatchString(text)
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
-	currentIsCommand := g.Commands.IsCommand(textWithoutMention)
+	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
 	currentIsReplyToBot := false
 	if replyCtx, ok := g.lookupMessage(replyGUID); ok {
 		currentIsReplyToBot = replyCtx.IsFromBot
@@ -130,7 +130,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		IsGroup:      isGroup,
 		IsMention:    mentionsBot,
 		IsReplyToBot: currentIsReplyToBot,
-		IsCommand:    currentIsCommand,
+		Text:         textWithoutMention,
 	})
 	if preflight.Action == routing.ActionIgnore {
 		log.Debug("gateway.message.ignored", "ignored imessage message",
@@ -140,7 +140,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 			config.F("is_group", isGroup),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", replyGUID != ""),
-			config.F("is_command", currentIsCommand),
+			config.F("is_command", currentIsCommandAttempt),
 			config.F("reason", preflight.Reason),
 			config.F("message_preview", routing.MessagePreview(msg.Text, 100)),
 		)
@@ -221,17 +221,11 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		IsGroup:      isGroup,
 		IsMention:    mentionsBot,
 		IsReplyToBot: currentIsReplyToBot,
-		IsCommand:    currentIsCommand,
 		Text:         textWithoutMention,
 		Images:       images,
 		Unsupported:  unsupported,
 		Reply:        reply,
-	}, gatewayruntime.Dependencies{
-		Broker:   g.Broker,
-		Commands: g.Commands,
-		Access:   g.Links,
-		Log:      g.Log,
-	}, &runtimeResponder{
+	}, g.runtimeDependencies(), &runtimeResponder{
 		gateway:             g,
 		requestID:           requestID,
 		chatGUID:            chat.GUID,
@@ -239,6 +233,18 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		sessionKey:          sessionKey,
 		senderID:            normalizedSenderID,
 	})
+}
+
+func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
+	deps := g.Runtime
+	deps.Broker = g.Broker
+	if deps.Access == nil {
+		deps.Access = g.Links
+	}
+	if deps.Log == nil {
+		deps.Log = g.Log
+	}
+	return deps
 }
 
 func (g *Gateway) lookupContactDisplayName(normalizedSenderID string) (string, error) {

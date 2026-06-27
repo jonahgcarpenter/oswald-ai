@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -114,8 +115,10 @@ func primaryWSRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 
 type wsPingHandler struct{}
 
-func (wsPingHandler) CanHandle(input string) bool                 { return input == "/ping" }
-func (wsPingHandler) Handle(string, string) (string, bool, error) { return "pong", true, nil }
+func (wsPingHandler) Definition() commands.Definition { return commands.Definition{Name: "ping"} }
+func (wsPingHandler) Execute(context.Context, commands.Request) (commands.Result, error) {
+	return commands.Result{Text: "pong"}, nil
+}
 
 func newWebSocketTestGateway(t *testing.T) (*Gateway, *broker.Broker, *wsFakeChatter) {
 	t.Helper()
@@ -131,7 +134,11 @@ func newWebSocketTestGateway(t *testing.T) (*Gateway, *broker.Broker, *wsFakeCha
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
-	wg := &Gateway{Links: links, Commands: commands.NewRouter(wsPingHandler{}), Log: log}
+	commandService, err := commands.NewService(wsPingHandler{})
+	if err != nil {
+		t.Fatalf("new command service: %v", err)
+	}
+	wg := &Gateway{Links: links, Runtime: gatewayruntime.Dependencies{Commands: commandService, Log: log}, Log: log}
 	return wg, b, chat
 }
 

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
@@ -16,14 +17,14 @@ func Decide(input Input) Decision {
 	text := strings.TrimSpace(input.Text)
 	reply := input.Reply
 
-	if input.IsCommand {
+	if input.IsCommandAttempt {
 		if input.IsGroup && !input.IsMention {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{Action: ActionCommand, Prompt: text, Reason: "command"}
 	}
 
-	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommand) {
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommandAttempt) {
 		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
 	}
 
@@ -39,17 +40,23 @@ func Decide(input Input) Decision {
 // Preflight cheaply identifies messages that should be ignored before gateways
 // perform expensive attachment, account, or reply-context work.
 func Preflight(input PreflightInput) Decision {
-	if input.IsCommand {
+	isCommandAttempt := IsCommandAttempt(input.Text)
+	if isCommandAttempt {
 		if input.IsGroup && !input.IsMention {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{}
 	}
 
-	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, input.IsCommand) {
+	if ShouldIgnoreUninvokedGroup(input.IsGroup, input.IsMention, input.IsReplyToBot, isCommandAttempt) {
 		return Decision{Action: ActionIgnore, Reason: "group_message_without_invocation"}
 	}
 	return Decision{}
+}
+
+// IsCommandAttempt reports whether text begins with command syntax.
+func IsCommandAttempt(text string) bool {
+	return commands.IsAttempt(text)
 }
 
 // MessagePreview returns a single-line, rune-bounded preview safe for debug logs.

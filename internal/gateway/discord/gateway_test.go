@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -224,12 +225,16 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
+	commandService, err := commands.NewService()
+	if err != nil {
+		t.Fatalf("new command service: %v", err)
+	}
 	dg := &Gateway{
 		Token:      "token",
 		BotID:      "bot-1",
 		Broker:     b,
 		Links:      links,
-		Commands:   commands.NewRouter(),
+		Runtime:    gatewayruntime.Dependencies{Commands: commandService, Log: log},
 		Log:        log,
 		APIBaseURL: apiBaseURL,
 		replyIndex: make(map[string]replyContext),

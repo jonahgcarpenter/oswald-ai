@@ -134,18 +134,24 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			SessionKey:  sessionKey,
 			IsDirect:    true,
 			IsMention:   true,
-			IsCommand:   wg.Commands.IsCommand(userPrompt),
 			Text:        userPrompt,
 			Images:      userImages,
 			Unsupported: userUnsupported,
 			StreamFunc:  streamFunc,
-		}, gatewayruntime.Dependencies{
-			Broker:   b,
-			Commands: wg.Commands,
-			Access:   wg.Links,
-			Log:      wg.Log,
-		}, &runtimeResponder{conn: conn, messageType: messageType})
+		}, wg.runtimeDependencies(b), &runtimeResponder{conn: conn, messageType: messageType})
 	}
+}
+
+func (wg *Gateway) runtimeDependencies(b *broker.Broker) gatewayruntime.Dependencies {
+	deps := wg.Runtime
+	deps.Broker = b
+	if deps.Access == nil {
+		deps.Access = wg.Links
+	}
+	if deps.Log == nil {
+		deps.Log = wg.Log
+	}
+	return deps
 }
 
 func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]llm.InputImage, []string) {

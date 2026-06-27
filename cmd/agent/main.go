@@ -9,11 +9,11 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	admincmd "github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
+	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/commands/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
@@ -87,9 +87,10 @@ func main() {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
-	adminCommands := admincmd.NewCommandHandler(accountLinkService)
-	accountLinkCommands := accountlinking.NewCommandHandler(accountLinkService)
-	commandRouter := commands.NewRouter(adminCommands, accountLinkCommands)
+	commandService, err := commandbuiltin.NewService(accountLinkService)
+	if err != nil {
+		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
+	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
 	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
@@ -110,7 +111,12 @@ func main() {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, commandRouter, rootLog)
+	runtimeDeps := gatewayruntime.Dependencies{
+		Commands: commandService,
+		Access:   accountLinkService,
+		Log:      rootLog,
+	}
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
 	if err != nil {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}
