@@ -12,7 +12,7 @@ import (
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
 	Broker   *broker.Broker
-	Commands *commands.Router
+	Commands *commands.Service
 	Access   AccessChecker
 	Log      *config.Logger
 }
@@ -35,7 +35,6 @@ type Request struct {
 	IsGroup      bool
 	IsMention    bool
 	IsReplyToBot bool
-	IsCommand    bool
 
 	Text        string
 	Images      []llm.InputImage

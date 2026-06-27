@@ -1,6 +1,7 @@
 package accountlinking
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -65,43 +67,47 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	handler := NewCommandHandler(links)
-
-	if !handler.CanHandle(" /connect ") || handler.CanHandle("hello") {
-		t.Fatal("unexpected CanHandle result")
+	service, err := commands.NewService(New(links)...)
+	if err != nil {
+		t.Fatalf("new command service: %v", err)
 	}
 
-	response, handled, err := handler.Handle(userID, "/connect")
-	if err != nil || !handled {
-		t.Fatalf("start connect handled=%v err=%v", handled, err)
+	response, err := executeAccountCommand(service, userID, "/connect")
+	if err != nil {
+		t.Fatalf("start connect err=%v", err)
 	}
 	if !strings.Contains(response, "Connect an account.") || !strings.Contains(response, "Discord (connected)") {
 		t.Fatalf("unexpected connect menu: %q", response)
 	}
 
-	response, handled, err = handler.Handle(userID, "/connect 2 alice-local")
-	if err != nil || !handled {
-		t.Fatalf("connect handled=%v err=%v", handled, err)
+	response, err = executeAccountCommand(service, userID, "/connect 2 alice-local")
+	if err != nil {
+		t.Fatalf("connect err=%v", err)
 	}
 	if !strings.Contains(response, "Linked WebSocket as alice-local.") {
 		t.Fatalf("unexpected connect response: %q", response)
 	}
 
-	response, handled, err = handler.Handle(userID, "/disconnect")
-	if err != nil || !handled {
-		t.Fatalf("start disconnect handled=%v err=%v", handled, err)
+	response, err = executeAccountCommand(service, userID, "/disconnect")
+	if err != nil {
+		t.Fatalf("start disconnect err=%v", err)
 	}
 	if !strings.Contains(response, "Disconnect an account.") {
 		t.Fatalf("unexpected disconnect menu: %q", response)
 	}
 
-	response, handled, err = handler.Handle(userID, "/disconnect 2")
-	if err != nil || !handled {
-		t.Fatalf("disconnect handled=%v err=%v", handled, err)
+	response, err = executeAccountCommand(service, userID, "/disconnect 2")
+	if err != nil {
+		t.Fatalf("disconnect err=%v", err)
 	}
 	if !strings.Contains(response, "Disconnected WebSocket: alice-local.") {
 		t.Fatalf("unexpected disconnect response: %q", response)
 	}
+}
+
+func executeAccountCommand(service *commands.Service, userID, raw string) (string, error) {
+	result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: raw})
+	return result.Text, err
 }
 
 func TestServicePersistsSQLiteAccounts(t *testing.T) {

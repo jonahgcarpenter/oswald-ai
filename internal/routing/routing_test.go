@@ -18,7 +18,7 @@ func TestDecideIgnoresUninvokedGroupMessage(t *testing.T) {
 }
 
 func TestDecideHandlesMentionedGroupCommand(t *testing.T) {
-	decision := Decide(Input{IsGroup: true, IsMention: true, IsCommand: true, Text: " /connect "})
+	decision := Decide(Input{IsGroup: true, IsMention: true, IsCommandAttempt: true, Text: " /connect "})
 	if decision.Action != ActionCommand {
 		t.Fatalf("expected command, got %q", decision.Action)
 	}

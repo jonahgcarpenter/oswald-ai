@@ -35,9 +35,15 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 
 	cmdResponder := &fakeResponder{}
-	cmd := Execute(Request{Gateway: "test", SenderID: "user", IsCommand: true, Text: "/ping"}, deps, cmdResponder)
+	cmd := Execute(Request{Gateway: "test", SenderID: "user", Text: "/ping"}, deps, cmdResponder)
 	if cmd.Action != routing.ActionCommand || cmdResponder.command != "pong:user:/ping" {
 		t.Fatalf("unexpected command outcome=%+v responder=%+v", cmd, cmdResponder)
+	}
+
+	unknownCmdResponder := &fakeResponder{}
+	unknownCmd := Execute(Request{Gateway: "test", SenderID: "user", Text: "/unknown arg"}, deps, unknownCmdResponder)
+	if unknownCmd.Action != routing.ActionCommand || unknownCmdResponder.command != "Unknown command: /unknown" || unknownCmdResponder.started || unknownCmdResponder.agent != nil {
+		t.Fatalf("unexpected unknown command outcome=%+v responder=%+v", unknownCmd, unknownCmdResponder)
 	}
 
 	llmResponder := &fakeResponder{}
@@ -57,7 +63,7 @@ func TestExecuteRejectsBannedUsersBeforeCommandOrLLM(t *testing.T) {
 	deps.Access = fakeAccess{banned: true, reason: "spam"}
 
 	cmdResponder := &fakeResponder{}
-	cmd := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", IsCommand: true, Text: "/ping"}, deps, cmdResponder)
+	cmd := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", Text: "/ping"}, deps, cmdResponder)
 	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command != "" {
 		t.Fatalf("unexpected banned command outcome=%+v responder=%+v", cmd, cmdResponder)
 	}
@@ -106,10 +112,12 @@ func (r *fakeResponder) SendAgentError(text string) error {
 
 type pingHandler struct{}
 
-func (pingHandler) CanHandle(input string) bool { return input == "/ping" }
+func (pingHandler) Definition() commands.Definition {
+	return commands.Definition{Name: "ping"}
+}
 
-func (pingHandler) Handle(userID, input string) (string, bool, error) {
-	return "pong:" + userID + ":" + input, true, nil
+func (pingHandler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	return commands.Result{Text: "pong:" + req.UserID + ":" + req.Raw}, nil
 }
 
 type fakeAccess struct {
@@ -137,5 +145,9 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
-	return Dependencies{Broker: b, Commands: commands.NewRouter(pingHandler{}), Log: log}, b.Shutdown
+	commandService, err := commands.NewService(pingHandler{})
+	if err != nil {
+		t.Fatalf("new command service: %v", err)
+	}
+	return Dependencies{Broker: b, Commands: commandService, Log: log}, b.Shutdown
 }

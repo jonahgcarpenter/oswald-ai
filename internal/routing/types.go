@@ -27,7 +27,7 @@ type Input struct {
 	IsGroup            bool
 	IsMention          bool
 	IsReplyToBot       bool
-	IsCommand          bool
+	IsCommandAttempt   bool
 	Text               string
 	CurrentImages      []llm.InputImage
 	CurrentUnsupported []string
@@ -39,7 +39,7 @@ type PreflightInput struct {
 	IsGroup      bool
 	IsMention    bool
 	IsReplyToBot bool
-	IsCommand    bool
+	Text         string
 }
 
 // ReplyContext is the gateway-neutral representation of a replied-to message.

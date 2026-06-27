@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 )
 
 const (
@@ -133,7 +133,7 @@ type Gateway struct {
 	BotID      string
 	Broker     *broker.Broker
 	Links      *accountlinking.Service
-	Commands   *commands.Router
+	Runtime    gatewayruntime.Dependencies
 	Log        *config.Logger
 	APIBaseURL string
 	HTTPClient *http.Client

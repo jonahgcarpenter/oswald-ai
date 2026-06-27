@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -15,7 +15,8 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	dir := t.TempDir()
 	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
 
-	services, err := NewServicesFromConfig(&config.Config{Port: "8000"}, links, commands.NewRouter(), log)
+	runtimeDeps := gatewayruntime.Dependencies{Log: log}
+	services, err := NewServicesFromConfig(&config.Config{Port: "8000"}, links, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("default services: %v", err)
 	}
@@ -23,7 +24,7 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 		t.Fatalf("unexpected default services %q", serviceNames(services))
 	}
 
-	services, err = NewServicesFromConfig(&config.Config{Port: "8000", DiscordToken: "token", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}, links, commands.NewRouter(), log)
+	services, err = NewServicesFromConfig(&config.Config{Port: "8000", DiscordToken: "token", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}, links, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("configured services: %v", err)
 	}

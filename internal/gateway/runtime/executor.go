@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"context"
+
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	admincmd "github.com/jonahgcarpenter/oswald-ai/internal/commands/admin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -20,7 +23,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		IsGroup:            req.IsGroup,
 		IsMention:          req.IsMention,
 		IsReplyToBot:       req.IsReplyToBot,
-		IsCommand:          req.IsCommand,
+		IsCommandAttempt:   commands.IsAttempt(req.Text),
 		Text:               req.Text,
 		CurrentImages:      req.Images,
 		CurrentUnsupported: req.Unsupported,
@@ -58,9 +61,20 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	}
 
 	if decision.Action == routing.ActionCommand {
-		response, handled, err := deps.Commands.Handle(req.SenderID, decision.Prompt)
-		if !handled {
-			return Outcome{Action: decision.Action, Reason: decision.Reason}
+		response := "Unknown command: /"
+		var err error
+		if deps.Commands != nil {
+			var result commands.Result
+			result, err = deps.Commands.Execute(context.Background(), commands.Request{
+				RequestID:   req.RequestID,
+				UserID:      req.SenderID,
+				Gateway:     req.Gateway,
+				ChatID:      req.ChatID,
+				SessionKey:  req.SessionKey,
+				DisplayName: req.DisplayName,
+				Raw:         decision.Prompt,
+			})
+			response = result.Text
 		}
 		if err != nil {
 			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))

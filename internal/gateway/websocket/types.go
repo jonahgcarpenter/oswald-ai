@@ -5,17 +5,17 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 )
 
 // Gateway handles local WebSocket connections for testing and client access.
 type Gateway struct {
-	Port     string
-	Links    *accountlinking.Service
-	Commands *commands.Router
-	Log      *config.Logger
+	Port    string
+	Links   *accountlinking.Service
+	Runtime gatewayruntime.Dependencies
+	Log     *config.Logger
 }
 
 // IncomingMessage is the JSON payload clients send over the WebSocket connection.

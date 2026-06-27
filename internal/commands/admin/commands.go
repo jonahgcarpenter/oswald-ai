@@ -1,22 +1,31 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 )
 
 const bannedMessage = "You are banned from using Oswald."
 
-// CommandHandler manages admin-only user moderation commands.
-type CommandHandler struct {
-	users *accountlinking.Service
+type handler struct {
+	definition commands.Definition
+	users      *accountlinking.Service
 }
 
-// NewCommandHandler creates an admin command handler backed by canonical users.
-func NewCommandHandler(users *accountlinking.Service) *CommandHandler {
-	return &CommandHandler{users: users}
+// New creates admin command handlers backed by canonical users.
+func New(users *accountlinking.Service) []commands.Handler {
+	return []commands.Handler{
+		&handler{users: users, definition: commands.Definition{Name: "admin", Summary: "Grant admin access to a user.", Usage: "/admin <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "ban", Summary: "Ban a user from using Oswald.", Usage: "/ban <canonical_id> [reason]", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "unadmin", Summary: "Remove admin access from a user.", Usage: "/unadmin <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "unban", Summary: "Unban a user.", Usage: "/unban <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "user", Summary: "Show one canonical user.", Usage: "/user <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "users", Summary: "List canonical users.", Usage: "/users", AdminOnly: true}},
+	}
 }
 
 // BannedMessage returns the canonical response for banned users.
@@ -28,61 +37,38 @@ func BannedMessage(reason string) string {
 	return bannedMessage + "\nReason: " + reason
 }
 
-// CanHandle reports whether input is one of the admin commands.
-func (h *CommandHandler) CanHandle(input string) bool {
-	fields := strings.Fields(strings.TrimSpace(input))
-	if len(fields) == 0 {
-		return false
-	}
-	switch fields[0] {
-	case "/users", "/user", "/admin", "/unadmin", "/ban", "/unban":
-		return true
-	default:
-		return false
-	}
+// Definition describes the command handled by h.
+func (h *handler) Definition() commands.Definition {
+	return h.definition
 }
 
-// Handle processes admin commands for a canonical user.
-func (h *CommandHandler) Handle(canonicalUserID, input string) (string, bool, error) {
-	trimmed := strings.TrimSpace(input)
-	if !h.CanHandle(trimmed) {
-		return "", false, nil
-	}
-
-	isAdmin, err := h.users.IsAdmin(canonicalUserID)
-	if err != nil {
-		return "", true, err
-	}
-	if !isAdmin {
-		return "You are not allowed to use admin commands.", true, nil
-	}
-
-	fields := strings.Fields(trimmed)
-	switch fields[0] {
-	case "/users":
+// Execute processes one admin command.
+func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	switch req.Name {
+	case "users":
 		return h.handleUsers()
-	case "/user":
-		return h.handleUser(fields)
-	case "/admin":
-		return h.handleSetAdmin(canonicalUserID, fields, true)
-	case "/unadmin":
-		return h.handleSetAdmin(canonicalUserID, fields, false)
-	case "/ban":
-		return h.handleBan(canonicalUserID, fields)
-	case "/unban":
-		return h.handleUnban(canonicalUserID, fields)
+	case "user":
+		return h.handleUser(req.Args)
+	case "admin":
+		return h.handleSetAdmin(req.UserID, req.Args, true)
+	case "unadmin":
+		return h.handleSetAdmin(req.UserID, req.Args, false)
+	case "ban":
+		return h.handleBan(req.UserID, req.Args)
+	case "unban":
+		return h.handleUnban(req.UserID, req.Args)
 	default:
-		return "", false, nil
+		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}
 }
 
-func (h *CommandHandler) handleUsers() (string, bool, error) {
+func (h *handler) handleUsers() (commands.Result, error) {
 	users, err := h.users.ListUsers()
 	if err != nil {
-		return "", true, err
+		return commands.Result{}, err
 	}
 	if len(users) == 0 {
-		return "No users found.", true, nil
+		return commands.Result{Text: "No users found."}, nil
 	}
 
 	lines := make([]string, 0, len(users)+1)
@@ -90,65 +76,62 @@ func (h *CommandHandler) handleUsers() (string, bool, error) {
 	for _, user := range users {
 		lines = append(lines, renderUser(user))
 	}
-	return strings.Join(lines, "\n"), true, nil
+	return commands.Result{Text: strings.Join(lines, "\n")}, nil
 }
 
-func (h *CommandHandler) handleUser(fields []string) (string, bool, error) {
-	if len(fields) != 2 {
-		return "Use: /user <canonical_id>", true, nil
+func (h *handler) handleUser(args []string) (commands.Result, error) {
+	if len(args) != 1 {
+		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
-	targetID := strings.TrimSpace(fields[1])
+	targetID := strings.TrimSpace(args[0])
 	user, ok, err := h.users.User(targetID)
 	if err != nil {
-		return "", true, err
+		return commands.Result{}, err
 	}
 	if !ok {
-		return fmt.Sprintf("User %s not found.", targetID), true, nil
+		return commands.Result{Text: fmt.Sprintf("User %s not found.", targetID)}, nil
 	}
-	return renderUser(user), true, nil
+	return commands.Result{Text: renderUser(user)}, nil
 }
 
-func (h *CommandHandler) handleSetAdmin(actorID string, fields []string, isAdmin bool) (string, bool, error) {
-	if len(fields) != 2 {
-		if isAdmin {
-			return "Use: /admin <canonical_id>", true, nil
-		}
-		return "Use: /unadmin <canonical_id>", true, nil
+func (h *handler) handleSetAdmin(actorID string, args []string, isAdmin bool) (commands.Result, error) {
+	if len(args) != 1 {
+		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
-	targetID := strings.TrimSpace(fields[1])
+	targetID := strings.TrimSpace(args[0])
 	if err := h.users.SetAdmin(actorID, targetID, isAdmin); err != nil {
-		return fmt.Sprintf("Could not update admin status: %v", err), true, nil
+		return commands.Result{Text: fmt.Sprintf("Could not update admin status: %v", err)}, nil
 	}
 	if isAdmin {
-		return fmt.Sprintf("Marked %s as admin.", targetID), true, nil
+		return commands.Result{Text: fmt.Sprintf("Marked %s as admin.", targetID)}, nil
 	}
-	return fmt.Sprintf("Removed admin from %s.", targetID), true, nil
+	return commands.Result{Text: fmt.Sprintf("Removed admin from %s.", targetID)}, nil
 }
 
-func (h *CommandHandler) handleBan(actorID string, fields []string) (string, bool, error) {
-	if len(fields) < 2 {
-		return "Use: /ban <canonical_id> [reason]", true, nil
+func (h *handler) handleBan(actorID string, args []string) (commands.Result, error) {
+	if len(args) < 1 {
+		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
-	targetID := strings.TrimSpace(fields[1])
+	targetID := strings.TrimSpace(args[0])
 	reason := ""
-	if len(fields) > 2 {
-		reason = strings.Join(fields[2:], " ")
+	if len(args) > 1 {
+		reason = strings.Join(args[1:], " ")
 	}
 	if err := h.users.BanUser(actorID, targetID, reason); err != nil {
-		return fmt.Sprintf("Could not ban user: %v", err), true, nil
+		return commands.Result{Text: fmt.Sprintf("Could not ban user: %v", err)}, nil
 	}
-	return fmt.Sprintf("Banned %s.", targetID), true, nil
+	return commands.Result{Text: fmt.Sprintf("Banned %s.", targetID)}, nil
 }
 
-func (h *CommandHandler) handleUnban(actorID string, fields []string) (string, bool, error) {
-	if len(fields) != 2 {
-		return "Use: /unban <canonical_id>", true, nil
+func (h *handler) handleUnban(actorID string, args []string) (commands.Result, error) {
+	if len(args) != 1 {
+		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
-	targetID := strings.TrimSpace(fields[1])
+	targetID := strings.TrimSpace(args[0])
 	if err := h.users.UnbanUser(actorID, targetID); err != nil {
-		return fmt.Sprintf("Could not unban user: %v", err), true, nil
+		return commands.Result{Text: fmt.Sprintf("Could not unban user: %v", err)}, nil
 	}
-	return fmt.Sprintf("Unbanned %s.", targetID), true, nil
+	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
 }
 
 func renderAccounts(accounts []accountlinking.LinkedAccount) string {

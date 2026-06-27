@@ -465,13 +465,13 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	text = strings.TrimSpace(text)
 	text = re.ReplaceAllString(text, ":$1:")
 	text = resolveMentions(text, msg.Mentions)
-	isCommand := dg.Commands.IsCommand(text)
 	preflight := routing.Preflight(routing.PreflightInput{
 		IsGroup:      msg.GuildID != "",
 		IsMention:    mentionsBot,
 		IsReplyToBot: isReplyToBot,
-		IsCommand:    isCommand,
+		Text:         text,
 	})
+	isCommandAttempt := routing.IsCommandAttempt(text)
 	if preflight.Action == routing.ActionIgnore {
 		log.Debug("gateway.message.ignored", "ignored discord message",
 			config.F("request_id", requestID),
@@ -480,7 +480,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			config.F("is_group", msg.GuildID != ""),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", msg.ReferencedMessage != nil),
-			config.F("is_command", isCommand),
+			config.F("is_command", isCommandAttempt),
 			config.F("reason", preflight.Reason),
 			config.F("message_preview", routing.MessagePreview(msg.Content, 100)),
 		)
@@ -512,8 +512,6 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	} else {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
-	isCommand = dg.Commands.IsCommand(text)
-
 	normalizedAuthorID, normErr := accountlinking.NormalizeIdentifier("discord", msg.Author.ID)
 	if normErr != nil {
 		log.Error("gateway.account.normalize_failed", "failed to normalize discord account", config.F("request_id", requestID), config.ErrorField(normErr))
@@ -555,17 +553,11 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		IsGroup:      msg.GuildID != "",
 		IsMention:    mentionsBot,
 		IsReplyToBot: isReplyToBot,
-		IsCommand:    isCommand,
 		Text:         text,
 		Images:       images,
 		Unsupported:  unsupported,
 		Reply:        reply,
-	}, gatewayruntime.Dependencies{
-		Broker:   dg.Broker,
-		Commands: dg.Commands,
-		Access:   dg.Links,
-		Log:      dg.Log,
-	}, &runtimeResponder{
+	}, dg.runtimeDependencies(), &runtimeResponder{
 		gateway:    dg,
 		requestID:  requestID,
 		channelID:  msg.ChannelID,
@@ -573,6 +565,18 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		sessionKey: sessionKey,
 		authorID:   msg.Author.ID,
 	})
+}
+
+func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
+	deps := dg.Runtime
+	deps.Broker = dg.Broker
+	if deps.Access == nil {
+		deps.Access = dg.Links
+	}
+	if deps.Log == nil {
+		deps.Log = dg.Log
+	}
+	return deps
 }
 
 func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp, currentImages []llm.InputImage, requestID string) *routing.ReplyContext {
