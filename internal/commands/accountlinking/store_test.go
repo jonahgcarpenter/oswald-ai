@@ -256,6 +256,22 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 	if err != nil || isBanned {
 		t.Fatalf("expected banned false, got %v err=%v", isBanned, err)
 	}
+	users, err = links.ListUsers()
+	if err != nil {
+		t.Fatalf("list users after unban: %v", err)
+	}
+	foundTarget = false
+	for _, user := range users {
+		if user.CanonicalUserID == targetID {
+			foundTarget = true
+			if user.IsBanned || user.BanReason != "" {
+				t.Fatalf("expected cleared ban fields after unban, got %+v", user)
+			}
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("target not found after unban: %+v", users)
+	}
 }
 
 func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
