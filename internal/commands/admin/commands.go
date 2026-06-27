@@ -35,7 +35,7 @@ func (h *CommandHandler) CanHandle(input string) bool {
 		return false
 	}
 	switch fields[0] {
-	case "/users", "/admin", "/unadmin", "/ban", "/unban":
+	case "/users", "/user", "/admin", "/unadmin", "/ban", "/unban":
 		return true
 	default:
 		return false
@@ -61,6 +61,8 @@ func (h *CommandHandler) Handle(canonicalUserID, input string) (string, bool, er
 	switch fields[0] {
 	case "/users":
 		return h.handleUsers()
+	case "/user":
+		return h.handleUser(fields)
 	case "/admin":
 		return h.handleSetAdmin(canonicalUserID, fields, true)
 	case "/unadmin":
@@ -86,9 +88,24 @@ func (h *CommandHandler) handleUsers() (string, bool, error) {
 	lines := make([]string, 0, len(users)+1)
 	lines = append(lines, "Users:")
 	for _, user := range users {
-		lines = append(lines, fmt.Sprintf("%s | admin=%t | banned=%t | %s | accounts: %s", user.CanonicalUserID, user.IsAdmin, user.IsBanned, user.Intro, renderAccounts(user.Accounts)))
+		lines = append(lines, renderUser(user))
 	}
 	return strings.Join(lines, "\n"), true, nil
+}
+
+func (h *CommandHandler) handleUser(fields []string) (string, bool, error) {
+	if len(fields) != 2 {
+		return "Use: /user <canonical_id>", true, nil
+	}
+	targetID := strings.TrimSpace(fields[1])
+	user, ok, err := h.users.User(targetID)
+	if err != nil {
+		return "", true, err
+	}
+	if !ok {
+		return fmt.Sprintf("User %s not found.", targetID), true, nil
+	}
+	return renderUser(user), true, nil
 }
 
 func (h *CommandHandler) handleSetAdmin(actorID string, fields []string, isAdmin bool) (string, bool, error) {
@@ -147,4 +164,12 @@ func renderAccounts(accounts []accountlinking.LinkedAccount) string {
 		parts = append(parts, label)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func renderUser(user accountlinking.UserSummary) string {
+	line := fmt.Sprintf("%s | admin=%t | banned=%t | %s | accounts: %s", user.CanonicalUserID, user.IsAdmin, user.IsBanned, user.Intro, renderAccounts(user.Accounts))
+	if user.IsBanned && strings.TrimSpace(user.BanReason) != "" {
+		line += " | ban_reason: " + user.BanReason
+	}
+	return line
 }

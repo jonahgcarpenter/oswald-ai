@@ -18,12 +18,14 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	}
 	handler := NewCommandHandler(links)
 
-	response, handled, err := handler.Handle(userID, "/users")
-	if err != nil || !handled {
-		t.Fatalf("handle users err=%v handled=%v", err, handled)
-	}
-	if response != "You are not allowed to use admin commands." {
-		t.Fatalf("unexpected response: %q", response)
+	for _, input := range []string{"/users", "/user " + userID} {
+		response, handled, err := handler.Handle(userID, input)
+		if err != nil || !handled {
+			t.Fatalf("handle %s err=%v handled=%v", input, err, handled)
+		}
+		if response != "You are not allowed to use admin commands." {
+			t.Fatalf("unexpected response for %s: %q", input, response)
+		}
 	}
 }
 
@@ -48,6 +50,24 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	}
 	if !strings.Contains(response, targetID) || !strings.Contains(response, "You are speaking with Target.") {
 		t.Fatalf("unexpected users response: %q", response)
+	}
+
+	response, handled, err = handler.Handle(adminID, "/user "+targetID)
+	if err != nil || !handled {
+		t.Fatalf("user err=%v handled=%v", err, handled)
+	}
+	if !strings.Contains(response, targetID) || !strings.Contains(response, "You are speaking with Target.") || !strings.Contains(response, "discord:300 (Target)") {
+		t.Fatalf("unexpected user response: %q", response)
+	}
+
+	response, handled, err = handler.Handle(adminID, "/user")
+	if err != nil || !handled || response != "Use: /user <canonical_id>" {
+		t.Fatalf("usage response=%q handled=%v err=%v", response, handled, err)
+	}
+
+	response, handled, err = handler.Handle(adminID, "/user usr_missing")
+	if err != nil || !handled || response != "User usr_missing not found." {
+		t.Fatalf("missing response=%q handled=%v err=%v", response, handled, err)
 	}
 
 	response, handled, err = handler.Handle(adminID, "/admin "+targetID)
