@@ -27,7 +27,6 @@ const (
 	memoryRetrievalLimit     = 12
 	memoryContextBudgetRatio = 0.15
 	sessionTurnTTL           = 24 * time.Hour
-	memoryUpdateTimeout      = 45 * time.Second
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -503,8 +502,6 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	if a.userMemory != nil {
 		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
 			RecentTurns:        memoryRecentTurns,
-			RetrievalLimit:     memoryRetrievalLimit,
-			MinSimilarity:      semanticMinSimilarity,
 			ContextBudgetChars: int(float64(a.budget.PromptBudget()*4) * memoryContextBudgetRatio),
 		})
 		if err != nil {
@@ -512,11 +509,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		} else if strings.TrimSpace(memoryContext.Block) != "" {
 			dynamicSystemPrompt += "\n\n" + memoryContext.Block
 			reqLog.Info("agent.memory.context.loaded", "loaded retrieved memory context",
-				config.F("long_term_count", memoryContext.LongTermCount),
-				config.F("short_term_count", memoryContext.ShortTermCount),
 				config.F("recent_turn_count", memoryContext.RecentTurnCount),
-				config.F("semantic_turn_count", memoryContext.SemanticTurnCount),
-				config.F("has_summary", memoryContext.HasSummary),
 			)
 		}
 	}
@@ -749,19 +742,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
 	if finalContent != "" && a.userMemory != nil {
-		memoryReq := usermemory.ProcessTurnRequest{
-			RequestID:     requestID,
-			SessionID:     sessionKey,
-			UserID:        senderID,
-			UserText:      userMemoryContent,
-			AssistantText: finalContent,
-			ToolNames:     toolAnnotations,
-			SessionTTL:    sessionTurnTTL,
-		}
-		if err := a.userMemory.AppendSessionTurn(ctx, memoryReq.SessionID, memoryReq.UserID, memoryReq.UserText, memoryReq.AssistantText, memoryReq.ToolNames, memoryReq.SessionTTL); err != nil {
+		if err := a.userMemory.AppendSessionTurn(ctx, sessionKey, senderID, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL); err != nil {
 			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
-		} else {
-			a.processMemoryUpdatesAsync(memoryReq, gateway)
 		}
 	}
 
@@ -798,32 +780,6 @@ func (a *Agent) currentSpeakerLine(log *config.Logger, senderID string) string {
 	}
 
 	return ""
-}
-
-func (a *Agent) processMemoryUpdatesAsync(req usermemory.ProcessTurnRequest, gateway string) {
-	if a.userMemory == nil {
-		return
-	}
-	go func() {
-		startedAt := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), memoryUpdateTimeout)
-		defer cancel()
-		ctx = requestctx.WithSenderID(ctx, req.UserID)
-		ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
-			RequestID: req.RequestID,
-			SessionID: req.SessionID,
-			SenderID:  req.UserID,
-			Gateway:   gateway,
-			Model:     a.model,
-		})
-		log := a.log.Agent("agent.memory", req.RequestID, req.SessionID, req.UserID, gateway, a.model)
-		log.Debug("agent.memory.async.started", "started async memory update")
-		if err := a.userMemory.ProcessTurnMemoryUpdates(ctx, a.chatClient, a.model, req); err != nil {
-			log.Warn("agent.memory.async.failed", "failed async memory update", config.F("duration_ms", time.Since(startedAt).Milliseconds()), config.F("status", "degraded"), config.ErrorField(err))
-			return
-		}
-		log.Debug("agent.memory.async.complete", "completed async memory update", config.F("duration_ms", time.Since(startedAt).Milliseconds()), config.F("status", "ok"))
-	}()
 }
 
 func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []string {

@@ -8,7 +8,6 @@ import (
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/mcpbrowse"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/sessionhistory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
@@ -43,11 +42,6 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 		return fmt.Errorf("failed to initialize memory.forget tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultAccountLinkPath))
-
-	if err := reg.RegisterHandler("session.summary", registry.Handler(sessionhistory.NewSummaryHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize session.summary tool: %w", err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured session summary tool", config.F("tool_name", "session.summary"))
 
 	if err := reg.RegisterHandler("mcp.servers", registry.Handler(mcpbrowse.NewServersHandler(mcpManager, log))); err != nil {
 		return fmt.Errorf("failed to initialize mcp.servers tool: %w", err)

@@ -56,8 +56,6 @@ CREATE TABLE IF NOT EXISTS session_turns (
 	topic_tags TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	expires_at TEXT,
-	embedding_model TEXT NOT NULL DEFAULT '',
-	embedding_dim INTEGER NOT NULL DEFAULT 0,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
 
@@ -66,17 +64,6 @@ ON session_turns (session_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_session_turns_user_created
 ON session_turns (canonical_user_id, created_at);
-
-CREATE TABLE IF NOT EXISTS session_summaries (
-	session_id TEXT PRIMARY KEY,
-	canonical_user_id TEXT NOT NULL,
-	summary TEXT NOT NULL DEFAULT '',
-	open_threads TEXT NOT NULL DEFAULT '',
-	decisions TEXT NOT NULL DEFAULT '',
-	user_goals TEXT NOT NULL DEFAULT '',
-	updated_at TEXT NOT NULL,
-	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
-);
 
 CREATE TABLE IF NOT EXISTS memory_events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,

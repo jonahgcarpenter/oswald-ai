@@ -96,9 +96,6 @@ func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 
-	if err := store.UpsertSessionSummary(SessionSummary{SessionID: "session-1", UserID: "usr_test", Summary: "They are planning a memory rework.", OpenThreads: []string{"finish tests"}}); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.AppendSessionTurn(context.Background(), "session-1", "usr_test", "I like purple", "Noted.", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -107,16 +104,16 @@ func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ctx, err := store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 2, RetrievalLimit: 5, MinSimilarity: 0.1, ContextBudgetChars: 4000})
+	ctx, err := store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 2, ContextBudgetChars: 4000})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ctx.Block, "Stable User Profile") || !strings.Contains(ctx.Block, "Current Session Summary") || !strings.Contains(ctx.Block, "Recent Exchanges") {
+	if strings.Contains(ctx.Block, "Stable User Profile") || strings.Contains(ctx.Block, "Current Session Summary") || !strings.Contains(ctx.Block, "Recent Exchanges") {
 		t.Fatalf("unexpected context block:\n%s", ctx.Block)
 	}
 }
 
-func TestBuildContextEmbedsQueryOnce(t *testing.T) {
+func TestBuildContextDoesNotEmbedQuery(t *testing.T) {
 	embedder := &countingMemoryEmbedder{}
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), embedder, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {
@@ -133,15 +130,12 @@ func TestBuildContextEmbedsQueryOnce(t *testing.T) {
 	}
 	seedEmbeddingCount := len(embedder.inputs)
 
-	_, err = store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 1, RetrievalLimit: 5, MinSimilarity: 0.1, ContextBudgetChars: 4000})
+	_, err = store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 1, ContextBudgetChars: 4000})
 	if err != nil {
 		t.Fatal(err)
 	}
 	queryEmbeddings := embedder.inputs[seedEmbeddingCount:]
-	if len(queryEmbeddings) != 1 {
-		t.Fatalf("expected one query embedding, got %d: %+v", len(queryEmbeddings), queryEmbeddings)
-	}
-	if queryEmbeddings[0] != "purple memory" {
-		t.Fatalf("unexpected query embedding input %q", queryEmbeddings[0])
+	if len(queryEmbeddings) != 0 {
+		t.Fatalf("expected no query embeddings from automatic context, got %d: %+v", len(queryEmbeddings), queryEmbeddings)
 	}
 }

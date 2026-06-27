@@ -129,15 +129,15 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	}
 }
 
-func TestProcessUsesFakeEmbeddingsForSemanticMemory(t *testing.T) {
+func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
-	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}, {1, 0}, {1, 0}, {1, 0}}}
+	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
 	agent.embeddingModel = "embed-model"
-	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "irrelevant", "old a", nil, time.Hour); err != nil {
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "older unrelated", "old a", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "relevant", "old b", nil, time.Hour); err != nil {
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "older relevant", "old b", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for _, text := range []string{"recent one", "recent two", "recent three", "recent four"} {
@@ -145,27 +145,29 @@ func TestProcessUsesFakeEmbeddingsForSemanticMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	seedEmbeddingCount := len(embedder.inputs)
 
 	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	if len(embedder.inputs) < 3 {
-		t.Fatalf("expected seed and query embeddings, got %d", len(embedder.inputs))
+	newEmbeddings := embedder.inputs[seedEmbeddingCount:]
+	if len(newEmbeddings) != 0 {
+		t.Fatalf("expected no automatic embeddings during request, got %d inputs: %+v", len(newEmbeddings), newEmbeddings)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	foundRelevant := false
-	foundIrrelevant := false
+	foundRecent := false
+	foundOlder := false
 	for _, msg := range messages {
-		if msg.Content != "" && contains(msg.Content, "relevant") {
-			foundRelevant = true
+		if msg.Content != "" && contains(msg.Content, "recent four") {
+			foundRecent = true
 		}
-		if msg.Content != "" && contains(msg.Content, "irrelevant") {
-			foundIrrelevant = true
+		if msg.Content != "" && contains(msg.Content, "older relevant") {
+			foundOlder = true
 		}
 	}
-	if !foundRelevant || foundIrrelevant {
-		t.Fatalf("expected only relevant history, got messages %+v", messages)
+	if !foundRecent || foundOlder {
+		t.Fatalf("expected recent session context only, got messages %+v", messages)
 	}
 }
 
@@ -183,9 +185,6 @@ type fakeChatter struct {
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
-	if req.Format == "json_object" {
-		return &llm.ChatResponse{Model: req.Model, Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
-	}
 	if len(f.responses) == 0 {
 		return nil, errors.New("no fake response")
 	}

@@ -53,48 +53,30 @@ type MemoryEntry struct {
 
 // SessionTurn is a completed exchange stored for session continuity.
 type SessionTurn struct {
-	ID             int64
-	SessionID      string
-	UserID         string
-	UserText       string
-	AssistantText  string
-	ToolNames      []string
-	Importance     int
-	TopicTags      []string
-	CreatedAt      time.Time
-	ExpiresAt      time.Time
-	EmbeddingModel string
-	EmbeddingDim   int
-	Score          float64
-}
-
-// SessionSummary stores compact state for a conversation session.
-type SessionSummary struct {
-	SessionID   string
-	UserID      string
-	Summary     string
-	OpenThreads []string
-	Decisions   []string
-	UserGoals   []string
-	UpdatedAt   time.Time
+	ID            int64
+	SessionID     string
+	UserID        string
+	UserText      string
+	AssistantText string
+	ToolNames     []string
+	Importance    int
+	TopicTags     []string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	Score         float64
 }
 
 // ContextOptions controls request-time memory retrieval.
 type ContextOptions struct {
-	RecentTurns        int
-	RetrievalLimit     int
-	MinSimilarity      float64
+	RecentTurns int
+
 	ContextBudgetChars int
 }
 
 // RetrievedContext contains the memory block selected for a request.
 type RetrievedContext struct {
-	Block             string
-	LongTermCount     int
-	ShortTermCount    int
-	RecentTurnCount   int
-	SemanticTurnCount int
-	HasSummary        bool
+	Block           string
+	RecentTurnCount int
 }
 
 // SaveRequest describes a user memory write.
@@ -211,7 +193,6 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	for _, stmt := range []string{
 		`UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`,
 		`UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`,
-		`UPDATE session_summaries SET canonical_user_id = ? WHERE canonical_user_id = ?`,
 	} {
 		if _, err := tx.Exec(stmt, winnerUserID, loserUserID); err != nil {
 			return fmt.Errorf("failed to merge memory users: %w", err)
@@ -477,23 +458,12 @@ func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userTe
 		exp := now.Add(ttl).UTC()
 		expires = &exp
 	}
-	embedding := s.embedBestEffort(ctx, strings.TrimSpace(userText+"\n"+assistantText))
-	embeddingModel := ""
-	embeddingDim := 0
-	if len(embedding) > 0 {
-		embeddingModel = s.embedModel
-		embeddingDim = len(embedding)
-	}
-	res, err := s.sql.Exec(`
-INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at, embedding_model, embedding_dim)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, sessionID, userID, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires), embeddingModel, embeddingDim)
+	_, err := s.sql.Exec(`
+INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, sessionID, userID, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires))
 	if err != nil {
 		return fmt.Errorf("failed to append session turn: %w", err)
-	}
-	id, _ := res.LastInsertId()
-	if err := s.storeSessionVector(id, embedding); err != nil {
-		return err
 	}
 	return nil
 }
@@ -513,7 +483,7 @@ func (s *Store) RecentSessionTurns(sessionID string, offset int, count int) ([]S
 		return nil, err
 	}
 	rows, err := s.sql.Query(`
-SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at, embedding_model, embedding_dim
+SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
 FROM session_turns WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
 `, sessionID, count, offset-1)
 	if err != nil {
@@ -531,51 +501,8 @@ FROM session_turns WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET 
 	return turns, rows.Err()
 }
 
-// ReadSessionSummary reads the compact session summary.
-func (s *Store) ReadSessionSummary(sessionID string) (SessionSummary, error) {
-	row := s.sql.QueryRow(`SELECT session_id, canonical_user_id, summary, open_threads, decisions, user_goals, updated_at FROM session_summaries WHERE session_id = ?`, sessionID)
-	var summary SessionSummary
-	var openThreads, decisions, userGoals, updated string
-	err := row.Scan(&summary.SessionID, &summary.UserID, &summary.Summary, &openThreads, &decisions, &userGoals, &updated)
-	if err == sql.ErrNoRows {
-		return SessionSummary{}, nil
-	}
-	if err != nil {
-		return SessionSummary{}, fmt.Errorf("failed to read session summary: %w", err)
-	}
-	summary.OpenThreads = splitList(openThreads)
-	summary.Decisions = splitList(decisions)
-	summary.UserGoals = splitList(userGoals)
-	summary.UpdatedAt = parseTime(updated)
-	return summary, nil
-}
-
-// UpsertSessionSummary stores the compact session summary.
-func (s *Store) UpsertSessionSummary(summary SessionSummary) error {
-	if strings.TrimSpace(summary.SessionID) == "" || strings.TrimSpace(summary.UserID) == "" {
-		return nil
-	}
-	if err := s.ensureAccountUser(summary.UserID); err != nil {
-		return err
-	}
-	_, err := s.sql.Exec(`
-INSERT INTO session_summaries (session_id, canonical_user_id, summary, open_threads, decisions, user_goals, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(session_id) DO UPDATE SET
-	canonical_user_id = excluded.canonical_user_id,
-	summary = excluded.summary,
-	open_threads = excluded.open_threads,
-	decisions = excluded.decisions,
-	user_goals = excluded.user_goals,
-	updated_at = excluded.updated_at
-`, summary.SessionID, summary.UserID, strings.TrimSpace(summary.Summary), strings.Join(summary.OpenThreads, "\n"), strings.Join(summary.Decisions, "\n"), strings.Join(summary.UserGoals, "\n"), formatTime(time.Now()))
-	if err != nil {
-		return fmt.Errorf("failed to upsert session summary: %w", err)
-	}
-	return nil
-}
-
-// BuildContext retrieves and formats the memory context block for a request.
+// BuildContext retrieves and formats automatic session context for a request.
+// Durable user memory is model-directed through memory.search.
 func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query string, opts ContextOptions) (RetrievedContext, error) {
 	if strings.TrimSpace(userID) == "" {
 		return RetrievedContext{}, nil
@@ -583,101 +510,25 @@ func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query strin
 	if opts.RecentTurns <= 0 {
 		opts.RecentTurns = 4
 	}
-	if opts.RetrievalLimit <= 0 {
-		opts.RetrievalLimit = 12
-	}
-	if opts.MinSimilarity <= 0 {
-		opts.MinSimilarity = 0.45
-	}
 	if opts.ContextBudgetChars <= 0 {
 		opts.ContextBudgetChars = 12000
 	}
 
-	query = strings.TrimSpace(query)
-	var queryVector []float64
-	if query != "" {
-		queryVector = s.embedBestEffort(ctx, query)
-	}
-
-	longTerm, err := s.searchWithVector(userID, ScopeLongTerm, "", query, queryVector, opts.RetrievalLimit)
-	if err != nil {
-		return RetrievedContext{}, err
-	}
-	shortTerm, err := s.searchWithVector(userID, ScopeShortTerm, "", query, queryVector, opts.RetrievalLimit)
-	if err != nil {
-		return RetrievedContext{}, err
-	}
 	recent, err := s.RecentSessionTurns(sessionID, 1, opts.RecentTurns)
 	if err != nil {
 		return RetrievedContext{}, err
 	}
-	summary, err := s.ReadSessionSummary(sessionID)
-	if err != nil {
-		return RetrievedContext{}, err
-	}
-	semanticTurns, err := s.semanticSessionTurnsWithVector(sessionID, queryVector, opts.RetrievalLimit, opts.MinSimilarity, recent)
-	if err != nil {
-		return RetrievedContext{}, err
-	}
 
-	block := s.renderContextBlock(longTerm, shortTerm, summary, recent, semanticTurns, opts.ContextBudgetChars)
-	return RetrievedContext{Block: block, LongTermCount: len(longTerm), ShortTermCount: len(shortTerm), RecentTurnCount: len(recent), SemanticTurnCount: len(semanticTurns), HasSummary: strings.TrimSpace(summary.Summary) != ""}, nil
+	block := s.renderContextBlock(recent, opts.ContextBudgetChars)
+	return RetrievedContext{Block: block, RecentTurnCount: len(recent)}, nil
 }
 
-func (s *Store) semanticSessionTurns(ctx context.Context, sessionID, query string, limit int, minSimilarity float64, excluded []SessionTurn) ([]SessionTurn, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, nil
-	}
-	qv := s.embedBestEffort(ctx, query)
-	if len(qv) == 0 {
-		return nil, nil
-	}
-	return s.semanticSessionTurnsWithVector(sessionID, qv, limit, minSimilarity, excluded)
-}
-
-func (s *Store) semanticSessionTurnsWithVector(sessionID string, queryVector []float64, limit int, minSimilarity float64, excluded []SessionTurn) ([]SessionTurn, error) {
-	if len(queryVector) == 0 {
-		return nil, nil
-	}
-	excludedIDs := map[int64]struct{}{}
-	for _, turn := range excluded {
-		excludedIDs[turn.ID] = struct{}{}
-	}
-	turns, ok, err := s.searchSessionVectors(queryVector, sessionID, limit, minSimilarity, excludedIDs)
-	if err != nil || ok {
-		return turns, err
-	}
-	return nil, nil
-}
-
-func (s *Store) renderContextBlock(longTerm, shortTerm []MemoryEntry, summary SessionSummary, recent, semantic []SessionTurn, maxChars int) string {
+func (s *Store) renderContextBlock(recent []SessionTurn, maxChars int) string {
 	var b strings.Builder
 	b.WriteString("# Retrieved Memory\n")
-	if len(longTerm) > 0 {
-		b.WriteString("\n## Stable User Profile\n")
-		writeEntries(&b, longTerm)
-	}
-	if len(shortTerm) > 0 {
-		b.WriteString("\n## Active Short-Term Context\n")
-		writeEntries(&b, shortTerm)
-	}
-	if strings.TrimSpace(summary.Summary) != "" || len(summary.OpenThreads) > 0 || len(summary.Decisions) > 0 || len(summary.UserGoals) > 0 {
-		b.WriteString("\n## Current Session Summary\n")
-		if strings.TrimSpace(summary.Summary) != "" {
-			fmt.Fprintf(&b, "%s\n", strings.TrimSpace(summary.Summary))
-		}
-		writeNamedList(&b, "Open threads", summary.OpenThreads)
-		writeNamedList(&b, "Decisions", summary.Decisions)
-		writeNamedList(&b, "User goals", summary.UserGoals)
-	}
 	if len(recent) > 0 {
 		b.WriteString("\n## Recent Exchanges\n")
 		writeTurns(&b, recent)
-	}
-	if len(semantic) > 0 {
-		b.WriteString("\n## Relevant Prior Exchanges\n")
-		writeTurns(&b, semantic)
 	}
 	text := strings.TrimSpace(b.String())
 	if text == "# Retrieved Memory" {
@@ -702,18 +553,6 @@ func writeTurns(b *strings.Builder, turns []SessionTurn) {
 	for i := len(turns) - 1; i >= 0; i-- {
 		turn := turns[i]
 		fmt.Fprintf(b, "User: %s\nAssistant: %s\n\n", strings.TrimSpace(turn.UserText), strings.TrimSpace(turn.AssistantText))
-	}
-}
-
-func writeNamedList(b *strings.Builder, name string, values []string) {
-	if len(values) == 0 {
-		return
-	}
-	fmt.Fprintf(b, "%s:\n", name)
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			fmt.Fprintf(b, "- %s\n", strings.TrimSpace(value))
-		}
 	}
 }
 
@@ -767,7 +606,7 @@ func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) 
 	var turn SessionTurn
 	var toolNames, topicTags, created string
 	var expires sql.NullString
-	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires, &turn.EmbeddingModel, &turn.EmbeddingDim); err != nil {
+	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires); err != nil {
 		return SessionTurn{}, fmt.Errorf("failed to scan session turn: %w", err)
 	}
 	turn.ToolNames = splitCSV(toolNames)
@@ -792,23 +631,6 @@ func (s *Store) storeMemoryVector(rowID int64, embedding []float64) error {
 	}
 	if _, err := s.sql.Exec(`INSERT OR REPLACE INTO memory_entry_vectors(rowid, embedding) VALUES (?, ?)`, rowID, serialized); err != nil {
 		return fmt.Errorf("failed to store memory vector: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) storeSessionVector(rowID int64, embedding []float64) error {
-	if rowID <= 0 || len(embedding) == 0 {
-		return nil
-	}
-	if err := s.ensureVectorTable("session_turn_vectors", len(embedding)); err != nil {
-		return err
-	}
-	serialized, err := serializeVector(embedding)
-	if err != nil {
-		return err
-	}
-	if _, err := s.sql.Exec(`INSERT OR REPLACE INTO session_turn_vectors(rowid, embedding) VALUES (?, ?)`, rowID, serialized); err != nil {
-		return fmt.Errorf("failed to store session vector: %w", err)
 	}
 	return nil
 }
@@ -865,55 +687,6 @@ WHERE v.embedding MATCH ? AND v.k = ? AND e.canonical_user_id = ? AND e.status =
 	return entries, true, nil
 }
 
-func (s *Store) searchSessionVectors(queryVector []float64, sessionID string, limit int, minSimilarity float64, excludedIDs map[int64]struct{}) ([]SessionTurn, bool, error) {
-	if len(queryVector) == 0 || !s.vectorTableExists("session_turn_vectors") {
-		return nil, false, nil
-	}
-	serialized, err := serializeVector(queryVector)
-	if err != nil {
-		return nil, false, err
-	}
-	k := limit * 5
-	if k < 25 {
-		k = 25
-	}
-	rows, err := s.sql.Query(`
-SELECT t.id, t.session_id, t.canonical_user_id, t.user_text, t.assistant_text, t.tool_names, t.importance, t.topic_tags, t.created_at, t.expires_at, t.embedding_model, t.embedding_dim, v.distance
-FROM session_turn_vectors v
-JOIN session_turns t ON t.id = v.rowid
-WHERE v.embedding MATCH ? AND v.k = ? AND t.session_id = ?
-ORDER BY v.distance
-LIMIT ?
-`, serialized, k, sessionID, k)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to search session vectors: %w", err)
-	}
-	defer rows.Close()
-	turns := []SessionTurn{}
-	for rows.Next() {
-		turn, distance, err := scanSessionTurnWithDistance(rows)
-		if err != nil {
-			return nil, true, err
-		}
-		if _, ok := excludedIDs[turn.ID]; ok {
-			continue
-		}
-		similarity := distanceToSimilarity(distance)
-		if similarity < minSimilarity {
-			continue
-		}
-		turn.Score = similarity
-		turns = append(turns, turn)
-		if len(turns) >= limit {
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, true, err
-	}
-	return turns, true, nil
-}
-
 func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEntry, float64, error) {
 	var entry MemoryEntry
 	var created, updated string
@@ -931,23 +704,6 @@ func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEn
 		entry.ExpiresAt = parseTime(expires.String)
 	}
 	return entry, distance, nil
-}
-
-func scanSessionTurnWithDistance(rows interface{ Scan(...any) error }) (SessionTurn, float64, error) {
-	var turn SessionTurn
-	var toolNames, topicTags, created string
-	var expires sql.NullString
-	var distance float64
-	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires, &turn.EmbeddingModel, &turn.EmbeddingDim, &distance); err != nil {
-		return SessionTurn{}, 0, fmt.Errorf("failed to scan session vector result: %w", err)
-	}
-	turn.ToolNames = splitCSV(toolNames)
-	turn.TopicTags = splitCSV(topicTags)
-	turn.CreatedAt = parseTime(created)
-	if expires.Valid {
-		turn.ExpiresAt = parseTime(expires.String)
-	}
-	return turn, distance, nil
 }
 
 func (s *Store) ensureVectorTable(name string, dimension int) error {

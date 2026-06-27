@@ -356,11 +356,10 @@ Current builtin tools:
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-- `session.summary` — read the current rolling session summary
 - `mcp.servers` — list connected MCP servers and read-only tool counts
 - `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
 
-`session.summary` is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
+Recent completed exchanges are injected automatically from session memory. Durable user-memory retrieval and saving are model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 
 Optional external tools:
 
@@ -631,7 +630,6 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | `internal/tools/runtime/`                    | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                | Tool registry assembly                       |
 | `internal/tools/builtin/`                    | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/sessionhistory/`     | `session.summary` runtime handler            |
 | `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store             |
 | `internal/tools/builtin/soul/store.go`       | Soul file store                              |
 | `internal/commands/router.go`                | Shared command router                        |
