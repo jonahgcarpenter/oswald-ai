@@ -8,7 +8,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -17,12 +17,7 @@ import (
 	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
-const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
-
 const (
-	semanticRecentTurns      = 0
-	semanticMaxRelevantTurns = 3
-	semanticMinSimilarity    = 0.70
 	memoryRecentTurns        = 4
 	memoryRetrievalLimit     = 12
 	memoryContextBudgetRatio = 0.15
@@ -224,77 +219,41 @@ type AgentResponse struct {
 // calls tools from the registry and generates the final response.
 type Agent struct {
 	chatClient            llm.Chatter
-	embeddingClient       llm.Embedder
 	registry              *registry.Registry
-	memory                *memory.Store
-	budget                memory.ContextBudget
+	budget                promptbudget.ContextBudget
 	model                 string
-	embeddingModel        string
 	soul                  *soul.Store
 	userMemory            *usermemory.Store
-	summarizer            *Summarizer
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, conversation memory store, tool failure retry budget, and logger.
+// soul store, SQLite user memory store, prompt budget, tool failure retry budget,
+// and logger.
 func NewAgent(
 	chatClient llm.Chatter,
-	embeddingClient llm.Embedder,
 	registry *registry.Registry,
 	model string,
-	embeddingModel string,
 	soul *soul.Store,
 	userMemory *usermemory.Store,
-	budget memory.ContextBudget,
+	budget promptbudget.ContextBudget,
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
-	memoryStore *memory.Store,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
 		chatClient:            chatClient,
-		embeddingClient:       embeddingClient,
 		registry:              registry,
-		memory:                memoryStore,
 		budget:                budget,
 		model:                 model,
-		embeddingModel:        strings.TrimSpace(embeddingModel),
 		soul:                  soul,
 		userMemory:            userMemory,
-		summarizer:            NewSummarizer(chatClient, model, log),
 		maxToolFailureRetries: maxToolFailureRetries,
 		requestTimeout:        requestTimeout,
 		log:                   log,
 	}
-}
-
-func (a *Agent) semanticMemoryEnabled() bool {
-	return a.embeddingClient != nil && strings.TrimSpace(a.embeddingModel) != ""
-}
-
-func (a *Agent) embedText(ctx context.Context, text string) ([]float64, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil, fmt.Errorf("cannot embed empty text")
-	}
-	resp, err := a.embeddingClient.Embed(ctx, llm.EmbedRequest{
-		Model: a.embeddingModel,
-		Input: text,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(resp.Embeddings) == 0 || len(resp.Embeddings[0]) == 0 {
-		return nil, fmt.Errorf("embedding response contained no vector")
-	}
-	return resp.Embeddings[0], nil
-}
-
-func memoryEmbeddingText(user string, _ string) string {
-	return strings.TrimSpace("User: " + strings.TrimSpace(user))
 }
 
 func stripReplyContext(prompt string) (string, bool) {
@@ -355,75 +314,6 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 		DurationMS:       resp.DurationMS,
 		TokensPerSecond:  tps,
 	}
-}
-
-func makeCompactedTurn(summary string, now time.Time) memory.Turn {
-	return memory.Turn{
-		CreatedAt: now.UTC(),
-		User: llm.ChatMessage{
-			Role:    "user",
-			Content: compactedHistoryUserPrompt,
-		},
-		Assistant: llm.ChatMessage{
-			Role:    "assistant",
-			Content: summary,
-		},
-	}
-}
-
-func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []llm.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
-	tools := a.registry.LLMTools()
-	currentTurns := append([]memory.Turn(nil), turns...)
-	persisted := false
-	result := memory.PromptPruneResult{
-		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, len(userImages), tools),
-	}
-	lastEstimate := result.EstimatedBefore
-
-	for len(currentTurns) > 0 {
-		history := memory.FlattenTurns(currentTurns)
-		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, len(userImages), tools)
-		lastEstimate = estimate
-		if estimate <= a.budget.PromptBudget() {
-			result.EstimatedAfter = estimate
-			return currentTurns, result, persisted
-		}
-
-		compacted := false
-		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
-			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
-			if err != nil {
-				log.Warn("agent.context.compaction_failed", "failed to compact context",
-					config.F("turn_pair_count", compactCount),
-					config.ErrorField(err),
-				)
-				continue
-			}
-
-			replacement := makeCompactedTurn(summary, time.Now())
-			candidateTurns := make([]memory.Turn, 0, 1+len(currentTurns)-compactCount)
-			candidateTurns = append(candidateTurns, replacement)
-			candidateTurns = append(candidateTurns, currentTurns[compactCount:]...)
-
-			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, len(userImages), tools)
-			if candidateEstimate >= estimate && compactCount < len(currentTurns) {
-				continue
-			}
-
-			currentTurns = candidateTurns
-			persisted = true
-			result.RemovedPairs += compactCount
-			compacted = true
-			break
-		}
-
-		if !compacted {
-			break
-		}
-	}
-
-	result.EstimatedAfter = lastEstimate
-	return currentTurns, result, persisted
 }
 
 // Process handles the end-to-end agentic pipeline in a single loop.
@@ -514,9 +404,9 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
-	prune := memory.PromptPruneResult{
-		EstimatedBefore: memory.EstimatePromptTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
-		EstimatedAfter:  memory.EstimatePromptTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
+	prune := promptbudget.Result{
+		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
+		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
 	}
 
 	messages := make([]llm.ChatMessage, 0, 2)

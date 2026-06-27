@@ -16,8 +16,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -52,7 +52,7 @@ func main() {
 	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, llmHTTPTimeout, rootLog.Server("provider.gateway"))
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
-	budget := memory.ContextBudgetFromModelDetails(details)
+	budget := promptbudget.FromModelDetails(details)
 	if budgetErr != nil {
 		log.Warn("app.context_budget.resolve_failed", "failed to discover context budget",
 			config.F("model", cfg.LLMGatewayModel),
@@ -97,31 +97,15 @@ func main() {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP clients", config.ErrorField(err))
 	}
 
-	memoryStore := memory.NewStore(memory.Options{
-		MaxTurns:      cfg.MemoryMaxTurns,
-		MaxAge:        cfg.MemoryMaxAge,
-		ContextWindow: budget.ContextWindow,
-		PromptBudget:  budget.PromptBudget(),
-	}, rootLog.Server("memory.session"))
-	log.Debug("app.memory_retention.configured", "configured memory retention",
-		config.F("max_turn_count", cfg.MemoryMaxTurns),
-		config.F("max_age", cfg.MemoryMaxAge.String()),
-		config.F("context_window", budget.ContextWindow),
-		config.F("prompt_budget", budget.PromptBudget()),
-	)
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
 			config.F("embedding_model", cfg.LLMGatewayEmbeddingModel),
-			config.F("recent_turn_count", 0),
-			config.F("max_relevant_turn_count", 3),
-			config.F("min_similarity", 0.70),
-			config.F("recent_policy", "tool_only"),
 		)
 	} else {
 		log.Debug("app.memory_vector.disabled", "semantic session-memory retrieval disabled")
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, memoryStore, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
@@ -133,16 +117,13 @@ func main() {
 
 	agentEngine := agent.NewAgent(
 		llmClient,
-		llmClient,
 		toolRegistry,
 		cfg.LLMGatewayModel,
-		cfg.LLMGatewayEmbeddingModel,
 		soulStore,
 		userMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
 		agentRequestTimeout,
-		memoryStore,
 		rootLog,
 	)
 

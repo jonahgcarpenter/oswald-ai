@@ -10,7 +10,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -133,7 +133,6 @@ func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) 
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
-	agent.embeddingModel = "embed-model"
 	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "older unrelated", "old a", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -231,8 +230,7 @@ func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *re
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	store := memory.NewStore(memory.Options{}, log)
-	agent := NewAgent(chat, embedder, reg, "test-model", "", soulStore, userStore, memory.ContextBudget{PromptLimit: 100000}, 3, time.Minute, store, log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	return agent, userStore
 }
 

@@ -11,7 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -134,7 +134,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
-	ai := agent.NewAgent(runtimeFakeChatter{}, nil, registry.New(log), "test-model", "", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), memory.ContextBudget{PromptLimit: 100000}, 3, time.Minute, memory.NewStore(memory.Options{}, log), log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	return Dependencies{Broker: b, Commands: commands.NewRouter(pingHandler{}), Log: log}, b.Shutdown
