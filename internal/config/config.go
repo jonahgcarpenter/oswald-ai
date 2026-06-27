@@ -29,15 +29,13 @@ type Config struct {
 	MaxToolFailureRetries    int           // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
 	WorkerPoolSize           int           // Number of concurrent broker workers (default: 1)
 	LogLevel                 Level         // Logging verbosity (default: LevelInfo)
-	MemoryMaxTurns           int           // Maximum retained conversation turn pairs per session; 0 disables the limit
-	MemoryMaxAge             time.Duration // Maximum age for retained conversation turn pairs; 0 disables expiry
 }
 
 const (
-	DefaultSoulPath        = "data/memory/soul/soul.md"
-	DefaultToolsConfigDir  = "data/tools"
-	DefaultUserMemoryPath  = "data/memory/users"
-	DefaultAccountLinkPath = "data/accounts/links.json"
+	DefaultSoulPath              = "data/memory/soul/soul.md"
+	DefaultToolsConfigDir        = "data/tools"
+	DefaultAccountLinkPath       = "data/database/oswald.db"
+	DefaultLegacyAccountLinkPath = "data/accounts/links.json"
 )
 
 // Load reads configuration from environment variables, with .env file support.
@@ -66,8 +64,6 @@ func Load() *Config {
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
-		MemoryMaxTurns:           getEnvInt("MEMORY_MAX_TURNS", 10),
-		MemoryMaxAge:             getEnvDuration("MEMORY_MAX_AGE", 30*time.Minute),
 	}
 }
 

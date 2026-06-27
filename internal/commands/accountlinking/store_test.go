@@ -1,9 +1,12 @@
 package accountlinking
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -101,10 +104,201 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	}
 }
 
+func TestServicePersistsSQLiteAccounts(t *testing.T) {
+	dir := t.TempDir()
+	log := config.NewLogger(config.LevelError)
+	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	legacyPath := filepath.Join(dir, "links.json")
+
+	links := NewService(dbPath, memories, log)
+	links.legacyPath = legacyPath
+	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	if err != nil {
+		t.Fatalf("ensure account: %v", err)
+	}
+	if _, err := links.LinkAccount(userID, "websocket", "alice-local", ""); err != nil {
+		t.Fatalf("link websocket: %v", err)
+	}
+
+	reopened := NewService(dbPath, memories, log)
+	reopened.legacyPath = legacyPath
+	accounts, err := reopened.AccountsForUser(userID)
+	if err != nil {
+		t.Fatalf("accounts after reopen: %v", err)
+	}
+	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "websocket" {
+		t.Fatalf("unexpected persisted accounts: %+v", accounts)
+	}
+}
+
+func TestServiceMigratesLegacyJSON(t *testing.T) {
+	dir := t.TempDir()
+	log := config.NewLogger(config.LevelError)
+	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	legacyPath := filepath.Join(dir, "links.json")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	legacy := fileData{
+		Version: 1,
+		Users: map[string]UserRecord{
+			"usr_legacy": {
+				CreatedAt: now,
+				UpdatedAt: now,
+				Accounts: []LinkedAccount{{
+					Gateway:     "discord",
+					Identifier:  "123",
+					DisplayName: "Alice",
+					LinkedAt:    now,
+					Verified:    true,
+				}},
+			},
+		},
+		AccountIndex: map[string]string{"discord:123": "usr_legacy"},
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, raw, 0o644); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	links := NewService(dbPath, memories, log)
+	links.legacyPath = legacyPath
+	if err := links.Initialize(); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	userID, err := links.EnsureAccount("discord", "123", "Alice Updated")
+	if err != nil {
+		t.Fatalf("ensure migrated account: %v", err)
+	}
+	if userID != "usr_legacy" {
+		t.Fatalf("got user %q, want legacy user", userID)
+	}
+	accounts, err := links.AccountsForUser(userID)
+	if err != nil {
+		t.Fatalf("accounts: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].DisplayName != "Alice Updated" || !accounts[0].Verified {
+		t.Fatalf("unexpected migrated account: %+v", accounts)
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		t.Fatalf("legacy file should remain as backup: %v", err)
+	}
+}
+
+func TestServiceAdminBanAndListUsers(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "100", "Admin")
+	if err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+	targetID, err := links.EnsureAccount("discord", "200", "Target")
+	if err != nil {
+		t.Fatalf("ensure target: %v", err)
+	}
+
+	if err := links.SetAdmin(adminID, adminID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+	if err := links.SetAdmin(adminID, adminID, false); err == nil || !strings.Contains(err.Error(), "cannot remove admin from yourself") {
+		t.Fatalf("expected self unadmin error, got %v", err)
+	}
+	if err := links.BanUser(adminID, adminID, "bad"); err == nil || !strings.Contains(err.Error(), "cannot ban yourself") {
+		t.Fatalf("expected self ban error, got %v", err)
+	}
+	if err := links.BanUser(adminID, targetID, "spam"); err != nil {
+		t.Fatalf("ban target: %v", err)
+	}
+
+	isAdmin, err := links.IsAdmin(adminID)
+	if err != nil || !isAdmin {
+		t.Fatalf("expected admin true, got %v err=%v", isAdmin, err)
+	}
+	isBanned, err := links.IsBanned(targetID)
+	if err != nil || !isBanned {
+		t.Fatalf("expected banned true, got %v err=%v", isBanned, err)
+	}
+
+	users, err := links.ListUsers()
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("expected 2 users, got %+v", users)
+	}
+	foundTarget := false
+	for _, user := range users {
+		if user.CanonicalUserID == targetID {
+			foundTarget = true
+			if !user.IsBanned || user.BanReason != "spam" || !strings.Contains(user.Intro, "Target") {
+				t.Fatalf("unexpected target summary: %+v", user)
+			}
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("target not found in users: %+v", users)
+	}
+
+	if err := links.UnbanUser(adminID, targetID); err != nil {
+		t.Fatalf("unban target: %v", err)
+	}
+	isBanned, err = links.IsBanned(targetID)
+	if err != nil || isBanned {
+		t.Fatalf("expected banned false, got %v err=%v", isBanned, err)
+	}
+}
+
+func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
+	links := newTestService(t)
+	targetID, err := links.EnsureAccount("discord", "300", "Target")
+	if err != nil {
+		t.Fatalf("ensure target: %v", err)
+	}
+	sourceID, err := links.EnsureAccount("websocket", "source", "Source")
+	if err != nil {
+		t.Fatalf("ensure source: %v", err)
+	}
+	if err := links.SetAdmin(sourceID, sourceID, true); err != nil {
+		t.Fatalf("set source admin: %v", err)
+	}
+	if err := links.BanUser(targetID, sourceID, "merged ban"); err != nil {
+		t.Fatalf("ban source: %v", err)
+	}
+
+	result, err := links.LinkAccount(targetID, "websocket", "source", "")
+	if err != nil {
+		t.Fatalf("merge link: %v", err)
+	}
+	if !result.Merged {
+		t.Fatalf("expected merge result: %+v", result)
+	}
+	isAdmin, err := links.IsAdmin(targetID)
+	if err != nil || !isAdmin {
+		t.Fatalf("expected merged admin true, got %v err=%v", isAdmin, err)
+	}
+	isBanned, err := links.IsBanned(targetID)
+	if err != nil || !isBanned {
+		t.Fatalf("expected merged banned true, got %v err=%v", isBanned, err)
+	}
+	user, ok, err := links.User(targetID)
+	if err != nil || !ok {
+		t.Fatalf("merged user lookup ok=%v err=%v", ok, err)
+	}
+	if user.BanReason != "merged ban" {
+		t.Fatalf("expected ban metadata preserved, got %+v", user)
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
 	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	return NewService(filepath.Join(dir, "links.json"), memories, log)
+	links := NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	links.legacyPath = filepath.Join(dir, "links.json")
+	return links
 }

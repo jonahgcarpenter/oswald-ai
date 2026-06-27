@@ -11,7 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -47,6 +47,26 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 	if !llmResponder.started || !llmResponder.cleaned {
 		t.Fatalf("expected processing cleanup, responder=%+v", llmResponder)
+	}
+}
+
+func TestExecuteRejectsBannedUsersBeforeCommandOrLLM(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	deps.Access = fakeAccess{banned: true, reason: "spam"}
+
+	cmdResponder := &fakeResponder{}
+	cmd := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", IsCommand: true, Text: "/ping"}, deps, cmdResponder)
+	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command != "" {
+		t.Fatalf("unexpected banned command outcome=%+v responder=%+v", cmd, cmdResponder)
+	}
+
+	deps.Access = fakeAccess{banned: true}
+	llmResponder := &fakeResponder{}
+	llm := Execute(Request{RequestID: "req", Gateway: "test", SenderID: "user", IsMention: true, Text: "hello"}, deps, llmResponder)
+	if llm.Reason != "user_banned" || llmResponder.fallback != "You are banned from using Oswald.\nReason: No reason provided." || llmResponder.started || llmResponder.agent != nil {
+		t.Fatalf("unexpected banned llm outcome=%+v responder=%+v", llm, llmResponder)
 	}
 }
 
@@ -92,6 +112,15 @@ func (pingHandler) Handle(userID, input string) (string, bool, error) {
 	return "pong:" + userID + ":" + input, true, nil
 }
 
+type fakeAccess struct {
+	banned bool
+	reason string
+}
+
+func (a fakeAccess) BanStatus(string) (bool, string, error) {
+	return a.banned, a.reason, nil
+}
+
 type runtimeFakeChatter struct{}
 
 func (runtimeFakeChatter) Chat(context.Context, llm.ChatRequest, func(llm.ChatMessage)) (*llm.ChatResponse, error) {
@@ -105,7 +134,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
-	ai := agent.NewAgent(runtimeFakeChatter{}, nil, registry.New(log), "test-model", "", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), memory.ContextBudget{PromptLimit: 100000}, 3, time.Minute, memory.NewStore(memory.Options{}, log), log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	return Dependencies{Broker: b, Commands: commands.NewRouter(pingHandler{}), Log: log}, b.Shutdown

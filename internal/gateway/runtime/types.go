@@ -13,7 +13,13 @@ import (
 type Dependencies struct {
 	Broker   *broker.Broker
 	Commands *commands.Router
+	Access   AccessChecker
 	Log      *config.Logger
+}
+
+// AccessChecker exposes gateway-neutral user moderation checks.
+type AccessChecker interface {
+	BanStatus(canonicalUserID string) (bool, string, error)
 }
 
 // Request is the gateway-neutral representation executed by the shared runtime.

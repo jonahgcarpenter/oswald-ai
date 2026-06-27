@@ -1,96 +1,141 @@
 package usermemory
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-func TestStoreSetReadCategoryAndDeleteAll(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "users"), config.NewLogger(config.LevelError))
-	store.SetSpeakerLineResolver(func(userID string) (string, error) {
-		return "You are speaking with Test User.", nil
-	})
+type fakeMemoryEmbedder struct{}
 
-	if err := store.Set("user1", "The user likes tea.", "They said so", "preferences"); err != nil {
-		t.Fatalf("set: %v", err)
+func (fakeMemoryEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	if strings.Contains(req.Input, "purple") {
+		return &llm.EmbedResponse{Embeddings: [][]float64{{1, 0}}}, nil
 	}
-	if err := store.Set("user1", "The user likes coffee.", "They corrected it", "preferences"); err != nil {
-		t.Fatalf("set second: %v", err)
-	}
+	return &llm.EmbedResponse{Embeddings: [][]float64{{0, 1}}}, nil
+}
 
-	content, err := store.ReadCategory("user1", "preferences")
+type countingMemoryEmbedder struct {
+	inputs []string
+}
+
+func (f *countingMemoryEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	f.inputs = append(f.inputs, req.Input)
+	if strings.Contains(req.Input, "purple") {
+		return &llm.EmbedResponse{Embeddings: [][]float64{{1, 0}}}, nil
+	}
+	return &llm.EmbedResponse{Embeddings: [][]float64{{0, 1}}}, nil
+}
+
+func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+
+	if err := store.SyncSpeakerIntro("usr_test", "You are speaking with Test User."); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "User said they like purple.", Importance: 4})
 	if err != nil {
-		t.Fatalf("read category: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "The user likes tea.") || !strings.Contains(content, "The user likes coffee.") || !strings.Contains(content, "They corrected it") {
-		t.Fatalf("unexpected category content:\n%s", content)
-	}
-
-	intro, err := store.ReadIntro("user1")
-	if err != nil {
-		t.Fatalf("read intro: %v", err)
-	}
-	if intro != "You are speaking with Test User." {
-		t.Fatalf("unexpected intro %q", intro)
+	if entry.Scope != ScopeLongTerm || entry.Category != "durable_preferences" {
+		t.Fatalf("unexpected entry: %+v", entry)
 	}
 
-	if err := store.DeleteAll("user1"); err != nil {
-		t.Fatalf("delete all: %v", err)
-	}
-	content, err = store.Read("user1")
+	entries, err := store.Search(context.Background(), "usr_test", ScopeLongTerm, "", "purple", 5)
 	if err != nil {
-		t.Fatalf("read after delete all: %v", err)
+		t.Fatal(err)
 	}
-	if content != "" {
-		t.Fatalf("expected memory removed, got:\n%s", content)
+	if len(entries) != 1 || !strings.Contains(entries[0].Statement, "purple") {
+		t.Fatalf("expected purple memory, got %+v", entries)
+	}
+
+	deleted, err := store.Forget("usr_test", "The user likes purple.", ScopeLongTerm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected one deleted row, got %d", deleted)
+	}
+	entries, err = store.ListMemories("usr_test", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no active memories, got %+v", entries)
 	}
 }
 
-func TestStoreMigratesFlatFileAndDefaultsCategory(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "users"), config.NewLogger(config.LevelError))
-	if err := store.WriteFull("user1", "Old flat fact.\n- Evidence: old"); err != nil {
-		t.Fatalf("write full: %v", err)
-	}
-	if err := store.Set("user1", "New default fact.", "new", ""); err != nil {
-		t.Fatalf("set default: %v", err)
-	}
+func TestStoreShortTermExpiry(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
 
-	content, err := store.ReadCategory("user1", "notes")
+	_, err := store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeShortTerm, Category: "tasks", Statement: "The user is testing expiry.", Evidence: "test", TTL: time.Nanosecond})
 	if err != nil {
-		t.Fatalf("read notes: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(content, "Old flat fact.") || !strings.Contains(content, "New default fact.") {
-		t.Fatalf("expected migrated and new notes, got:\n%s", content)
+	time.Sleep(time.Millisecond)
+	entries, err := store.ListMemories("usr_test", ScopeShortTerm, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected expired memory to be hidden, got %+v", entries)
 	}
 }
 
-func TestStoreMergeUsersDeduplicatesStatements(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "users"), config.NewLogger(config.LevelError))
-	if err := store.WriteFull("winner", "# User Memory\n\n## Preferences\n\nThe user likes tea.\n- Evidence: winner evidence.\n"); err != nil {
-		t.Fatalf("write winner: %v", err)
+func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fakeMemoryEmbedder{}, "fake-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.WriteFull("loser", "# User Memory\n\n## Identity\n\nThe user lives in Berlin.\n- Evidence: loser evidence.\n\n## Preferences\n\nThe user likes tea.\n- Evidence: loser evidence.\n"); err != nil {
-		t.Fatalf("write loser: %v", err)
+	defer store.Close() // nolint:errcheck
+
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "usr_test", "I like purple", "Noted.", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "User said they like purple.", Importance: 4})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if err := store.MergeUsers("winner", "loser"); err != nil {
-		t.Fatalf("merge: %v", err)
-	}
-	winner, err := store.Read("winner")
+	ctx, err := store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 2, ContextBudgetChars: 4000})
 	if err != nil {
-		t.Fatalf("read winner: %v", err)
+		t.Fatal(err)
 	}
-	if strings.Count(winner, "The user likes tea.") != 1 || !strings.Contains(winner, "The user lives in Berlin.") {
-		t.Fatalf("unexpected merged content:\n%s", winner)
+	if strings.Contains(ctx.Block, "Stable User Profile") || strings.Contains(ctx.Block, "Current Session Summary") || !strings.Contains(ctx.Block, "Recent Exchanges") {
+		t.Fatalf("unexpected context block:\n%s", ctx.Block)
 	}
-	loser, err := store.Read("loser")
+}
+
+func TestBuildContextDoesNotEmbedQuery(t *testing.T) {
+	embedder := &countingMemoryEmbedder{}
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), embedder, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {
-		t.Fatalf("read loser: %v", err)
+		t.Fatal(err)
 	}
-	if loser != "" {
-		t.Fatalf("expected loser memory removed, got %q", loser)
+	defer store.Close() // nolint:errcheck
+
+	if err := store.AppendSessionTurn(context.Background(), "session-1", "usr_test", "I like purple", "Noted.", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user likes purple.", Evidence: "User said they like purple.", Importance: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedEmbeddingCount := len(embedder.inputs)
+
+	_, err = store.BuildContext(context.Background(), "usr_test", "session-1", "purple memory", ContextOptions{RecentTurns: 1, ContextBudgetChars: 4000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryEmbeddings := embedder.inputs[seedEmbeddingCount:]
+	if len(queryEmbeddings) != 0 {
+		t.Fatalf("expected no query embeddings from automatic context, got %d: %+v", len(queryEmbeddings), queryEmbeddings)
 	}
 }

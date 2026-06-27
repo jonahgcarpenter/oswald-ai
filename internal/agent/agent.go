@@ -8,7 +8,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -17,12 +17,11 @@ import (
 	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
-const compactedHistoryUserPrompt = "Here is the compacted history from previous messages."
-
 const (
-	semanticRecentTurns      = 0
-	semanticMaxRelevantTurns = 3
-	semanticMinSimilarity    = 0.70
+	memoryRecentTurns        = 4
+	memoryRetrievalLimit     = 12
+	memoryContextBudgetRatio = 0.15
+	sessionTurnTTL           = 24 * time.Hour
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -108,7 +107,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web.search" {
 		switch toolName {
-		case "memory.remember", "memory.recall", "memory.forget":
+		case "memory.save", "memory.search", "memory.list", "memory.forget":
 			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
 		case "soul.read", "soul.patch":
 			payload.Soul = soulStreamPayload(toolName, args, result, isError)
@@ -150,7 +149,7 @@ func memoryStreamPayload(toolName string, args map[string]interface{}, result st
 	if isError {
 		return payload
 	}
-	if payload.Action == "recall" {
+	if payload.Action == "search" || payload.Action == "list" {
 		content := usermemory.ParseContent(result)
 		if content.Intro != "" || len(content.Sections) > 0 {
 			payload.Content = &content
@@ -220,77 +219,41 @@ type AgentResponse struct {
 // calls tools from the registry and generates the final response.
 type Agent struct {
 	chatClient            llm.Chatter
-	embeddingClient       llm.Embedder
 	registry              *registry.Registry
-	memory                *memory.Store
-	budget                memory.ContextBudget
+	budget                promptbudget.ContextBudget
 	model                 string
-	embeddingModel        string
 	soul                  *soul.Store
 	userMemory            *usermemory.Store
-	summarizer            *Summarizer
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, conversation memory store, tool failure retry budget, and logger.
+// soul store, SQLite user memory store, prompt budget, tool failure retry budget,
+// and logger.
 func NewAgent(
 	chatClient llm.Chatter,
-	embeddingClient llm.Embedder,
 	registry *registry.Registry,
 	model string,
-	embeddingModel string,
 	soul *soul.Store,
 	userMemory *usermemory.Store,
-	budget memory.ContextBudget,
+	budget promptbudget.ContextBudget,
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
-	memoryStore *memory.Store,
 	log *config.Logger,
 ) *Agent {
 	return &Agent{
 		chatClient:            chatClient,
-		embeddingClient:       embeddingClient,
 		registry:              registry,
-		memory:                memoryStore,
 		budget:                budget,
 		model:                 model,
-		embeddingModel:        strings.TrimSpace(embeddingModel),
 		soul:                  soul,
 		userMemory:            userMemory,
-		summarizer:            NewSummarizer(chatClient, model, log),
 		maxToolFailureRetries: maxToolFailureRetries,
 		requestTimeout:        requestTimeout,
 		log:                   log,
 	}
-}
-
-func (a *Agent) semanticMemoryEnabled() bool {
-	return a.embeddingClient != nil && strings.TrimSpace(a.embeddingModel) != ""
-}
-
-func (a *Agent) embedText(ctx context.Context, text string) ([]float64, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil, fmt.Errorf("cannot embed empty text")
-	}
-	resp, err := a.embeddingClient.Embed(ctx, llm.EmbedRequest{
-		Model: a.embeddingModel,
-		Input: text,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(resp.Embeddings) == 0 || len(resp.Embeddings[0]) == 0 {
-		return nil, fmt.Errorf("embedding response contained no vector")
-	}
-	return resp.Embeddings[0], nil
-}
-
-func memoryEmbeddingText(user string, _ string) string {
-	return strings.TrimSpace("User: " + strings.TrimSpace(user))
 }
 
 func stripReplyContext(prompt string) (string, bool) {
@@ -353,75 +316,6 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	}
 }
 
-func makeCompactedTurn(summary string, now time.Time) memory.Turn {
-	return memory.Turn{
-		CreatedAt: now.UTC(),
-		User: llm.ChatMessage{
-			Role:    "user",
-			Content: compactedHistoryUserPrompt,
-		},
-		Assistant: llm.ChatMessage{
-			Role:    "assistant",
-			Content: summary,
-		},
-	}
-}
-
-func (a *Agent) compactTurnsToFit(ctx context.Context, log *config.Logger, systemPrompt string, turns []memory.Turn, userPrompt string, userImages []llm.InputImage) ([]memory.Turn, memory.PromptPruneResult, bool) {
-	tools := a.registry.LLMTools()
-	currentTurns := append([]memory.Turn(nil), turns...)
-	persisted := false
-	result := memory.PromptPruneResult{
-		EstimatedBefore: memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(currentTurns), userPrompt, len(userImages), tools),
-	}
-	lastEstimate := result.EstimatedBefore
-
-	for len(currentTurns) > 0 {
-		history := memory.FlattenTurns(currentTurns)
-		estimate := memory.EstimatePromptTokens(systemPrompt, history, userPrompt, len(userImages), tools)
-		lastEstimate = estimate
-		if estimate <= a.budget.PromptBudget() {
-			result.EstimatedAfter = estimate
-			return currentTurns, result, persisted
-		}
-
-		compacted := false
-		for compactCount := 1; compactCount <= len(currentTurns); compactCount++ {
-			summary, err := a.summarizer.Summarize(ctx, currentTurns[:compactCount])
-			if err != nil {
-				log.Warn("agent.context.compaction_failed", "failed to compact context",
-					config.F("turn_pair_count", compactCount),
-					config.ErrorField(err),
-				)
-				continue
-			}
-
-			replacement := makeCompactedTurn(summary, time.Now())
-			candidateTurns := make([]memory.Turn, 0, 1+len(currentTurns)-compactCount)
-			candidateTurns = append(candidateTurns, replacement)
-			candidateTurns = append(candidateTurns, currentTurns[compactCount:]...)
-
-			candidateEstimate := memory.EstimatePromptTokens(systemPrompt, memory.FlattenTurns(candidateTurns), userPrompt, len(userImages), tools)
-			if candidateEstimate >= estimate && compactCount < len(currentTurns) {
-				continue
-			}
-
-			currentTurns = candidateTurns
-			persisted = true
-			result.RemovedPairs += compactCount
-			compacted = true
-			break
-		}
-
-		if !compacted {
-			break
-		}
-	}
-
-	result.EstimatedAfter = lastEstimate
-	return currentTurns, result, persisted
-}
-
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
 // before generating its final response. Thinking tokens, content tokens, and
@@ -476,8 +370,8 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	}
 
 	// Build the dynamic system prompt: timestamp + soul + speaker identity.
-	// Only system_rules memory is injected automatically; other user memory,
-	// including identity, must be retrieved via the memory.recall tool.
+	// Only system_rules memory is injected automatically here; relevant user and
+	// session memories are added below as a structured retrieved-memory block.
 	var promptParts []string
 	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 	promptParts = append(promptParts, soulContent)
@@ -491,93 +385,34 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 
-	// Retrieve retained conversation turns for this session. TTL and max-turn
-	// pruning are applied destructively inside the store before history is used.
-	// When embeddings are configured, only strongly relevant turns are included;
-	// vague follow-ups can use session.recent instead of automatic history replay.
-	semanticSelection := false
-	var turns []memory.Turn
-	if a.semanticMemoryEnabled() {
-		semanticSelection = true
-		includeRecent := false
-		retrievalOpts := memory.RetrievalOptions{
-			RecentTurns:      semanticRecentTurns,
-			MaxRelevantTurns: semanticMaxRelevantTurns,
-			MinSimilarity:    semanticMinSimilarity,
-			IncludeRecent:    includeRecent,
-		}
-		semanticQueryText, _ := stripReplyContext(userPrompt)
-		if semanticQueryText == "" {
-			semanticQueryText = userPrompt
-		}
-		embedStartedAt := time.Now()
-		queryEmbedding, err := a.embedText(ctx, semanticQueryText)
-		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
+	semanticQueryText, _ := stripReplyContext(userPrompt)
+	if semanticQueryText == "" {
+		semanticQueryText = userPrompt
+	}
+	if a.userMemory != nil {
+		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
+			RecentTurns:        memoryRecentTurns,
+			ContextBudgetChars: int(float64(a.budget.PromptBudget()*4) * memoryContextBudgetRatio),
+		})
 		if err != nil {
-			retrieval := a.memory.RelevantTurns(sessionKey, nil, retrievalOpts)
-			turns = retrieval.Turns
-			reqLog.Warn("agent.memory.embedding.query_failed", "failed to embed query for semantic memory retrieval",
-				config.F("embedding_model", a.embeddingModel),
-				config.F("duration_ms", embedDurationMS),
-				config.F("candidate_turn_count", retrieval.CandidateTurnCount),
-				config.F("selected_turn_count", len(retrieval.Turns)),
-				config.F("recent_turn_count", retrieval.RecentTurnCount),
-				config.F("include_recent", includeRecent),
-				config.F("status", "degraded"),
-				config.ErrorField(err),
-			)
-		} else {
-			retrieval := a.memory.RelevantTurns(sessionKey, queryEmbedding, retrievalOpts)
-			turns = retrieval.Turns
-			reqLog.Info("agent.memory.vector.retrieved", "selected semantic session memory",
-				config.F("embedding_model", a.embeddingModel),
-				config.F("embedding_dimension_count", len(queryEmbedding)),
-				config.F("duration_ms", embedDurationMS),
-				config.F("candidate_turn_count", retrieval.CandidateTurnCount),
-				config.F("selected_turn_count", len(retrieval.Turns)),
-				config.F("recent_turn_count", retrieval.RecentTurnCount),
-				config.F("semantic_turn_count", retrieval.SemanticTurnCount),
-				config.F("include_recent", includeRecent),
-				config.F("max_relevant_turn_count", retrievalOpts.MaxRelevantTurns),
-				config.F("min_similarity", retrievalOpts.MinSimilarity),
-				config.F("status", "ok"),
+			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
+		} else if strings.TrimSpace(memoryContext.Block) != "" {
+			dynamicSystemPrompt += "\n\n" + memoryContext.Block
+			reqLog.Info("agent.memory.context.loaded", "loaded retrieved memory context",
+				config.F("recent_turn_count", memoryContext.RecentTurnCount),
 			)
 		}
-	} else {
-		turns = a.memory.Turns(sessionKey)
 	}
 
-	// If the estimated prompt would exceed the active model budget, destructively
-	// compact the oldest retained turns into a synthetic turn pair that remains
-	// in ordinary conversation history.
-	compactedTurns, prune, compacted := a.compactTurnsToFit(ctx, reqLog, dynamicSystemPrompt, turns, userPrompt, userImages)
-	if compacted {
-		if !semanticSelection {
-			a.memory.ReplaceTurns(sessionKey, compactedTurns)
-		}
-		turns = compactedTurns
+	prune := promptbudget.Result{
+		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
+		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
 	}
-	trimmedHistory := memory.FlattenTurns(turns)
 
-	messages := make([]llm.ChatMessage, 0, 2+len(trimmedHistory))
+	messages := make([]llm.ChatMessage, 0, 2)
 	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
-	messages = append(messages, trimmedHistory...)
 	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: userImages})
 
-	if len(trimmedHistory) > 0 {
-		reqLog.Debug("agent.memory.loaded", "loaded retained memory",
-			config.F("historical_message_count", len(trimmedHistory)),
-			config.F("turn_pair_count", len(turns)),
-		)
-	}
-	if prune.RemovedPairs > 0 {
-		reqLog.Debug("agent.context.compacted", "compacted retained context",
-			config.F("removed_pair_count", prune.RemovedPairs),
-			config.F("prompt_budget", a.budget.PromptBudget()),
-			config.F("estimated_before", prune.EstimatedBefore),
-			config.F("estimated_after", prune.EstimatedAfter),
-		)
-	}
 	if prune.EstimatedAfter > a.budget.PromptBudget() {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
 			config.F("estimated_after", prune.EstimatedAfter),
@@ -796,39 +631,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	}
 
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
-	var turnEmbedding []float64
-	if finalContent != "" && a.semanticMemoryEnabled() {
-		embedStartedAt := time.Now()
-		embedding, err := a.embedText(ctx, memoryEmbeddingText(userMemoryContent, finalContent))
-		embedDurationMS := time.Since(embedStartedAt).Milliseconds()
-		if err != nil {
-			reqLog.Warn("agent.memory.embedding.turn_failed", "failed to embed completed turn for semantic memory retrieval",
-				config.F("embedding_model", a.embeddingModel),
-				config.F("duration_ms", embedDurationMS),
-				config.F("status", "degraded"),
-				config.ErrorField(err),
-			)
-		} else {
-			turnEmbedding = embedding
-			reqLog.Info("agent.memory.vector.stored", "stored semantic session-memory embedding",
-				config.F("embedding_model", a.embeddingModel),
-				config.F("embedding_dimension_count", len(turnEmbedding)),
-				config.F("duration_ms", embedDurationMS),
-				config.F("status", "ok"),
-			)
+	if finalContent != "" && a.userMemory != nil {
+		if err := a.userMemory.AppendSessionTurn(ctx, sessionKey, senderID, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL); err != nil {
+			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
-	}
-
-	// Persist the user prompt and the assistant's final response to memory.
-	// Tool-call intermediaries are intentionally excluded to keep history lean —
-	// only the conversational exchange (not the internal reasoning steps) is retained.
-	if finalContent != "" {
-		a.memory.AppendTurn(
-			sessionKey,
-			llm.ChatMessage{Role: "user", Content: userMemoryContent},
-			llm.ChatMessage{Role: "assistant", Content: finalContent},
-			turnEmbedding,
-		)
 	}
 
 	reqLog.Debug("agent.response.complete", "completed agent response",

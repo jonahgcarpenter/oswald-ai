@@ -8,12 +8,12 @@ Oswald AI is a pure Go application built around a single LLM gateway-backed agen
 It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin tools:
 
 - `web.search`
-- `memory.remember`
-- `memory.recall`
+- `memory.save`
+- `memory.search`
+- `memory.list`
 - `memory.forget`
 - `soul.read`
 - `soul.patch`
-- `session.recent`
 - `mcp.servers`
 - `mcp.tools`
 
@@ -34,7 +34,7 @@ Current layers:
 5. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
 6. `internal/broker/` — request queue and worker pool
 7. `internal/agent/` — iterative tool-calling agent loop
-8. `internal/memory/` — in-process conversation retention and compaction
+8. `internal/promptbudget/` — model context budget and prompt token estimates
 9. `internal/tools/` — tool registry, builtin handlers, and schema loading
 10. `internal/mcp/` — optional MCP client sessions and discovered tools
 11. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
@@ -52,13 +52,12 @@ Current layers:
 5. Create the soul store and persistent user-memory store
 6. Create the account-link service, shared `/connect` and `/disconnect` command handler, and command router
 7. Initialize optional MCP clients
-8. Create the in-process conversation memory store
-9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
-10. Build enabled gateways from config
-11. Create the agent
-12. Start the broker worker pool
-13. Start each gateway in its own goroutine
-14. Wait for shutdown signal, drain the broker, and close MCP clients
+8. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+9. Build enabled gateways from config
+10. Create the agent
+11. Start the broker worker pool
+12. Start each gateway in its own goroutine
+13. Wait for shutdown signal, drain the broker, and close MCP clients
 
 ## Request Lifecycle
 
@@ -72,7 +71,7 @@ Every request follows the same high-level path:
 6. Account-link commands are handled by the shared command router without reaching the agent loop
 7. The runtime submits a `broker.Request` when the request should reach the LLM
 8. A broker worker calls `(*Agent).Process()`
-9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools including `session.recent`, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+9. The agent builds the prompt, includes any current-turn images on the final user message, offers tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 10. The final response is returned to the shared runtime
 11. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
@@ -106,9 +105,9 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
    - current date and time
-5. Load retained session turns from `internal/memory`; when `LLM_GATEWAY_EMBEDDING_MODEL` is set, select only strongly relevant turns and let the model call `session.recent` for vague follow-ups
-6. Compact older selected turns if the estimated prompt exceeds the active model budget
-7. Build the chat message array: system prompt, selected retained history, current user prompt, and any current-turn images
+5. Load structured retrieved memory context from SQLite-backed session and user memory stores
+6. Estimate prompt size against the active model budget
+7. Build the chat message array: system prompt, retrieved SQLite session context, current user prompt, and any current-turn images
 8. Call the LLM gateway with all registered tools available
 9. If the model emits tool calls:
    - execute each tool handler
@@ -153,8 +152,8 @@ Oswald keeps three distinct memory layers.
 | Layer                  | Storage                     | Purpose                                     | Mutable by agent |
 | ---------------------- | --------------------------- | ------------------------------------------- | ---------------- |
 | Soul memory            | `data/memory/soul/soul.md`  | Identity, directives, personality           | Yes              |
-| Persistent user memory | `data/memory/users/<id>.md` | Facts about a user that survive restart     | Yes              |
-| Session chat memory    | In-process only             | Conversation history for the active session | Implicitly       |
+| Persistent user memory | SQLite `memory_entries`     | Facts about a user that survive restart     | Yes              |
+| Session chat memory    | SQLite `session_turns`      | Conversation history for the active session | Implicitly       |
 
 ### Soul Memory
 
@@ -165,18 +164,16 @@ Oswald keeps three distinct memory layers.
 
 ### Persistent User Memory
 
-- Stored in `data/memory/users/<id>.md`
+- Stored in `data/database/oswald.db` tables `user_memory_profiles` and `memory_entries`
 - Managed by the `memory.*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
-- Organized into categories: `identity`, `system_rules`, `preferences`, `notes`
-- Uses per-user locking so different users can be updated in parallel safely
-- Older flat files are migrated to categorized markdown on first recall or write
+- Organized into categories like `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, `tasks`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Only the `system_rules` category is injected automatically into the system prompt; other categories are retrieved on demand via tools
 
 ### Account Links
 
-- Stored in `data/accounts/links.json`
+- Stored in `/data/database/oswald.db`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
@@ -184,34 +181,21 @@ Oswald keeps three distinct memory layers.
 
 ### Session Chat Memory
 
-- Stored only in memory until process exit
-- Keyed by a gateway-provided `SessionKey`
-- Stores only final user/assistant turn pairs
-- When `LLM_GATEWAY_EMBEDDING_MODEL` is unset, retained turns are replayed using the older recency-based behavior, subject to TTL, max-turn pruning, and prompt-budget compaction
-- When `LLM_GATEWAY_EMBEDDING_MODEL` is set, each stored turn gets an in-memory embedding built from the cleaned user message only; assistant text is not embedded
-- Semantic retrieval embeds the cleaned current user message, strips leading reply-context wrappers, and includes up to three retained turns with cosine similarity at or above `0.70`
-- No recent turn is included automatically when semantic retrieval is enabled
-- The model can call `session.recent` to inspect recent completed exchanges when the current prompt is a vague follow-up and semantic context is not already present
-- If query embedding fails while semantic retrieval is enabled, the agent degrades to no retained history instead of replaying all retained history
+- Stored in SQLite table `session_turns`
+- Keyed by gateway-provided `SessionKey` and canonical user ID
+- Stores only completed final user/assistant turn pairs
+- Recent completed exchanges are automatically included in the structured retrieved-memory block when budget permits
+- Each stored turn has an optional `expires_at`; expired turns are deleted when recent session turns are read
 - Tool messages and intermediate reasoning are intentionally not persisted
-
-Retention behavior:
-
-- `MEMORY_MAX_TURNS` keeps only the newest N turn pairs when set above `0`
-- `MEMORY_MAX_AGE` expires turn pairs older than the configured Go duration when set above `0`
-- Pruning is destructive inside the store
 
 Prompt-budget behavior:
 
 - The agent estimates prompt size before calling the LLM gateway
-- If selected retained history would exceed budget, the oldest selected turns are summarized into a synthetic replacement turn
-- When semantic retrieval is disabled, that compacted turn is written back into session memory and gets a fresh timestamp
-- When semantic retrieval is enabled, request-time compaction affects only the selected context for that request and does not overwrite unrelated retained turns
-- Persisted compaction is destructive and still counts toward `MEMORY_MAX_TURNS`
+- If the assembled prompt exceeds the budget, the request still proceeds with a warning log; session turns are not compacted or rewritten
 
 ## Context Budget Discovery
 
-Context budgeting lives in `internal/memory/budget.go`.
+Context budgeting lives in `internal/promptbudget/`.
 
 - At startup the app queries `https://openrouter.ai/api/v1/models`
 - Models are matched by `hugging_face_id` against `LLM_GATEWAY_MODEL`, first exactly and then with trimmed case-insensitive matching
@@ -350,21 +334,16 @@ Tools are split into schema and runtime layers.
 Current builtin tools:
 
 - `web.search` — SearXNG-backed search
-- `memory.remember` — store or update user facts
-- `memory.recall` — retrieve stored user facts
+- `memory.save` — explicitly store or update user facts
+- `memory.search` — retrieve relevant stored user facts
+- `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-- `session.recent` — read recent completed exchanges from the current in-process session
 - `mcp.servers` — list connected MCP servers and read-only tool counts
 - `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
 
-`session.recent` arguments:
-
-- `offset`: one-based recent exchange offset; `1` is the newest completed exchange
-- `count`: number of exchanges to return, clamped to `1` through `3`
-
-The tool is read-only and scoped to the current request's `session_id` from `requestctx.MetadataFromContext`.
+Recent completed exchanges are injected automatically from session memory. Durable user-memory retrieval and saving are model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 
 Optional external tools:
 
@@ -410,7 +389,7 @@ Notes:
 - OpenRouter's public model catalog is used at startup for context-budget discovery
 - `MODEL_*` environment overrides take precedence over discovered model metadata
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
-- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic session-memory retrieval
+- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic user-memory retrieval
 - The client maps between internal app types and the gateway's OpenAI-compatible wire format
 - Streaming responses accumulate both `thinking` and visible content
 - Current-turn images are sent to the LLM gateway as OpenAI-compatible image URL content blocks when provided by a gateway
@@ -489,7 +468,7 @@ Use `server` logs for runtime infrastructure and transport behavior:
 Use `agent` logs for request-scoped agent execution behavior:
 
 - `Agent.Process()` lifecycle
-- context compaction
+- prompt budget checks
 - loop iterations
 - tool execution during a prompt
 - final agent response completion
@@ -620,12 +599,8 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | -------------------------------------------- | -------------------------------------------- |
 | `cmd/agent/main.go`                          | Startup wiring and shutdown                  |
 | `internal/agent/agent.go`                    | Main agent loop                              |
-| `internal/agent/summarize.go`                | History compaction summarizer                |
 | `internal/broker/broker.go`                  | Request queue and worker pool                |
-| `internal/memory/store.go`                   | Session memory retention                     |
-| `internal/memory/retrieval.go`               | Semantic session-memory selection            |
-| `internal/memory/compact.go`                 | Retention pruning and token estimates        |
-| `internal/memory/budget.go`                  | Context budget discovery                     |
+| `internal/promptbudget/`                     | Context budget and prompt token estimates    |
 | `internal/mcp/manager.go`                    | MCP client bootstrap and catalog             |
 | `internal/routing/routing.go`                | Shared gateway routing policy                |
 | `internal/routing/types.go`                  | Gateway-neutral routing types                |
@@ -635,7 +610,6 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | `internal/tools/runtime/`                    | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                | Tool registry assembly                       |
 | `internal/tools/builtin/`                    | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/sessionhistory/`     | `session.recent` runtime handler             |
 | `internal/tools/builtin/usermemory/store.go` | Persistent per-user memory store             |
 | `internal/tools/builtin/soul/store.go`       | Soul file store                              |
 | `internal/commands/router.go`                | Shared command router                        |
@@ -683,7 +657,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 ## Known Limitations
 
-- Session chat history is in-process only and does not survive restart
+- Session chat history is stored in SQLite `session_turns` with TTL expiry
 - WebSocket gateway has no authentication layer
 - Only nine builtin tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
 - GitHub is the only MCP server integration today
@@ -691,7 +665,8 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 Account-linking note:
 
-- `data/accounts/links.json` stores canonical users and linked external accounts
+- `/data/database/oswald.db` stores canonical users and linked external accounts
+- Existing `data/accounts/links.json` files are migrated into SQLite at startup when the database is empty
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available
 

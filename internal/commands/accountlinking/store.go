@@ -3,31 +3,45 @@ package accountlinking
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // Service manages canonical user IDs and linked gateway accounts.
 type Service struct {
-	path     string
-	memories *usermemory.Store
-	log      *config.Logger
-	mu       sync.Mutex
+	path       string
+	legacyPath string
+	memories   *usermemory.Store
+	log        *config.Logger
+	db         *database.DB
+	mu         sync.Mutex
+	initOnce   sync.Once
+	initErr    error
 }
 
-// NewService creates a new account-link service backed by a JSON file on disk.
+// NewService creates a new account-link service backed by a SQLite database on disk.
 func NewService(path string, memories *usermemory.Store, log *config.Logger) *Service {
-	return &Service{path: path, memories: memories, log: log}
+	legacyPath := filepath.Join(filepath.Dir(path), "links.json")
+	if path == config.DefaultAccountLinkPath {
+		legacyPath = config.DefaultLegacyAccountLinkPath
+	}
+	return &Service{path: path, legacyPath: legacyPath, memories: memories, log: log}
+}
+
+// Initialize prepares the account-link database and migrates the legacy JSON store when present.
+func (s *Service) Initialize() error {
+	s.initOnce.Do(func() {
+		s.initErr = s.initialize()
+	})
+	return s.initErr
 }
 
 // EnsureAccount resolves an external account to a canonical user ID, creating one when needed.
@@ -125,6 +139,165 @@ func (s *Service) AccountsForUser(canonicalUserID string) ([]LinkedAccount, erro
 	return accounts, nil
 }
 
+// ListUsers returns all canonical users with compact account and status details.
+func (s *Service) ListUsers() ([]UserSummary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	userIDs := make([]string, 0, len(data.Users))
+	for canonicalID := range data.Users {
+		userIDs = append(userIDs, canonicalID)
+	}
+	sort.Strings(userIDs)
+
+	users := make([]UserSummary, 0, len(userIDs))
+	for _, canonicalID := range userIDs {
+		users = append(users, summarizeUser(canonicalID, data.Users[canonicalID]))
+	}
+	return users, nil
+}
+
+// User returns one canonical user's summary.
+func (s *Service) User(canonicalUserID string) (UserSummary, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return UserSummary{}, false, err
+	}
+	user, ok := data.Users[canonicalUserID]
+	if !ok {
+		return UserSummary{}, false, nil
+	}
+	return summarizeUser(canonicalUserID, user), true, nil
+}
+
+// IsAdmin reports whether a canonical user can run admin commands.
+func (s *Service) IsAdmin(canonicalUserID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	user, ok := data.Users[canonicalUserID]
+	return ok && user.IsAdmin, nil
+}
+
+// IsBanned reports whether a canonical user is blocked from using Oswald.
+func (s *Service) IsBanned(canonicalUserID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	user, ok := data.Users[canonicalUserID]
+	return ok && user.IsBanned, nil
+}
+
+// BanStatus returns whether a canonical user is banned and the stored reason.
+func (s *Service) BanStatus(canonicalUserID string) (bool, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return false, "", err
+	}
+	user, ok := data.Users[canonicalUserID]
+	if !ok || !user.IsBanned {
+		return false, "", nil
+	}
+	return true, user.BanReason, nil
+}
+
+// SetAdmin updates a canonical user's admin flag.
+func (s *Service) SetAdmin(actorID, targetID string, isAdmin bool) error {
+	if actorID == targetID && !isAdmin {
+		return fmt.Errorf("cannot remove admin from yourself")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	user, ok := data.Users[targetID]
+	if !ok {
+		return fmt.Errorf("canonical user %q not found", targetID)
+	}
+	if user.IsAdmin == isAdmin {
+		return nil
+	}
+	user.IsAdmin = isAdmin
+	user.UpdatedAt = time.Now().UTC()
+	data.Users[targetID] = user
+	return s.saveLocked(data)
+}
+
+// BanUser marks a canonical user as banned.
+func (s *Service) BanUser(actorID, targetID, reason string) error {
+	if actorID == targetID {
+		return fmt.Errorf("cannot ban yourself")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	user, ok := data.Users[targetID]
+	if !ok {
+		return fmt.Errorf("canonical user %q not found", targetID)
+	}
+	now := time.Now().UTC()
+	user.IsBanned = true
+	user.BannedAt = now
+	user.BannedBy = actorID
+	user.BanReason = strings.TrimSpace(reason)
+	user.UpdatedAt = now
+	data.Users[targetID] = user
+	return s.saveLocked(data)
+}
+
+// UnbanUser clears a canonical user's ban state.
+func (s *Service) UnbanUser(actorID, targetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	user, ok := data.Users[targetID]
+	if !ok {
+		return fmt.Errorf("canonical user %q not found", targetID)
+	}
+	if !user.IsBanned && user.BannedAt.IsZero() && user.BannedBy == "" && user.BanReason == "" {
+		return nil
+	}
+	user.IsBanned = false
+	user.BannedAt = time.Time{}
+	user.BannedBy = ""
+	user.BanReason = ""
+	user.UpdatedAt = time.Now().UTC()
+	data.Users[targetID] = user
+	return s.saveLocked(data)
+}
+
 // SpeakerLine returns a deterministic speaker line for the canonical user.
 func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
 	accounts, err := s.AccountsForUser(canonicalUserID)
@@ -207,6 +380,15 @@ func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName 
 		s.log.Info("account_link.users.merged", "merged linked users", config.F("source_user_id", existingOwner), config.F("target_user_id", canonicalUserID), config.F("account", key))
 
 		mergedUser := current
+		mergedUser.IsAdmin = current.IsAdmin || other.IsAdmin
+		if !current.IsBanned && other.IsBanned {
+			mergedUser.IsBanned = true
+			mergedUser.BannedAt = other.BannedAt
+			mergedUser.BannedBy = other.BannedBy
+			mergedUser.BanReason = other.BanReason
+		} else if current.IsBanned {
+			mergedUser.IsBanned = true
+		}
 		seen := make(map[string]struct{}, len(mergedUser.Accounts))
 		for _, account := range mergedUser.Accounts {
 			seen[accountKey(account.Gateway, account.Identifier)] = struct{}{}
@@ -316,79 +498,29 @@ func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string)
 }
 
 func (s *Service) loadLocked() (fileData, error) {
-	data := fileData{
-		Version:      1,
-		Users:        make(map[string]UserRecord),
-		AccountIndex: make(map[string]string),
+	if err := s.Initialize(); err != nil {
+		return fileData{}, err
 	}
-
-	raw, err := os.ReadFile(s.path)
-	if os.IsNotExist(err) {
-		return data, nil
-	}
-	if err != nil {
-		return fileData{}, fmt.Errorf("failed to read account link store: %w", err)
-	}
-	if len(raw) == 0 {
-		return data, nil
-	}
-	if err := json.Unmarshal(raw, &data); err != nil {
-		sanitized := sanitizeJSON(raw)
-		if jsonErr := json.Unmarshal(sanitized, &data); jsonErr != nil {
-			backupPath := s.path + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
-			if writeErr := os.WriteFile(backupPath, raw, 0o644); writeErr != nil {
-				s.log.Warn("account_link.store.backup_failed", "failed to back up corrupt account link store", config.F("path", backupPath), config.F("status", "degraded"), config.ErrorField(writeErr))
-			}
-			return fileData{}, fmt.Errorf("failed to decode account link store: %w", err)
-		}
-		if err := os.WriteFile(s.path, sanitized, 0o644); err != nil {
-			s.log.Warn("account_link.store.recovered", "recovered malformed JSON in memory but could not rewrite store", config.F("path", s.path), config.F("status", "degraded"), config.ErrorField(err))
-		} else {
-			s.log.Warn("account_link.store.repaired", "repaired malformed account link store", config.F("path", s.path), config.F("status", "degraded"))
-		}
-	}
-	if data.Users == nil {
-		data.Users = make(map[string]UserRecord)
-	}
-	if data.AccountIndex == nil {
-		data.AccountIndex = make(map[string]string)
-	}
-	if data.Version == 0 {
-		data.Version = 1
-	}
-	return data, nil
-}
-
-var trailingCommaRE = regexp.MustCompile(`,(\s*[}\]])`)
-
-func sanitizeJSON(raw []byte) []byte {
-	trimmed := bytesTrimSpace(raw)
-	if len(trimmed) == 0 {
-		return raw
-	}
-	return trailingCommaRE.ReplaceAll(trimmed, []byte("$1"))
-}
-
-func bytesTrimSpace(raw []byte) []byte {
-	return []byte(strings.TrimSpace(string(raw)))
+	return s.db.LoadAccountLinks()
 }
 
 func (s *Service) saveLocked(data fileData) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("failed to create account link directory: %w", err)
+	if err := s.Initialize(); err != nil {
+		return err
 	}
+	return s.db.ReplaceAccountLinks(data)
+}
 
-	raw, err := json.MarshalIndent(data, "", "  ")
+func (s *Service) initialize() error {
+	db, err := database.Open(s.path, s.log)
 	if err != nil {
-		return fmt.Errorf("failed to encode account link store: %w", err)
+		return err
 	}
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, raw, 0o644); err != nil {
-		return fmt.Errorf("failed to write account link store: %w", err)
+	if err := db.MigrateLegacyAccountLinks(s.legacyPath); err != nil {
+		db.Close() // nolint:errcheck
+		return err
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("failed to replace account link store: %w", err)
-	}
+	s.db = db
 	return nil
 }
 
@@ -407,6 +539,28 @@ func findAccount(accounts []LinkedAccount, gateway, identifier string) (LinkedAc
 		}
 	}
 	return LinkedAccount{}, false
+}
+
+func summarizeUser(canonicalID string, user UserRecord) UserSummary {
+	accounts := append([]LinkedAccount(nil), user.Accounts...)
+	sort.Slice(accounts, func(i, j int) bool {
+		if accounts[i].Gateway == accounts[j].Gateway {
+			return accounts[i].Identifier < accounts[j].Identifier
+		}
+		return accounts[i].Gateway < accounts[j].Gateway
+	})
+
+	return UserSummary{
+		CanonicalUserID: canonicalID,
+		Intro:           FormatSpeakerLine(accounts),
+		Accounts:        accounts,
+		CreatedAt:       user.CreatedAt,
+		UpdatedAt:       user.UpdatedAt,
+		IsAdmin:         user.IsAdmin,
+		IsBanned:        user.IsBanned,
+		BannedBy:        user.BannedBy,
+		BanReason:       user.BanReason,
+	}
 }
 
 func chooseDisplayName(existing, requested string) string {

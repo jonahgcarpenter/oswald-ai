@@ -1,60 +1,141 @@
 package usermemory
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-// ValidCategories lists the supported memory categories in display order.
-// The model can assign any of these when storing a fact.
-var ValidCategories = []string{"identity", "system_rules", "preferences", "notes"}
+const (
+	ScopeShortTerm = "short_term"
+	ScopeLongTerm  = "long_term"
 
-// defaultCategory is used when the model omits the category argument.
-const defaultCategory = "notes"
+	StatusActive     = "active"
+	StatusExpired    = "expired"
+	StatusSuperseded = "superseded"
+	StatusDeleted    = "deleted"
 
-// Store manages persistent per-user Markdown memory files.
-// Each user gets a single file at <basedir>/<userID>.md.
-// Facts are organised into category sections (## Identity, ## Preferences,
-// ## Context, ## Notes). Within each section, facts use the same two-line
-// statement + evidence format:
-//
-//	## Identity
-//
-//	The user's name is Alex.
-//
-//	- Evidence: User stated "my name is Alex". Date: [2026-04-04].
-//
-// Files written in the old flat format (no ## category headers) are
-// automatically migrated to the ## Notes section on first write.
-//
-// Concurrent access to the same user file is serialised with a per-user mutex.
-// Access to different user files is fully parallel.
-type Store struct {
-	basedir string
-	log     *config.Logger
+	DefaultShortTermTTL = 30 * 24 * time.Hour
+)
 
-	speakerLineResolver func(string) (string, error)
+// ValidCategories lists supported memory categories in display order.
+var ValidCategories = []string{"identity", "system_rules", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "tasks", "notes"}
 
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex
+// MemoryEntry is a single short-term or long-term user memory.
+type MemoryEntry struct {
+	ID              int64
+	UserID          string
+	Scope           string
+	Category        string
+	Statement       string
+	Evidence        string
+	Confidence      float64
+	Importance      int
+	Status          string
+	SourceSessionID string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	LastUsedAt      time.Time
+	ExpiresAt       time.Time
+	SupersedesID    int64
+	EmbeddingModel  string
+	EmbeddingDim    int
+	Score           float64
 }
 
-// NewStore creates a Store that persists user memory files under basedir.
-// The directory is created on first use rather than at startup.
-func NewStore(basedir string, log *config.Logger) *Store {
-	return &Store{
-		basedir: basedir,
-		log:     log,
-		locks:   make(map[string]*sync.Mutex),
+// SessionTurn is a completed exchange stored for session continuity.
+type SessionTurn struct {
+	ID            int64
+	SessionID     string
+	UserID        string
+	UserText      string
+	AssistantText string
+	ToolNames     []string
+	Importance    int
+	TopicTags     []string
+	CreatedAt     time.Time
+	ExpiresAt     time.Time
+	Score         float64
+}
+
+// ContextOptions controls request-time memory retrieval.
+type ContextOptions struct {
+	RecentTurns int
+
+	ContextBudgetChars int
+}
+
+// RetrievedContext contains the memory block selected for a request.
+type RetrievedContext struct {
+	Block           string
+	RecentTurnCount int
+}
+
+// SaveRequest describes a user memory write.
+type SaveRequest struct {
+	Scope           string
+	Category        string
+	Statement       string
+	Evidence        string
+	Confidence      float64
+	Importance      int
+	SourceSessionID string
+	TTL             time.Duration
+	Supersedes      string
+	Embedding       []float64
+}
+
+// Store manages speaker profiles, user memories, and session memory in SQLite.
+type Store struct {
+	dbPath     string
+	db         *database.DB
+	sql        *sql.DB
+	log        *config.Logger
+	embedder   llm.Embedder
+	embedModel string
+
+	speakerLineResolver func(string) (string, error)
+}
+
+// NewStore creates a SQLite-backed Store. The argument is treated as a database path.
+func NewStore(dbPath string, log *config.Logger) *Store {
+	store, err := NewSQLiteStore(dbPath, nil, "", log)
+	if err != nil {
+		panic(err)
 	}
+	return store
+}
+
+// NewSQLiteStore creates a fresh-schema SQLite-backed Store.
+func NewSQLiteStore(dbPath string, embedder llm.Embedder, embeddingModel string, log *config.Logger) (*Store, error) {
+	db, err := database.Open(dbPath, log)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		dbPath:     dbPath,
+		db:         db,
+		sql:        db.SQL(),
+		log:        log,
+		embedder:   embedder,
+		embedModel: strings.TrimSpace(embeddingModel),
+	}, nil
+}
+
+// Close closes the store database connection.
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
 }
 
 // SetSpeakerLineResolver configures how speaker intro lines are derived.
@@ -62,637 +143,918 @@ func (s *Store) SetSpeakerLineResolver(resolver func(string) (string, error)) {
 	s.speakerLineResolver = resolver
 }
 
-// lockFor returns (and lazily creates) the per-user mutex for userID.
-func (s *Store) lockFor(userID string) *sync.Mutex {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if m, ok := s.locks[userID]; ok {
-		return m
+// SyncSpeakerIntro creates or updates the account-derived speaker intro.
+func (s *Store) SyncSpeakerIntro(userID, intro string) error {
+	if err := s.ensureAccountUser(userID); err != nil {
+		return err
 	}
-	m := &sync.Mutex{}
-	s.locks[userID] = m
-	return m
-}
-
-// filePath returns the absolute path for a user's memory file.
-func (s *Store) filePath(userID string) string {
-	return filepath.Join(s.basedir, userID+".md")
-}
-
-// Read returns the full contents of the user's memory file.
-// Returns an empty string if the file does not exist yet (not an error).
-func (s *Store) Read(userID string) (string, error) {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	data, err := os.ReadFile(s.filePath(userID))
-	if os.IsNotExist(err) {
-		return "", nil
-	}
+	now := formatTime(time.Now())
+	_, err := s.sql.Exec(`
+INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at = excluded.updated_at
+`, userID, strings.TrimSpace(intro), now, now)
 	if err != nil {
-		return "", fmt.Errorf("failed to read user memory for %q: %w", userID, err)
+		return fmt.Errorf("failed to sync user memory intro for %q: %w", userID, err)
 	}
-	return string(data), nil
+	return nil
 }
 
-// ReadIntro returns the top intro block from the user's memory file.
+// ReadIntro returns the current speaker intro for a user.
 func (s *Store) ReadIntro(userID string) (string, error) {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	data, err := os.ReadFile(s.filePath(userID))
-	if os.IsNotExist(err) {
+	var intro string
+	err := s.sql.QueryRow(`SELECT intro FROM user_memory_profiles WHERE canonical_user_id = ?`, userID).Scan(&intro)
+	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to read user memory for %q: %w", userID, err)
+		return "", fmt.Errorf("failed to read user memory intro for %q: %w", userID, err)
 	}
-
-	intro := strings.TrimSpace(parseMemory(string(data)).Intro)
+	intro = strings.TrimSpace(intro)
 	if !strings.HasPrefix(intro, "You are speaking with ") {
 		return "", nil
 	}
 	return intro, nil
 }
 
-// SyncSpeakerIntro creates or updates the user's memory file so its intro block
-// mirrors the supplied speaker line while preserving any existing sections.
-func (s *Store) SyncSpeakerIntro(userID, intro string) error {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	path := s.filePath(userID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("failed to create memory directory: %w", err)
-	}
-
-	var existing string
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read user memory for %q: %w", userID, err)
-	}
-	if err == nil {
-		existing = migrateIfNeeded(string(data))
-	}
-
-	parsed := parseMemory(existing)
-	updated := serializeMemory(strings.TrimSpace(intro), parsed.Sections)
-	if strings.TrimSpace(updated) == strings.TrimSpace(existing) {
-		return nil
-	}
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
-	}
-
-	s.log.Debug("memory.user.synced_speaker_intro", "synced user speaker intro", config.F("user_id", userID))
-	return nil
-}
-
-// Set stores a new fact or replaces an existing one whose statement matches,
-// within the given category section. If category is empty, defaultCategory is used.
-// Each entry is written as:
-//
-//	<statement>
-//
-//	- Evidence: <evidence>. Date: [<today>].
-//
-// If an entry with an identical statement (case-insensitive) already exists
-// anywhere in the file it is replaced in place; otherwise the new entry is
-// appended to the appropriate category section.
-func (s *Store) Set(userID, statement, evidence, category string) error {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	path := s.filePath(userID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("failed to create memory directory: %w", err)
-	}
-
-	var existing string
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read user memory for %q: %w", userID, err)
-	}
-	if err == nil {
-		existing = migrateIfNeeded(string(data))
-	}
-
-	cat := normalizeCategory(category)
-	entry := formatEntry(statement, evidence)
-	updated := replaceOrAppendCategorized(existing, statement, entry, cat)
-	updated, err = s.withSpeakerIntro(userID, updated)
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
-	}
-
-	s.log.Debug("memory.user.stored", "stored user memory", config.F("user_id", userID), config.F("category", cat))
-	return nil
-}
-
-// ReadCategory returns only the facts stored under the given category section.
-// Returns an empty string if the section does not exist or the file is missing.
-func (s *Store) ReadCategory(userID, category string) (string, error) {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	data, err := os.ReadFile(s.filePath(userID))
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("failed to read user memory for %q: %w", userID, err)
-	}
-
-	cat := normalizeCategory(category)
-	sections := parseSections(migrateIfNeeded(string(data)))
-	content, ok := sections[cat]
-	if !ok || strings.TrimSpace(content) == "" {
-		return "", nil
-	}
-	return "## " + displayCategoryName(cat) + "\n\n" + strings.TrimSpace(content) + "\n", nil
-}
-
-// Delete removes the entry whose statement matches the given text.
-// The search spans all category sections. Returns nil if the file or entry does not exist.
-func (s *Store) Delete(userID, statement string) error {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	path := s.filePath(userID)
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to read user memory for %q: %w", userID, err)
-	}
-
-	updated := deleteCategorizedEntry(migrateIfNeeded(string(data)), statement)
-	updated, err = s.withSpeakerIntro(userID, updated)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
-		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
-	}
-
-	s.log.Debug("memory.user.deleted_entry", "deleted user memory entry", config.F("user_id", userID))
-	return nil
-}
-
-// DeleteAll removes the user's entire memory file.
-// Returns nil if the file does not exist.
-func (s *Store) DeleteAll(userID string) error {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	err := os.Remove(s.filePath(userID))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("failed to delete user memory for %q: %w", userID, err)
-	}
-
-	s.log.Debug("memory.user.deleted_all", "deleted all user memory", config.F("user_id", userID))
-	return nil
-}
-
-// WriteFull atomically replaces the entire content of the user's memory file.
-// It is used by the LLM migration path to persist a freshly categorized file.
-func (s *Store) WriteFull(userID, content string) error {
-	l := s.lockFor(userID)
-	l.Lock()
-	defer l.Unlock()
-
-	path := s.filePath(userID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("failed to create memory directory: %w", err)
-	}
-	var err error
-	content, err = s.withSpeakerIntro(userID, content)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("failed to write user memory for %q: %w", userID, err)
-	}
-	s.log.Debug("memory.user.file_written", "wrote full user memory file", config.F("user_id", userID), config.F("content_chars", len(content)))
-	return nil
-}
-
-// MergeUsers merges the persistent memory file for loserUserID into winnerUserID.
-// Statement lines are de-duplicated case-insensitively, preserving the winner's
-// existing entry when a duplicate exists in both files.
+// MergeUsers moves memory/session ownership from loserUserID into winnerUserID.
 func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	if winnerUserID == "" || loserUserID == "" || winnerUserID == loserUserID {
 		return nil
 	}
-
-	firstID, secondID := winnerUserID, loserUserID
-	if firstID > secondID {
-		firstID, secondID = secondID, firstID
+	if err := s.ensureAccountUser(winnerUserID); err != nil {
+		return err
 	}
-
-	firstLock := s.lockFor(firstID)
-	secondLock := s.lockFor(secondID)
-	firstLock.Lock()
-	secondLock.Lock()
-	defer secondLock.Unlock()
-	defer firstLock.Unlock()
-
-	winnerPath := s.filePath(winnerUserID)
-	loserPath := s.filePath(loserUserID)
-
-	winnerRaw, err := os.ReadFile(winnerPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read user memory for %q: %w", winnerUserID, err)
+	tx, err := s.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin memory merge: %w", err)
 	}
-	loserRaw, err := os.ReadFile(loserPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to read user memory for %q: %w", loserUserID, err)
-	}
-
-	merged := mergeCategorizedContent(string(winnerRaw), string(loserRaw))
-	if strings.TrimSpace(merged) != "" && strings.TrimSpace(merged) != "# User Memory" {
-		if err := os.MkdirAll(filepath.Dir(winnerPath), 0o755); err != nil {
-			return fmt.Errorf("failed to create memory directory: %w", err)
-		}
-		if err := os.WriteFile(winnerPath, []byte(merged), 0o644); err != nil {
-			return fmt.Errorf("failed to write merged user memory for %q: %w", winnerUserID, err)
+	defer tx.Rollback() // nolint:errcheck
+	for _, stmt := range []string{
+		`UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`,
+		`UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`,
+	} {
+		if _, err := tx.Exec(stmt, winnerUserID, loserUserID); err != nil {
+			return fmt.Errorf("failed to merge memory users: %w", err)
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM user_memory_profiles WHERE canonical_user_id = ?`, loserUserID); err != nil {
+		return fmt.Errorf("failed to remove merged memory profile: %w", err)
+	}
+	return tx.Commit()
+}
 
-	if err := os.Remove(loserPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove merged user memory for %q: %w", loserUserID, err)
+// SaveMemory creates or updates a scoped memory entry.
+func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) (MemoryEntry, error) {
+	if err := s.ensureAccountUser(userID); err != nil {
+		return MemoryEntry{}, err
+	}
+	statement := strings.TrimSpace(req.Statement)
+	if statement == "" {
+		return MemoryEntry{}, fmt.Errorf("memory statement is required")
+	}
+	evidence := strings.TrimSpace(req.Evidence)
+	if evidence == "" {
+		evidence = "Stored from user interaction"
+	}
+	scope := normalizeScope(req.Scope)
+	category := normalizeCategory(req.Category)
+	importance := clampInt(req.Importance, 1, 5, 3)
+	confidence := req.Confidence
+	if confidence <= 0 || confidence > 1 {
+		confidence = 0.8
+	}
+	now := time.Now().UTC()
+	var expiresAt *time.Time
+	if scope == ScopeShortTerm {
+		ttl := req.TTL
+		if ttl <= 0 {
+			ttl = DefaultShortTermTTL
+		}
+		exp := now.Add(ttl).UTC()
+		expiresAt = &exp
+	}
+	embedding := append([]float64(nil), req.Embedding...)
+	if len(embedding) == 0 {
+		embedding = s.embedBestEffort(ctx, memoryEmbeddingText(scope, category, statement, evidence))
+	}
+	embeddingModel := ""
+	embeddingDim := 0
+	if len(embedding) > 0 {
+		embeddingModel = s.embedModel
+		embeddingDim = len(embedding)
 	}
 
-	s.log.Debug("memory.user.merged", "merged user memory", config.F("source_user_id", loserUserID), config.F("target_user_id", winnerUserID))
+	var supersedesID any
+	if strings.TrimSpace(req.Supersedes) != "" {
+		id, err := s.markSuperseded(userID, scope, req.Supersedes)
+		if err != nil {
+			return MemoryEntry{}, err
+		}
+		if id > 0 {
+			supersedesID = id
+		}
+	}
+
+	res, err := s.sql.Exec(`
+INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
+	category = excluded.category,
+	statement = excluded.statement,
+	evidence = excluded.evidence,
+	confidence = excluded.confidence,
+	importance = excluded.importance,
+	status = 'active',
+	source_session_id = excluded.source_session_id,
+	updated_at = excluded.updated_at,
+	expires_at = excluded.expires_at,
+	supersedes_id = excluded.supersedes_id,
+	embedding_model = excluded.embedding_model,
+	embedding_dim = excluded.embedding_dim
+`, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance, strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), supersedesID, embeddingModel, embeddingDim)
+	if err != nil {
+		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
+	}
+	id, _ := res.LastInsertId()
+	if id == 0 {
+		_ = s.sql.QueryRow(`SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ?`, userID, scope, statementKey(statement)).Scan(&id)
+	}
+	if err := s.storeMemoryVector(id, embedding); err != nil {
+		return MemoryEntry{}, err
+	}
+	entry, err := s.EntryByID(id)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	s.recordEvent(entry.ID, "updated", "", req.SourceSessionID, "")
+	return entry, nil
+}
+
+// EntryByID reads a memory entry by ID.
+func (s *Store) EntryByID(id int64) (MemoryEntry, error) {
+	rows, err := s.sql.Query(`SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim FROM memory_entries WHERE id = ?`, id)
+	if err != nil {
+		return MemoryEntry{}, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return scanMemoryEntry(rows)
+	}
+	return MemoryEntry{}, sql.ErrNoRows
+}
+
+// Search returns active memories matching the requested filters.
+func (s *Store) Search(ctx context.Context, userID, scope, category, query string, limit int) ([]MemoryEntry, error) {
+	query = strings.TrimSpace(query)
+	var queryVector []float64
+	if query != "" {
+		queryVector = s.embedBestEffort(ctx, query)
+	}
+	return s.searchWithVector(userID, scope, category, query, queryVector, limit)
+}
+
+func (s *Store) searchWithVector(userID, scope, category, query string, queryVector []float64, limit int) ([]MemoryEntry, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+	if limit > 25 {
+		limit = 25
+	}
+	if err := s.expireOldMemories(); err != nil {
+		return nil, err
+	}
+	normalizedScope := normalizeOptionalScope(scope)
+	normalizedCategory := normalizeOptionalCategory(category)
+	query = strings.TrimSpace(query)
+	var entries []MemoryEntry
+	if query != "" {
+		if vectorEntries, ok, err := s.searchMemoryVectors(queryVector, userID, normalizedScope, normalizedCategory, limit); err != nil {
+			return nil, err
+		} else if ok {
+			entries = vectorEntries
+		} else {
+			var err error
+			entries, err = s.activeEntries(userID, normalizedScope, normalizedCategory)
+			if err != nil || len(entries) == 0 {
+				return entries, err
+			}
+			for i := range entries {
+				if strings.Contains(strings.ToLower(entries[i].Statement), strings.ToLower(query)) {
+					entries[i].Score = 0.55 + (float64(entries[i].Importance)/5)*0.20
+				}
+			}
+			sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
+		}
+	} else {
+		var err error
+		entries, err = s.activeEntries(userID, normalizedScope, normalizedCategory)
+		if err != nil || len(entries) == 0 {
+			return entries, err
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].Importance == entries[j].Importance {
+				return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
+			}
+			return entries[i].Importance > entries[j].Importance
+		})
+	}
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	ids := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.ID)
+		s.recordEvent(entry.ID, "retrieved", "", "", "")
+	}
+	if len(ids) > 0 {
+		now := formatTime(time.Now())
+		for _, id := range ids {
+			_, _ = s.sql.Exec(`UPDATE memory_entries SET last_used_at = ? WHERE id = ?`, now, id)
+		}
+	}
+	return entries, nil
+}
+
+// ListMemories returns active memories without semantic ranking.
+func (s *Store) ListMemories(userID, scope, category string, limit int) ([]MemoryEntry, error) {
+	return s.Search(context.Background(), userID, scope, category, "", limit)
+}
+
+// Forget marks one or more user memories deleted.
+func (s *Store) Forget(userID, target, scope string) (int64, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return 0, fmt.Errorf("memory target is required")
+	}
+	if strings.EqualFold(target, "all") {
+		res, err := s.sql.Exec(`UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND status = 'active'`, formatTime(time.Now()), userID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to delete memories for %q: %w", userID, err)
+		}
+		return res.RowsAffected()
+	}
+	stmt := `UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status = 'active'`
+	args := []any{formatTime(time.Now()), userID, statementKey(target)}
+	if normalizeOptionalScope(scope) != "" {
+		stmt += ` AND scope = ?`
+		args = append(args, normalizeScope(scope))
+	}
+	res, err := s.sql.Exec(stmt, args...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete memory for %q: %w", userID, err)
+	}
+	return res.RowsAffected()
+}
+
+// Read renders all active memories for compatibility with older callers/tests.
+func (s *Store) Read(userID string) (string, error) {
+	entries, err := s.ListMemories(userID, "", "", 100)
+	if err != nil {
+		return "", err
+	}
+	intro, _ := s.ReadIntro(userID)
+	return RenderMemory(intro, entries), nil
+}
+
+// ReadCategory renders active memories for one category.
+func (s *Store) ReadCategory(userID, category string) (string, error) {
+	entries, err := s.ListMemories(userID, "", category, 100)
+	if err != nil || len(entries) == 0 {
+		return "", err
+	}
+	return RenderMemory("", entries), nil
+}
+
+// SetWithContext stores a long-term memory for compatibility with memory.save handlers.
+func (s *Store) SetWithContext(ctx context.Context, userID, statement, evidence, category string) error {
+	_, err := s.SaveMemory(ctx, userID, SaveRequest{Scope: ScopeLongTerm, Category: category, Statement: statement, Evidence: evidence, Confidence: 0.9, Importance: 3})
+	return err
+}
+
+// Delete marks a specific memory deleted.
+func (s *Store) Delete(userID, statement string) error {
+	_, err := s.Forget(userID, statement, "")
+	return err
+}
+
+// DeleteAll marks all user memories deleted.
+func (s *Store) DeleteAll(userID string) error {
+	_, err := s.Forget(userID, "all", "")
+	return err
+}
+
+// AppendSessionTurn stores a completed session exchange.
+func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
+		return nil
+	}
+	if err := s.ensureAccountUser(userID); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	var expires *time.Time
+	if ttl > 0 {
+		exp := now.Add(ttl).UTC()
+		expires = &exp
+	}
+	_, err := s.sql.Exec(`
+INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, sessionID, userID, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires))
+	if err != nil {
+		return fmt.Errorf("failed to append session turn: %w", err)
+	}
 	return nil
 }
 
-func (s *Store) withSpeakerIntro(userID, content string) (string, error) {
-	parsed := parseMemory(content)
-	if s.speakerLineResolver == nil {
-		return serializeMemory(parsed.Intro, parsed.Sections), nil
+// RecentSessionTurns returns newest completed exchanges, newest first.
+func (s *Store) RecentSessionTurns(sessionID string, offset int, count int) ([]SessionTurn, error) {
+	if offset < 1 {
+		offset = 1
 	}
-
-	intro, err := s.speakerLineResolver(userID)
+	if count < 1 {
+		count = 1
+	}
+	if count > 10 {
+		count = 10
+	}
+	if err := s.expireOldSessionTurns(); err != nil {
+		return nil, err
+	}
+	rows, err := s.sql.Query(`
+SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
+FROM session_turns WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
+`, sessionID, count, offset-1)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve speaker line for %q: %w", userID, err)
+		return nil, fmt.Errorf("failed to read session turns: %w", err)
 	}
-	if strings.TrimSpace(intro) == "" {
-		intro = parsed.Intro
+	defer rows.Close()
+	turns := []SessionTurn{}
+	for rows.Next() {
+		turn, err := scanSessionTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		turns = append(turns, turn)
 	}
-	return serializeMemory(intro, parsed.Sections), nil
+	return turns, rows.Err()
 }
 
-// normalizeCategory maps an input category string to a valid lowercase category name.
-// Falls back to defaultCategory if the input does not match any known category.
+// BuildContext retrieves and formats automatic session context for a request.
+// Durable user memory is model-directed through memory.search.
+func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query string, opts ContextOptions) (RetrievedContext, error) {
+	if strings.TrimSpace(userID) == "" {
+		return RetrievedContext{}, nil
+	}
+	if opts.RecentTurns <= 0 {
+		opts.RecentTurns = 4
+	}
+	if opts.ContextBudgetChars <= 0 {
+		opts.ContextBudgetChars = 12000
+	}
+
+	recent, err := s.RecentSessionTurns(sessionID, 1, opts.RecentTurns)
+	if err != nil {
+		return RetrievedContext{}, err
+	}
+
+	block := s.renderContextBlock(recent, opts.ContextBudgetChars)
+	return RetrievedContext{Block: block, RecentTurnCount: len(recent)}, nil
+}
+
+func (s *Store) renderContextBlock(recent []SessionTurn, maxChars int) string {
+	var b strings.Builder
+	b.WriteString("# Retrieved Memory\n")
+	if len(recent) > 0 {
+		b.WriteString("\n## Recent Exchanges\n")
+		writeTurns(&b, recent)
+	}
+	text := strings.TrimSpace(b.String())
+	if text == "# Retrieved Memory" {
+		return ""
+	}
+	if len(text) > maxChars {
+		text = text[:maxChars] + "..."
+	}
+	return text
+}
+
+func writeEntries(b *strings.Builder, entries []MemoryEntry) {
+	for _, entry := range entries {
+		fmt.Fprintf(b, "- [%s/%s, importance %d] %s\n", entry.Scope, entry.Category, entry.Importance, strings.TrimSpace(entry.Statement))
+		if strings.TrimSpace(entry.Evidence) != "" {
+			fmt.Fprintf(b, "  Evidence: %s\n", strings.TrimSpace(entry.Evidence))
+		}
+	}
+}
+
+func writeTurns(b *strings.Builder, turns []SessionTurn) {
+	for i := len(turns) - 1; i >= 0; i-- {
+		turn := turns[i]
+		fmt.Fprintf(b, "User: %s\nAssistant: %s\n\n", strings.TrimSpace(turn.UserText), strings.TrimSpace(turn.AssistantText))
+	}
+}
+
+func (s *Store) activeEntries(userID, scope, category string) ([]MemoryEntry, error) {
+	query := `SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim FROM memory_entries WHERE canonical_user_id = ? AND status = 'active'`
+	args := []any{userID}
+	if scope != "" {
+		query += ` AND scope = ?`
+		args = append(args, scope)
+	}
+	if category != "" {
+		query += ` AND category = ?`
+		args = append(args, category)
+	}
+	query += ` ORDER BY importance DESC, updated_at DESC`
+	rows, err := s.sql.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read memories: %w", err)
+	}
+	defer rows.Close()
+	entries := []MemoryEntry{}
+	for rows.Next() {
+		entry, err := scanMemoryEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+func scanMemoryEntry(rows interface{ Scan(...any) error }) (MemoryEntry, error) {
+	var entry MemoryEntry
+	var created, updated string
+	var lastUsed, expires sql.NullString
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim); err != nil {
+		return MemoryEntry{}, fmt.Errorf("failed to scan memory entry: %w", err)
+	}
+	entry.CreatedAt = parseTime(created)
+	entry.UpdatedAt = parseTime(updated)
+	if lastUsed.Valid {
+		entry.LastUsedAt = parseTime(lastUsed.String)
+	}
+	if expires.Valid {
+		entry.ExpiresAt = parseTime(expires.String)
+	}
+	return entry, nil
+}
+
+func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) {
+	var turn SessionTurn
+	var toolNames, topicTags, created string
+	var expires sql.NullString
+	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires); err != nil {
+		return SessionTurn{}, fmt.Errorf("failed to scan session turn: %w", err)
+	}
+	turn.ToolNames = splitCSV(toolNames)
+	turn.TopicTags = splitCSV(topicTags)
+	turn.CreatedAt = parseTime(created)
+	if expires.Valid {
+		turn.ExpiresAt = parseTime(expires.String)
+	}
+	return turn, nil
+}
+
+func (s *Store) storeMemoryVector(rowID int64, embedding []float64) error {
+	if rowID <= 0 || len(embedding) == 0 {
+		return nil
+	}
+	if err := s.ensureVectorTable("memory_entry_vectors", len(embedding)); err != nil {
+		return err
+	}
+	serialized, err := serializeVector(embedding)
+	if err != nil {
+		return err
+	}
+	if _, err := s.sql.Exec(`INSERT OR REPLACE INTO memory_entry_vectors(rowid, embedding) VALUES (?, ?)`, rowID, serialized); err != nil {
+		return fmt.Errorf("failed to store memory vector: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) searchMemoryVectors(queryVector []float64, userID, scope, category string, limit int) ([]MemoryEntry, bool, error) {
+	if len(queryVector) == 0 || !s.vectorTableExists("memory_entry_vectors") {
+		return nil, false, nil
+	}
+	serialized, err := serializeVector(queryVector)
+	if err != nil {
+		return nil, false, err
+	}
+	k := limit * 5
+	if k < limit {
+		k = limit
+	}
+	if k < 25 {
+		k = 25
+	}
+	query := `
+SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence, e.confidence, e.importance, e.status, e.source_session_id, e.created_at, e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0), e.embedding_model, e.embedding_dim, v.distance
+FROM memory_entry_vectors v
+JOIN memory_entries e ON e.id = v.rowid
+WHERE v.embedding MATCH ? AND v.k = ? AND e.canonical_user_id = ? AND e.status = 'active'`
+	args := []any{serialized, k, userID}
+	if scope != "" {
+		query += ` AND e.scope = ?`
+		args = append(args, scope)
+	}
+	if category != "" {
+		query += ` AND e.category = ?`
+		args = append(args, category)
+	}
+	query += ` ORDER BY v.distance LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.sql.Query(query, args...)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to search memory vectors: %w", err)
+	}
+	defer rows.Close()
+	entries := []MemoryEntry{}
+	for rows.Next() {
+		entry, distance, err := scanMemoryEntryWithDistance(rows)
+		if err != nil {
+			return nil, true, err
+		}
+		entry.Score = vectorHybridScore(distance, entry.Importance, entry.UpdatedAt)
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, true, err
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
+	return entries, true, nil
+}
+
+func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEntry, float64, error) {
+	var entry MemoryEntry
+	var created, updated string
+	var lastUsed, expires sql.NullString
+	var distance float64
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim, &distance); err != nil {
+		return MemoryEntry{}, 0, fmt.Errorf("failed to scan memory vector result: %w", err)
+	}
+	entry.CreatedAt = parseTime(created)
+	entry.UpdatedAt = parseTime(updated)
+	if lastUsed.Valid {
+		entry.LastUsedAt = parseTime(lastUsed.String)
+	}
+	if expires.Valid {
+		entry.ExpiresAt = parseTime(expires.String)
+	}
+	return entry, distance, nil
+}
+
+func (s *Store) ensureVectorTable(name string, dimension int) error {
+	if dimension <= 0 {
+		return fmt.Errorf("embedding dimension must be positive")
+	}
+	if dim, ok := s.vectorTableDimension(name); ok && dim == dimension {
+		return nil
+	}
+	if _, err := s.sql.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, name)); err != nil {
+		return fmt.Errorf("failed to drop stale vector table %s: %w", name, err)
+	}
+	if _, err := s.sql.Exec(fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(embedding float[%d])`, name, dimension)); err != nil {
+		return fmt.Errorf("failed to create vector table %s: %w", name, err)
+	}
+	return nil
+}
+
+func (s *Store) vectorTableExists(name string) bool {
+	_, ok := s.vectorTableDimension(name)
+	return ok
+}
+
+func (s *Store) vectorTableDimension(name string) (int, bool) {
+	var sqlText string
+	err := s.sql.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&sqlText)
+	if err != nil || !strings.Contains(sqlText, "float[") {
+		return 0, false
+	}
+	start := strings.Index(sqlText, "float[") + len("float[")
+	end := strings.Index(sqlText[start:], "]")
+	if end < 0 {
+		return 0, false
+	}
+	var dim int
+	if _, err := fmt.Sscanf(sqlText[start:start+end], "%d", &dim); err != nil || dim <= 0 {
+		return 0, false
+	}
+	return dim, true
+}
+
+func serializeVector(values []float64) ([]byte, error) {
+	vector := make([]float32, 0, len(values))
+	for _, value := range values {
+		vector = append(vector, float32(value))
+	}
+	serialized, err := sqlite_vec.SerializeFloat32(vector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize embedding vector: %w", err)
+	}
+	return serialized, nil
+}
+
+func distanceToSimilarity(distance float64) float64 {
+	if distance < 0 {
+		distance = 0
+	}
+	return 1 / (1 + distance)
+}
+
+func vectorHybridScore(distance float64, importance int, updatedAt time.Time) float64 {
+	return distanceToSimilarity(distance)*0.55 + (float64(importance)/5)*0.20 + recencyScore(updatedAt)*0.15 + 0.10
+}
+
+func (s *Store) markSuperseded(userID, scope, statement string) (int64, error) {
+	var id int64
+	err := s.sql.QueryRow(`SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status = 'active'`, userID, normalizeScope(scope), statementKey(statement)).Scan(&id)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to find superseded memory: %w", err)
+	}
+	if _, err := s.sql.Exec(`UPDATE memory_entries SET status = 'superseded', updated_at = ? WHERE id = ?`, formatTime(time.Now()), id); err != nil {
+		return 0, fmt.Errorf("failed to supersede memory: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) expireOldMemories() error {
+	_, err := s.sql.Exec(`UPDATE memory_entries SET status = 'expired', updated_at = ? WHERE status = 'active' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()), formatTime(time.Now()))
+	if err != nil {
+		return fmt.Errorf("failed to expire memories: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) expireOldSessionTurns() error {
+	_, err := s.sql.Exec(`DELETE FROM session_turns WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()))
+	if err != nil {
+		return fmt.Errorf("failed to expire session turns: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) recordEvent(memoryID int64, eventType, requestID, sessionID, metadata string) {
+	_, _ = s.sql.Exec(`INSERT INTO memory_events (memory_id, event_type, request_id, session_id, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?)`, nullableID(memoryID), eventType, requestID, sessionID, formatTime(time.Now()), metadata)
+}
+
+func (s *Store) ensureAccountUser(userID string) error {
+	if strings.TrimSpace(userID) == "" {
+		return fmt.Errorf("user memory: user id is required")
+	}
+	now := formatTime(time.Now())
+	_, err := s.sql.Exec(`INSERT OR IGNORE INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, userID, now, now)
+	if err != nil {
+		return fmt.Errorf("failed to ensure account user %q: %w", userID, err)
+	}
+	return nil
+}
+
+func (s *Store) embedBestEffort(ctx context.Context, text string) []float64 {
+	if s == nil || s.embedder == nil || strings.TrimSpace(s.embedModel) == "" || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	resp, err := s.embedder.Embed(ctx, llm.EmbedRequest{Model: s.embedModel, Input: strings.TrimSpace(text)})
+	if err != nil || len(resp.Embeddings) == 0 {
+		return nil
+	}
+	return append([]float64(nil), resp.Embeddings[0]...)
+}
+
+func memoryEmbeddingText(scope, category, statement, evidence string) string {
+	return strings.TrimSpace(scope + "\n" + category + "\n" + statement + "\nEvidence: " + evidence)
+}
+
+func normalizeScope(scope string) string {
+	scope = strings.TrimSpace(strings.ToLower(scope))
+	scope = strings.ReplaceAll(scope, "-", "_")
+	scope = strings.ReplaceAll(scope, " ", "_")
+	if scope == ScopeLongTerm || scope == "long" || scope == "persistent" {
+		return ScopeLongTerm
+	}
+	return ScopeShortTerm
+}
+
+func normalizeOptionalScope(scope string) string {
+	if strings.TrimSpace(scope) == "" {
+		return ""
+	}
+	return normalizeScope(scope)
+}
+
 func normalizeCategory(cat string) string {
 	cat = strings.TrimSpace(strings.ToLower(cat))
+	cat = strings.ReplaceAll(cat, "-", "_")
 	cat = strings.ReplaceAll(cat, " ", "_")
+	if cat == "preferences" {
+		cat = "durable_preferences"
+	}
 	for _, valid := range ValidCategories {
 		if cat == valid {
 			return cat
 		}
 	}
-	return defaultCategory
+	return "notes"
 }
 
-// displayCategoryName returns the human-readable Markdown heading for a category.
-func displayCategoryName(cat string) string {
-	parts := strings.Split(normalizeCategory(cat), "_")
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		r := []rune(part)
-		r[0] = []rune(strings.ToUpper(string(r[0])))[0]
-		parts[i] = string(r)
+func normalizeOptionalCategory(cat string) string {
+	if strings.TrimSpace(cat) == "" {
+		return ""
 	}
-	return strings.Join(parts, " ")
+	return normalizeCategory(cat)
 }
 
-// formatEntry builds the two-line Markdown block for a single fact.
-func formatEntry(statement, evidence string) string {
-	evidence = sanitizeEvidence(evidence)
-	date := time.Now().Format("2006-01-02")
-	if hasExplicitEvidenceDate(evidence) {
-		return fmt.Sprintf("%s\n\n- Evidence: %s.\n", statement, evidence)
+func statementKey(statement string) string {
+	return strings.ToLower(strings.Join(strings.Fields(statement), " "))
+}
+
+func clampInt(value, minValue, maxValue, fallback int) int {
+	if value == 0 {
+		return fallback
 	}
-	return fmt.Sprintf("%s\n\n- Evidence: %s. Date: [%s].\n", statement, evidence, date)
-}
-
-var explicitEvidenceDateRE = regexp.MustCompile(`(?i)\bDate:\s*\[[^\]]+\]$`)
-
-func sanitizeEvidence(evidence string) string {
-	evidence = strings.TrimSpace(evidence)
-	evidence = strings.TrimRight(evidence, ". ")
-	return evidence
-}
-
-func hasExplicitEvidenceDate(evidence string) bool {
-	return explicitEvidenceDateRE.MatchString(evidence)
-}
-
-// parseEntries splits a raw section body (no header lines) into individual entry blocks.
-// Each entry is the text between blank-line separators. Returns one block per valid entry.
-func parseEntries(body string) []string {
-	raw := strings.Split(body, "\n\n")
-	var entries []string
-	for _, block := range raw {
-		block = strings.TrimSpace(block)
-		if block == "" {
-			continue
-		}
-		lines := strings.SplitN(block, "\n", 2)
-		if len(lines) == 2 && strings.HasPrefix(strings.TrimSpace(lines[1]), "- Evidence:") {
-			entries = append(entries, block)
-		}
+	if value < minValue {
+		return minValue
 	}
-	return entries
-}
-
-// statementOf extracts the statement line (first line) from an entry block.
-func statementOf(entry string) string {
-	lines := strings.SplitN(entry, "\n", 2)
-	return strings.TrimSpace(lines[0])
-}
-
-type parsedMemory struct {
-	Intro    string
-	Sections map[string]string
-}
-
-// MemoryEntry is a structured fact parsed from markdown memory content.
-type MemoryEntry struct {
-	Statement string `json:"statement"`
-	Evidence  string `json:"evidence"`
-}
-
-// ParsedContent is a structured view of a user memory markdown document.
-type ParsedContent struct {
-	Intro    string                   `json:"intro,omitempty"`
-	Sections map[string][]MemoryEntry `json:"sections,omitempty"`
-}
-
-func parseMemory(content string) parsedMemory {
-	parsed := parsedMemory{Sections: make(map[string]string)}
-	body := memoryBody(content)
-
-	var introLines []string
-	var currentCat string
-	var buf strings.Builder
-
-	flush := func() {
-		if currentCat != "" {
-			parsed.Sections[currentCat] = buf.String()
-			buf.Reset()
-		}
+	if value > maxValue {
+		return maxValue
 	}
-
-	for _, line := range strings.Split(body, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			if currentCat == "" {
-				parsed.Intro = strings.TrimSpace(strings.Join(introLines, "\n"))
-			} else {
-				flush()
-			}
-			currentCat = normalizeCategory(strings.TrimPrefix(line, "## "))
-			continue
-		}
-
-		if currentCat == "" {
-			introLines = append(introLines, line)
-			continue
-		}
-		buf.WriteString(line + "\n")
-	}
-
-	if currentCat == "" {
-		parsed.Intro = strings.TrimSpace(strings.Join(introLines, "\n"))
-	} else {
-		flush()
-	}
-
-	return parsed
+	return value
 }
 
-func memoryBody(content string) string {
-	body := content
-	if strings.HasPrefix(content, "# User Memory") {
-		idx := strings.Index(content, "\n")
-		if idx >= 0 {
-			body = content[idx+1:]
-		} else {
-			body = ""
-		}
+func nullableTime(t *time.Time) any {
+	if t == nil || t.IsZero() {
+		return nil
 	}
-	return strings.TrimLeft(body, "\n")
+	return formatTime(*t)
 }
 
-// parseSections parses a categorized user memory file into a map of
-// category -> section body (the text under each ## heading, excluding the heading itself).
-func parseSections(content string) map[string]string {
-	return parseMemory(content).Sections
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }
 
-// ParseContent converts persisted memory markdown into structured sections and entries.
-func ParseContent(content string) ParsedContent {
-	parsed := parseMemory(content)
-	out := ParsedContent{
-		Intro:    strings.TrimSpace(parsed.Intro),
-		Sections: make(map[string][]MemoryEntry),
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		t = time.Now()
 	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
 
-	for _, cat := range ValidCategories {
-		body, ok := parsed.Sections[cat]
-		if !ok {
-			continue
-		}
-		entries := parseEntries(body)
-		if len(entries) == 0 {
-			continue
-		}
-		out.Sections[cat] = make([]MemoryEntry, 0, len(entries))
-		for _, entry := range entries {
-			lines := strings.SplitN(strings.TrimSpace(entry), "\n", 2)
-			memoryEntry := MemoryEntry{Statement: strings.TrimSpace(lines[0])}
-			if len(lines) == 2 {
-				evidence := strings.TrimSpace(lines[1])
-				evidence = strings.TrimPrefix(evidence, "- Evidence:")
-				memoryEntry.Evidence = strings.TrimSpace(evidence)
-			}
-			out.Sections[cat] = append(out.Sections[cat], memoryEntry)
-		}
+func parseTime(value string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	return t
+}
+
+func recencyScore(t time.Time) float64 {
+	if t.IsZero() {
+		return 0
 	}
+	age := time.Since(t)
+	if age <= 0 {
+		return 1
+	}
+	return 1 / (1 + age.Hours()/168)
+}
 
-	if len(out.Sections) == 0 {
-		out.Sections = nil
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
 	}
 	return out
 }
 
-// serializeMemory writes the intro block and category map back to a full file string.
-func serializeMemory(intro string, sections map[string]string) string {
-	var sb strings.Builder
-	sb.WriteString("# User Memory\n")
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	lines := strings.Split(value, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line = strings.TrimSpace(strings.TrimPrefix(line, "-")); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+// RenderMemory formats entries as compact Markdown for tools and stream payloads.
+func RenderMemory(intro string, entries []MemoryEntry) string {
+	var b strings.Builder
 	if strings.TrimSpace(intro) != "" {
-		sb.WriteString("\n")
-		sb.WriteString(strings.TrimSpace(intro))
-		sb.WriteString("\n")
+		b.WriteString(strings.TrimSpace(intro))
+		b.WriteString("\n\n")
 	}
-	for _, cat := range ValidCategories {
-		body, ok := sections[cat]
-		if !ok || strings.TrimSpace(body) == "" {
-			continue
-		}
-		sb.WriteString("\n## ")
-		sb.WriteString(displayCategoryName(cat))
-		sb.WriteString("\n\n")
-		sb.WriteString(strings.TrimSpace(body))
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
-// serializeSections writes only the category map back to a full file string.
-func serializeSections(sections map[string]string) string {
-	return serializeMemory("", sections)
-}
-
-// migrateIfNeeded detects files in the old flat format (no ## category headers)
-// and migrates all their entries into the ## Notes section.
-// Files already in the categorized format are returned unchanged.
-func migrateIfNeeded(content string) string {
-	if content == "" {
-		return content
-	}
-	if !needsMigration(content) {
-		return content
-	}
-
-	// Old format: parse flat entries and move them all to "notes".
-	entries := parseEntries(memoryBody(content))
 	if len(entries) == 0 {
-		return "# User Memory\n"
+		return strings.TrimSpace(b.String())
 	}
-
-	sections := map[string]string{
-		"notes": strings.Join(entries, "\n\n") + "\n",
+	b.WriteString("# User Memory\n")
+	byHeading := map[string][]MemoryEntry{}
+	for _, entry := range entries {
+		heading := displayCategoryName(entry.Scope + " " + entry.Category)
+		byHeading[heading] = append(byHeading[heading], entry)
 	}
-	return serializeSections(sections)
+	headings := make([]string, 0, len(byHeading))
+	for heading := range byHeading {
+		headings = append(headings, heading)
+	}
+	sort.Strings(headings)
+	for _, heading := range headings {
+		b.WriteString("\n## ")
+		b.WriteString(heading)
+		b.WriteString("\n\n")
+		for _, entry := range byHeading[heading] {
+			b.WriteString(strings.TrimSpace(entry.Statement))
+			b.WriteString("\n\n- Evidence: ")
+			b.WriteString(strings.TrimSpace(entry.Evidence))
+			b.WriteString(".\n\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
-// replaceOrAppendCategorized stores entry in the category section of content.
-// If an entry with a matching statement (case-insensitive) exists anywhere in the
-// file, it is replaced in place (regardless of which section it lives in).
-// Otherwise the entry is appended to the given category section.
-func replaceOrAppendCategorized(content, statement, newEntry, cat string) string {
-	parsed := parseMemory(content)
-	sections := parsed.Sections
-
-	// Search all sections for an existing matching statement.
-	for secCat, body := range sections {
-		entries := parseEntries(body)
-		for i, e := range entries {
-			if strings.EqualFold(statementOf(e), strings.TrimSpace(statement)) {
-				entries[i] = strings.TrimSpace(newEntry)
-				sections[secCat] = strings.Join(entries, "\n\n") + "\n"
-				return serializeMemory(parsed.Intro, sections)
-			}
-		}
+func displayCategoryName(value string) string {
+	value = strings.ReplaceAll(value, "_", " ")
+	parts := strings.Fields(value)
+	for i, part := range parts {
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
 	}
-
-	// Not found — append to the target category.
-	existing := strings.TrimSpace(sections[cat])
-	if existing == "" {
-		sections[cat] = strings.TrimSpace(newEntry) + "\n"
-	} else {
-		sections[cat] = existing + "\n\n" + strings.TrimSpace(newEntry) + "\n"
-	}
-	return serializeMemory(parsed.Intro, sections)
+	return strings.Join(parts, " ")
 }
 
-// deleteCategorizedEntry removes the entry with a matching statement from any
-// category section. Returns the updated file content.
-func deleteCategorizedEntry(content, statement string) string {
-	parsed := parseMemory(content)
-	sections := parsed.Sections
-	for cat, body := range sections {
-		entries := parseEntries(body)
-		kept := entries[:0]
-		for _, e := range entries {
-			if !strings.EqualFold(statementOf(e), strings.TrimSpace(statement)) {
-				kept = append(kept, e)
-			}
-		}
-		if len(kept) == 0 {
-			sections[cat] = ""
-		} else {
-			sections[cat] = strings.Join(kept, "\n\n") + "\n"
-		}
-	}
-	return serializeMemory(parsed.Intro, sections)
+// ParsedContent is a UI-friendly representation of rendered memory content.
+type ParsedContent struct {
+	Intro    string            `json:"intro,omitempty"`
+	Sections map[string]string `json:"sections,omitempty"`
 }
 
-func mergeCategorizedContent(primary, secondary string) string {
-	primaryContent := migrateIfNeeded(primary)
-	secondaryContent := migrateIfNeeded(secondary)
-	primaryParsed := parseMemory(primaryContent)
-	secondaryParsed := parseMemory(secondaryContent)
-	primarySections := primaryParsed.Sections
-	secondarySections := secondaryParsed.Sections
-	mergedSections := make(map[string]string, len(ValidCategories))
-
-	for _, cat := range ValidCategories {
-		entries := make([]string, 0)
-		seen := make(map[string]struct{})
-
-		for _, block := range parseEntries(primarySections[cat]) {
-			statement := strings.ToLower(statementOf(block))
-			if _, ok := seen[statement]; ok {
-				continue
-			}
-			seen[statement] = struct{}{}
-			entries = append(entries, strings.TrimSpace(block))
+// ParseContent converts rendered memory Markdown into sections for streaming UIs.
+func ParseContent(content string) ParsedContent {
+	parsed := ParsedContent{Sections: map[string]string{}}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return parsed
+	}
+	lines := strings.Split(content, "\n")
+	var current string
+	var b strings.Builder
+	flush := func() {
+		if current != "" {
+			parsed.Sections[current] = strings.TrimSpace(b.String())
+			b.Reset()
 		}
-		for _, block := range parseEntries(secondarySections[cat]) {
-			statement := strings.ToLower(statementOf(block))
-			if _, ok := seen[statement]; ok {
-				continue
-			}
-			seen[statement] = struct{}{}
-			entries = append(entries, strings.TrimSpace(block))
-		}
-
-		if len(entries) == 0 {
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "# User Memory") {
 			continue
 		}
-		sort.SliceStable(entries, func(i, j int) bool {
-			return strings.ToLower(statementOf(entries[i])) < strings.ToLower(statementOf(entries[j]))
-		})
-		mergedSections[cat] = strings.Join(entries, "\n\n") + "\n"
+		if strings.HasPrefix(line, "## ") {
+			flush()
+			current = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+			continue
+		}
+		if current == "" && strings.HasPrefix(strings.TrimSpace(line), "You are speaking with ") {
+			parsed.Intro = strings.TrimSpace(line)
+			continue
+		}
+		if current != "" {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
 	}
-
-	if len(mergedSections) == 0 {
-		return ""
+	flush()
+	if len(parsed.Sections) == 0 {
+		parsed.Sections = nil
 	}
-	intro := primaryParsed.Intro
-	if strings.TrimSpace(intro) == "" {
-		intro = secondaryParsed.Intro
-	}
-	return serializeMemory(intro, mergedSections)
+	return parsed
 }

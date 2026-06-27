@@ -17,7 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -31,10 +31,11 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 
 	dg.handleMessage(discordMessage("msg-1", "channel-1", "", "123", "Alice", "hello discord"))
 
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %d", len(chat.requests))
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	last := chat.requests[0].Messages[len(chat.requests[0].Messages)-1]
+	last := primary[0].Messages[len(primary[0].Messages)-1]
 	if last.Content != "hello discord" {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
@@ -54,8 +55,8 @@ func TestDiscordIgnoresUnmentionedGuildMessage(t *testing.T) {
 
 	dg.handleMessage(discordMessage("msg-1", "channel-1", "guild-1", "123", "Alice", "hello guild"))
 
-	if len(chat.requests) != 0 {
-		t.Fatalf("expected no LLM request, got %d", len(chat.requests))
+	if len(primaryDiscordRequests(chat.requests)) != 0 {
+		t.Fatalf("expected no LLM request, got %d", len(primaryDiscordRequests(chat.requests)))
 	}
 	if len(rest.sentMessages()) != 0 {
 		t.Fatalf("expected no sent messages, got %+v", rest.sentMessages())
@@ -75,10 +76,11 @@ func TestDiscordMentionedGuildMessageStripsMentionAndResolvesMentions(t *testing
 	}{{ID: "456", Username: "Bob"}}
 	dg.handleMessage(msg)
 
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %d", len(chat.requests))
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	prompt := chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
 	if prompt != "hello @Bob" {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
@@ -106,10 +108,11 @@ func TestDiscordReplyToBotIncludesReplyContext(t *testing.T) {
 	msg.ReferencedMessage.Author.Username = "Oswald"
 	dg.handleMessage(msg)
 
-	if len(chat.requests) != 1 {
-		t.Fatalf("expected one LLM request, got %d", len(chat.requests))
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 {
+		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	prompt := chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content
+	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
 	if !strings.Contains(prompt, "[Replying to Oswald: \"prior answer\"]") || !strings.Contains(prompt, "follow up") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
@@ -141,7 +144,20 @@ func (f *discordFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb fun
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.mu.Unlock()
+	if req.Format == "json_object" {
+		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
+	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "discord response"}}, nil
+}
+
+func primaryDiscordRequests(requests []llm.ChatRequest) []llm.ChatRequest {
+	out := make([]llm.ChatRequest, 0, len(requests))
+	for _, req := range requests {
+		if req.Format != "json_object" {
+			out = append(out, req)
+		}
+	}
+	return out
 }
 
 type fakeDiscordREST struct {
@@ -199,13 +215,13 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
 	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := accountlinking.NewService(filepath.Join(dir, "links.json"), memories, log)
+	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
 	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
 	chat := &discordFakeChatter{}
-	ai := agent.NewAgent(chat, nil, registry.New(log), "test-model", "", soulStore, memories, memory.ContextBudget{PromptLimit: 100000}, 3, time.Minute, memory.NewStore(memory.Options{}, log), log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	dg := &Gateway{

@@ -21,6 +21,7 @@ LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald
 RUN apk add --no-cache ca-certificates tzdata libstdc++
 
 RUN addgroup -S oswald-group && adduser -S oswald-ai -G oswald-group
+RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
 
 WORKDIR /home/oswald-ai/
 

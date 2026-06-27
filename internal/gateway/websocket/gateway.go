@@ -142,6 +142,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		}, gatewayruntime.Dependencies{
 			Broker:   b,
 			Commands: wg.Commands,
+			Access:   wg.Links,
 			Log:      wg.Log,
 		}, &runtimeResponder{conn: conn, messageType: messageType})
 	}
