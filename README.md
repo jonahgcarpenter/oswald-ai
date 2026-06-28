@@ -80,6 +80,6 @@ What is Bitcoins current price?
 - [x] Uncensored tool calling model
 - [x] Multi-gateway response routing and queuing
 - [x] Persistent conversation history (multi-user context)
-- [x] Support for images
-- [ ] Support for files
+- [] Support for images, gifs, and files
+- [] Global vs User defined MCP servers
 - [ ] STT & TTS support
