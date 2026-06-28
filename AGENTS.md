@@ -205,7 +205,7 @@ Prompt-budget behavior:
 
 Context budgeting lives in `internal/promptbudget/`.
 
-- Bifrost is the runtime LLM gateway; Oswald does not depend on live model-provider access during tests
+- Oswald uses an OpenAI-compatible model gateway at runtime, but does not depend on live model-provider access during tests
 - `MODEL_CONTEXT_WINDOW` and `MODEL_MAX_OUTPUT_TOKENS` provide explicit context-budget overrides
 - Max input tokens are derived as context window minus max output tokens when possible
 - If overrides do not provide a field, package defaults are used
@@ -378,7 +378,7 @@ The registry:
 - Consecutive failures are tracked per request
 - Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
 
-## Bifrost Gateway Integration
+## Model Gateway Integration
 
 Files:
 
@@ -389,9 +389,9 @@ Files:
 
 Notes:
 
-- Bifrost is the LLM gateway and model router
-- `LLM_GATEWAY_URL` points at Bifrost, and `LLM_GATEWAY_VIRTUAL_KEY` can select a Bifrost virtual key
-- `MODEL_*` environment overrides take precedence over package defaults for prompt budgeting
+- `LLM_GATEWAY_URL` points at an OpenAI-compatible model gateway
+- `LLM_GATEWAY_VIRTUAL_KEY` can pass an optional gateway routing key when supported by the configured gateway
+- `MODEL_*` environment overrides take precedence over discovered model metadata and package defaults for prompt budgeting
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
 - `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic user-memory retrieval
 - The client maps between internal app types and the gateway's OpenAI-compatible wire format
@@ -435,7 +435,7 @@ gofmt -w .
 
 ## Test Standards
 
-Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no Bifrost, LLM, gateway, Discord, BlueBubbles, GitHub MCP, SearXNG, or embedding service access.
+Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no live model gateway, Discord, BlueBubbles, GitHub MCP, SearXNG, or embedding service access.
 
 - Use fake LLM clients, fake gateway transports, `httptest` servers, temporary directories, and isolated temporary SQLite databases
 - Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `SEARXNG_URL`, or model budget variables in tests
@@ -701,7 +701,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - WebSocket gateway has no authentication layer
 - Only nine builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
 - GitHub is the only MCP server integration today
-- Bifrost is the OpenAI-compatible LLM gateway; prompt budgeting uses optional `MODEL_*` overrides or package defaults
+- Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
 
 Account-linking note:
 

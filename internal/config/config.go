@@ -20,7 +20,7 @@ type Config struct {
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
-	LLMGatewayVirtualKey     string        // Optional Bifrost virtual key for LLM gateway requests
+	LLMGatewayVirtualKey     string        // Optional gateway routing key for LLM gateway requests
 	LLMGatewayTimeout        time.Duration // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
 	ModelContextWindow       int           // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int           // Optional model output-token reserve override for prompt budgeting

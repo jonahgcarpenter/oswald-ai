@@ -12,7 +12,7 @@ const (
 	defaultOutputTokens  = 8192
 )
 
-// Details describes model metadata discovered from OpenRouter and environment overrides.
+// Details describes model metadata discovered from a catalog and environment overrides.
 type Details struct {
 	Name            string
 	Provider        string
@@ -23,13 +23,13 @@ type Details struct {
 	Confidence      string
 }
 
-// Resolve discovers model metadata from OpenRouter, applies environment overrides,
+// Resolve discovers model metadata from OpenRouter's catalog, applies environment overrides,
 // then falls back to package defaults for any missing values.
 func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Details, error) {
 	modelLog := log.Server("modelinfo")
 	openRouter, err := ResolveFromOpenRouter(ctx, cfg.LLMGatewayModel, modelLog)
 	if err != nil {
-		modelLog.Warn("modelinfo.openrouter.resolve_failed", "failed to resolve model details from OpenRouter", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
+		modelLog.Warn("modelinfo.openrouter.resolve_failed", "failed to resolve model metadata from OpenRouter catalog", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
 	}
 
 	details := openRouter
@@ -46,7 +46,7 @@ func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Detai
 
 	details = normalizeDetails(details)
 	if err != nil {
-		return details, fmt.Errorf("modelinfo: OpenRouter details unavailable: %w", err)
+		return details, fmt.Errorf("modelinfo: OpenRouter catalog metadata unavailable: %w", err)
 	}
 	return details, nil
 }
@@ -87,7 +87,7 @@ func logOverrideDiscrepancy(log *config.Logger, model string, field string, envV
 	if !hasOpenRouter || openRouterValue <= 0 || envValue == openRouterValue {
 		return
 	}
-	log.Info("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
+	log.Info("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter catalog metadata", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
 }
 
 func normalizeDetails(details Details) Details {
