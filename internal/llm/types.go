@@ -25,6 +25,7 @@ type gatewayContentPart struct {
 type gatewayMessage struct {
 	Role             string            `json:"role"`
 	Content          interface{}       `json:"content,omitempty"`
+	Reasoning        string            `json:"reasoning,omitempty"`
 	Thinking         string            `json:"thinking,omitempty"`
 	ReasoningContent string            `json:"reasoning_content,omitempty"`
 	ToolCalls        []gatewayToolCall `json:"tool_calls,omitempty"`

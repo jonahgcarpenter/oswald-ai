@@ -97,10 +97,11 @@ func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"model\":\"stream-model\",\"choices\":[{\"delta\":{\"thinking\":\"think\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"model\":\"stream-model\",\"choices\":[{\"delta\":{\"reasoning\":\"think\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"tool.name\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8,\"total_tokens\":15}}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -113,8 +114,11 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 	if err != nil {
 		t.Fatalf("stream Chat returned error: %v", err)
 	}
-	if resp.Model != "stream-model" || resp.Message.Thinking != "think" || resp.Message.Content != "hello" || resp.DoneReason != "tool_calls" {
+	if resp.Model != "stream-model" || resp.Message.Thinking != "think" || resp.Message.Content != "hello" || resp.DoneReason != "stop" {
 		t.Fatalf("unexpected stream response: %+v", resp)
+	}
+	if resp.PromptTokens != 7 || resp.CompletionTokens != 8 || resp.TotalTokens != 15 {
+		t.Fatalf("unexpected stream usage: %+v", resp)
 	}
 	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "call_1" || resp.Message.ToolCalls[0].Function.Arguments["x"] != float64(1) {
 		t.Fatalf("unexpected stream tool call: %+v", resp.Message.ToolCalls)
