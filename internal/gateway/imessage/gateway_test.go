@@ -99,6 +99,98 @@ func TestIMessageReplyToBotIncludesReplyContext(t *testing.T) {
 	}
 }
 
+func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:   "msg-1",
+		Text:   "@Oswald hello",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+
+	if !bb.waitForPath("/api/v1/chat/chat%3B+%3Bgroup/typing") {
+		t.Fatalf("expected escaped typing request, got paths %+v", bb.paths())
+	}
+	if !bb.waitForPath("/api/v1/chat/chat%3B+%3Bgroup/read") {
+		t.Fatalf("expected escaped read receipt request, got paths %+v", bb.paths())
+	}
+}
+
+func TestIMessageReadReceiptNotSentForIgnoredGroupMessage(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:   "msg-1",
+		Text:   "hello group",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+
+	if bb.waitForPath("/api/v1/chat/chat%3B+%3Bgroup/read") {
+		t.Fatalf("expected no read receipt for ignored message, got paths %+v", bb.paths())
+	}
+}
+
+func TestIMessageTypingAndReadRequirePrivateAPIHelper(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	bb.setCapabilities(false, true)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:   "msg-1",
+		Text:   "hello imessage",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+	})
+
+	if bb.waitForPath("/api/v1/chat/chat-direct/typing") {
+		t.Fatalf("expected no typing request without private api, got paths %+v", bb.paths())
+	}
+	if bb.waitForPath("/api/v1/chat/chat-direct/read") {
+		t.Fatalf("expected no read receipt without private api, got paths %+v", bb.paths())
+	}
+}
+
+func TestIMessageCapabilityRetryStopsWhenHelperReady(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	bb.setCapabilities(true, false)
+	bb.setHelperReadyAfter(3)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	if !g.refreshBlueBubblesCapabilitiesWithRetry(5, 0) {
+		t.Fatal("expected capabilities to become available")
+	}
+	if attempts := bb.serverInfoRequests(); attempts != 3 {
+		t.Fatalf("expected 3 server info attempts, got %d", attempts)
+	}
+}
+
+func TestIMessageCapabilityRetryStopsAfterLimit(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	bb.setCapabilities(true, false)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	if g.refreshBlueBubblesCapabilitiesWithRetry(5, 0) {
+		t.Fatal("expected capabilities to remain unavailable")
+	}
+	if attempts := bb.serverInfoRequests(); attempts != 5 {
+		t.Fatalf("expected 5 server info attempts, got %d", attempts)
+	}
+}
+
 func TestIMessageEndpointBuilders(t *testing.T) {
 	endpoint, err := buildBlueBubblesMessageEndpoint("http://bb/base/", "a/b", "pw")
 	if err != nil {
@@ -113,6 +205,13 @@ func TestIMessageEndpointBuilders(t *testing.T) {
 	}
 	if !strings.Contains(attachment, "/api/v1/attachment/att-1/download") || !strings.Contains(attachment, "original=true") {
 		t.Fatalf("unexpected attachment endpoint %q", attachment)
+	}
+	chatAction, err := buildBlueBubblesChatActionEndpoint("http://bb/base/", "chat;+;group", "typing", "pw")
+	if err != nil {
+		t.Fatalf("chat action endpoint: %v", err)
+	}
+	if !strings.Contains(chatAction, "/base/api/v1/chat/chat%3B+%3Bgroup/typing") || !strings.Contains(chatAction, "guid=pw") {
+		t.Fatalf("unexpected chat action endpoint %q", chatAction)
 	}
 }
 
@@ -142,17 +241,41 @@ func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 }
 
 type fakeBlueBubbles struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	sent   []sendTextRequest
+	server           *httptest.Server
+	mu               sync.Mutex
+	sent             []sendTextRequest
+	seenPaths        []string
+	privateAPI       bool
+	helperConnected  bool
+	serverInfoCount  int
+	helperReadyAfter int
 }
 
 func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
 	t.Helper()
 	bb := &fakeBlueBubbles{}
+	bb.privateAPI = true
+	bb.helperConnected = true
 	bb.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		bb.mu.Lock()
+		bb.seenPaths = append(bb.seenPaths, r.URL.EscapedPath())
+		privateAPI := bb.privateAPI
+		helperConnected := bb.helperConnected
+		if r.URL.Path == "/api/v1/server/info" {
+			bb.serverInfoCount++
+			if bb.helperReadyAfter > 0 && bb.serverInfoCount >= bb.helperReadyAfter {
+				bb.helperConnected = true
+				helperConnected = true
+			}
+		}
+		bb.mu.Unlock()
 		switch {
+		case r.URL.Path == "/api/v1/server/info":
+			_ = json.NewEncoder(w).Encode(serverInfoResponse{Data: struct {
+				PrivateAPI      bool `json:"private_api"`
+				HelperConnected bool `json:"helper_connected"`
+			}{PrivateAPI: privateAPI, HelperConnected: helperConnected}})
 		case r.URL.Path == "/api/v1/contact/query":
 			_, _ = w.Write([]byte(`{"data":[{"displayName":"Alice"}]}`))
 		case strings.Contains(r.URL.Path, "/typing"):
@@ -173,6 +296,44 @@ func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
 		}
 	}))
 	return bb
+}
+
+func (bb *fakeBlueBubbles) setCapabilities(privateAPI, helperConnected bool) {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	bb.privateAPI = privateAPI
+	bb.helperConnected = helperConnected
+}
+
+func (bb *fakeBlueBubbles) setHelperReadyAfter(attempt int) {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	bb.helperReadyAfter = attempt
+}
+
+func (bb *fakeBlueBubbles) serverInfoRequests() int {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	return bb.serverInfoCount
+}
+
+func (bb *fakeBlueBubbles) paths() []string {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	return append([]string(nil), bb.seenPaths...)
+}
+
+func (bb *fakeBlueBubbles) waitForPath(path string) bool {
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, seen := range bb.paths() {
+			if seen == path {
+				return true
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
 
 func (bb *fakeBlueBubbles) sentMessages() []sendTextRequest {

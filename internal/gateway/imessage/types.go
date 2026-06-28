@@ -13,13 +13,16 @@ import (
 )
 
 const (
-	chatStyleGroup     = 43
-	chatStyleDirect    = 45
-	defaultWebhookPath = "/imessage/webhook"
-	defaultSendMethod  = "private-api"
-	fallbackSendMethod = "apple-script"
-	messageIndexTTL    = time.Hour
-	contactCacheTTL    = 6 * time.Hour
+	chatStyleGroup       = 43
+	chatStyleDirect      = 45
+	defaultWebhookPath   = "/imessage/webhook"
+	defaultSendMethod    = "private-api"
+	fallbackSendMethod   = "apple-script"
+	capabilityAttempts   = 5
+	capabilityRetryDelay = 500 * time.Millisecond
+	typingAfterReadDelay = 150 * time.Millisecond
+	messageIndexTTL      = time.Hour
+	contactCacheTTL      = 6 * time.Hour
 )
 
 var mentionRE = regexp.MustCompile(`@?Oswald\b`)
@@ -35,6 +38,10 @@ type Gateway struct {
 	Log                 *config.Logger
 	Broker              *broker.Broker
 	HTTPClient          *http.Client
+	capabilityMu        sync.Mutex
+	capabilitiesLoaded  bool
+	privateAPIEnabled   bool
+	helperConnected     bool
 	messageMu           sync.RWMutex
 	messageIndex        map[string]messageContext
 	contactMu           sync.RWMutex
@@ -145,6 +152,13 @@ type contactRecord struct {
 type contactNameCacheEntry struct {
 	DisplayName string
 	ExpiresAt   time.Time
+}
+
+type serverInfoResponse struct {
+	Data struct {
+		PrivateAPI      bool `json:"private_api"`
+		HelperConnected bool `json:"helper_connected"`
+	} `json:"data"`
 }
 
 type messageContext struct {

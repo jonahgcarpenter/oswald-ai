@@ -17,7 +17,7 @@ type runtimeResponder struct {
 }
 
 func (r *runtimeResponder) StartProcessing() (func(), error) {
-	return nil, r.gateway.startTyping(r.chatGUID)
+	return nil, nil
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
