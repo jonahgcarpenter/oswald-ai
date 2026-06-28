@@ -110,7 +110,7 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 		return "", err
 	}
 
-	s.log.Debug("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("account", key))
+	s.log.Info("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("account", key))
 	return canonicalID, nil
 }
 
@@ -243,7 +243,15 @@ func (s *Service) SetAdmin(actorID, targetID string, isAdmin bool) error {
 	user.IsAdmin = isAdmin
 	user.UpdatedAt = time.Now().UTC()
 	data.Users[targetID] = user
-	return s.saveLocked(data)
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	if isAdmin {
+		s.log.Info("account_link.user.admin_granted", "granted user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	} else {
+		s.log.Info("account_link.user.admin_revoked", "revoked user admin access", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	}
+	return nil
 }
 
 // BanUser marks a canonical user as banned.
@@ -270,7 +278,11 @@ func (s *Service) BanUser(actorID, targetID, reason string) error {
 	user.BanReason = strings.TrimSpace(reason)
 	user.UpdatedAt = now
 	data.Users[targetID] = user
-	return s.saveLocked(data)
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	s.log.Info("account_link.user.banned", "banned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	return nil
 }
 
 // UnbanUser clears a canonical user's ban state.
@@ -295,7 +307,11 @@ func (s *Service) UnbanUser(actorID, targetID string) error {
 	user.BanReason = ""
 	user.UpdatedAt = time.Now().UTC()
 	data.Users[targetID] = user
-	return s.saveLocked(data)
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	s.log.Info("account_link.user.unbanned", "unbanned user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "ok"))
+	return nil
 }
 
 // SpeakerLine returns a deterministic speaker line for the canonical user.

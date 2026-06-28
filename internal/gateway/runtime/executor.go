@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -61,6 +62,12 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	}
 
 	if decision.Action == routing.ActionCommand {
+		startedAt := time.Now()
+		parsed, _ := commands.Parse(decision.Prompt)
+		commandName := parsed.Name
+		if commandName == "" {
+			commandName = "unknown"
+		}
 		response := "Unknown command: /"
 		var err error
 		if deps.Commands != nil {
@@ -84,6 +91,20 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		if sendErr != nil {
 			log.Error("gateway.response.failed", "failed to send command response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(sendErr))
 		}
+		status := "ok"
+		if err != nil || sendErr != nil {
+			status = "error"
+		}
+		log.Info("gateway.command.completed", "completed gateway command",
+			config.F("request_id", req.RequestID),
+			config.F("chat_id", req.ChatID),
+			config.F("session_id", req.SessionKey),
+			config.F("user_id", req.SenderID),
+			config.F("command", commandName),
+			config.F("response_chars", len(response)),
+			config.F("duration_ms", time.Since(startedAt).Milliseconds()),
+			config.F("status", status),
+		)
 		return Outcome{Action: decision.Action, Reason: decision.Reason, Err: sendErr}
 	}
 
@@ -95,7 +116,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		defer cleanup()
 	}
 
-	log.Debug("gateway.request.received", "received gateway request",
+	log.Info("gateway.request.received", "received gateway request",
 		config.F("request_id", req.RequestID),
 		config.F("chat_id", req.ChatID),
 		config.F("session_id", req.SessionKey),
@@ -134,6 +155,15 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	err = responder.SendAgentResponse(result.Response)
 	if err != nil {
 		log.Error("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
+	} else if result.Response != nil {
+		log.Info("gateway.response.sent", "sent gateway response",
+			config.F("request_id", req.RequestID),
+			config.F("chat_id", req.ChatID),
+			config.F("session_id", req.SessionKey),
+			config.F("user_id", req.SenderID),
+			config.F("response_chars", len(result.Response.Response)),
+			config.F("status", "ok"),
+		)
 	}
 	return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
 }
