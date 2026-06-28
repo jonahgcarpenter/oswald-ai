@@ -141,7 +141,7 @@ func mapFromGatewayMessage(m gatewayMessage) ChatMessage {
 	msg := ChatMessage{
 		Role:       m.Role,
 		Content:    contentToString(m.Content),
-		Thinking:   firstNonEmpty(m.ReasoningContent, m.Thinking),
+		Thinking:   firstNonEmpty(m.ReasoningContent, m.Thinking, m.Reasoning),
 		ToolCallID: m.ToolCallID,
 	}
 	if len(m.ToolCalls) > 0 {
@@ -373,13 +373,18 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		if chunk.Model != "" {
 			final.Model = chunk.Model
 		}
+		if usageReported(chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens, chunk.Usage.TotalTokens) {
+			final.PromptTokens = chunk.Usage.PromptTokens
+			final.CompletionTokens = chunk.Usage.CompletionTokens
+			final.TotalTokens = chunk.Usage.TotalTokens
+		}
 		choice, ok := firstChoice(chunk)
 		if !ok {
 			continue
 		}
 		final.DoneReason = choice.FinishReason
 		content := contentToString(choice.Delta.Content)
-		thinking := firstNonEmpty(choice.Delta.ReasoningContent, choice.Delta.Thinking)
+		thinking := firstNonEmpty(choice.Delta.ReasoningContent, choice.Delta.Thinking, choice.Delta.Reasoning)
 		if thinking != "" {
 			final.Message.Role = "assistant"
 			final.Message.Thinking += thinking

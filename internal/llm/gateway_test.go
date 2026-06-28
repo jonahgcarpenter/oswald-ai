@@ -76,6 +76,18 @@ func TestMapFromGatewayMessageDecodesToolArgumentsAndThinking(t *testing.T) {
 	}
 }
 
+func TestMapFromGatewayMessageUsesReasoningFallback(t *testing.T) {
+	msg := mapFromGatewayMessage(gatewayMessage{
+		Role:      "assistant",
+		Content:   "hello",
+		Reasoning: "reasoning",
+	})
+
+	if msg.Thinking != "reasoning" {
+		t.Fatalf("expected reasoning fallback, got %+v", msg)
+	}
+}
+
 func TestDecodeToolArgumentsFallsBackToRaw(t *testing.T) {
 	got := decodeToolArguments("not-json")
 	if got["_raw"] != "not-json" {
