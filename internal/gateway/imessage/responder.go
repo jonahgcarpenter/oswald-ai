@@ -38,7 +38,7 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) erro
 	}
 	responseText := strings.TrimSpace(response.Response)
 	if responseText == "" {
-		r.gateway.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("status", "degraded"))
+		r.gateway.log().Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("status", "degraded"))
 		return nil
 	}
 	return r.sendAndRemember(responseText)
@@ -49,7 +49,7 @@ func (r *runtimeResponder) sendAndRemember(text string) error {
 	if err != nil {
 		return err
 	}
-	r.gateway.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.response.sent", "sent imessage response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("response_chars", len(text)), config.F("status", "ok"))
+	r.gateway.log().Debug("gateway.response.sent", "sent imessage response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("response_chars", len(text)), config.F("status", "ok"))
 	r.gateway.rememberBotMessage(messageGUID, r.sessionKey, r.chatGUID, r.senderID, text)
 	return nil
 }

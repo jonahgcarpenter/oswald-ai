@@ -67,7 +67,7 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) erro
 		CreatedAt:   time.Now(),
 	}
 
-	log := r.gateway.Log.Server("gateway.discord", config.F("gateway", "discord"))
+	log := r.gateway.log()
 	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", r.requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", response.Model))
 
 	sentCount := 0

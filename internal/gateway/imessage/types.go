@@ -48,6 +48,10 @@ type Gateway struct {
 	contactNames        map[string]contactNameCacheEntry
 }
 
+func (g *Gateway) log() *config.Logger {
+	return g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
+}
+
 type webhookEvent struct {
 	Type string         `json:"type"`
 	Data webhookMessage `json:"data"`

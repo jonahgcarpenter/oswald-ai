@@ -26,9 +26,10 @@ type Details struct {
 // Resolve discovers model metadata from OpenRouter, applies environment overrides,
 // then falls back to package defaults for any missing values.
 func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Details, error) {
-	openRouter, err := ResolveFromOpenRouter(ctx, cfg.LLMGatewayModel, log)
+	modelLog := log.Server("modelinfo")
+	openRouter, err := ResolveFromOpenRouter(ctx, cfg.LLMGatewayModel, modelLog)
 	if err != nil {
-		log.Server("modelinfo").Warn("modelinfo.openrouter.resolve_failed", "failed to resolve model details from OpenRouter", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
+		modelLog.Warn("modelinfo.openrouter.resolve_failed", "failed to resolve model details from OpenRouter", config.F("model", cfg.LLMGatewayModel), config.F("status", "degraded"), config.ErrorField(err))
 	}
 
 	details := openRouter
@@ -41,7 +42,7 @@ func Resolve(ctx context.Context, cfg *config.Config, log *config.Logger) (Detai
 		}
 	}
 	details.Name = cfg.LLMGatewayModel
-	applyEnvOverrides(&details, cfg, openRouter, err == nil, log)
+	applyEnvOverrides(&details, cfg, openRouter, err == nil, modelLog)
 
 	details = normalizeDetails(details)
 	if err != nil {
@@ -86,7 +87,7 @@ func logOverrideDiscrepancy(log *config.Logger, model string, field string, envV
 	if !hasOpenRouter || openRouterValue <= 0 || envValue == openRouterValue {
 		return
 	}
-	log.Server("modelinfo").Info("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
+	log.Info("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
 }
 
 func normalizeDetails(details Details) Details {

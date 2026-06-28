@@ -18,6 +18,10 @@ type Gateway struct {
 	Log     *config.Logger
 }
 
+func (wg *Gateway) log() *config.Logger {
+	return wg.Log.Server("gateway.websocket", config.F("gateway", "websocket"))
+}
+
 // IncomingMessage is the JSON payload clients send over the WebSocket connection.
 // UserID identifies the sender for persistent memory and session keying.
 // DisplayName is an optional human-readable name for the sender; it is injected

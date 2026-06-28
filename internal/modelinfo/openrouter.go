@@ -72,7 +72,7 @@ func ResolveFromOpenRouter(ctx context.Context, model string, log *config.Logger
 		Source:          "openrouter.models.hugging_face_id",
 		Confidence:      "high",
 	}
-	log.Server("modelinfo").Info("modelinfo.openrouter.resolved", "resolved model details from OpenRouter", config.F("model", details.Name), config.F("openrouter_model_id", selected.ID), config.F("context_window", details.ContextWindow), config.F("max_output_tokens", details.MaxOutputTokens), config.F("status", "ok"))
+	log.Info("modelinfo.openrouter.resolved", "resolved model details from OpenRouter", config.F("model", details.Name), config.F("openrouter_model_id", selected.ID), config.F("context_window", details.ContextWindow), config.F("max_output_tokens", details.MaxOutputTokens), config.F("status", "ok"))
 	return details, nil
 }
 

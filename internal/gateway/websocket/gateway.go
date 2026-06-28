@@ -23,7 +23,7 @@ func (wg *Gateway) Name() string {
 
 // Start initializes the HTTP server and registers the WebSocket handler.
 func (wg *Gateway) Start(b *broker.Broker) error {
-	log := wg.Log.Server("gateway.websocket", config.F("gateway", "websocket"))
+	log := wg.log()
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		wg.handleConnections(w, r, b)
 	})
@@ -34,7 +34,7 @@ func (wg *Gateway) Start(b *broker.Broker) error {
 
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
 func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
-	log := wg.Log.Server("gateway.websocket", config.F("gateway", "websocket"))
+	log := wg.log()
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Warn("gateway.connection.upgrade_failed", "websocket upgrade failed", config.ErrorField(err))
@@ -171,7 +171,7 @@ func (wg *Gateway) decodeIncomingImages(images []IncomingImage) ([]llm.InputImag
 			unsupported = append(unsupported, media.AttachmentLabel(image.Source, image.MimeType))
 			continue
 		}
-		wg.Log.Server("gateway.websocket", config.F("gateway", "websocket")).Debug(
+		wg.log().Debug(
 			"gateway.attachment.normalized",
 			"normalized websocket attachment",
 			config.F("source", image.Source),

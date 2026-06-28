@@ -146,6 +146,10 @@ type Gateway struct {
 	hbAcked    bool
 }
 
+func (dg *Gateway) log() *config.Logger {
+	return dg.Log.Server("gateway.discord", config.F("gateway", "discord"))
+}
+
 func (dg *Gateway) apiBaseURL() string {
 	if dg.APIBaseURL != "" {
 		return dg.APIBaseURL

@@ -49,7 +49,7 @@ func main() {
 		config.F("agent_request_timeout", agentRequestTimeout.String()),
 	)
 
-	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, llmHTTPTimeout, rootLog.Server("provider.gateway"))
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, llmHTTPTimeout, rootLog)
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
 	budget := promptbudget.FromModelDetails(details)
