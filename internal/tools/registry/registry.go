@@ -238,9 +238,51 @@ func (r *Registry) CatalogBySource(source string) []CatalogEntry {
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
-		return "", fmt.Errorf("no handler registered for tool %q", name)
+		return "", r.unknownToolError(name)
 	}
 	return handler(ctx, args)
+}
+
+func (r *Registry) unknownToolError(name string) error {
+	if prefix, ok := toolPrefix(name); ok {
+		return fmt.Errorf("no handler registered for tool %q; available tools in prefix %q: %s", name, prefix, strings.Join(r.handlerNamesWithPrefix(prefix), ", "))
+	}
+	return fmt.Errorf("no handler registered for tool %q; available tools: %s", name, strings.Join(r.handlerNames(), ", "))
+}
+
+func toolPrefix(name string) (string, bool) {
+	prefix, _, ok := strings.Cut(name, ".")
+	if !ok || prefix == "" {
+		return "", false
+	}
+	return prefix, true
+}
+
+func (r *Registry) handlerNamesWithPrefix(prefix string) []string {
+	names := make([]string, 0)
+	needle := prefix + "."
+	for name := range r.handlers {
+		if strings.HasPrefix(name, needle) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return []string{"none"}
+	}
+	return names
+}
+
+func (r *Registry) handlerNames() []string {
+	names := make([]string, 0, len(r.handlers))
+	for name := range r.handlers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return []string{"none"}
+	}
+	return names
 }
 
 // HasHandler returns true if a handler has been registered for the given tool name.

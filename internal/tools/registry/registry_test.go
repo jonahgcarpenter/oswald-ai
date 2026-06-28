@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -57,6 +58,64 @@ Echo a value.
 	}
 	if len(tools[0].Function.Parameters.Required) != 1 || tools[0].Function.Parameters.Required[0] != "text" {
 		t.Fatalf("unexpected required params: %+v", tools[0].Function.Parameters.Required)
+	}
+}
+
+func TestRegistryUnknownToolListsMatchingPrefixHandlers(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	registerTestTool(t, reg, "memory.save")
+	registerTestTool(t, reg, "memory.search")
+	registerTestTool(t, reg, "memory.list")
+	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "web.search")
+
+	_, err := reg.Execute(context.Background(), "memory.delete", nil)
+	if err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+	want := `no handler registered for tool "memory.delete"; available tools in prefix "memory": memory.forget, memory.list, memory.save, memory.search`
+	if err.Error() != want {
+		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
+	}
+}
+
+func TestRegistryUnknownToolWithoutPrefixListsAllHandlers(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	registerTestTool(t, reg, "memory.save")
+	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "web.search")
+
+	_, err := reg.Execute(context.Background(), "delete", nil)
+	if err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+	want := `no handler registered for tool "delete"; available tools: memory.forget, memory.save, web.search`
+	if err.Error() != want {
+		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
+	}
+}
+
+func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	registerTestTool(t, reg, "memory.save")
+	registerTestTool(t, reg, "web.search")
+
+	_, err := reg.Execute(context.Background(), "soul.write", nil)
+	if err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+	want := `no handler registered for tool "soul.write"; available tools in prefix "soul": none`
+	if err.Error() != want {
+		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
+	}
+}
+
+func registerTestTool(t *testing.T, reg *Registry, name string) {
+	t.Helper()
+	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, func(context.Context, map[string]interface{}) (string, error) {
+		return "ok", nil
+	}); err != nil {
+		t.Fatalf("register %s: %v", name, err)
 	}
 }
 
