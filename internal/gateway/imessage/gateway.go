@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,7 +56,13 @@ func (g *Gateway) Start(b *broker.Broker) error {
 func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
 	if r.Method != http.MethodPost {
+		g.logIgnoredMessage("invalid_method", "", webhookMessage{}, config.F("method", r.Method))
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !g.validWebhookCredential(r) {
+		g.logIgnoredMessage("invalid_webhook_credential", "", webhookMessage{})
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
@@ -63,6 +70,7 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		g.logIgnoredMessage("webhook_body_read_failed", "", webhookMessage{}, config.ErrorField(err))
 		log.Warn("gateway.webhook.read_failed", "failed to read imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -70,33 +78,119 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	var event webhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
+		g.logIgnoredMessage("webhook_decode_failed", "", webhookMessage{}, config.ErrorField(err))
 		log.Warn("gateway.webhook.decode_failed", "failed to decode imessage webhook body", config.ErrorField(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	switch strings.TrimSpace(strings.ToLower(event.Type)) {
+	eventType := strings.TrimSpace(strings.ToLower(event.Type))
+	switch eventType {
 	case "new-message":
 		if event.Data.IsFromMe {
+			g.logIgnoredMessage("self_authored", eventType, event.Data)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if isTapbackMessage(event.Data) {
+			g.logIgnoredMessage("tapback", eventType, event.Data)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if !hasMessageContent(event.Data) {
-			log.Debug("gateway.webhook.ignored", "ignored imessage webhook without content", config.F("message_guid", event.Data.GUID), config.F("associated_type", event.Data.AssociatedMessageType))
+			g.logIgnoredMessage("no_message_content", eventType, event.Data)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		go g.processIncomingMessage(event.Data)
 		w.WriteHeader(http.StatusAccepted)
 	case "typing-indicator":
+		g.logIgnoredMessage("typing_indicator", eventType, event.Data)
 		w.WriteHeader(http.StatusNoContent)
 	default:
+		g.logIgnoredMessage("unsupported_event_type", eventType, event.Data)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
+func (g *Gateway) logIgnoredMessage(reason, eventType string, msg webhookMessage, fields ...config.Field) {
+	chat := msg.primaryChat()
+	baseFields := []config.Field{
+		config.F("reason", reason),
+		config.F("event_type", eventType),
+		config.F("message_guid", msg.GUID),
+		config.F("chat_id", chat.GUID),
+		config.F("user_id", strings.TrimSpace(msg.Handle.Address)),
+		config.F("is_from_me", msg.IsFromMe),
+		config.F("associated_type", associatedMessageTypeString(msg.AssociatedMessageType)),
+		config.F("has_text", strings.TrimSpace(msg.Text) != ""),
+		config.F("attachment_count", len(msg.Attachments)),
+	}
+	baseFields = append(baseFields, fields...)
+	g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.message.ignored", "ignored imessage message", baseFields...)
+}
+
+func (g *Gateway) validWebhookCredential(r *http.Request) bool {
+	password := strings.TrimSpace(g.BlueBubblesPassword)
+	if password == "" {
+		return true
+	}
+	token := strings.TrimSpace(r.URL.Query().Get("password"))
+	if token == "" {
+		token = strings.TrimSpace(r.URL.Query().Get("guid"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("x-password"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("x-guid"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(r.Header.Get("x-bluebubbles-guid"))
+	}
+	return token == password
+}
+
 func hasMessageContent(msg webhookMessage) bool {
 	return strings.TrimSpace(msg.Text) != "" || len(msg.Attachments) > 0
+}
+
+func isTapbackMessage(msg webhookMessage) bool {
+	associatedType, ok := associatedMessageTypeInt(msg.AssociatedMessageType)
+	if !ok {
+		return false
+	}
+	return (associatedType >= 2000 && associatedType <= 2005) || (associatedType >= 3000 && associatedType <= 3005)
+}
+
+func associatedMessageTypeInt(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var number int
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number, true
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func associatedMessageTypeString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	return string(raw)
 }
 
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
@@ -104,12 +198,16 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	log := g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
 	requestID := config.NewRequestID()
 	chat := msg.primaryChat()
-	if chat.GUID == "" || strings.TrimSpace(msg.Handle.Address) == "" {
-		log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
+	if chat.GUID == "" {
+		g.logIgnoredMessage("missing_chat_guid", "new-message", msg, config.F("request_id", requestID))
+		return
+	}
+	if strings.TrimSpace(msg.Handle.Address) == "" {
+		g.logIgnoredMessage("missing_sender", "new-message", msg, config.F("request_id", requestID))
 		return
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(msg.Attachments) == 0 {
-		log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
+		g.logIgnoredMessage("empty_text_and_no_attachments", "new-message", msg, config.F("request_id", requestID))
 		return
 	}
 
@@ -134,15 +232,12 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 		Text:         textWithoutMention,
 	})
 	if preflight.Action == routing.ActionIgnore {
-		log.Debug("gateway.message.ignored", "ignored imessage message",
+		g.logIgnoredMessage(preflight.Reason, "new-message", msg,
 			config.F("request_id", requestID),
-			config.F("chat_id", chat.GUID),
-			config.F("user_id", strings.TrimSpace(msg.Handle.Address)),
 			config.F("is_group", isGroup),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", replyGUID != ""),
 			config.F("is_command", currentIsCommandAttempt),
-			config.F("reason", preflight.Reason),
 			config.F("message_preview", routing.MessagePreview(msg.Text, 100)),
 		)
 		return
@@ -154,12 +249,13 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
-			log.Debug("gateway.webhook.ignored", "ignored imessage webhook with incomplete payload")
+			g.logIgnoredMessage("no_supported_content", "new-message", msg, config.F("request_id", requestID))
 			return
 		}
 	}
 
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && len(unsupported) == 0 {
+		g.logIgnoredMessage("no_supported_content", "new-message", msg, config.F("request_id", requestID))
 		return
 	}
 
@@ -760,15 +856,16 @@ func (g *Gateway) markRead(chatGUID string) {
 
 // sendTextReply sends a text reply, retrying with the fallback method if needed.
 func (g *Gateway) sendTextReply(chatGUID, text, selectedMessageGUID string, partIndex int) (string, error) {
+	if strings.TrimSpace(selectedMessageGUID) == "" || !g.blueBubblesPrivateAPIAvailable() {
+		return g.sendText(chatGUID, text, "", 0, "")
+	}
+
 	messageGUID, err := g.sendText(chatGUID, text, selectedMessageGUID, partIndex, defaultSendMethod)
 	if err == nil {
 		return messageGUID, nil
 	}
-	if defaultSendMethod == fallbackSendMethod {
-		return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
-	}
-	g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.send.retry", "retrying imessage send with fallback method", config.F("chat_id", chatGUID), config.F("default_method", defaultSendMethod), config.F("fallback_method", fallbackSendMethod), config.F("status", "retry"), config.ErrorField(err))
-	return g.sendText(chatGUID, text, selectedMessageGUID, partIndex, fallbackSendMethod)
+	g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.send.retry", "retrying imessage send without private reply fields", config.F("chat_id", chatGUID), config.F("default_method", defaultSendMethod), config.F("status", "retry"), config.ErrorField(err))
+	return g.sendText(chatGUID, text, "", 0, "")
 }
 
 // sendText posts a text message to BlueBubbles and returns the created message GUID.
@@ -829,36 +926,38 @@ func buildBlueBubblesEndpoint(baseURL, path, password string) (string, error) {
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + path
 	query := parsed.Query()
-	query.Set("guid", password)
+	query.Set("password", password)
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
 
 func buildBlueBubblesMessageEndpoint(baseURL, messageGUID, password string) (string, error) {
-	endpoint, err := buildBlueBubblesEndpoint(baseURL, "/api/v1/message/"+url.PathEscape(messageGUID), password)
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parse BlueBubbles URL: %w", err)
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("parse BlueBubbles message URL: %w", err)
-	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	baseEscapedPath := strings.TrimRight(parsed.EscapedPath(), "/")
+	parsed.Path = basePath + "/api/v1/message/" + messageGUID
+	parsed.RawPath = baseEscapedPath + "/api/v1/message/" + url.PathEscape(messageGUID)
 	query := parsed.Query()
+	query.Set("password", password)
 	query.Set("with", "chats,participants,attachment,handle")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
 
 func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string) (string, error) {
-	endpoint, err := buildBlueBubblesEndpoint(baseURL, "/api/v1/attachment/"+attachmentGUID+"/download", password)
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("parse BlueBubbles URL: %w", err)
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("parse BlueBubbles attachment URL: %w", err)
-	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	baseEscapedPath := strings.TrimRight(parsed.EscapedPath(), "/")
+	parsed.Path = basePath + "/api/v1/attachment/" + attachmentGUID + "/download"
+	parsed.RawPath = baseEscapedPath + "/api/v1/attachment/" + url.PathEscape(attachmentGUID) + "/download"
 	query := parsed.Query()
+	query.Set("password", password)
 	query.Set("original", "true")
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
@@ -874,7 +973,7 @@ func buildBlueBubblesChatActionEndpoint(baseURL, chatGUID, action, password stri
 	parsed.Path = basePath + "/api/v1/chat/" + chatGUID + "/" + action
 	parsed.RawPath = baseEscapedPath + "/api/v1/chat/" + url.PathEscape(chatGUID) + "/" + url.PathEscape(action)
 	query := parsed.Query()
-	query.Set("guid", password)
+	query.Set("password", password)
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }

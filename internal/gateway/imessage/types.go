@@ -1,6 +1,7 @@
 package imessage
 
 import (
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"sync"
@@ -17,7 +18,6 @@ const (
 	chatStyleDirect      = 45
 	defaultWebhookPath   = "/imessage/webhook"
 	defaultSendMethod    = "private-api"
-	fallbackSendMethod   = "apple-script"
 	capabilityAttempts   = 5
 	capabilityRetryDelay = 500 * time.Millisecond
 	typingAfterReadDelay = 150 * time.Millisecond
@@ -54,15 +54,15 @@ type webhookEvent struct {
 }
 
 type webhookMessage struct {
-	GUID                  string        `json:"guid"`
-	Text                  string        `json:"text"`
-	IsFromMe              bool          `json:"isFromMe"`
-	Handle                messageHandle `json:"handle"`
-	Attachments           []attachment  `json:"attachments"`
-	AssociatedMessageType string        `json:"associatedMessageType"`
-	ReplyToGUID           string        `json:"replyToGuid"`
-	ThreadOriginatorGUID  string        `json:"threadOriginatorGuid"`
-	Chats                 []messageChat `json:"chats"`
+	GUID                  string          `json:"guid"`
+	Text                  string          `json:"text"`
+	IsFromMe              bool            `json:"isFromMe"`
+	Handle                messageHandle   `json:"handle"`
+	Attachments           []attachment    `json:"attachments"`
+	AssociatedMessageType json.RawMessage `json:"associatedMessageType"`
+	ReplyToGUID           string          `json:"replyToGuid"`
+	ThreadOriginatorGUID  string          `json:"threadOriginatorGuid"`
+	Chats                 []messageChat   `json:"chats"`
 }
 
 type attachment struct {

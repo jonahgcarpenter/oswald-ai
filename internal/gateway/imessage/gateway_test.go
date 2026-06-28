@@ -3,8 +3,10 @@ package imessage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -48,8 +50,195 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	if bb.sentMessage() != "imessage response" {
 		t.Fatalf("unexpected sent messages: %+v", bb.sentMessages())
 	}
+	if sent := bb.sentMessages(); len(sent) != 1 || sent[0].Method != "" || sent[0].SelectedMessageGUID != "" {
+		t.Fatalf("expected plain text send, got %+v", sent)
+	}
 	if _, ok := g.lookupMessage("sent-1"); !ok {
 		t.Fatal("expected sent bot message remembered")
+	}
+}
+
+func TestIMessageWebhookRequiresBlueBubblesCredential(t *testing.T) {
+	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook", strings.NewReader(`{"type":"typing-indicator"}`))
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", rec.Code)
+	}
+}
+
+func TestIMessageWebhookAcceptsPasswordCredential(t *testing.T) {
+	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":"typing-indicator"}`))
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected no content, got %d", rec.Code)
+	}
+}
+
+func TestIMessageWebhookAcceptsCredentialSources(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		header string
+	}{
+		{name: "password query", path: "/imessage/webhook?password=pw"},
+		{name: "guid query", path: "/imessage/webhook?guid=pw"},
+		{name: "x-password header", path: "/imessage/webhook", header: "x-password"},
+		{name: "x-guid header", path: "/imessage/webhook", header: "x-guid"},
+		{name: "x-bluebubbles-guid header", path: "/imessage/webhook", header: "x-bluebubbles-guid"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(`{"type":"typing-indicator"}`))
+			if tt.header != "" {
+				req.Header.Set(tt.header, "pw")
+			}
+			rec := httptest.NewRecorder()
+
+			g.handleWebhook(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("expected no content, got %d", rec.Code)
+			}
+		})
+	}
+}
+
+func TestIMessageWebhookRejectsWrongCredential(t *testing.T) {
+	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=wrong", strings.NewReader(`{"type":"typing-indicator"}`))
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", rec.Code)
+	}
+}
+
+func TestIMessageWebhookMalformedJSONReturnsBadRequest(t *testing.T) {
+	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":`))
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d", rec.Code)
+	}
+}
+
+func TestIMessageWebhookWrongMethodReturnsMethodNotAllowed(t *testing.T) {
+	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	req := httptest.NewRequest(http.MethodGet, "/imessage/webhook?password=pw", nil)
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected method not allowed, got %d", rec.Code)
+	}
+}
+
+func TestIMessageWebhookDirectMessageRoutesAndReplies(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	rec := postIMessageWebhook(t, g, `{"type":"new-message","data":{"guid":"msg-1","text":"hello from webhook","isFromMe":false,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted, got %d", rec.Code)
+	}
+	primary := waitForPrimaryIMessageRequests(t, chat, 1)
+	last := primary[0].Messages[len(primary[0].Messages)-1]
+	if last.Content != "hello from webhook" {
+		t.Fatalf("unexpected prompt %q", last.Content)
+	}
+	if !bb.waitForSentCount(1) {
+		t.Fatalf("expected reply send, got %+v", bb.sentMessages())
+	}
+	if bb.sentMessage() != "imessage response" {
+		t.Fatalf("unexpected sent message %q", bb.sentMessage())
+	}
+}
+
+func TestIMessageWebhookGroupMentionRoutesCleanedText(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	rec := postIMessageWebhook(t, g, `{"type":"new-message","data":{"guid":"msg-1","text":"@Oswald hello","isFromMe":false,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat;+;group","style":43}]}}`)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted, got %d", rec.Code)
+	}
+	primary := waitForPrimaryIMessageRequests(t, chat, 1)
+	last := primary[0].Messages[len(primary[0].Messages)-1]
+	if last.Content != "hello" {
+		t.Fatalf("unexpected prompt %q", last.Content)
+	}
+}
+
+func TestIMessageWebhookGroupWithoutMentionSkips(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	rec := postIMessageWebhook(t, g, `{"type":"new-message","data":{"guid":"msg-1","text":"casual group chatter","isFromMe":false,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat;+;group","style":43}]}}`)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected accepted, got %d", rec.Code)
+	}
+	if waitForPrimaryIMessageRequestCount(chat, 1, 100*time.Millisecond) {
+		t.Fatalf("expected no LLM request, got %d", len(chat.primaryRequests()))
+	}
+	if bb.waitForSentCount(1) {
+		t.Fatalf("expected no reply send, got %+v", bb.sentMessages())
+	}
+}
+
+func TestIMessageWebhookIgnoresSelfAuthoredMessage(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	rec := postIMessageWebhook(t, g, `{"type":"new-message","data":{"guid":"msg-1","text":"from oswald","isFromMe":true,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected no content, got %d", rec.Code)
+	}
+	if waitForPrimaryIMessageRequestCount(chat, 1, 100*time.Millisecond) {
+		t.Fatalf("expected no LLM request, got %d", len(chat.primaryRequests()))
+	}
+}
+
+func TestIMessageWebhookIgnoresUpdatedMessage(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	rec := postIMessageWebhook(t, g, `{"type":"updated-message","data":{"guid":"msg-1","text":"edited","isFromMe":false,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected no content, got %d", rec.Code)
+	}
+	if waitForPrimaryIMessageRequestCount(chat, 1, 100*time.Millisecond) {
+		t.Fatalf("expected no LLM request, got %d", len(chat.primaryRequests()))
 	}
 }
 
@@ -117,6 +306,103 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 	if !bb.waitForPath("/api/v1/chat/chat%3B+%3Bgroup/read") {
 		t.Fatalf("expected escaped read receipt request, got paths %+v", bb.paths())
+	}
+	if sent := bb.sentMessages(); len(sent) != 1 || sent[0].Method != defaultSendMethod || sent[0].SelectedMessageGUID != "msg-1" {
+		t.Fatalf("expected private reply send, got %+v", sent)
+	}
+}
+
+func TestIMessageWebhookIgnoresTapback(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	body := `{"type":"new-message","data":{"guid":"tapback-1","text":"Liked an image","associatedMessageType":2001,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	g.handleWebhook(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected no content, got %d", rec.Code)
+	}
+	if len(primaryIMessageRequests(chat.requests)) != 0 {
+		t.Fatalf("expected no LLM request, got %d", len(primaryIMessageRequests(chat.requests)))
+	}
+}
+
+func TestIMessageWebhookIgnoresAllTapbackCodes(t *testing.T) {
+	codes := []int{2000, 2001, 2002, 2003, 2004, 2005, 3000, 3001, 3002, 3003, 3004, 3005}
+	for _, code := range codes {
+		for _, asString := range []bool{false, true} {
+			name := fmt.Sprintf("%d", code)
+			if asString {
+				name += " string"
+			}
+			t.Run(name, func(t *testing.T) {
+				bb := newFakeBlueBubbles(t)
+				g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+				defer b.Shutdown()
+				defer bb.server.Close()
+
+				associatedType := fmt.Sprintf("%d", code)
+				if asString {
+					associatedType = fmt.Sprintf("%q", associatedType)
+				}
+				body := fmt.Sprintf(`{"type":"new-message","data":{"guid":"tapback-1","text":"Liked an image","associatedMessageType":%s,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`, associatedType)
+				rec := postIMessageWebhook(t, g, body)
+
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("expected no content, got %d", rec.Code)
+				}
+				if waitForPrimaryIMessageRequestCount(chat, 1, 50*time.Millisecond) {
+					t.Fatalf("expected no LLM request, got %d", len(chat.primaryRequests()))
+				}
+			})
+		}
+	}
+}
+
+func TestIMessageWebhookMissingRequiredFieldsSkips(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		code int
+	}{
+		{
+			name: "missing chat guid",
+			body: `{"type":"new-message","data":{"guid":"msg-1","text":"hello","isFromMe":false,"handle":{"address":"+15551234567"}}}`,
+			code: http.StatusAccepted,
+		},
+		{
+			name: "missing sender",
+			body: `{"type":"new-message","data":{"guid":"msg-1","text":"hello","isFromMe":false,"chats":[{"guid":"chat-direct","style":45}]}}`,
+			code: http.StatusAccepted,
+		},
+		{
+			name: "empty text and no attachments",
+			body: `{"type":"new-message","data":{"guid":"msg-1","text":"","isFromMe":false,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`,
+			code: http.StatusNoContent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bb := newFakeBlueBubbles(t)
+			g, b, chat := newIMessageTestGateway(t, bb.server.URL)
+			defer b.Shutdown()
+			defer bb.server.Close()
+
+			rec := postIMessageWebhook(t, g, tt.body)
+
+			if rec.Code != tt.code {
+				t.Fatalf("expected status %d, got %d", tt.code, rec.Code)
+			}
+			if waitForPrimaryIMessageRequestCount(chat, 1, 100*time.Millisecond) {
+				t.Fatalf("expected no LLM request, got %d", len(chat.primaryRequests()))
+			}
+		})
 	}
 }
 
@@ -196,22 +482,106 @@ func TestIMessageEndpointBuilders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("message endpoint: %v", err)
 	}
-	if !strings.Contains(endpoint, "/base/api/v1/message/a%252Fb") || !strings.Contains(endpoint, "guid=pw") || !strings.Contains(endpoint, "with=") {
+	if !strings.Contains(endpoint, "/base/api/v1/message/a%2Fb") || strings.Contains(endpoint, "a%252Fb") || !strings.Contains(endpoint, "password=pw") || !strings.Contains(endpoint, "with=") {
 		t.Fatalf("unexpected message endpoint %q", endpoint)
 	}
-	attachment, err := buildBlueBubblesAttachmentEndpoint("http://bb", "att-1", "pw")
+	attachment, err := buildBlueBubblesAttachmentEndpoint("http://bb", "att/1", "pw")
 	if err != nil {
 		t.Fatalf("attachment endpoint: %v", err)
 	}
-	if !strings.Contains(attachment, "/api/v1/attachment/att-1/download") || !strings.Contains(attachment, "original=true") {
+	if !strings.Contains(attachment, "/api/v1/attachment/att%2F1/download") || strings.Contains(attachment, "att%252F1") || !strings.Contains(attachment, "password=pw") || !strings.Contains(attachment, "original=true") {
 		t.Fatalf("unexpected attachment endpoint %q", attachment)
 	}
 	chatAction, err := buildBlueBubblesChatActionEndpoint("http://bb/base/", "chat;+;group", "typing", "pw")
 	if err != nil {
 		t.Fatalf("chat action endpoint: %v", err)
 	}
-	if !strings.Contains(chatAction, "/base/api/v1/chat/chat%3B+%3Bgroup/typing") || !strings.Contains(chatAction, "guid=pw") {
+	if !strings.Contains(chatAction, "/base/api/v1/chat/chat%3B+%3Bgroup/typing") || !strings.Contains(chatAction, "password=pw") {
 		t.Fatalf("unexpected chat action endpoint %q", chatAction)
+	}
+}
+
+func TestIMessageEndpointBuildersEncodeSpecialPasswordAndGUIDs(t *testing.T) {
+	message, err := buildBlueBubblesMessageEndpoint("http://bb/base/", "a/b c", "TestPass234!")
+	if err != nil {
+		t.Fatalf("message endpoint: %v", err)
+	}
+	parsedMessage, err := url.Parse(message)
+	if err != nil {
+		t.Fatalf("parse message endpoint: %v", err)
+	}
+	if got := parsedMessage.Query().Get("password"); got != "TestPass234!" {
+		t.Fatalf("unexpected message password %q", got)
+	}
+	if !strings.Contains(parsedMessage.EscapedPath(), "/base/api/v1/message/a%2Fb%20c") || strings.Contains(parsedMessage.EscapedPath(), "%252F") {
+		t.Fatalf("unexpected message path %q", parsedMessage.EscapedPath())
+	}
+
+	attachment, err := buildBlueBubblesAttachmentEndpoint("http://bb", "att/1 c", "abc&def")
+	if err != nil {
+		t.Fatalf("attachment endpoint: %v", err)
+	}
+	parsedAttachment, err := url.Parse(attachment)
+	if err != nil {
+		t.Fatalf("parse attachment endpoint: %v", err)
+	}
+	if got := parsedAttachment.Query().Get("password"); got != "abc&def" {
+		t.Fatalf("unexpected attachment password %q", got)
+	}
+	if !strings.Contains(parsedAttachment.EscapedPath(), "/api/v1/attachment/att%2F1%20c/download") || strings.Contains(parsedAttachment.EscapedPath(), "%252F") {
+		t.Fatalf("unexpected attachment path %q", parsedAttachment.EscapedPath())
+	}
+
+	chatAction, err := buildBlueBubblesChatActionEndpoint("http://bb", "chat;+;group", "typing", "abc&def")
+	if err != nil {
+		t.Fatalf("chat action endpoint: %v", err)
+	}
+	parsedChatAction, err := url.Parse(chatAction)
+	if err != nil {
+		t.Fatalf("parse chat action endpoint: %v", err)
+	}
+	if got := parsedChatAction.Query().Get("password"); got != "abc&def" {
+		t.Fatalf("unexpected chat action password %q", got)
+	}
+	if !strings.Contains(parsedChatAction.EscapedPath(), "/api/v1/chat/chat%3B+%3Bgroup/typing") || strings.Contains(parsedChatAction.EscapedPath(), "%253B") {
+		t.Fatalf("unexpected chat action path %q", parsedChatAction.EscapedPath())
+	}
+}
+
+func TestChooseContactDisplayNameFallbackOrder(t *testing.T) {
+	tests := []struct {
+		name     string
+		contacts []contactRecord
+		expect   string
+	}{
+		{
+			name:     "display name",
+			contacts: []contactRecord{{DisplayName: "Alice Display", FirstName: "Alice", LastName: "Person", Nickname: "Al"}},
+			expect:   "Alice Display",
+		},
+		{
+			name:     "first last",
+			contacts: []contactRecord{{FirstName: "Alice", LastName: "Person", Nickname: "Al"}},
+			expect:   "Alice Person",
+		},
+		{
+			name:     "nickname",
+			contacts: []contactRecord{{Nickname: "Al"}},
+			expect:   "Al",
+		},
+		{
+			name:     "empty",
+			contacts: []contactRecord{{}},
+			expect:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chooseContactDisplayName(tt.contacts); got != tt.expect {
+				t.Fatalf("expected %q, got %q", tt.expect, got)
+			}
+		})
 	}
 }
 
@@ -238,6 +608,39 @@ func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 		}
 	}
 	return out
+}
+
+func (f *imFakeChatter) primaryRequests() []llm.ChatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return primaryIMessageRequests(append([]llm.ChatRequest(nil), f.requests...))
+}
+
+func postIMessageWebhook(t *testing.T, g *Gateway, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	g.handleWebhook(rec, req)
+	return rec
+}
+
+func waitForPrimaryIMessageRequests(t *testing.T, chat *imFakeChatter, count int) []llm.ChatRequest {
+	t.Helper()
+	if !waitForPrimaryIMessageRequestCount(chat, count, time.Second) {
+		t.Fatalf("expected %d primary LLM requests, got %d", count, len(chat.primaryRequests()))
+	}
+	return chat.primaryRequests()
+}
+
+func waitForPrimaryIMessageRequestCount(chat *imFakeChatter, count int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(chat.primaryRequests()) >= count {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return len(chat.primaryRequests()) >= count
 }
 
 type fakeBlueBubbles struct {
@@ -348,6 +751,17 @@ func (bb *fakeBlueBubbles) sentMessage() string {
 		return ""
 	}
 	return sent[len(sent)-1].Message
+}
+
+func (bb *fakeBlueBubbles) waitForSentCount(count int) bool {
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(bb.sentMessages()) >= count {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return len(bb.sentMessages()) >= count
 }
 
 func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *broker.Broker, *imFakeChatter) {
