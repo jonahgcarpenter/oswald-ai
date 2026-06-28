@@ -49,7 +49,7 @@ func NewPatchHandler(store *Store, log *config.Logger) func(ctx context.Context,
 		}
 
 		reqLog := requestLog(log, ctx)
-		reqLog.Warn("agent.tool.soul.patched", "patched soul memory",
+		reqLog.Info("agent.tool.soul.patched", "patched soul memory",
 			config.F("tool_name", "soul.patch"),
 			config.F("action", "patch"),
 			config.F("operation", operation),

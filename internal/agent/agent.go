@@ -398,7 +398,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
 		} else if strings.TrimSpace(memoryContext.Block) != "" {
 			dynamicSystemPrompt += "\n\n" + memoryContext.Block
-			reqLog.Info("agent.memory.context.loaded", "loaded retrieved memory context",
+			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
 				config.F("recent_turn_count", memoryContext.RecentTurnCount),
 			)
 		}
@@ -529,7 +529,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			if streamCallback != nil {
 				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)})
 			}
-			reqLog.Debug("agent.tool.start", "starting tool execution",
+			reqLog.Info("agent.tool.start", "starting tool execution",
 				config.F("iteration", iteration),
 				config.F("tool_name", toolName),
 			)
@@ -637,7 +637,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
-	reqLog.Debug("agent.response.complete", "completed agent response",
+	reqLog.Info("agent.response.complete", "completed agent response",
 		config.F("iteration_count", toolExecutionCount+1),
 		config.F("response_chars", len(finalContent)),
 		config.F("thinking_chars", len(finalThinking)),

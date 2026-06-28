@@ -149,7 +149,7 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 
 	images, unsupported := g.loadImages(msg.Attachments)
 	if len(msg.Attachments) > 0 {
-		log.Debug("gateway.attachment.processed", "processed imessage attachments", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
+		log.Info("gateway.attachment.processed", "processed imessage attachments", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
@@ -534,7 +534,7 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int) ([]ll
 
 		image, err := g.fetchAttachmentImage(attachment)
 		if err != nil {
-			g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.attachment.rejected", "rejected imessage attachment", config.F("filename", attachment.TransferName), config.F("status", "degraded"), config.ErrorField(err))
+			g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.attachment.rejected", "rejected imessage attachment", config.F("filename", attachment.TransferName), config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -635,7 +635,7 @@ func (g *Gateway) sendTypingRequest(chatGUID string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Warn("gateway.typing.failed", "BlueBubbles typing request failed", config.F("chat_id", chatGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
+		g.Log.Server("gateway.imessage", config.F("gateway", "imessage")).Debug("gateway.typing.failed", "BlueBubbles typing request failed", config.F("chat_id", chatGUID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return fmt.Errorf("BlueBubbles typing request failed with status %d", resp.StatusCode)
 	}
 	return nil

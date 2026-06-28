@@ -490,14 +490,14 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	images, unsupported := dg.loadImages(msg.Attachments)
 	embedImageCount := 0
 	if len(msg.Attachments) > 0 {
-		log.Debug("gateway.attachment.processed", "processed discord attachments", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
+		log.Info("gateway.attachment.processed", "processed discord attachments", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)))
 	}
 	if len(msg.Embeds) > 0 {
 		embedImages, embedUnsupported := dg.loadEmbedImagesLimit(msg.Embeds, media.MaxImagesPerRequest-len(images))
 		embedImageCount = len(embedImages)
 		images = append(images, embedImages...)
 		unsupported = append(unsupported, embedUnsupported...)
-		log.Debug("gateway.embed.processed", "processed discord embeds", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(embedImages)), config.F("downgraded_count", len(embedUnsupported)), config.F("declared_embed_count", len(msg.Embeds)))
+		log.Info("gateway.embed.processed", "processed discord embeds", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("accepted_count", len(embedImages)), config.F("downgraded_count", len(embedUnsupported)), config.F("declared_embed_count", len(msg.Embeds)))
 	}
 	if embedImageCount > 0 {
 		text = stripEmbedURLsFromText(text, msg.Embeds)
@@ -764,7 +764,7 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]l
 
 		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
-			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.attachment.rejected", "rejected discord attachment", config.F("filename", attachment.Filename), config.F("status", "degraded"), config.ErrorField(err))
+			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("filename", attachment.Filename), config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -812,7 +812,7 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 		}
 		image, err := dg.fetchAttachmentImage("", assetURL, "", label)
 		if err != nil {
-			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.embed.rejected", "rejected discord embed image", config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
+			dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.embed.rejected", "rejected discord embed image", config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -956,7 +956,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Warn("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
+		dg.Log.Server("gateway.discord", config.F("gateway", "discord")).Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil

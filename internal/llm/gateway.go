@@ -309,6 +309,18 @@ func (c *GatewayClient) readChatResponse(ctx context.Context, resp *http.Respons
 	if msg.Role == "" {
 		msg.Role = "assistant"
 	}
+	durationMS := time.Since(startedAt).Milliseconds()
+	requestLog.Info("provider.gateway.chat.complete", "LLM gateway chat completed",
+		config.F("operation", "chat"),
+		config.F("duration_ms", durationMS),
+		config.F("prompt_tokens", gatewayResp.Usage.PromptTokens),
+		config.F("completion_tokens", gatewayResp.Usage.CompletionTokens),
+		config.F("total_tokens", gatewayResp.Usage.TotalTokens),
+		config.F("is_usage_reported", usageReported(gatewayResp.Usage.PromptTokens, gatewayResp.Usage.CompletionTokens, gatewayResp.Usage.TotalTokens)),
+		config.F("done_reason", choice.FinishReason),
+		config.F("is_streaming", false),
+		config.F("status", "ok"),
+	)
 
 	return &ChatResponse{
 		Model:            firstNonEmpty(gatewayResp.Model, model),
@@ -316,7 +328,7 @@ func (c *GatewayClient) readChatResponse(ctx context.Context, resp *http.Respons
 		PromptTokens:     gatewayResp.Usage.PromptTokens,
 		CompletionTokens: gatewayResp.Usage.CompletionTokens,
 		TotalTokens:      gatewayResp.Usage.TotalTokens,
-		DurationMS:       time.Since(startedAt).Milliseconds(),
+		DurationMS:       durationMS,
 		DoneReason:       choice.FinishReason,
 	}, nil
 }
@@ -409,7 +421,22 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		}
 	}
 	final.DurationMS = time.Since(startedAt).Milliseconds()
+	requestLog.Info("provider.gateway.chat.complete", "LLM gateway chat completed",
+		config.F("operation", "chat_stream"),
+		config.F("duration_ms", final.DurationMS),
+		config.F("prompt_tokens", final.PromptTokens),
+		config.F("completion_tokens", final.CompletionTokens),
+		config.F("total_tokens", final.TotalTokens),
+		config.F("is_usage_reported", usageReported(final.PromptTokens, final.CompletionTokens, final.TotalTokens)),
+		config.F("done_reason", final.DoneReason),
+		config.F("is_streaming", true),
+		config.F("status", "ok"),
+	)
 	return &final, nil
+}
+
+func usageReported(promptTokens, completionTokens, totalTokens int) bool {
+	return promptTokens > 0 || completionTokens > 0 || totalTokens > 0
 }
 
 func firstNonEmpty(values ...string) string {

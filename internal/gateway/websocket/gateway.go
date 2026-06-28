@@ -68,7 +68,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			userImages = images
 			userUnsupported = unsupported
 			if len(incoming.Images) > 0 {
-				log.Debug("gateway.attachment.processed", "processed websocket attachments",
+				log.Info("gateway.attachment.processed", "processed websocket attachments",
 					config.F("request_id", requestID),
 					config.F("chat_id", remoteAddr),
 					config.F("accepted_count", len(images)),

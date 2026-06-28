@@ -465,6 +465,31 @@ Current defaults:
 - `level`: `debug`, `info`, `warn`, `error`
 - `log_type`: `server` or `agent`
 
+### Log Level Standards
+
+Use `info` for production monitoring and audit events that should be visible during normal operation without debug logging enabled:
+
+- application startup, shutdown, selected model, context budget, enabled gateways, enabled tools, and enabled integrations
+- accepted agent requests, completed gateway commands, successful response delivery, provider completion summaries, and final agent response completion
+- aggregate usage signals useful for dashboards, such as prompt counts, attachment processing counts, tool starts, token counts, latency, response sizes, and finish reasons
+- durable state or security mutations, such as account linking, canonical user creation, admin changes, bans, unbans, and soul patches
+
+Use `debug` for diagnostic details that are useful during investigation but too noisy for production monitoring:
+
+- ignored messages, routine connection closes, typing indicator failures, reply lookup details, reply context reconstruction, and stream chunk lifecycle
+- prompt/model loop internals, model-call attempts, per-iteration state, context estimate comparisons, successful tool internals, memory retrieval details, and worker processing
+- attachment rejection details, image normalization metadata, individual tool/bootstrap registration details, and other high-cardinality implementation facts
+
+Use `warn` for degraded behavior where the request may continue or recover, but operators should be able to see the condition in production:
+
+- queue rejection, retry paths, provider stream parse/scan degradation, prompt over-budget conditions, tool execution failures, exhausted tool-failure budget, memory/session write failures, attachment fetch failures, and optional integration failures
+
+Use `error` for failures that prevent an expected operation from completing:
+
+- gateway send failures, account resolution failures, command execution failures, access-check failures, provider HTTP/decode failures, model-call failures, and gateway crashes
+
+Do not promote noisy `debug` events to `info` only because they are interesting. Prefer adding a small aggregate `info` event with stable metric fields when a dashboard needs visibility.
+
 ### Server vs Agent Logs
 
 Use `server` logs for runtime infrastructure and transport behavior:

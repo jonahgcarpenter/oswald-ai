@@ -86,7 +86,7 @@ func logOverrideDiscrepancy(log *config.Logger, model string, field string, envV
 	if !hasOpenRouter || openRouterValue <= 0 || envValue == openRouterValue {
 		return
 	}
-	log.Server("modelinfo").Warn("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
+	log.Server("modelinfo").Info("modelinfo.override.discrepancy", "model metadata env override differs from OpenRouter", config.F("model", model), config.F("field", field), config.F("env_value", envValue), config.F("openrouter_value", openRouterValue), config.F("status", "ok"))
 }
 
 func normalizeDetails(details Details) Details {
