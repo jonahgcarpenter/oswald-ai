@@ -82,4 +82,5 @@ What is Bitcoins current price?
 - [x] Persistent conversation history (multi-user context)
 - [ ] Support for images, gifs, and files
 - [ ] Global vs User defined MCP servers
+- [ ] Scheduled task (cron tool)
 - [ ] STT & TTS support
