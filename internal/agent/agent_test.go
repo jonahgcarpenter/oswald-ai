@@ -129,6 +129,83 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	}
 }
 
+func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, func(context.Context, map[string]interface{}) (string, error) {
+		return "lookup result", nil
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	agent, store := newTestAgent(t, chat, nil, reg)
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "visible answer" {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 2 {
+		t.Fatalf("expected retry chat call, got %d calls", len(primary))
+	}
+	if len(primary[1].Tools) != 0 {
+		t.Fatalf("expected retry with tools disabled, got %+v", primary[1].Tools)
+	}
+	lastMessage := primary[1].Messages[len(primary[1].Messages)-1]
+	if lastMessage.Role != "user" || lastMessage.Content != emptyResponseRetryPrompt {
+		t.Fatalf("unexpected retry prompt: %+v", lastMessage)
+	}
+
+	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].AssistantText != "visible answer" {
+		t.Fatalf("unexpected stored turn: %+v", turns)
+	}
+}
+
+func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "still reasoning"}},
+	}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+
+	var chunks []StreamChunk
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != emptyResponseFallback {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	foundFallbackChunk := false
+	for _, chunk := range chunks {
+		if chunk.Type == ChunkContent && chunk.Text == emptyResponseFallback {
+			foundFallbackChunk = true
+		}
+	}
+	if !foundFallbackChunk {
+		t.Fatalf("expected fallback content chunk, got %+v", chunks)
+	}
+
+	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].AssistantText != emptyResponseFallback {
+		t.Fatalf("unexpected stored turn: %+v", turns)
+	}
+}
+
 func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}

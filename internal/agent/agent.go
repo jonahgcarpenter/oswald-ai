@@ -22,6 +22,8 @@ const (
 	memoryRetrievalLimit     = 12
 	memoryContextBudgetRatio = 0.15
 	sessionTurnTTL           = 24 * time.Hour
+	emptyResponseRetryPrompt = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseFallback    = "I blanked on the actual answer. Try again and I'll take another shot."
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -625,6 +627,46 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	finalThinking := accumulatedThinking.String()
 	if finalThinking == "" && lastResp != nil {
 		finalThinking = lastResp.Message.Thinking
+	}
+	if strings.TrimSpace(finalContent) == "" {
+		retryMessages := append([]llm.ChatMessage{}, messages...)
+		retryMessages = append(retryMessages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+
+		accumulatedContent.Reset()
+		retryReq := req
+		retryReq.Messages = retryMessages
+		retryReq.Tools = nil
+
+		reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
+			config.F("thinking_chars", len(finalThinking)),
+			config.F("status", "retry"),
+		)
+		retryResp, err := a.chatClient.Chat(ctx, retryReq, chatCallback)
+		if err != nil {
+			reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
+				config.F("status", "degraded"),
+				config.ErrorField(err),
+			)
+		} else {
+			lastResp = retryResp
+			finalContent = accumulatedContent.String()
+			if strings.TrimSpace(finalContent) == "" {
+				finalContent = retryResp.Message.Content
+			}
+			if retryResp.Message.Thinking != "" && !strings.Contains(finalThinking, retryResp.Message.Thinking) {
+				finalThinking += retryResp.Message.Thinking
+			}
+		}
+
+		if strings.TrimSpace(finalContent) == "" {
+			finalContent = emptyResponseFallback
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
+			}
+			reqLog.Warn("agent.response.empty_fallback", "using generic fallback after empty model response",
+				config.F("status", "degraded"),
+			)
+		}
 	}
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)
