@@ -1,6 +1,26 @@
 package mcp
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+const (
+	// ScopeGlobal identifies MCP servers available to every user.
+	ScopeGlobal = "global"
+	// ScopeUser identifies MCP servers available only to one canonical user.
+	ScopeUser = "user"
+
+	// TransportStreamableHTTP identifies MCP streamable HTTP transport.
+	TransportStreamableHTTP = "streamable_http"
+	// TransportSSE is reserved for HTTP SSE MCP transport.
+	TransportSSE = "sse"
+
+	serverStatusConnected    = "connected"
+	serverStatusError        = "error"
+	serverStatusDisabled     = "disabled"
+	serverStatusNotConnected = "not_connected"
+)
 
 // Handler executes an MCP-backed tool call.
 type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
@@ -19,6 +39,9 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	Server      string
+	Scope       string
+	OwnerUserID string
+	RemoteName  string
 	Parameters  []ParamSpec
 	Handler     Handler
 }
@@ -27,13 +50,46 @@ type ToolSpec struct {
 type ServerInfo struct {
 	Name        string
 	Description string
+	Scope       string
+	OwnerUserID string
 	Status      string
 	ToolCount   int
 	Reason      string
 }
 
+// ServerConfig is a decrypted MCP server configuration loaded from storage.
+type ServerConfig struct {
+	ID          string
+	Scope       string
+	OwnerUserID string
+	Name        string
+	Type        string
+	Transport   string
+	URL         string
+	Headers     map[string]string
+	Enabled     bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type storedServerConfig struct {
+	ID                string
+	Scope             string
+	OwnerUserID       string
+	Name              string
+	Type              string
+	Transport         string
+	URLCiphertext     string
+	URLHostHash       string
+	HeadersCiphertext string
+	Enabled           bool
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
 type server struct {
-	name  string
-	tools []ToolSpec
-	close func() error
+	config ServerConfig
+	tools  []ToolSpec
+	close  func() error
+	reason string
 }

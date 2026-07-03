@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin model tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin model tools:
 
 - `web.search`
 - `memory.save`
@@ -14,10 +14,8 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `memory.forget`
 - `soul.read`
 - `soul.patch`
-- `mcp.servers`
-- `mcp.tools`
 
-Oswald can also expose additional read-only tools discovered at startup from connected MCP servers. Today that means optional GitHub MCP integration when a GitHub personal access token is configured. Discovered MCP tools are hidden by default and become visible to the model only for the active request after `mcp.tools` lists them.
+Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. For each visible configured MCP server, the model sees a lightweight dynamic discovery tool named `<server>.tools`; actual MCP tools remain hidden and become visible only for the active request after `<server>.tools` lists them.
 
 Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, and admin-only user-management commands: `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, and `/unban`.
 
@@ -57,7 +55,7 @@ Current layers:
 6. Create the soul store and SQLite-backed persistent user-memory store
 7. Create the account-link service and command service with `/help`, `/connect`, `/disconnect`, and admin user-management commands
 8. Initialize optional MCP clients
-9. Load tool schemas from `data/tools/*.md`, register builtin handlers, and register any discovered MCP tools
+9. Load builtin tool schemas from `data/tools/*.md`, register builtin handlers, and prepare dynamic MCP discovery tools for configured servers
 10. Build enabled gateways from config
 11. Create the agent
 12. Start the broker worker pool
@@ -344,15 +342,13 @@ Current builtin tools:
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-- `mcp.servers` — list connected MCP servers and read-only tool counts
-- `mcp.tools` — list and request-locally expose matching read-only MCP tools from one server
-
 Recent completed exchanges are injected automatically from session memory. Durable user-memory retrieval and saving are model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 
 Optional external tools:
 
-- Read-only GitHub MCP tools are discovered at startup and registered under the `github.` namespace when `GITHUB_PERSONAL_ACCESS_TOKEN` is set
-- MCP-discovered tools are not included in the default LLM tool list; `mcp.tools` exposes only returned matches for direct calls during the current request
+- MCP server configurations are stored in SQLite with encrypted URLs and headers
+- MCP-discovered tools are not included in the default LLM tool list; `<server>.tools` exposes only returned matches for direct calls during the current request
+- Global MCP servers are visible to all users; user MCP servers are visible only to their owning canonical user
 
 ### Tool Registry
 
@@ -367,10 +363,10 @@ The registry:
 ### MCP Integration
 
 - MCP client startup lives in `internal/mcp/`
-- GitHub is the only MCP server integration today
+- MCP servers are configured as HTTPS streamable HTTP/SSE endpoints in SQLite; GitHub is just one possible global server configuration
 - The client connects to GitHub's streamable HTTP MCP endpoint using the configured personal access token
 - Oswald only exposes tools that appear read-only; mutating GitHub tools are filtered out before registration
-- MCP tools use namespaced names like `github.*` and are surfaced to the model only after request-local discovery through `mcp.tools`
+- MCP tools use namespaced names like `github.*` and are surfaced to the model only after request-local discovery through `<server>.tools`
 
 ### Tool Failure Handling
 
@@ -435,10 +431,10 @@ gofmt -w .
 
 ## Test Standards
 
-Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no live model gateway, Discord, BlueBubbles, GitHub MCP, SearXNG, or embedding service access.
+Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no live model gateway, Discord, BlueBubbles, MCP server, SearXNG, or embedding service access.
 
 - Use fake LLM clients, fake gateway transports, `httptest` servers, temporary directories, and isolated temporary SQLite databases
-- Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `SEARXNG_URL`, or model budget variables in tests
+- Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `MCP_CONFIG_ENCRYPTION_KEY`, `SEARXNG_URL`, or model budget variables in tests
 - Do not make live network calls from normal unit tests; external integrations must be mocked or guarded behind explicit opt-in checks
 - Tests may validate request/response mapping and error handling, but they should not depend on a real model response
 - Keep test data deterministic and avoid relying on existing files under `data/database/`, `data/accounts/`, or user memory directories
@@ -699,8 +695,8 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is stored in SQLite `session_turns` with TTL expiry
 - WebSocket gateway has no authentication layer
-- Only nine builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `mcp.tools`
-- GitHub is the only MCP server integration today
+- Only seven builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
+- MCP servers are configured dynamically in SQLite rather than hard-coded to one provider
 - Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
 
 Account-linking note:

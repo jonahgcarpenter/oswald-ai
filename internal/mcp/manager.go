@@ -4,216 +4,323 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	githubmcp "github.com/jonahgcarpenter/oswald-ai/internal/mcp/github"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Manager owns the configured MCP client sessions for the lifetime of the app.
+// Manager owns scoped MCP client sessions and resolves tools for active users.
 type Manager struct {
-	servers     []*server
-	serverInfos []ServerInfo
-	log         *config.Logger
+	store    *Store
+	sessions map[string]*server
+	mu       sync.Mutex
+	log      *config.Logger
 }
 
-const (
-	serverStatusConnected = "connected"
-	serverStatusError     = "error"
-
-	githubServerDescription = "GitHub repository, issue, pull request, code search, user, and discussion inspection. Access is limited by the configured GitHub token permissions; this deployment is expected to use a read-only token."
-)
-
-// NewManagerFromConfig initializes all eager MCP servers enabled by config.
-func NewManagerFromConfig(ctx context.Context, cfg *config.Config, log *config.Logger) (*Manager, error) {
-	manager := &Manager{log: log.Server("mcp.manager")}
-	if !cfg.GitHubMCPEnabled() {
-		manager.log.Info("mcp.bootstrap.disabled", "github MCP disabled", config.F("server", "github"), config.F("reason", "missing_token"), config.F("status", "degraded"))
-		return manager, nil
-	}
-
-	githubServer, err := newGitHubServer(ctx, cfg, log)
-	if err != nil {
-		reason := config.SafeErrorText(err)
-		manager.serverInfos = append(manager.serverInfos, ServerInfo{
-			Name:        "github",
-			Description: githubServerDescription,
-			Status:      serverStatusError,
-			Reason:      reason,
-		})
-		manager.log.Warn("mcp.bootstrap.server_failed", "configured MCP server unavailable", config.F("server", "github"), config.F("status", "error"), config.ErrorField(err))
-		return manager, nil
-	}
-	manager.servers = append(manager.servers, githubServer)
-	manager.serverInfos = append(manager.serverInfos, ServerInfo{
-		Name:        "github",
-		Description: githubServerDescription,
-		Status:      serverStatusConnected,
-		ToolCount:   len(githubServer.tools),
-	})
-	manager.log.Info("mcp.bootstrap.enabled", "enabled MCP servers", config.F("server_count", len(manager.servers)), config.F("servers", manager.ServerNames()))
-	return manager, nil
+// NewManagerFromStore creates a DB-backed MCP manager.
+func NewManagerFromStore(store *Store, log *config.Logger) *Manager {
+	return &Manager{store: store, sessions: make(map[string]*server), log: log.Server("mcp.manager")}
 }
 
-// ToolSpecs returns all discovered MCP tools across enabled servers.
-func (m *Manager) ToolSpecs() []ToolSpec {
-	out := make([]ToolSpec, 0)
-	for _, srv := range m.servers {
-		out = append(out, srv.tools...)
-	}
-	return out
-}
-
-// ServerInfos returns configured MCP server metadata in stable order.
-func (m *Manager) ServerInfos() []ServerInfo {
-	if m == nil {
+// ServerInfos returns global and user-scoped MCP server metadata visible to userID.
+func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
+	if m == nil || m.store == nil {
 		return nil
 	}
-	out := append([]ServerInfo(nil), m.serverInfos...)
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Name < out[j].Name
+	configs, err := m.store.ListForUser(ctx, userID)
+	if err != nil {
+		m.log.Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
+		return nil
+	}
+	infos := make([]ServerInfo, 0, len(configs))
+	for _, cfg := range configs {
+		info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+		if !cfg.Enabled {
+			info.Status = serverStatusDisabled
+			infos = append(infos, info)
+			continue
+		}
+		if srv := m.cached(scopeKey(cfg)); srv != nil {
+			if srv.reason != "" {
+				info.Status = serverStatusError
+				info.Reason = srv.reason
+			} else {
+				info.Status = serverStatusConnected
+				info.ToolCount = len(srv.tools)
+			}
+		}
+		infos = append(infos, info)
+	}
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].Scope != infos[j].Scope {
+			return infos[i].Scope < infos[j].Scope
+		}
+		return infos[i].Name < infos[j].Name
 	})
-	return out
+	return infos
 }
 
-// ServerInfo returns configured MCP server metadata by name.
-func (m *Manager) ServerInfo(name string) (ServerInfo, bool) {
-	if m == nil {
-		return ServerInfo{}, false
-	}
+// ServerInfo returns a visible server by name for the active user.
+func (m *Manager) ServerInfo(ctx context.Context, userID string, name string) (ServerInfo, bool) {
 	name = strings.TrimSpace(strings.ToLower(name))
-	for _, info := range m.serverInfos {
-		if strings.ToLower(info.Name) == name {
+	for _, info := range m.ServerInfos(ctx, userID) {
+		if info.Name == name {
 			return info, true
 		}
 	}
 	return ServerInfo{}, false
 }
 
-// ServerCount returns the number of connected MCP servers.
-func (m *Manager) ServerCount() int {
-	if m == nil {
-		return 0
+// ToolSpecs returns currently connected tools visible to userID.
+func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
+	configs, err := m.store.ListForUser(ctx, userID)
+	if err != nil {
+		return nil
 	}
-	return len(m.servers)
+	var specs []ToolSpec
+	for _, cfg := range configs {
+		if !cfg.Enabled {
+			continue
+		}
+		srv, err := m.ensureConnected(ctx, cfg)
+		if err != nil {
+			m.log.Warn("mcp.server.connect_failed", "failed to connect MCP server", config.F("server", cfg.Name), config.F("scope", cfg.Scope), config.F("status", "degraded"), config.ErrorField(err))
+			continue
+		}
+		specs = append(specs, srv.tools...)
+	}
+	return specs
 }
 
-// ServerNames returns the enabled MCP server names.
-func (m *Manager) ServerNames() string {
-	if m == nil || len(m.servers) == 0 {
-		return ""
+// ServerToolSpecs returns tools for a single visible server, connecting lazily.
+func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]ToolSpec, ServerInfo, error) {
+	cfg, ok, err := m.resolveConfig(ctx, userID, name)
+	if err != nil {
+		return nil, ServerInfo{}, err
 	}
-	names := make([]string, 0, len(m.servers))
-	for _, srv := range m.servers {
-		names = append(names, srv.name)
+	if !ok {
+		return nil, ServerInfo{}, fmt.Errorf("no configured MCP server named %q", name)
 	}
-	return strings.Join(names, ",")
+	info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+	if !cfg.Enabled {
+		info.Status = serverStatusDisabled
+		return nil, info, nil
+	}
+	srv, err := m.ensureConnected(ctx, cfg)
+	if err != nil {
+		info.Status = serverStatusError
+		info.Reason = config.SafeErrorText(err)
+		return nil, info, nil
+	}
+	info.Status = serverStatusConnected
+	info.ToolCount = len(srv.tools)
+	return append([]ToolSpec(nil), srv.tools...), info, nil
 }
 
-// Close shuts down all connected MCP sessions.
+// Execute calls a scoped MCP tool visible to userID.
+func (m *Manager) Execute(ctx context.Context, userID string, toolName string, args map[string]interface{}) (string, error) {
+	serverName, remoteName, ok := splitToolName(toolName)
+	if !ok {
+		return "", fmt.Errorf("invalid MCP tool name %q", toolName)
+	}
+	tols, _, err := m.ServerToolSpecs(ctx, userID, serverName)
+	if err != nil {
+		return "", err
+	}
+	for _, tool := range tols {
+		if tool.RemoteName == remoteName || tool.Name == toolName {
+			return tool.Handler(ctx, args)
+		}
+	}
+	return "", fmt.Errorf("MCP tool %q is not available", toolName)
+}
+
+// Close shuts down connected MCP sessions.
 func (m *Manager) Close() error {
 	if m == nil {
 		return nil
 	}
-
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var errs []error
-	for _, srv := range m.servers {
-		if srv.close == nil {
-			continue
+	for key, srv := range m.sessions {
+		if srv.close != nil {
+			if err := srv.close(); err != nil {
+				errs = append(errs, fmt.Errorf("close %s MCP session: %w", key, err))
+			}
 		}
-		if err := srv.close(); err != nil {
-			errs = append(errs, fmt.Errorf("close %s MCP session: %w", srv.name, err))
-		}
-	}
-	if len(errs) == 0 {
-		return nil
+		delete(m.sessions, key)
 	}
 	return errors.Join(errs...)
 }
 
-func newGitHubServer(ctx context.Context, cfg *config.Config, log *config.Logger) (*server, error) {
-	provider, err := githubmcp.Connect(ctx, cfg, log)
-	if err != nil {
-		return nil, fmt.Errorf("connect github MCP server: %w", err)
+// Invalidate closes any cached session for a server whose config changed.
+func (m *Manager) Invalidate(scope, ownerUserID, name string) {
+	if m == nil {
+		return
 	}
-
-	tools, err := loadGitHubToolSpecs(ctx, provider.Session(), log)
-	if err != nil {
-		provider.Close() // nolint: errcheck
-		return nil, err
+	key := scope + ":" + strings.TrimSpace(name)
+	if scope == ScopeUser {
+		key = scope + ":" + strings.TrimSpace(ownerUserID) + ":" + strings.TrimSpace(name)
 	}
-
-	log.Server("mcp.github").Info("mcp.server.connect.complete", "connected MCP server", config.F("server", "github"), config.F("tool_count", len(tools)), config.F("status", "ok"))
-	return &server{name: "github", tools: tools, close: provider.Close}, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if srv := m.sessions[key]; srv != nil && srv.close != nil {
+		srv.close() // nolint:errcheck
+	}
+	delete(m.sessions, key)
 }
 
-func loadGitHubToolSpecs(ctx context.Context, session *gomcp.ClientSession, log *config.Logger) ([]ToolSpec, error) {
-	serverLog := log.Server("mcp.github")
+func (m *Manager) cached(key string) *server {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sessions[key]
+}
+
+func (m *Manager) resolveConfig(ctx context.Context, userID, name string) (ServerConfig, bool, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if cfg, ok, err := m.store.Get(ctx, ScopeGlobal, "", name); err != nil || ok {
+		return cfg, ok, err
+	}
+	if strings.TrimSpace(userID) == "" {
+		return ServerConfig{}, false, nil
+	}
+	return m.store.Get(ctx, ScopeUser, userID, name)
+}
+
+func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*server, error) {
+	key := scopeKey(cfg)
+	if srv := m.cached(key); srv != nil && srv.reason == "" {
+		return srv, nil
+	}
+	if _, err := parseAndValidateURL(ctx, cfg.URL, m.store.resolver); err != nil {
+		m.rememberError(key, cfg, err)
+		return nil, err
+	}
+	if cfg.Transport != TransportStreamableHTTP {
+		err := fmt.Errorf("MCP transport %q is not implemented", cfg.Transport)
+		m.rememberError(key, cfg, err)
+		return nil, err
+	}
+	session, closeFn, err := connectStreamableHTTP(ctx, cfg)
+	if err != nil {
+		m.rememberError(key, cfg, err)
+		return nil, err
+	}
+	tools, err := loadToolSpecs(ctx, cfg, session, m.log)
+	if err != nil {
+		closeFn() // nolint:errcheck
+		m.rememberError(key, cfg, err)
+		return nil, err
+	}
+	srv := &server{config: cfg, tools: tools, close: closeFn}
+	m.mu.Lock()
+	if old := m.sessions[key]; old != nil && old.close != nil {
+		old.close() // nolint:errcheck
+	}
+	m.sessions[key] = srv
+	m.mu.Unlock()
+	m.log.Info("mcp.server.connect.complete", "connected MCP server", config.F("server", cfg.Name), config.F("scope", cfg.Scope), config.F("tool_count", len(tools)), config.F("status", "ok"))
+	return srv, nil
+}
+
+func (m *Manager) rememberError(key string, cfg ServerConfig, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[key] = &server{config: cfg, reason: config.SafeErrorText(err)}
+}
+
+func connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &headerTransport{
+			base:    http.DefaultTransport,
+			headers: cfg.Headers,
+		},
+	}
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "oswald-ai", Version: "1.0.0"}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
+	transport := &gomcp.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: httpClient, DisableStandaloneSSE: true}
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	session, err := client.Connect(connectCtx, transport, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect MCP session: %w", err)
+	}
+	return session, session.Close, nil
+}
+
+func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientSession, log *config.Logger) ([]ToolSpec, error) {
 	var specs []ToolSpec
 	cursor := ""
 	for {
 		result, err := session.ListTools(ctx, &gomcp.ListToolsParams{Cursor: cursor})
 		if err != nil {
-			return nil, fmt.Errorf("list github MCP tools: %w", err)
+			return nil, fmt.Errorf("list MCP tools: %w", err)
 		}
-
 		for _, tool := range result.Tools {
-			if tool == nil || !githubmcp.IsReadOnlyTool(tool) {
+			if tool == nil {
 				continue
 			}
-			spec, err := githubToolSpec(tool, session, log)
+			if strings.EqualFold(strings.TrimSpace(tool.Name), "tools") {
+				log.Warn("mcp.tool.skipped", "skipped MCP tool with reserved name", config.F("server", cfg.Name), config.F("tool_name", tool.Name), config.F("status", "degraded"))
+				continue
+			}
+			spec, err := toolSpec(cfg, tool, session, log)
 			if err != nil {
-				serverLog.Warn("mcp.tool.skipped", "skipped MCP tool", config.F("server", "github"), config.F("tool_name", tool.Name), config.F("status", "degraded"), config.ErrorField(err))
+				log.Warn("mcp.tool.skipped", "skipped MCP tool", config.F("server", cfg.Name), config.F("tool_name", tool.Name), config.F("status", "degraded"), config.ErrorField(err))
 				continue
 			}
 			specs = append(specs, spec)
 		}
-
 		if result.NextCursor == "" {
 			break
 		}
 		cursor = result.NextCursor
 	}
-
 	return specs, nil
 }
 
-func githubToolSpec(tool *gomcp.Tool, session *gomcp.ClientSession, log *config.Logger) (ToolSpec, error) {
+func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, log *config.Logger) (ToolSpec, error) {
 	params, err := schemaToParams(tool.InputSchema)
 	if err != nil {
 		return ToolSpec{}, fmt.Errorf("normalize input schema: %w", err)
 	}
-
-	toolName := tool.Name
-	localName := "github." + toolName
+	remoteName := strings.TrimSpace(tool.Name)
+	localName := cfg.Name + "." + remoteName
 	description := strings.TrimSpace(tool.Description)
 	if description == "" {
 		description = strings.TrimSpace(tool.Title)
 	}
+	return ToolSpec{Name: localName, Description: description, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+		meta := requestctx.MetadataFromContext(ctx)
+		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
+		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
+		if err != nil {
+			return "", fmt.Errorf("MCP tool %q failed: %w", remoteName, err)
+		}
+		flattened, err := flattenToolResult(result)
+		if err != nil {
+			return "", fmt.Errorf("format MCP tool %q result: %w", remoteName, err)
+		}
+		return flattened, nil
+	}}, nil
+}
 
-	return ToolSpec{
-		Name:        localName,
-		Description: description,
-		Server:      "github",
-		Parameters:  params,
-		Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
-			meta := requestctx.MetadataFromContext(ctx)
-			reqLog := log.Agent("agent.tool.mcp.github", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
-			reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", toolName), config.F("server", "github"))
+func scopeKey(cfg ServerConfig) string {
+	if cfg.Scope == ScopeGlobal {
+		return ScopeGlobal + ":" + cfg.Name
+	}
+	return ScopeUser + ":" + cfg.OwnerUserID + ":" + cfg.Name
+}
 
-			result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: toolName, Arguments: arguments})
-			if err != nil {
-				return "", fmt.Errorf("github MCP tool %q failed: %w", toolName, err)
-			}
-
-			flattened, err := flattenToolResult(result)
-			if err != nil {
-				return "", fmt.Errorf("format github MCP tool %q result: %w", toolName, err)
-			}
-			return flattened, nil
-		},
-	}, nil
+func splitToolName(name string) (string, string, bool) {
+	server, remote, ok := strings.Cut(strings.TrimSpace(name), ".")
+	return server, remote, ok && server != "" && remote != ""
 }

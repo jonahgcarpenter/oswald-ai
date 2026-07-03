@@ -81,6 +81,9 @@ What is Bitcoins current price?
 - [x] Multi-gateway response routing and queuing
 - [x] Persistent conversation history (multi-user context)
 - [ ] Support for images, gifs, and files
-- [ ] Global vs User defined MCP servers
+  - [x] Images
+  - [x] GIFs
+  - [ ] Files
+- [x] Global vs User defined MCP servers
 - [ ] Scheduled task (cron tool)
 - [ ] STT & TTS support

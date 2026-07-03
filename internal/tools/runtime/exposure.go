@@ -37,3 +37,15 @@ func (e *Exposure) Visibility() registry.ToolVisibility {
 	}
 	return registry.ToolVisibility{ExposedMCPTools: e.mcpTools}
 }
+
+// ExposedMCPTools returns a copy of request-local exposed MCP tool names.
+func (e *Exposure) ExposedMCPTools() map[string]bool {
+	if e == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(e.mcpTools))
+	for name, exposed := range e.mcpTools {
+		out[name] = exposed
+	}
+	return out
+}

@@ -15,7 +15,7 @@ type Config struct {
 	IMessageWebhookPath      string        // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
 	BlueBubblesURL           string        // BlueBubbles server base URL; iMessage gateway disabled if empty
 	BlueBubblesPassword      string        // BlueBubbles server password/token for REST API auth
-	GitHubMCPToken           string        // GitHub PAT used to authenticate to the GitHub MCP server
+	MCPConfigEncryptionKey   string        // Key used to encrypt MCP server URLs and headers at rest
 	LLMGatewayURL            string        // LLM gateway API base URL (default: "http://localhost:8080")
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
 	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
@@ -50,7 +50,7 @@ func Load() *Config {
 		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
 		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:      getEnv("BLUEBUBBLES_PASSWORD", ""),
-		GitHubMCPToken:           getEnv("GITHUB_PERSONAL_ACCESS_TOKEN", ""),
+		MCPConfigEncryptionKey:   getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
 		LLMGatewayURL:            getEnv("LLM_GATEWAY_URL", "http://localhost:8080"),
 		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
@@ -65,11 +65,6 @@ func Load() *Config {
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
 	}
-}
-
-// GitHubMCPEnabled reports whether GitHub MCP should be initialized at startup.
-func (c *Config) GitHubMCPEnabled() bool {
-	return c != nil && c.GitHubMCPToken != ""
 }
 
 // getEnv retrieves an environment variable with a fallback to the default value

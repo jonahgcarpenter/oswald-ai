@@ -74,5 +74,8 @@ func (d *DB) initialize() error {
 	if err := d.initializeUserMemory(); err != nil {
 		return err
 	}
+	if err := d.initializeMCPServers(); err != nil {
+		return err
+	}
 	return nil
 }

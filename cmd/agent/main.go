@@ -87,16 +87,18 @@ func main() {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
 	}
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
-	commandService, err := commandbuiltin.NewService(accountLinkService)
+	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
+	if err != nil {
+		log.Fatal("app.mcp.init_failed", "failed to initialize MCP config store", config.ErrorField(err))
+	}
+	defer mcpStore.Close() // nolint:errcheck
+	mcpManager := mcp.NewManagerFromStore(mcpStore, rootLog)
+	mcpProvider := mcp.NewProvider(mcpManager)
+	commandService, err := commandbuiltin.NewService(accountLinkService, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
-
-	mcpManager, err := mcp.NewManagerFromConfig(context.Background(), cfg, rootLog)
-	if err != nil {
-		log.Fatal("app.mcp.init_failed", "failed to initialize MCP clients", config.ErrorField(err))
-	}
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
@@ -131,6 +133,7 @@ func main() {
 		cfg.MaxToolFailureRetries,
 		agentRequestTimeout,
 		rootLog,
+		mcpProvider,
 	)
 
 	// Create the broker and start its worker pool.

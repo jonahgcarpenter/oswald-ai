@@ -6,13 +6,24 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
+	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 )
 
+// MCPDeps contains optional dependencies for MCP management commands.
+type MCPDeps struct {
+	Store   *mcpmanager.Store
+	Manager *mcpmanager.Manager
+}
+
 // NewService creates the application command service with all built-in commands.
-func NewService(users *accountlinking.Service) (*commands.Service, error) {
+func NewService(users *accountlinking.Service, optionalMCP ...MCPDeps) (*commands.Service, error) {
 	help := &helpHandler{auth: users}
 	registrations := []commands.Command{{Handler: help}}
+	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
+		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
+	}
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})
 	}
