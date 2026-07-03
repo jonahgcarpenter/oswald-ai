@@ -277,10 +277,64 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 	}
 }
 
+func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	intro := "You are speaking with Example User aka examplehandle."
+	if err := store.SyncSpeakerIntro("user-1", intro); err != nil {
+		t.Fatalf("sync speaker intro: %v", err)
+	}
+
+	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	req := primaryRequests(chat.requests)[0]
+	if req.User != "Example User aka examplehandle" {
+		t.Fatalf("provider user = %q, want stripped speaker name", req.User)
+	}
+	if !strings.Contains(req.Messages[0].Content, intro) {
+		t.Fatalf("system prompt no longer contains full speaker intro: %q", req.Messages[0].Content)
+	}
+}
+
 func TestSessionMemoryUserContentReplyOnly(t *testing.T) {
 	got := sessionMemoryUserContent("[Replying to Alice: \"old\"]", 0)
 	if got != "[User replied to a prior message]" {
 		t.Fatalf("unexpected content %q", got)
+	}
+}
+
+func TestProviderUserValueStripsStaticSpeakerPrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "speaker intro",
+			input: "You are speaking with Example User aka examplehandle.",
+			want:  "Example User aka examplehandle",
+		},
+		{
+			name:  "display name",
+			input: "Example User",
+			want:  "Example User",
+		},
+		{
+			name:  "canonical id",
+			input: "usr_123",
+			want:  "usr_123",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerUserValue(tt.input); got != tt.want {
+				t.Fatalf("providerUserValue(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 

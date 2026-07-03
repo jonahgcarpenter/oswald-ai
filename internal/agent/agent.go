@@ -299,6 +299,13 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func providerUserValue(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "You are speaking with ")
+	value = strings.TrimSuffix(value, ".")
+	return strings.TrimSpace(value)
+}
+
 func gatewaySystemPrompt(gateway string) string {
 	switch strings.TrimSpace(strings.ToLower(gateway)) {
 	case "imessage":
@@ -394,7 +401,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
 		promptParts = append(promptParts, gatewayPrompt)
 	}
-	requestUser := firstNonEmpty(speakerLine, displayName, senderID)
+	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)
 
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
