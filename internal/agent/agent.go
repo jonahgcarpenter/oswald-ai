@@ -299,6 +299,15 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func gatewaySystemPrompt(gateway string) string {
+	switch strings.TrimSpace(strings.ToLower(gateway)) {
+	case "imessage":
+		return "# Gateway Instructions\nThe user is reading this in iMessage, which does not render Markdown. Write responses in plain text. Do not use Markdown formatting such as **bold**, headings, tables, fenced code blocks, or inline code ticks. Use simple line breaks and plain bullets when helpful."
+	default:
+		return ""
+	}
+}
+
 // mapMetrics converts an LLM response into a model metrics summary.
 func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	if resp == nil {
@@ -381,6 +390,9 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	speakerLine := a.currentSpeakerLine(reqLog, senderID)
 	if speakerLine != "" {
 		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
+	}
+	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
+		promptParts = append(promptParts, gatewayPrompt)
 	}
 	requestUser := firstNonEmpty(speakerLine, displayName, senderID)
 	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)

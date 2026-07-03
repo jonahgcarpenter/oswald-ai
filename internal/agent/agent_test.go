@@ -247,6 +247,36 @@ func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) 
 	}
 }
 
+func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	_, err := agent.Process("req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	system := primaryRequests(chat.requests)[0].Messages[0]
+	if system.Role != "system" || !strings.Contains(system.Content, "iMessage") || !strings.Contains(system.Content, "does not render Markdown") {
+		t.Fatalf("missing imessage system instruction: %+v", system)
+	}
+}
+
+func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	system := primaryRequests(chat.requests)[0].Messages[0]
+	if strings.Contains(system.Content, "does not render Markdown") {
+		t.Fatalf("unexpected imessage system instruction: %+v", system)
+	}
+}
+
 func TestSessionMemoryUserContentReplyOnly(t *testing.T) {
 	got := sessionMemoryUserContent("[Replying to Alice: \"old\"]", 0)
 	if got != "[User replied to a prior message]" {
