@@ -9,7 +9,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
-	toolmcp "github.com/jonahgcarpenter/oswald-ai/internal/tools/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -26,9 +25,6 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemSto
 	}
 
 	if err := builtin.Register(reg, cfg, soulStore, userMemStore, chatClient, model, mcpManager, log); err != nil {
-		return nil, err
-	}
-	if err := toolmcp.Register(reg, mcpManager, log); err != nil {
 		return nil, err
 	}
 

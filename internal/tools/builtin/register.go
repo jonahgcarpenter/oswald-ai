@@ -47,7 +47,7 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.servers"))
 
-	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(reg, mcpManager, log))); err != nil {
+	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(mcpManager, log))); err != nil {
 		return fmt.Errorf("failed to initialize mcp.tools tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.tools"))

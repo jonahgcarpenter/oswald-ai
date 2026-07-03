@@ -15,9 +15,12 @@ import (
 // NewServersHandler returns a handler that lists configured MCP servers.
 func NewServersHandler(manager *mcpmanager.Manager, log *config.Logger) registry.Handler {
 	return func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+		if manager == nil {
+			return "No MCP servers are configured.", nil
+		}
 		meta := requestctx.MetadataFromContext(ctx)
 		reqLog := log.Agent("agent.tool.mcp.servers", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
-		servers := manager.ServerInfos()
+		servers := manager.ServerInfos(ctx, meta.SenderID)
 		reqLog.Debug("agent.tool.mcp.servers", "listed MCP servers", config.F("server_count", len(servers)))
 		if len(servers) == 0 {
 			return "No MCP servers are configured.", nil
@@ -27,6 +30,7 @@ func NewServersHandler(manager *mcpmanager.Manager, log *config.Logger) registry
 		fmt.Fprintf(&b, "Configured MCP servers:\n")
 		for i, server := range servers {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, server.Name)
+			fmt.Fprintf(&b, "Scope: %s\n", server.Scope)
 			fmt.Fprintf(&b, "Status: %s\n", server.Status)
 			fmt.Fprintf(&b, "Tools: %d\n", server.ToolCount)
 			if server.Description != "" {
@@ -44,16 +48,20 @@ func NewServersHandler(manager *mcpmanager.Manager, log *config.Logger) registry
 }
 
 // NewToolsHandler returns a handler that lists and exposes MCP tools for this request.
-func NewToolsHandler(reg *registry.Registry, manager *mcpmanager.Manager, log *config.Logger) registry.Handler {
+func NewToolsHandler(manager *mcpmanager.Manager, log *config.Logger) registry.Handler {
 	return func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+		if manager == nil {
+			return "No MCP servers are configured.", nil
+		}
+		meta := requestctx.MetadataFromContext(ctx)
 		server := strings.TrimSpace(stringArg(arguments, "server"))
 		if server == "" {
 			return "", fmt.Errorf("server is required")
 		}
 		query := strings.TrimSpace(stringArg(arguments, "query"))
 		limit := intArg(arguments, "limit", 8)
-		serverInfo, ok := manager.ServerInfo(server)
-		if !ok {
+		entries, serverInfo, err := serverCatalog(ctx, manager, meta.SenderID, server)
+		if err != nil {
 			return fmt.Sprintf("No configured MCP server named %q. Use mcp.servers to list configured servers.", server), nil
 		}
 		if serverInfo.Status != "connected" {
@@ -63,7 +71,7 @@ func NewToolsHandler(reg *registry.Registry, manager *mcpmanager.Manager, log *c
 			return fmt.Sprintf("MCP server %q is configured but unavailable.", serverInfo.Name), nil
 		}
 
-		tools := searchTools(reg, serverInfo.Name, query, limit)
+		tools := searchTools(entries, serverInfo.Name, query, limit)
 		if len(tools) == 0 {
 			if query != "" {
 				return fmt.Sprintf("No MCP tools matched server %q for query %q.", serverInfo.Name, query), nil
@@ -80,7 +88,6 @@ func NewToolsHandler(reg *registry.Registry, manager *mcpmanager.Manager, log *c
 			exposer.ExposeTools(names)
 		}
 
-		meta := requestctx.MetadataFromContext(ctx)
 		reqLog := log.Agent("agent.tool.mcp.tools", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.tools", "listed MCP tools", config.F("server", serverInfo.Name), config.F("query", query), config.F("tool_count", len(tools)))
 
@@ -109,7 +116,23 @@ func NewToolsHandler(reg *registry.Registry, manager *mcpmanager.Manager, log *c
 	}
 }
 
-func searchTools(reg *registry.Registry, server, query string, limit int) []registry.CatalogEntry {
+func serverCatalog(ctx context.Context, manager *mcpmanager.Manager, userID, server string) ([]registry.CatalogEntry, mcpmanager.ServerInfo, error) {
+	specs, info, err := manager.ServerToolSpecs(ctx, userID, server)
+	if err != nil {
+		return nil, info, err
+	}
+	entries := make([]registry.CatalogEntry, 0, len(specs))
+	for _, spec := range specs {
+		params := make([]registry.ParamSpec, 0, len(spec.Parameters))
+		for _, p := range spec.Parameters {
+			params = append(params, registry.ParamSpec{Name: p.Name, Type: p.Type, Required: p.Required, Description: p.Description, Enum: p.Enum})
+		}
+		entries = append(entries, registry.CatalogEntry{Name: spec.Name, Description: spec.Description, Source: registry.ToolSourceMCP, Server: spec.Server, Parameters: params})
+	}
+	return entries, info, nil
+}
+
+func searchTools(catalog []registry.CatalogEntry, server, query string, limit int) []registry.CatalogEntry {
 	server = strings.TrimSpace(strings.ToLower(server))
 	query = strings.TrimSpace(strings.ToLower(query))
 	if limit <= 0 {
@@ -124,7 +147,7 @@ func searchTools(reg *registry.Registry, server, query string, limit int) []regi
 		score int
 	}
 	var matches []scoredEntry
-	for _, tool := range reg.CatalogBySource(registry.ToolSourceMCP) {
+	for _, tool := range catalog {
 		if server != "" && strings.ToLower(tool.Server) != server {
 			continue
 		}

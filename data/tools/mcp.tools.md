@@ -2,7 +2,7 @@
 
 ## Description
 
-List tools available from one configured and connected MCP server. Calling this tool makes the returned tools available for direct tool calls during the rest of the current request. Use the query parameter to avoid exposing an entire large server catalog when only one capability is needed.
+List tools available from one configured MCP server visible to the current user. Calling this tool makes the returned tools available for direct tool calls during the rest of the current request. Use the query parameter to avoid exposing an entire large server catalog when only one capability is needed.
 
 ## Parameters
 

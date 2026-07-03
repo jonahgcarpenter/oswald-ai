@@ -222,6 +222,7 @@ type AgentResponse struct {
 type Agent struct {
 	chatClient            llm.Chatter
 	registry              *registry.Registry
+	mcpProvider           MCPProvider
 	budget                promptbudget.ContextBudget
 	model                 string
 	soul                  *soul.Store
@@ -229,6 +230,12 @@ type Agent struct {
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
+}
+
+// MCPProvider resolves request-scoped MCP tools for the active canonical user.
+type MCPProvider interface {
+	LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool
+	Execute(ctx context.Context, userID, name string, args map[string]interface{}) (string, bool, error)
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
@@ -244,10 +251,16 @@ func NewAgent(
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
 	log *config.Logger,
+	mcpProviders ...MCPProvider,
 ) *Agent {
+	var mcpProvider MCPProvider
+	if len(mcpProviders) > 0 {
+		mcpProvider = mcpProviders[0]
+	}
 	return &Agent{
 		chatClient:            chatClient,
 		registry:              registry,
+		mcpProvider:           mcpProvider,
 		budget:                budget,
 		model:                 model,
 		soul:                  soul,
@@ -332,6 +345,24 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 		DurationMS:       resp.DurationMS,
 		TokensPerSecond:  tps,
 	}
+}
+
+func (a *Agent) toolsForRequest(ctx context.Context, senderID string, exposure *toolruntime.Exposure) []llm.Tool {
+	tools := a.registry.LLMToolsForVisibility(exposure.Visibility())
+	if a.mcpProvider == nil {
+		return tools
+	}
+	tools = append(tools, a.mcpProvider.LLMTools(ctx, senderID, exposure.ExposedMCPTools())...)
+	return tools
+}
+
+func (a *Agent) executeTool(ctx context.Context, senderID string, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (string, error) {
+	if a.mcpProvider != nil && exposure.ExposedMCPTools()[name] {
+		if result, handled, err := a.mcpProvider.Execute(ctx, senderID, name, args); handled {
+			return result, err
+		}
+	}
+	return a.registry.Execute(ctx, name, args)
 }
 
 // Process handles the end-to-end agentic pipeline in a single loop.
@@ -425,9 +456,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
+	initialTools := a.registry.LLMTools()
 	prune := promptbudget.Result{
-		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
-		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), a.registry.LLMTools()),
+		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
+		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
 	}
 
 	messages := make([]llm.ChatMessage, 0, 2)
@@ -492,7 +524,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		accumulatedContent.Reset()
 
 		req.Messages = messages
-		req.Tools = a.registry.LLMToolsForVisibility(toolExposure.Visibility())
+		req.Tools = a.toolsForRequest(ctx, senderID, toolExposure)
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),
@@ -557,7 +589,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 			var toolContent string
 
-			result, execErr := a.registry.Execute(ctx, toolName, tc.Function.Arguments)
+			result, execErr := a.executeTool(ctx, senderID, toolName, tc.Function.Arguments, toolExposure)
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				consecutiveToolFailures++
