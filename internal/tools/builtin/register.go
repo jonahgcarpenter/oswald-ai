@@ -5,8 +5,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/mcpbrowse"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
@@ -14,7 +12,7 @@ import (
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, chatClient llm.Chatter, model string, mcpManager *mcpmanager.Manager, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, chatClient llm.Chatter, model string, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := reg.RegisterHandler("web.search", registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
@@ -41,16 +39,6 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 		return fmt.Errorf("failed to initialize memory.forget tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultAccountLinkPath))
-
-	if err := reg.RegisterHandler("mcp.servers", registry.Handler(mcpbrowse.NewServersHandler(mcpManager, log))); err != nil {
-		return fmt.Errorf("failed to initialize mcp.servers tool: %w", err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.servers"))
-
-	if err := reg.RegisterHandler("mcp.tools", registry.Handler(mcpbrowse.NewToolsHandler(mcpManager, log))); err != nil {
-		return fmt.Errorf("failed to initialize mcp.tools tool: %w", err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured MCP browse tool", config.F("tool_name", "mcp.tools"))
 
 	if err := reg.RegisterHandler("soul.read", registry.Handler(soul.NewReadHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.read tool: %w", err)

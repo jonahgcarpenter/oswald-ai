@@ -234,8 +234,9 @@ type Agent struct {
 
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
 type MCPProvider interface {
+	DiscoveryTools(ctx context.Context, userID string) []llm.Tool
 	LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool
-	Execute(ctx context.Context, userID, name string, args map[string]interface{}) (string, bool, error)
+	Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error)
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
@@ -352,13 +353,14 @@ func (a *Agent) toolsForRequest(ctx context.Context, senderID string, exposure *
 	if a.mcpProvider == nil {
 		return tools
 	}
+	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, senderID)...)
 	tools = append(tools, a.mcpProvider.LLMTools(ctx, senderID, exposure.ExposedMCPTools())...)
 	return tools
 }
 
 func (a *Agent) executeTool(ctx context.Context, senderID string, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (string, error) {
-	if a.mcpProvider != nil && exposure.ExposedMCPTools()[name] {
-		if result, handled, err := a.mcpProvider.Execute(ctx, senderID, name, args); handled {
+	if a.mcpProvider != nil {
+		if result, handled, err := a.mcpProvider.Execute(ctx, senderID, name, args, exposure.ExposedMCPTools()); handled {
 			return result, err
 		}
 	}
@@ -456,7 +458,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
-	initialTools := a.registry.LLMTools()
+	initialTools := a.toolsForRequest(ctx, senderID, toolExposure)
 	prune := promptbudget.Result{
 		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
 		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),

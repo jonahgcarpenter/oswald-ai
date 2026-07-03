@@ -35,7 +35,7 @@ func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
 	}
 	configs, err := m.store.ListForUser(ctx, userID)
 	if err != nil {
-		m.log.Warn("mcp.servers.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
+		m.log.Warn("mcp.server_configs.list_failed", "failed to list MCP servers", config.F("status", "degraded"), config.ErrorField(err))
 		return nil
 	}
 	infos := make([]ServerInfo, 0, len(configs))
@@ -265,6 +265,10 @@ func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientS
 		}
 		for _, tool := range result.Tools {
 			if tool == nil {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(tool.Name), "tools") {
+				log.Warn("mcp.tool.skipped", "skipped MCP tool with reserved name", config.F("server", cfg.Name), config.F("tool_name", tool.Name), config.F("status", "degraded"))
 				continue
 			}
 			spec, err := toolSpec(cfg, tool, session, log)

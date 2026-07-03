@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -338,6 +339,41 @@ func TestProviderUserValueStripsStaticSpeakerPrefix(t *testing.T) {
 	}
 }
 
+func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("call-discover", "home.tools", map[string]interface{}{"query": "light"}),
+		toolCallResponse("call-tool", "home.turn_on", map[string]interface{}{"entity": "light.office"}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+	agent.mcpProvider = &fakeMCPProvider{}
+
+	resp, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "done" {
+		t.Fatalf("response = %q", resp.Response)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) < 2 {
+		t.Fatalf("expected multiple requests, got %d", len(requests))
+	}
+	if !requestHasTool(requests[0], "home.tools") {
+		t.Fatalf("first request did not include home.tools: %+v", toolNames(requests[0]))
+	}
+	if requestHasTool(requests[0], "home.turn_on") {
+		t.Fatalf("first request exposed actual MCP tool before discovery")
+	}
+	if !requestHasTool(requests[1], "home.turn_on") {
+		t.Fatalf("second request did not expose actual MCP tool: %+v", toolNames(requests[1]))
+	}
+}
+
+func toolCallResponse(id, name string, args map[string]interface{}) *llm.ChatResponse {
+	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: id, Function: llm.ToolFunction{Name: name, Arguments: args}}}}}
+}
+
 type fakeChatter struct {
 	responses []*llm.ChatResponse
 	requests  []llm.ChatRequest
@@ -364,6 +400,32 @@ func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.C
 type fakeEmbedder struct {
 	vectors [][]float64
 	inputs  []string
+}
+
+type fakeMCPProvider struct{}
+
+func (p *fakeMCPProvider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool {
+	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.tools", Description: "Search Home Assistant tools", Parameters: llm.ToolParameters{Type: "object"}}}}
+}
+
+func (p *fakeMCPProvider) LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool {
+	if !exposed["home.turn_on"] {
+		return nil
+	}
+	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.turn_on", Description: "Turn on a light", Parameters: llm.ToolParameters{Type: "object"}}}}
+}
+
+func (p *fakeMCPProvider) Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error) {
+	if name == "home.tools" {
+		if exposer := requestctx.ToolExposerFromContext(ctx); exposer != nil {
+			exposer.ExposeTools([]string{"home.turn_on"})
+		}
+		return "Available MCP tools from home:\n1. home.turn_on", true, nil
+	}
+	if name == "home.turn_on" && exposed[name] {
+		return "light turned on", true, nil
+	}
+	return "", false, nil
 }
 
 func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
@@ -408,4 +470,21 @@ func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 
 func contains(value, needle string) bool {
 	return strings.Contains(value, needle)
+}
+
+func requestHasTool(req llm.ChatRequest, name string) bool {
+	for _, tool := range req.Tools {
+		if tool.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(req llm.ChatRequest) []string {
+	names := make([]string, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		names = append(names, tool.Function.Name)
+	}
+	return names
 }
