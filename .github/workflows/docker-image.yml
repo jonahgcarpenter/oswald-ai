@@ -55,3 +55,12 @@ jobs:
           push: true
           tags: ${{ steps.meta_server.outputs.tags }}
           labels: ${{ steps.meta_server.outputs.labels }}
+
+  release-notes:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord Notification
+        uses: SethCohen/github-releases-to-discord@v1
+        with:
+          webhook_url: ${{ secrets.DISCORD_WEBHOOK }}
