@@ -59,7 +59,7 @@ Can you elaborate on that?
 
 ### WebSocket API
 
-Currently used for testing.
+Currently used for the Home Assistant integration [here](https://github.com/jonahgcarpenter/has-oswald-conversation).
 
 Connect to `ws://localhost:8000/ws`:
 
