@@ -21,6 +21,7 @@ func New(users *accountlinking.Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{users: users, definition: commands.Definition{Name: "admin", Summary: "Grant admin access to a user.", Usage: "/admin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "ban", Summary: "Ban a user from using Oswald.", Usage: "/ban <canonical_id> [reason]", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "deleteuser", Summary: "Delete a canonical user.", Usage: "/deleteuser <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unadmin", Summary: "Remove admin access from a user.", Usage: "/unadmin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unban", Summary: "Unban a user.", Usage: "/unban <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "user", Summary: "Show one canonical user.", Usage: "/user <canonical_id>", AdminOnly: true}},
@@ -55,6 +56,8 @@ func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Res
 		return h.handleSetAdmin(req.UserID, req.Args, false)
 	case "ban":
 		return h.handleBan(req.UserID, req.Args)
+	case "deleteuser":
+		return h.handleDeleteUser(req.UserID, req.Args)
 	case "unban":
 		return h.handleUnban(req.UserID, req.Args)
 	default:
@@ -132,6 +135,17 @@ func (h *handler) handleUnban(actorID string, args []string) (commands.Result, e
 		return commands.Result{Text: fmt.Sprintf("Could not unban user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
+}
+
+func (h *handler) handleDeleteUser(actorID string, args []string) (commands.Result, error) {
+	if len(args) != 1 {
+		return commands.Result{Text: commands.UsageText(h.definition)}, nil
+	}
+	targetID := strings.TrimSpace(args[0])
+	if err := h.users.DeleteUser(actorID, targetID); err != nil {
+		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
+	}
+	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID)}, nil
 }
 
 func renderAccounts(accounts []accountlinking.LinkedAccount) string {

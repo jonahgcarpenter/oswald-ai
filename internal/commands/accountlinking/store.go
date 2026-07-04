@@ -314,6 +314,47 @@ func (s *Service) UnbanUser(actorID, targetID string) error {
 	return nil
 }
 
+// DeleteUser removes a canonical user and all data owned by that user.
+func (s *Service) DeleteUser(actorID, targetID string) error {
+	targetID = strings.TrimSpace(targetID)
+	if targetID == "" {
+		return fmt.Errorf("canonical user ID cannot be empty")
+	}
+	if actorID == targetID {
+		return fmt.Errorf("cannot delete yourself")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	user, ok := data.Users[targetID]
+	if !ok {
+		return fmt.Errorf("canonical user %q not found", targetID)
+	}
+
+	delete(data.Users, targetID)
+	for accountKey, owner := range data.AccountIndex {
+		if owner == targetID {
+			delete(data.AccountIndex, accountKey)
+		}
+	}
+	if err := s.saveLocked(data); err != nil {
+		return err
+	}
+	if s.db != nil && s.db.SQL() != nil {
+		if _, err := s.db.SQL().Exec(`DELETE FROM mcp_servers WHERE owner_user_id = ?`, targetID); err != nil {
+			return fmt.Errorf("failed to delete user MCP servers: %w", err)
+		}
+	}
+
+	s.log.Info("account_link.user.deleted", "deleted user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("account_count", len(user.Accounts)), config.F("status", "ok"))
+	return nil
+}
+
 // SpeakerLine returns a deterministic speaker line for the canonical user.
 func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
 	accounts, err := s.AccountsForUser(canonicalUserID)
