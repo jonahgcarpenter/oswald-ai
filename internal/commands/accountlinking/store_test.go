@@ -2,6 +2,7 @@ package accountlinking
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -312,6 +313,85 @@ func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
 	}
 	if user.BanReason != "merged ban" {
 		t.Fatalf("expected ban metadata preserved, got %+v", user)
+	}
+}
+
+func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "400", "Admin")
+	if err != nil {
+		t.Fatalf("ensure admin: %v", err)
+	}
+	targetID, err := links.EnsureAccount("discord", "500", "Target")
+	if err != nil {
+		t.Fatalf("ensure target: %v", err)
+	}
+	if _, err := links.LinkAccount(targetID, "websocket", "target-local", "Target Local"); err != nil {
+		t.Fatalf("link websocket: %v", err)
+	}
+	if err := links.SetAdmin(adminID, adminID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+
+	db := links.db.SQL()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(`INSERT OR REPLACE INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, targetID, "You are speaking with Target.", now, now); err != nil {
+		t.Fatalf("insert profile: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "the user likes green.", "test", 0.9, 3, "active", "session-target", now, now); err != nil {
+		t.Fatalf("insert memory entry: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES (?, ?, ?, ?, ?)`, "session-target", targetID, "hello", "hi", now); err != nil {
+		t.Fatalf("insert session turn: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mcp_servers (id, scope, owner_user_id, name, type, transport, url_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "mcp-target", "user", targetID, "target-tools", "generic", "streamable_http", "ciphertext", now, now); err != nil {
+		t.Fatalf("insert mcp server: %v", err)
+	}
+
+	if err := links.DeleteUser(adminID, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
+		t.Fatalf("expected self delete error, got %v", err)
+	}
+	if err := links.DeleteUser(adminID, targetID); err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+
+	if _, ok, err := links.User(targetID); err != nil || ok {
+		t.Fatalf("expected deleted user missing, ok=%v err=%v", ok, err)
+	}
+	accounts, err := links.AccountsForUser(targetID)
+	if err != nil {
+		t.Fatalf("accounts after delete: %v", err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("expected no accounts after delete, got %+v", accounts)
+	}
+
+	assertRowCount(t, db, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM linked_accounts WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM user_memory_profiles WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM mcp_servers WHERE owner_user_id = ?`, targetID, 0)
+
+	recreatedID, err := links.EnsureAccount("discord", "500", "Target Recreated")
+	if err != nil {
+		t.Fatalf("recreate deleted account: %v", err)
+	}
+	if recreatedID == targetID {
+		t.Fatalf("expected deleted external account to create a new canonical user, got original %s", recreatedID)
+	}
+}
+
+func assertRowCount(t *testing.T, db interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, query, userID string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(query, userID).Scan(&got); err != nil {
+		t.Fatalf("count query %q: %v", query, err)
+	}
+	if got != want {
+		t.Fatalf("count query %q got %d, want %d", query, got, want)
 	}
 }
 

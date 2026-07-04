@@ -20,7 +20,7 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	}
 	service := newAdminCommandService(t, links)
 
-	for _, input := range []string{"/users", "/user " + userID} {
+	for _, input := range []string{"/users", "/user " + userID, "/deleteuser " + userID} {
 		result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: input})
 		if err != nil {
 			t.Fatalf("execute %s err=%v", input, err)
@@ -102,6 +102,24 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	isBanned, err = links.IsBanned(targetID)
 	if err != nil || isBanned {
 		t.Fatalf("expected target unbanned, got %v err=%v", isBanned, err)
+	}
+
+	response, err = executeCommand(t, service, adminID, "/deleteuser")
+	if err != nil || response != "Delete a canonical user.\nUse: /deleteuser <canonical_id>" {
+		t.Fatalf("delete usage response=%q err=%v", response, err)
+	}
+
+	response, err = executeCommand(t, service, adminID, "/deleteuser "+adminID)
+	if err != nil || !strings.Contains(response, "cannot delete yourself") {
+		t.Fatalf("self delete response=%q err=%v", response, err)
+	}
+
+	response, err = executeCommand(t, service, adminID, "/deleteuser "+targetID)
+	if err != nil || !strings.Contains(response, "Deleted "+targetID+".") {
+		t.Fatalf("delete response=%q err=%v", response, err)
+	}
+	if _, ok, err := links.User(targetID); err != nil || ok {
+		t.Fatalf("expected target deleted, ok=%v err=%v", ok, err)
 	}
 }
 
