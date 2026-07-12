@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 const (
@@ -88,6 +89,7 @@ type Embed struct {
 	URL       string     `json:"url,omitempty"`
 	Image     EmbedImage `json:"image,omitempty"`
 	Thumbnail EmbedImage `json:"thumbnail,omitempty"`
+	Video     EmbedImage `json:"video,omitempty"`
 }
 
 // EmbedImage describes an image-like Discord embed asset.
@@ -129,21 +131,22 @@ type replyContext struct {
 
 // Gateway runs the Discord gateway connection loop.
 type Gateway struct {
-	Token      string
-	BotID      string
-	Broker     *broker.Broker
-	Links      *accountlinking.Service
-	Runtime    gatewayruntime.Dependencies
-	Log        *config.Logger
-	APIBaseURL string
-	HTTPClient *http.Client
-	replyMu    sync.RWMutex
-	replyIndex map[string]replyContext
-	sessionMu  sync.RWMutex
-	sessionID  string
-	resumeURL  string
-	lastSeq    *int
-	hbAcked    bool
+	Token       string
+	BotID       string
+	Broker      *broker.Broker
+	Links       *accountlinking.Service
+	Runtime     gatewayruntime.Dependencies
+	Log         *config.Logger
+	APIBaseURL  string
+	HTTPClient  *http.Client
+	VideoFrames media.VideoFrameExtractor
+	replyMu     sync.RWMutex
+	replyIndex  map[string]replyContext
+	sessionMu   sync.RWMutex
+	sessionID   string
+	resumeURL   string
+	lastSeq     *int
+	hbAcked     bool
 }
 
 func (dg *Gateway) log() *config.Logger {

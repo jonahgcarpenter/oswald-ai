@@ -17,9 +17,10 @@ type ToolCall struct {
 // InputImage is a validated image payload attached to a user request.
 // Data must contain base64-encoded normalized image bytes.
 type InputImage struct {
-	MimeType string `json:"mime_type,omitempty"`
-	Data     string `json:"data"`
-	Source   string `json:"source,omitempty"`
+	MimeType          string `json:"mime_type,omitempty"`
+	Data              string `json:"data"`
+	Source            string `json:"source,omitempty"`
+	IsGIFContactSheet bool   `json:"-"`
 }
 
 // ChatMessage is a single turn in a conversation.

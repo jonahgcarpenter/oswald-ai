@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libsqlite3-0 \
   sqlite3 \
   libstdc++6 \
+  ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system oswald-group && useradd --system --gid oswald-group oswald-ai

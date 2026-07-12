@@ -1,8 +1,14 @@
 package discord
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -134,6 +140,110 @@ func TestDiscordHelpers(t *testing.T) {
 	if resolveGatewayURL("gateway.discord.gg") != "wss://gateway.discord.gg/?v=10&encoding=json" {
 		t.Fatal("unexpected resolved gateway URL")
 	}
+}
+
+func TestDiscordGIFVEmbedPrefersAnimatedVideo(t *testing.T) {
+	videoPayload := []byte("mock mp4")
+	requestedThumbnail := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/video.mp4":
+			_, _ = w.Write(videoPayload)
+		case "/thumbnail.jpg":
+			requestedThumbnail = true
+			_, _ = w.Write(testDiscordJPEG(t))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	extractor := &fakeVideoFrameExtractor{image: llm.InputImage{MimeType: "image/jpeg", Data: base64.StdEncoding.EncodeToString(testDiscordJPEG(t))}}
+	dg := &Gateway{HTTPClient: server.Client(), VideoFrames: extractor, Log: config.NewLogger(config.LevelError)}
+	embed := Embed{
+		Type:      "gifv",
+		Video:     EmbedImage{ProxyURL: server.URL + "/video.mp4"},
+		Thumbnail: EmbedImage{ProxyURL: server.URL + "/thumbnail.jpg"},
+	}
+
+	images, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1)
+	if len(images) != 1 || len(unsupported) != 0 {
+		t.Fatalf("images=%d unsupported=%v", len(images), unsupported)
+	}
+	if !bytes.Equal(extractor.data, videoPayload) {
+		t.Fatalf("extractor payload = %q, want %q", extractor.data, videoPayload)
+	}
+	if requestedThumbnail {
+		t.Fatal("static thumbnail was requested after successful video extraction")
+	}
+}
+
+func TestDiscordGIFVEmbedFallsBackToStaticThumbnail(t *testing.T) {
+	requestedThumbnail := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/video.mp4":
+			_, _ = w.Write([]byte("mock mp4"))
+		case "/thumbnail.jpg":
+			requestedThumbnail = true
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(testDiscordJPEG(t))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	dg := &Gateway{
+		HTTPClient:  server.Client(),
+		VideoFrames: &fakeVideoFrameExtractor{err: errors.New("ffmpeg unavailable")},
+		Log:         config.NewLogger(config.LevelError),
+	}
+	embed := Embed{
+		Type:      "gifv",
+		Video:     EmbedImage{URL: server.URL + "/video.mp4"},
+		Thumbnail: EmbedImage{URL: server.URL + "/thumbnail.jpg"},
+	}
+
+	images, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1)
+	if len(images) != 1 || len(unsupported) != 0 || !requestedThumbnail {
+		t.Fatalf("images=%d unsupported=%v thumbnail_requested=%t", len(images), unsupported, requestedThumbnail)
+	}
+}
+
+func TestDiscordGIFVEmbedJSONIncludesVideo(t *testing.T) {
+	var embed Embed
+	err := json.Unmarshal([]byte(`{"type":"gifv","video":{"url":"https://cdn.example/video.mp4","proxy_url":"https://proxy.example/video.mp4","width":480,"height":270}}`), &embed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := discordEmbedVideoURL(embed); got != "https://proxy.example/video.mp4" {
+		t.Fatalf("video URL = %q", got)
+	}
+}
+
+type fakeVideoFrameExtractor struct {
+	data  []byte
+	image llm.InputImage
+	err   error
+}
+
+func (f *fakeVideoFrameExtractor) Extract(_ context.Context, data []byte, _ string) (llm.InputImage, error) {
+	f.data = append([]byte(nil), data...)
+	return f.image, f.err
+}
+
+func testDiscordJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 40, G: 80, B: 120, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
 }
 
 type discordFakeChatter struct {

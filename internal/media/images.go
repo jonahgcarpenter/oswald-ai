@@ -7,13 +7,14 @@ import (
 	"image"
 	"image/color"
 	imagedraw "image/draw"
-	_ "image/gif"
+	"image/gif"
 	"image/jpeg"
 	_ "image/jpeg"
 	"image/png"
 	_ "image/png"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 
 	_ "github.com/jdeng/goheif"
@@ -127,10 +128,17 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 	if err != nil {
 		return NormalizationResult{}, fmt.Errorf("image payload decode failed for MIME type %q: %w", detectedMIME, err)
 	}
-
 	originalBounds := decoded.Bounds()
 	originalWidth := originalBounds.Dx()
 	originalHeight := originalBounds.Dy()
+	isGIFContactSheet := false
+	if strings.EqualFold(format, "gif") {
+		decoded, originalWidth, originalHeight, isGIFContactSheet, err = decodeGIFContactSheet(data)
+		if err != nil {
+			return NormalizationResult{}, fmt.Errorf("image payload decode failed for MIME type %q: %w", detectedMIME, err)
+		}
+	}
+
 	if originalWidth <= 0 || originalHeight <= 0 {
 		return NormalizationResult{}, fmt.Errorf("image payload has invalid dimensions for MIME type %q", detectedMIME)
 	}
@@ -147,9 +155,10 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 
 	return NormalizationResult{
 		Image: llm.InputImage{
-			MimeType: normalizedMIME,
-			Data:     encoded,
-			Source:   source,
+			MimeType:          normalizedMIME,
+			Data:              encoded,
+			Source:            source,
+			IsGIFContactSheet: isGIFContactSheet,
 		},
 		DetectedMIME:     detectedMIME,
 		DecodedFormat:    strings.TrimSpace(strings.ToLower(format)),
@@ -165,11 +174,150 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 	}, nil
 }
 
+func decodeGIFContactSheet(data []byte) (image.Image, int, int, bool, error) {
+	animation, err := gif.DecodeAll(bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, 0, false, fmt.Errorf("decode GIF animation: %w", err)
+	}
+	if len(animation.Image) == 0 {
+		return nil, 0, 0, false, fmt.Errorf("GIF contains no frames")
+	}
+
+	width := animation.Config.Width
+	height := animation.Config.Height
+	if width <= 0 || height <= 0 {
+		bounds := animation.Image[0].Bounds()
+		width = bounds.Max.X
+		height = bounds.Max.Y
+	}
+	if width <= 0 || height <= 0 {
+		return nil, 0, 0, false, fmt.Errorf("GIF has invalid dimensions")
+	}
+	if len(animation.Image) == 1 {
+		return animation.Image[0], width, height, false, nil
+	}
+
+	selected := gifSampleFrameIndexes(animation.Delay, len(animation.Image))
+	selectedSet := make(map[int]struct{}, len(selected))
+	for _, index := range selected {
+		selectedSet[index] = struct{}{}
+	}
+
+	canvasBounds := image.Rect(0, 0, width, height)
+	canvas := image.NewNRGBA(canvasBounds)
+	snapshots := make([]*image.NRGBA, 0, len(selected))
+	for index, frame := range animation.Image {
+		var previous *image.NRGBA
+		if gifDisposal(animation, index) == gif.DisposalPrevious {
+			previous = cloneNRGBA(canvas)
+		}
+
+		frameBounds := frame.Bounds().Intersect(canvasBounds)
+		imagedraw.Draw(canvas, frameBounds, frame, frameBounds.Min, imagedraw.Over)
+		if _, ok := selectedSet[index]; ok {
+			snapshots = append(snapshots, cloneNRGBA(canvas))
+		}
+
+		switch gifDisposal(animation, index) {
+		case gif.DisposalBackground:
+			imagedraw.Draw(canvas, frameBounds, image.Transparent, image.Point{}, imagedraw.Src)
+		case gif.DisposalPrevious:
+			canvas = previous
+		}
+	}
+
+	frames := make([]image.Image, len(snapshots))
+	for index, snapshot := range snapshots {
+		frames[index] = snapshot
+	}
+	sheet := buildContactSheet(frames, width, height)
+	return sheet, width, height, true, nil
+}
+
+func buildContactSheet(frames []image.Image, width, height int) *image.NRGBA {
+	columns := min(2, len(frames))
+	rows := (len(frames) + columns - 1) / columns
+	sheet := image.NewNRGBA(image.Rect(0, 0, width*columns, height*rows))
+	for index, frame := range frames {
+		offset := image.Pt(index%columns*width, index/columns*height)
+		destination := image.Rectangle{Min: offset, Max: offset.Add(image.Pt(width, height))}
+		imagedraw.Draw(sheet, destination, frame, frame.Bounds().Min, imagedraw.Src)
+	}
+	return sheet
+}
+
+func gifSampleFrameIndexes(delays []int, frameCount int) []int {
+	if frameCount <= 4 {
+		indexes := make([]int, frameCount)
+		for index := range indexes {
+			indexes[index] = index
+		}
+		return indexes
+	}
+
+	totalDelay := 0
+	frameDelays := make([]int, frameCount)
+	for index := range frameDelays {
+		delay := 1
+		if index < len(delays) && delays[index] > 0 {
+			delay = delays[index]
+		}
+		frameDelays[index] = delay
+		totalDelay += delay
+	}
+
+	indexes := []int{0, frameCount - 1}
+	for _, target := range []int{totalDelay / 3, totalDelay * 2 / 3} {
+		elapsed := 0
+		for index, delay := range frameDelays {
+			elapsed += delay
+			if target < elapsed {
+				indexes = append(indexes, index)
+				break
+			}
+		}
+	}
+	sort.Ints(indexes)
+	unique := indexes[:0]
+	for _, index := range indexes {
+		if len(unique) == 0 || unique[len(unique)-1] != index {
+			unique = append(unique, index)
+		}
+	}
+	return unique
+}
+
+func gifDisposal(animation *gif.GIF, index int) byte {
+	if index < len(animation.Disposal) {
+		return animation.Disposal[index]
+	}
+	return gif.DisposalNone
+}
+
+func cloneNRGBA(source *image.NRGBA) *image.NRGBA {
+	clone := image.NewNRGBA(source.Bounds())
+	copy(clone.Pix, source.Pix)
+	return clone
+}
+
 // ResizeInputImages scales normalized LLM images from their current dimensions.
 func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage, error) {
-	if scale <= 0 || scale > 1 {
-		return nil, fmt.Errorf("image scale must be greater than 0 and at most 1")
-	}
+	return resizeInputImages(images, func(image.Image) float64 { return scale })
+}
+
+// ResizeInputImagesForAttempt skips the initial resize for images already at or below maxLongEdge.
+func ResizeInputImagesForAttempt(images []llm.InputImage, attempt int, retryScale float64, maxLongEdge int) ([]llm.InputImage, error) {
+	return resizeInputImages(images, func(decoded image.Image) float64 {
+		exponent := attempt
+		bounds := decoded.Bounds()
+		if max(bounds.Dx(), bounds.Dy()) <= maxLongEdge {
+			exponent--
+		}
+		return math.Pow(retryScale, float64(exponent))
+	})
+}
+
+func resizeInputImages(images []llm.InputImage, scaleFor func(image.Image) float64) ([]llm.InputImage, error) {
 	resized := make([]llm.InputImage, len(images))
 	for i, input := range images {
 		data, err := base64.StdEncoding.DecodeString(base64Payload(input.Data))
@@ -179,6 +327,14 @@ func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage
 		decoded, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("decode normalized image %d: %w", i+1, err)
+		}
+		scale := scaleFor(decoded)
+		if scale <= 0 || scale > 1 {
+			return nil, fmt.Errorf("image scale must be greater than 0 and at most 1")
+		}
+		if scale == 1 {
+			resized[i] = input
+			continue
 		}
 		bounds := decoded.Bounds()
 		width := max(1, int(float64(bounds.Dx())*scale+0.5))
@@ -190,9 +346,10 @@ func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage
 			return nil, fmt.Errorf("encode resized image %d: %w", i+1, err)
 		}
 		resized[i] = llm.InputImage{
-			MimeType: mimeType,
-			Data:     base64.StdEncoding.EncodeToString(encoded),
-			Source:   input.Source,
+			MimeType:          mimeType,
+			Data:              base64.StdEncoding.EncodeToString(encoded),
+			Source:            input.Source,
+			IsGIFContactSheet: input.IsGIFContactSheet,
 		}
 	}
 	return resized, nil

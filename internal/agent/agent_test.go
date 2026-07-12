@@ -313,7 +313,7 @@ func TestProcessRetriesStoppedModelRunnerWithExponentiallySmallerImages(t *testi
 	if len(requests) != 3 {
 		t.Fatalf("calls = %d, want 3", len(requests))
 	}
-	wants := []image.Point{{X: 600, Y: 450}, {X: 450, Y: 338}, {X: 338, Y: 253}}
+	wants := []image.Point{{X: 800, Y: 600}, {X: 600, Y: 450}, {X: 450, Y: 338}}
 	for i, req := range requests {
 		got := inputImageDimensions(t, req.Messages[len(req.Messages)-1].Images[0])
 		if got != wants[i] {
@@ -341,11 +341,11 @@ func TestProcessUsesImageSizeFallbackAfterFiveStoppedRunnerAttempts(t *testing.T
 	if len(requests) != maxImageModelAttempts {
 		t.Fatalf("calls = %d, want %d", len(chat.requests), maxImageModelAttempts)
 	}
-	if got := inputImageDimensions(t, requests[0].Messages[len(requests[0].Messages)-1].Images[0]); got != (image.Point{X: 600, Y: 450}) {
-		t.Fatalf("first attempt dimensions = %v, want 600x450", got)
+	if got := inputImageDimensions(t, requests[0].Messages[len(requests[0].Messages)-1].Images[0]); got != (image.Point{X: 800, Y: 600}) {
+		t.Fatalf("first attempt dimensions = %v, want 800x600", got)
 	}
-	if got := inputImageDimensions(t, requests[4].Messages[len(requests[4].Messages)-1].Images[0]); got != (image.Point{X: 190, Y: 142}) {
-		t.Fatalf("fifth attempt dimensions = %v, want 190x142", got)
+	if got := inputImageDimensions(t, requests[4].Messages[len(requests[4].Messages)-1].Images[0]); got != (image.Point{X: 253, Y: 190}) {
+		t.Fatalf("fifth attempt dimensions = %v, want 253x190", got)
 	}
 	contentChunks := 0
 	for _, chunk := range chunks {
