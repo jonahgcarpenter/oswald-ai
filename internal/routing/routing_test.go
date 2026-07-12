@@ -81,6 +81,37 @@ func TestBuildPromptImageOnlyAndReplyImageLimit(t *testing.T) {
 	}
 }
 
+func TestBuildPromptDescribesGIFContactSheets(t *testing.T) {
+	gif := llm.InputImage{MimeType: "image/jpeg", Data: "gif", IsGIFContactSheet: true}
+	image := llm.InputImage{MimeType: "image/jpeg", Data: "image"}
+	tests := []struct {
+		name   string
+		images []llm.InputImage
+		want   string
+	}{
+		{name: "single GIF", images: []llm.InputImage{gif}, want: "[User sent a GIF; the attached image is a contact sheet showing its contents over time]"},
+		{name: "multiple GIFs", images: []llm.InputImage{gif, gif}, want: "[User sent 2 GIFs; the attached images are contact sheets showing their contents over time]"},
+		{name: "mixed", images: []llm.InputImage{image, gif}, want: "[User sent 2 images, including GIF contact sheets showing their contents over time]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := BuildPrompt("", test.images, nil, nil); got != test.want {
+				t.Fatalf("prompt = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
+	reply := &ReplyContext{
+		SenderName: "Alice",
+		Images:     []llm.InputImage{{MimeType: "image/jpeg", Data: "gif", IsGIFContactSheet: true}},
+	}
+	if got := BuildPrompt("what happens?", nil, nil, reply); got != "[Replying to Alice's GIF contact sheet showing its contents over time]\n\nwhat happens?" {
+		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
 func TestMessagePreviewCollapsesWhitespaceAndLimitsRunes(t *testing.T) {
 	got := MessagePreview("  one\n two\tthree four  ", 13)
 	if got != "one two three" {

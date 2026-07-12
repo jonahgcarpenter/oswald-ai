@@ -86,7 +86,7 @@ func BuildPrompt(text string, images []llm.InputImage, unsupported []string, rep
 
 	text = strings.TrimSpace(text)
 	if text == "" && len(images) > 0 {
-		text = imageOnlyNote(len(images))
+		text = imageOnlyNote(images)
 	}
 	if text != "" {
 		parts = append(parts, text)
@@ -134,7 +134,6 @@ func formatReplyContext(reply *ReplyContext) string {
 	}
 	name := strings.TrimSpace(reply.SenderName)
 	text := strings.TrimSpace(reply.Text)
-	imageCount := len(reply.Images)
 	unsupported := compactLabels(reply.Unsupported)
 
 	if reply.IsUnavailable {
@@ -147,7 +146,7 @@ func formatReplyContext(reply *ReplyContext) string {
 		return fmt.Sprintf("[Replying to %s's attachment: Attachment unavailable]", name)
 	}
 
-	suffix := replyAttachmentSuffix(imageCount, unsupported)
+	suffix := replyAttachmentSuffix(reply.Images, unsupported)
 	switch {
 	case text != "" && name != "" && suffix != "":
 		return fmt.Sprintf("[Replying to %s: %q with %s]", name, text, suffix)
@@ -168,10 +167,10 @@ func formatReplyContext(reply *ReplyContext) string {
 	}
 }
 
-func replyAttachmentSuffix(imageCount int, unsupported []string) string {
+func replyAttachmentSuffix(images []llm.InputImage, unsupported []string) string {
 	parts := make([]string, 0, 2)
-	if imageCount > 0 {
-		parts = append(parts, imageDescription(imageCount))
+	if len(images) > 0 {
+		parts = append(parts, imageDescription(images))
 	}
 	if len(unsupported) == 1 {
 		parts = append(parts, "unsupported attachment: "+unsupported[0])
@@ -181,18 +180,48 @@ func replyAttachmentSuffix(imageCount int, unsupported []string) string {
 	return strings.Join(parts, "; ")
 }
 
-func imageOnlyNote(count int) string {
-	if count == 1 {
+func imageOnlyNote(images []llm.InputImage) string {
+	count := len(images)
+	gifCount := gifContactSheetCount(images)
+	switch {
+	case count == 1 && gifCount == 1:
+		return "[User sent a GIF; the attached image is a contact sheet showing its contents over time]"
+	case count > 1 && gifCount == count:
+		return fmt.Sprintf("[User sent %d GIFs; the attached images are contact sheets showing their contents over time]", count)
+	case gifCount > 0:
+		return fmt.Sprintf("[User sent %d images, including GIF contact sheets showing their contents over time]", count)
+	case count == 1:
 		return "[User sent an image]"
+	default:
+		return fmt.Sprintf("[User sent %d images]", count)
 	}
-	return fmt.Sprintf("[User sent %d images]", count)
 }
 
-func imageDescription(count int) string {
-	if count == 1 {
+func imageDescription(images []llm.InputImage) string {
+	count := len(images)
+	gifCount := gifContactSheetCount(images)
+	switch {
+	case count == 1 && gifCount == 1:
+		return "GIF contact sheet showing its contents over time"
+	case count > 1 && gifCount == count:
+		return fmt.Sprintf("%d GIF contact sheets showing their contents over time", count)
+	case gifCount > 0:
+		return fmt.Sprintf("%d images, including GIF contact sheets showing their contents over time", count)
+	case count == 1:
 		return "image"
+	default:
+		return fmt.Sprintf("%d images", count)
 	}
-	return fmt.Sprintf("%d images", count)
+}
+
+func gifContactSheetCount(images []llm.InputImage) int {
+	count := 0
+	for _, image := range images {
+		if image.IsGIFContactSheet {
+			count++
+		}
+	}
+	return count
 }
 
 func compactLabels(labels []string) []string {

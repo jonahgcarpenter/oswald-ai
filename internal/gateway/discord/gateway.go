@@ -2,6 +2,7 @@ package discord
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -806,6 +807,19 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 			continue
 		}
 
+		if videoURL := discordEmbedVideoURL(embed); videoURL != "" {
+			image, err := dg.fetchEmbedVideo(videoURL, label)
+			if err == nil && image.Data != "" {
+				images = append(images, image)
+				continue
+			}
+			if err == nil {
+				err = fmt.Errorf("video extractor returned an empty image")
+			}
+			dg.log().Warn("gateway.embed.video_fallback", "failed to extract animated discord embed; using static preview",
+				config.F("embed_type", strings.TrimSpace(embed.Type)), config.F("status", "degraded"), config.ErrorField(err))
+		}
+
 		assetURL := discordEmbedImageURL(embed)
 		if assetURL == "" {
 			continue
@@ -832,7 +846,7 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 func discordEmbedLabels(embeds []Embed) []string {
 	labels := make([]string, 0, len(embeds))
 	for _, embed := range embeds {
-		if discordEmbedImageURL(embed) != "" {
+		if discordEmbedVideoURL(embed) != "" || discordEmbedImageURL(embed) != "" {
 			labels = append(labels, discordEmbedLabel(embed))
 		}
 	}
@@ -860,6 +874,16 @@ func discordEmbedImageURL(embed Embed) string {
 	return strings.TrimSpace(embed.Thumbnail.URL)
 }
 
+func discordEmbedVideoURL(embed Embed) string {
+	if !strings.EqualFold(strings.TrimSpace(embed.Type), "gifv") {
+		return ""
+	}
+	if url := strings.TrimSpace(embed.Video.ProxyURL); url != "" {
+		return url
+	}
+	return strings.TrimSpace(embed.Video.URL)
+}
+
 func stripEmbedURLsFromText(text string, embeds []Embed) string {
 	for _, rawURL := range discordEmbedSourceURLs(embeds) {
 		text = strings.ReplaceAll(text, rawURL, "")
@@ -868,8 +892,8 @@ func stripEmbedURLsFromText(text string, embeds []Embed) string {
 }
 
 func discordEmbedSourceURLs(embeds []Embed) []string {
-	urls := make([]string, 0, len(embeds)*5)
-	seen := make(map[string]struct{}, len(embeds)*5)
+	urls := make([]string, 0, len(embeds)*7)
+	seen := make(map[string]struct{}, len(embeds)*7)
 	for _, embed := range embeds {
 		for _, rawURL := range []string{
 			embed.URL,
@@ -877,6 +901,8 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 			embed.Image.ProxyURL,
 			embed.Thumbnail.URL,
 			embed.Thumbnail.ProxyURL,
+			embed.Video.URL,
+			embed.Video.ProxyURL,
 		} {
 			rawURL = strings.TrimSpace(rawURL)
 			if rawURL == "" {
@@ -890,6 +916,33 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 		}
 	}
 	return urls
+}
+
+func (dg *Gateway) fetchEmbedVideo(rawURL, label string) (llm.InputImage, error) {
+	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
+	if err != nil {
+		return llm.InputImage{}, fmt.Errorf("download animated embed %q: %w", label, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return llm.InputImage{}, fmt.Errorf("download animated embed %q: unexpected status %d", label, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	if err != nil {
+		return llm.InputImage{}, fmt.Errorf("read animated embed %q: %w", label, err)
+	}
+	if len(body) > media.MaxImageBytes {
+		return llm.InputImage{}, fmt.Errorf("animated embed %q exceeds %d bytes", label, media.MaxImageBytes)
+	}
+	extractor := dg.VideoFrames
+	if extractor == nil {
+		extractor = media.FFmpegVideoFrameExtractor{}
+	}
+	image, err := extractor.Extract(context.Background(), body, label)
+	if err != nil {
+		return llm.InputImage{}, fmt.Errorf("extract animated embed %q: %w", label, err)
+	}
+	return image, nil
 }
 
 func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, filename string) (llm.InputImage, error) {
