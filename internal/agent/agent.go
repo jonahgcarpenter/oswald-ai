@@ -516,6 +516,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 	var lastResp *llm.ChatResponse
 	toolFailureBudgetExhausted := false
+	temporaryParserFallback := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
@@ -536,12 +537,45 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
-			errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-			return &AgentResponse{
-				Model:    a.model,
-				Response: errorText,
-				Error:    errorText,
-			}, nil
+			if llm.IsTemporaryOllamaToolParserError(err) {
+				// Temporary workaround for an upstream Ollama/Qwen tool-markup parser
+				// defect. Retry the identical request once and remove this branch when fixed.
+				reqLog.Warn("agent.model.temporary_parser_retry", "retrying model call after upstream tool parser failure",
+					config.F("iteration", iteration),
+					config.F("retry_attempt", 1),
+					config.F("status", "retry"),
+				)
+				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
+				if err == nil {
+					reqLog.Warn("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
+						config.F("iteration", iteration),
+						config.F("retry_attempt", 1),
+						config.F("is_recovered", true),
+						config.F("status", "degraded"),
+					)
+				} else {
+					reqLog.Error("agent.model.temporary_parser_retry_failed", "model retry failed after upstream tool parser failure",
+						config.F("iteration", iteration),
+						config.F("retry_attempt", 1),
+						config.F("is_recovered", false),
+						config.F("status", "error"),
+						config.ErrorField(err),
+					)
+					if llm.IsTemporaryOllamaToolParserError(err) {
+						temporaryParserFallback = true
+						resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
+						if streamCallback != nil {
+							streamCallback(StreamChunk{Type: ChunkContent, Text: emptyResponseFallback})
+						}
+					} else {
+						errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
+						return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+					}
+				}
+			} else {
+				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
+				return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+			}
 		}
 
 		lastResp = resp
@@ -732,6 +766,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		}
 	}
 
+	responseStatus := "ok"
+	if temporaryParserFallback {
+		responseStatus = "degraded"
+	}
 	reqLog.Info("agent.response.complete", "completed agent response",
 		config.F("iteration_count", toolExecutionCount+1),
 		config.F("response_chars", len(finalContent)),
@@ -739,7 +777,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		config.F("tool_call_count", toolExecutionCount),
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("tool_failure_budget_exhausted", toolFailureBudgetExhausted),
-		config.F("status", "ok"),
+		config.F("status", responseStatus),
 	)
 
 	return &AgentResponse{

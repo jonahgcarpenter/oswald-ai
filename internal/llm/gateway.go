@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,33 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
+
+// ChatHTTPError describes a non-success response from the chat completion endpoint.
+type ChatHTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *ChatHTTPError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("LLM gateway chat returned HTTP %d: %s", e.StatusCode, e.Body)
+	}
+	return fmt.Sprintf("LLM gateway chat returned HTTP %d", e.StatusCode)
+}
+
+// IsTemporaryOllamaToolParserError identifies a narrow upstream Ollama/Qwen
+// tool-parser failure. Remove this workaround when the provider no longer
+// turns malformed generated tool markup into HTTP 500 responses.
+func IsTemporaryOllamaToolParserError(err error) bool {
+	var httpErr *ChatHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusInternalServerError {
+		return false
+	}
+	body := strings.ToLower(httpErr.Body)
+	return strings.Contains(body, "expected element type") ||
+		strings.Contains(body, "xml syntax error") ||
+		(strings.Contains(body, "xml") && strings.Contains(body, "unexpected eof"))
+}
 
 // GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
 type GatewayClient struct {
@@ -292,10 +320,7 @@ func (c *GatewayClient) readChatResponse(ctx context.Context, resp *http.Respons
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := bodySnippet(rawBody)
 		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat returned non-2xx", config.F("operation", "chat"), config.F("http_status", resp.StatusCode), config.F("error_body", snippet))
-		if snippet != "" {
-			return nil, fmt.Errorf("LLM gateway chat returned HTTP %d: %s", resp.StatusCode, snippet)
-		}
-		return nil, fmt.Errorf("LLM gateway chat returned HTTP %d", resp.StatusCode)
+		return nil, &ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
 	}
 
 	var gatewayResp gatewayChatResponse
@@ -347,10 +372,7 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		}
 		snippet := bodySnippet(rawBody)
 		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat stream returned non-2xx", config.F("operation", "chat_stream"), config.F("http_status", resp.StatusCode), config.F("error_body", snippet))
-		if snippet != "" {
-			return nil, fmt.Errorf("LLM gateway chat stream returned HTTP %d: %s", resp.StatusCode, snippet)
-		}
-		return nil, fmt.Errorf("LLM gateway chat stream returned HTTP %d", resp.StatusCode)
+		return nil, &ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
 	}
 
 	var final ChatResponse

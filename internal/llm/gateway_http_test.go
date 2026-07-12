@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -72,6 +73,48 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 	})
 	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "decode chat response") {
 		t.Fatalf("Chat decode error = %v, want decode error", err)
+	}
+}
+
+func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"XML syntax error on line 7: unexpected EOF"}}`))
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
+	var httpErr *ChatHTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("Chat error = %T %v, want *ChatHTTPError", err, err)
+	}
+	if httpErr.StatusCode != http.StatusInternalServerError || !strings.Contains(httpErr.Body, "XML syntax error") {
+		t.Fatalf("unexpected typed error: %+v", httpErr)
+	}
+	if !IsTemporaryOllamaToolParserError(err) {
+		t.Fatalf("expected temporary parser error classification: %v", err)
+	}
+}
+
+func TestTemporaryOllamaToolParserErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "element type", err: &ChatHTTPError{StatusCode: 500, Body: `expected element type <function> but have <parameter>`}, want: true},
+		{name: "xml syntax", err: &ChatHTTPError{StatusCode: 500, Body: `XML syntax error on line 7: unexpected EOF`}, want: true},
+		{name: "unrelated 500", err: &ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
+		{name: "wrong status", err: &ChatHTTPError{StatusCode: 400, Body: `XML syntax error: unexpected EOF`}, want: false},
+		{name: "ordinary error", err: errors.New("XML syntax error: unexpected EOF"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTemporaryOllamaToolParserError(tt.err); got != tt.want {
+				t.Fatalf("IsTemporaryOllamaToolParserError() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -207,6 +207,85 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	}
 }
 
+func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
+	parserErr := &llm.ChatHTTPError{StatusCode: 500, Body: `expected element type <function> but have <parameter>`}
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{
+		{err: parserErr},
+		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, func(context.Context, map[string]interface{}) (string, error) {
+		return "lookup result", nil
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "recovered" || resp.Error != "" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 2 {
+		t.Fatalf("expected two calls, got %d", len(primary))
+	}
+	if len(primary[0].Tools) == 0 || len(primary[1].Tools) != len(primary[0].Tools) {
+		t.Fatalf("retry did not preserve tools: first=%+v retry=%+v", primary[0].Tools, primary[1].Tools)
+	}
+	if len(primary[1].Messages) != len(primary[0].Messages) || primary[1].Messages[len(primary[1].Messages)-1].Content != "question" {
+		t.Fatalf("retry changed messages: first=%+v retry=%+v", primary[0].Messages, primary[1].Messages)
+	}
+}
+
+func TestProcessUsesFriendlyFallbackAfterRepeatedOllamaParserError(t *testing.T) {
+	parserErr := &llm.ChatHTTPError{StatusCode: 500, Body: `XML syntax error on line 7: unexpected EOF`}
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: parserErr}, {err: parserErr}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	var chunks []StreamChunk
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != emptyResponseFallback || resp.Error != "" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	contentChunks := 0
+	for _, chunk := range chunks {
+		if chunk.Type == ChunkContent && chunk.Text == emptyResponseFallback {
+			contentChunks++
+		}
+	}
+	if contentChunks != 1 {
+		t.Fatalf("fallback chunks = %d, want 1: %+v", contentChunks, chunks)
+	}
+	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].AssistantText != emptyResponseFallback {
+		t.Fatalf("fallback turn was not persisted: %+v", turns)
+	}
+}
+
+func TestProcessDoesNotRetryUnrelatedModelError(t *testing.T) {
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: "out of memory"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Error == "" || len(primaryRequests(chat.requests)) != 1 {
+		t.Fatalf("unexpected response or retry: response=%+v calls=%d", resp, len(chat.requests))
+	}
+}
+
 func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
@@ -376,11 +455,36 @@ func toolCallResponse(id, name string, args map[string]interface{}) *llm.ChatRes
 
 type fakeChatter struct {
 	responses []*llm.ChatResponse
+	outcomes  []fakeChatOutcome
 	requests  []llm.ChatRequest
+}
+
+type fakeChatOutcome struct {
+	response *llm.ChatResponse
+	err      error
 }
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
+	if len(f.outcomes) > 0 {
+		outcome := f.outcomes[0]
+		f.outcomes = f.outcomes[1:]
+		if outcome.err != nil {
+			return nil, outcome.err
+		}
+		if outcome.response == nil {
+			return nil, errors.New("empty fake outcome")
+		}
+		if cb != nil {
+			if outcome.response.Message.Thinking != "" {
+				cb(llm.ChatMessage{Thinking: outcome.response.Message.Thinking})
+			}
+			if outcome.response.Message.Content != "" {
+				cb(llm.ChatMessage{Content: outcome.response.Message.Content})
+			}
+		}
+		return outcome.response, nil
+	}
 	if len(f.responses) == 0 {
 		return nil, errors.New("no fake response")
 	}
