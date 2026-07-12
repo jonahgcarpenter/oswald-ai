@@ -29,6 +29,7 @@ const (
 	imageSizeFallback        = "Your image is too big. Crop it and try again."
 	maxImageModelAttempts    = 5
 	imageRetryScale          = 0.75
+	imageInitialScaleMaxEdge = 1920
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -382,13 +383,12 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 	var firstErr error
 	for attempt := 1; attempt <= maxImageModelAttempts; attempt++ {
 		if imageCount > 0 {
-			scale := math.Pow(imageRetryScale, float64(attempt))
 			messages := append([]llm.ChatMessage(nil), originalMessages...)
 			for i := range messages {
 				if len(originalMessages[i].Images) == 0 {
 					continue
 				}
-				resized, err := media.ResizeInputImages(originalMessages[i].Images, scale)
+				resized, err := media.ResizeInputImagesForAttempt(originalMessages[i].Images, attempt, imageRetryScale, imageInitialScaleMaxEdge)
 				if err != nil {
 					log.Warn("agent.model.image_retry_resize_failed", "failed to resize images for model retry",
 						config.F("attempt", attempt), config.F("image_count", imageCount),

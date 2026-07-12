@@ -167,9 +167,22 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 
 // ResizeInputImages scales normalized LLM images from their current dimensions.
 func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage, error) {
-	if scale <= 0 || scale > 1 {
-		return nil, fmt.Errorf("image scale must be greater than 0 and at most 1")
-	}
+	return resizeInputImages(images, func(image.Image) float64 { return scale })
+}
+
+// ResizeInputImagesForAttempt skips the initial resize for images already at or below maxLongEdge.
+func ResizeInputImagesForAttempt(images []llm.InputImage, attempt int, retryScale float64, maxLongEdge int) ([]llm.InputImage, error) {
+	return resizeInputImages(images, func(decoded image.Image) float64 {
+		exponent := attempt
+		bounds := decoded.Bounds()
+		if max(bounds.Dx(), bounds.Dy()) <= maxLongEdge {
+			exponent--
+		}
+		return math.Pow(retryScale, float64(exponent))
+	})
+}
+
+func resizeInputImages(images []llm.InputImage, scaleFor func(image.Image) float64) ([]llm.InputImage, error) {
 	resized := make([]llm.InputImage, len(images))
 	for i, input := range images {
 		data, err := base64.StdEncoding.DecodeString(base64Payload(input.Data))
@@ -179,6 +192,14 @@ func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage
 		decoded, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("decode normalized image %d: %w", i+1, err)
+		}
+		scale := scaleFor(decoded)
+		if scale <= 0 || scale > 1 {
+			return nil, fmt.Errorf("image scale must be greater than 0 and at most 1")
+		}
+		if scale == 1 {
+			resized[i] = input
+			continue
 		}
 		bounds := decoded.Bounds()
 		width := max(1, int(float64(bounds.Dx())*scale+0.5))
