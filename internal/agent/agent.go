@@ -3,11 +3,13 @@ package agent
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -24,6 +26,9 @@ const (
 	sessionTurnTTL           = 24 * time.Hour
 	emptyResponseRetryPrompt = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback    = "I blanked on the actual answer. Try again and I'll take another shot."
+	imageSizeFallback        = "Your image is too big. Crop it and try again."
+	maxImageModelAttempts    = 5
+	imageRetryScale          = 0.75
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -367,6 +372,59 @@ func (a *Agent) executeTool(ctx context.Context, senderID string, name string, a
 	return a.registry.Execute(ctx, name, args)
 }
 
+func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
+	originalMessages := req.Messages
+	imageCount := 0
+	for _, message := range originalMessages {
+		imageCount += len(message.Images)
+	}
+
+	var firstErr error
+	for attempt := 1; attempt <= maxImageModelAttempts; attempt++ {
+		if imageCount > 0 {
+			scale := math.Pow(imageRetryScale, float64(attempt))
+			messages := append([]llm.ChatMessage(nil), originalMessages...)
+			for i := range messages {
+				if len(originalMessages[i].Images) == 0 {
+					continue
+				}
+				resized, err := media.ResizeInputImages(originalMessages[i].Images, scale)
+				if err != nil {
+					log.Warn("agent.model.image_retry_resize_failed", "failed to resize images for model retry",
+						config.F("attempt", attempt), config.F("image_count", imageCount),
+						config.F("status", "degraded"), config.ErrorField(err))
+					return nil, err, false
+				}
+				messages[i].Images = resized
+			}
+			req.Messages = messages
+		}
+
+		resp, err := a.chatClient.Chat(ctx, req, callback)
+		if err == nil {
+			return resp, nil, false
+		}
+		if imageCount == 0 || !llm.IsOllamaModelRunnerStoppedError(err) {
+			return nil, err, false
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if attempt == maxImageModelAttempts {
+			log.Error("agent.model.image_retry_exhausted", "model runner stopped after resized image retries",
+				config.F("attempt_count", attempt), config.F("image_count", imageCount),
+				config.F("status", "error"), config.F("original_error", firstErr.Error()),
+				config.F("last_error", err.Error()))
+			return nil, err, true
+		}
+		log.Warn("agent.model.image_retry", "retrying model call with smaller images",
+			config.F("attempt", attempt+1), config.F("image_count", imageCount),
+			config.F("scale_percent", int(math.Pow(imageRetryScale, float64(attempt+1))*100)),
+			config.F("status", "retry"))
+	}
+	return nil, firstErr, false
+}
+
 // Process handles the end-to-end agentic pipeline in a single loop.
 // The model receives all registered tools and may call them zero or more times
 // before generating its final response. Thinking tokens, content tokens, and
@@ -517,6 +575,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	var lastResp *llm.ChatResponse
 	toolFailureBudgetExhausted := false
 	temporaryParserFallback := false
+	imageSizeFallbackUsed := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
@@ -534,10 +593,16 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			config.F("tool_count", len(req.Tools)),
 		)
 
-		resp, err := a.chatClient.Chat(ctx, req, chatCallback)
+		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
-			if llm.IsTemporaryOllamaToolParserError(err) {
+			if imageRetriesExhausted {
+				imageSizeFallbackUsed = true
+				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+				if streamCallback != nil {
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+				}
+			} else if llm.IsTemporaryOllamaToolParserError(err) {
 				// Temporary workaround for an upstream Ollama/Qwen tool-markup parser
 				// defect. Retry the identical request once and remove this branch when fixed.
 				reqLog.Warn("agent.model.temporary_parser_retry", "retrying model call after upstream tool parser failure",
@@ -684,15 +749,19 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		finalReq.Messages = messages
 		finalReq.Tools = nil
 
-		resp, err := a.chatClient.Chat(ctx, finalReq, chatCallback)
+		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
-			errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
-			return &AgentResponse{
-				Model:    a.model,
-				Response: errorText,
-				Error:    errorText,
-			}, nil
+			if imageRetriesExhausted {
+				imageSizeFallbackUsed = true
+				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+				if streamCallback != nil {
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+				}
+			} else {
+				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
+				return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
+			}
 		}
 
 		lastResp = resp
@@ -728,12 +797,19 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			config.F("thinking_chars", len(finalThinking)),
 			config.F("status", "retry"),
 		)
-		retryResp, err := a.chatClient.Chat(ctx, retryReq, chatCallback)
+		retryResp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
 		if err != nil {
 			reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
 				config.F("status", "degraded"),
 				config.ErrorField(err),
 			)
+			if imageRetriesExhausted {
+				imageSizeFallbackUsed = true
+				finalContent = imageSizeFallback
+				if streamCallback != nil {
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+				}
+			}
 		} else {
 			lastResp = retryResp
 			finalContent = accumulatedContent.String()
@@ -767,7 +843,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback {
+	if temporaryParserFallback || imageSizeFallbackUsed {
 		responseStatus = "degraded"
 	}
 	reqLog.Info("agent.response.complete", "completed agent response",

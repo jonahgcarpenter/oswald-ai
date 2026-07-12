@@ -8,6 +8,8 @@ import (
 	"image/jpeg"
 	"image/png"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 func TestNormalizeInputImageDoesNotResizeSmallJPEG(t *testing.T) {
@@ -120,6 +122,37 @@ func TestNormalizeInputImageDownscalesToOutputByteCap(t *testing.T) {
 	}
 	if result.Image.MimeType != "image/jpeg" {
 		t.Fatalf("expected image/jpeg, got %q", result.Image.MimeType)
+	}
+}
+
+func TestResizeInputImagesScalesNormalizedImages(t *testing.T) {
+	jpegInput, err := BuildInputImageFromBytes("image/jpeg", encodeTestJPEG(t, 800, 600), "photo.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pngInput, err := BuildInputImageFromBytes("image/png", encodeTestPNG(t, 400, 200, true), "alpha.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resized, err := ResizeInputImages([]llm.InputImage{jpegInput, pngInput}, 0.75)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []image.Point{{X: 600, Y: 450}, {X: 300, Y: 150}} {
+		data, err := base64.StdEncoding.DecodeString(resized[i].Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decoded.Bounds().Size(); got != want {
+			t.Fatalf("image %d dimensions = %v, want %v", i, got, want)
+		}
+	}
+	if resized[0].MimeType != "image/jpeg" || resized[1].MimeType != "image/png" || resized[0].Source != "photo.jpg" || resized[1].Source != "alpha.png" {
+		t.Fatalf("image metadata was not preserved: %+v", resized)
 	}
 }
 

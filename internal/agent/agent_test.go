@@ -1,8 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +15,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -21,7 +27,7 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{{MimeType: "image/jpeg", Data: "abc"}}, nil)
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{testInputImage(t, 800, 600)}, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -275,6 +281,89 @@ func TestProcessUsesFriendlyFallbackAfterRepeatedOllamaParserError(t *testing.T)
 
 func TestProcessDoesNotRetryUnrelatedModelError(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: "out of memory"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Error == "" || len(primaryRequests(chat.requests)) != 1 {
+		t.Fatalf("unexpected response or retry: response=%+v calls=%d", resp, len(chat.requests))
+	}
+}
+
+func TestProcessRetriesStoppedModelRunnerWithExponentiallySmallerImages(t *testing.T) {
+	runnerErr := &llm.ChatHTTPError{StatusCode: 500, Body: `{"error":{"message":"model runner has unexpectedly stopped, this may be due to resource limitations"}}`}
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{
+		{err: runnerErr},
+		{err: runnerErr},
+		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
+	}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+	input := testInputImage(t, 800, 600)
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{input}, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "recovered" || resp.Error != "" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != 3 {
+		t.Fatalf("calls = %d, want 3", len(requests))
+	}
+	wants := []image.Point{{X: 600, Y: 450}, {X: 450, Y: 338}, {X: 338, Y: 253}}
+	for i, req := range requests {
+		got := inputImageDimensions(t, req.Messages[len(req.Messages)-1].Images[0])
+		if got != wants[i] {
+			t.Fatalf("attempt %d dimensions = %v, want %v", i+1, got, wants[i])
+		}
+	}
+}
+
+func TestProcessUsesImageSizeFallbackAfterFiveStoppedRunnerAttempts(t *testing.T) {
+	runnerErr := &llm.ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped`}
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: runnerErr}, {err: runnerErr}, {err: runnerErr}, {err: runnerErr}, {err: runnerErr}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	var chunks []StreamChunk
+
+	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{testInputImage(t, 800, 600)}, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != imageSizeFallback || resp.Error != "" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != maxImageModelAttempts {
+		t.Fatalf("calls = %d, want %d", len(chat.requests), maxImageModelAttempts)
+	}
+	if got := inputImageDimensions(t, requests[0].Messages[len(requests[0].Messages)-1].Images[0]); got != (image.Point{X: 600, Y: 450}) {
+		t.Fatalf("first attempt dimensions = %v, want 600x450", got)
+	}
+	if got := inputImageDimensions(t, requests[4].Messages[len(requests[4].Messages)-1].Images[0]); got != (image.Point{X: 190, Y: 142}) {
+		t.Fatalf("fifth attempt dimensions = %v, want 190x142", got)
+	}
+	contentChunks := 0
+	for _, chunk := range chunks {
+		if chunk.Type == ChunkContent && chunk.Text == imageSizeFallback {
+			contentChunks++
+		}
+	}
+	if contentChunks != 1 {
+		t.Fatalf("fallback chunks = %d, want 1", contentChunks)
+	}
+	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	if err != nil || len(turns) != 1 || turns[0].AssistantText != imageSizeFallback {
+		t.Fatalf("fallback turn was not persisted: turns=%+v err=%v", turns, err)
+	}
+}
+
+func TestProcessDoesNotRetryStoppedModelRunnerWithoutImages(t *testing.T) {
+	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped`}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
 	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
@@ -591,4 +680,36 @@ func toolNames(req llm.ChatRequest) []string {
 		names = append(names, tool.Function.Name)
 	}
 	return names
+}
+
+func testInputImage(t *testing.T, width, height int) llm.InputImage {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 127, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
+		t.Fatal(err)
+	}
+	input, err := media.BuildInputImageFromBytes("image/jpeg", buf.Bytes(), "test.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input
+}
+
+func inputImageDimensions(t *testing.T, input llm.InputImage) image.Point {
+	t.Helper()
+	data, err := base64.StdEncoding.DecodeString(input.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decoded.Bounds().Size()
 }

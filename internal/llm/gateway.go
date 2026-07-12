@@ -43,6 +43,16 @@ func IsTemporaryOllamaToolParserError(err error) bool {
 		(strings.Contains(body, "xml") && strings.Contains(body, "unexpected eof"))
 }
 
+// IsOllamaModelRunnerStoppedError identifies the upstream failure returned when
+// Ollama stops a model runner while processing a request.
+func IsOllamaModelRunnerStoppedError(err error) bool {
+	var httpErr *ChatHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusInternalServerError {
+		return false
+	}
+	return strings.Contains(strings.ToLower(httpErr.Body), "model runner has unexpectedly stopped")
+}
+
 // GatewayClient interacts with the LLM gateway's OpenAI-compatible REST API.
 type GatewayClient struct {
 	BaseURL    string

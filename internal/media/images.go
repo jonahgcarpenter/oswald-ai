@@ -165,6 +165,39 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 	}, nil
 }
 
+// ResizeInputImages scales normalized LLM images from their current dimensions.
+func ResizeInputImages(images []llm.InputImage, scale float64) ([]llm.InputImage, error) {
+	if scale <= 0 || scale > 1 {
+		return nil, fmt.Errorf("image scale must be greater than 0 and at most 1")
+	}
+	resized := make([]llm.InputImage, len(images))
+	for i, input := range images {
+		data, err := base64.StdEncoding.DecodeString(base64Payload(input.Data))
+		if err != nil {
+			return nil, fmt.Errorf("decode normalized image %d: %w", i+1, err)
+		}
+		decoded, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("decode normalized image %d: %w", i+1, err)
+		}
+		bounds := decoded.Bounds()
+		width := max(1, int(float64(bounds.Dx())*scale+0.5))
+		height := max(1, int(float64(bounds.Dy())*scale+0.5))
+		dst := image.NewNRGBA(image.Rect(0, 0, width, height))
+		xdraw.CatmullRom.Scale(dst, dst.Bounds(), decoded, bounds, xdraw.Over, nil)
+		encoded, mimeType, err := encodeNormalizedImage(dst, hasTransparency(decoded))
+		if err != nil {
+			return nil, fmt.Errorf("encode resized image %d: %w", i+1, err)
+		}
+		resized[i] = llm.InputImage{
+			MimeType: mimeType,
+			Data:     base64.StdEncoding.EncodeToString(encoded),
+			Source:   input.Source,
+		}
+	}
+	return resized, nil
+}
+
 func normalizeEncodedImage(img image.Image, maxLongEdge int, maxBytes int) (image.Image, bool, []byte, string, error) {
 	currentMaxEdge := maxLongEdge
 	wasResized := false

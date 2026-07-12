@@ -118,6 +118,26 @@ func TestTemporaryOllamaToolParserErrorClassification(t *testing.T) {
 	}
 }
 
+func TestOllamaModelRunnerStoppedErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "runner stopped", err: &ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped, this may be due to resource limitations`}, want: true},
+		{name: "unrelated 500", err: &ChatHTTPError{StatusCode: 500, Body: `out of memory`}, want: false},
+		{name: "wrong status", err: &ChatHTTPError{StatusCode: 502, Body: `model runner has unexpectedly stopped`}, want: false},
+		{name: "ordinary error", err: errors.New("model runner has unexpectedly stopped"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsOllamaModelRunnerStoppedError(tt.err); got != tt.want {
+				t.Fatalf("IsOllamaModelRunnerStoppedError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/embeddings" {
