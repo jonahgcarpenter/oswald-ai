@@ -113,6 +113,41 @@ func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 	}
 }
 
+func TestStoreSessionContextIncludesToolAnnotationsAndScopesUser(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+
+	ctx := context.Background()
+	if err := store.AppendSessionTurn(ctx, "shared-session", "user-1", "first question", "first answer", []string{"github.get_issue", "web.search"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendSessionTurn(ctx, "shared-session", "user-2", "private question", "private answer", []string{"other.secret"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	retrieved, err := store.BuildContext(ctx, "user-1", "shared-session", "follow up", ContextOptions{RecentTurns: 4, ContextBudgetChars: 4000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(retrieved.Block, "Assistant: first answer\nTools used: github.get_issue, web.search") {
+		t.Fatalf("tool annotation missing from context:\n%s", retrieved.Block)
+	}
+	if strings.Contains(retrieved.Block, "private") || strings.Contains(retrieved.Block, "other.secret") {
+		t.Fatalf("context included another user's turn:\n%s", retrieved.Block)
+	}
+	if strings.Join(retrieved.RecentToolNames, ",") != "github.get_issue,web.search" {
+		t.Fatalf("recent tool names = %+v", retrieved.RecentToolNames)
+	}
+
+	turns, err := store.RecentSessionTurns("user-2", "shared-session", 1, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].UserText != "private question" {
+		t.Fatalf("unexpected scoped turns: %+v", turns)
+	}
+}
+
 func TestBuildContextDoesNotEmbedQuery(t *testing.T) {
 	embedder := &countingMemoryEmbedder{}
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), embedder, "fake-embed", config.NewLogger(config.LevelError))

@@ -77,6 +77,7 @@ type ContextOptions struct {
 type RetrievedContext struct {
 	Block           string
 	RecentTurnCount int
+	RecentToolNames []string
 }
 
 // SaveRequest describes a user memory write.
@@ -468,8 +469,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	return nil
 }
 
-// RecentSessionTurns returns newest completed exchanges, newest first.
-func (s *Store) RecentSessionTurns(sessionID string, offset int, count int) ([]SessionTurn, error) {
+// RecentSessionTurns returns a user's newest completed session exchanges, newest first.
+func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count int) ([]SessionTurn, error) {
 	if offset < 1 {
 		offset = 1
 	}
@@ -484,8 +485,8 @@ func (s *Store) RecentSessionTurns(sessionID string, offset int, count int) ([]S
 	}
 	rows, err := s.sql.Query(`
 SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
-FROM session_turns WHERE session_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?
-`, sessionID, count, offset-1)
+FROM session_turns WHERE canonical_user_id = ? AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+`, userID, sessionID, count, offset-1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session turns: %w", err)
 	}
@@ -514,13 +515,17 @@ func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query strin
 		opts.ContextBudgetChars = 12000
 	}
 
-	recent, err := s.RecentSessionTurns(sessionID, 1, opts.RecentTurns)
+	recent, err := s.RecentSessionTurns(userID, sessionID, 1, opts.RecentTurns)
 	if err != nil {
 		return RetrievedContext{}, err
 	}
 
 	block := s.renderContextBlock(recent, opts.ContextBudgetChars)
-	return RetrievedContext{Block: block, RecentTurnCount: len(recent)}, nil
+	var toolNames []string
+	for _, turn := range recent {
+		toolNames = append(toolNames, turn.ToolNames...)
+	}
+	return RetrievedContext{Block: block, RecentTurnCount: len(recent), RecentToolNames: uniqueStrings(toolNames)}, nil
 }
 
 func (s *Store) renderContextBlock(recent []SessionTurn, maxChars int) string {
@@ -552,7 +557,11 @@ func writeEntries(b *strings.Builder, entries []MemoryEntry) {
 func writeTurns(b *strings.Builder, turns []SessionTurn) {
 	for i := len(turns) - 1; i >= 0; i-- {
 		turn := turns[i]
-		fmt.Fprintf(b, "User: %s\nAssistant: %s\n\n", strings.TrimSpace(turn.UserText), strings.TrimSpace(turn.AssistantText))
+		fmt.Fprintf(b, "User: %s\nAssistant: %s\n", strings.TrimSpace(turn.UserText), strings.TrimSpace(turn.AssistantText))
+		if len(turn.ToolNames) > 0 {
+			fmt.Fprintf(b, "Tools used: %s\n", strings.Join(turn.ToolNames, ", "))
+		}
+		b.WriteString("\n")
 	}
 }
 

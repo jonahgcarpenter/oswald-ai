@@ -54,7 +54,7 @@ func flattenToolResult(result *gomcp.CallToolResult) (string, error) {
 		if text == "" {
 			text = "MCP tool returned an unspecified error."
 		}
-		text = "Error: " + text
+		return "", fmt.Errorf("MCP tool returned an error: %s", truncate(text, maxToolResultChars))
 	}
 	if text == "" {
 		text = "MCP tool returned no content."

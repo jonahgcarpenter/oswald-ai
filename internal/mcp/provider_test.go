@@ -52,6 +52,34 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	}
 }
 
+func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	ctx := context.Background()
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
+	if err != nil {
+		t.Fatalf("save home: %v", err)
+	}
+	manager := NewManagerFromStore(store, config.NewLogger(config.LevelError))
+	manager.sessions[scopeKey(cfg)] = &server{config: cfg, tools: []ToolSpec{
+		{Name: "home.turn_on", Server: "home", RemoteName: "turn_on"},
+		{Name: "home.weather", Server: "home", RemoteName: "weather"},
+	}}
+	provider := NewProvider(manager)
+
+	resolved := provider.ResolveTools(ctx, "user_1", []string{"home.turn_on", "home.tools", "web.search", "home.missing", "home.turn_on"})
+	if len(resolved) != 1 || resolved[0] != "home.turn_on" {
+		t.Fatalf("resolved tools = %+v", resolved)
+	}
+	if resolved := provider.ResolveTools(ctx, "user_2", []string{"home.turn_on"}); len(resolved) != 0 {
+		t.Fatalf("resolved another user's tools: %+v", resolved)
+	}
+}
+
 func TestSearchToolsReturnsAllToolsWithoutQuery(t *testing.T) {
 	catalog := []registryEntry{
 		{name: "home.turn_on", description: "Turn on a light"},
