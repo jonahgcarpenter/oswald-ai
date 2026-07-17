@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	canonical_user_id TEXT NOT NULL,
 	scope TEXT NOT NULL CHECK (scope IN ('short_term', 'long_term')),
-	category TEXT NOT NULL CHECK (category IN ('identity', 'system_rules', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'tasks', 'notes')),
+	category TEXT NOT NULL CHECK (category IN ('identity', 'system_rules', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
 	statement TEXT NOT NULL,
 	statement_key TEXT NOT NULL,
 	evidence TEXT NOT NULL,

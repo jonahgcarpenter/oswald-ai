@@ -75,7 +75,7 @@ func TestStoreShortTermExpiry(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 
-	_, err := store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeShortTerm, Category: "tasks", Statement: "The user is testing expiry.", Evidence: "test", TTL: time.Nanosecond})
+	_, err := store.SaveMemory(context.Background(), "usr_test", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "The user is testing expiry.", Evidence: "test", TTL: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}

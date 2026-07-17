@@ -172,7 +172,7 @@ Oswald keeps three distinct memory layers.
 - Stored in `data/database/oswald.db` tables `user_memory_profiles` and `memory_entries`
 - Managed by the `memory.*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
-- Organized into categories like `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, `tasks`, and `notes`
+- Organized into categories like `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Only the `system_rules` category is injected automatically into the system prompt; other categories are retrieved on demand via tools
 
