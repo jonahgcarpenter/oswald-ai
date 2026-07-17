@@ -241,6 +241,7 @@ type Agent struct {
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
 type MCPProvider interface {
 	DiscoveryTools(ctx context.Context, userID string) []llm.Tool
+	ResolveTools(ctx context.Context, userID string, names []string) []string
 	LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool
 	Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error)
 }
@@ -500,6 +501,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	if semanticQueryText == "" {
 		semanticQueryText = userPrompt
 	}
+	var recentToolNames []string
 	if a.userMemory != nil {
 		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
 			RecentTurns:        memoryRecentTurns,
@@ -509,10 +511,20 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
 		} else if strings.TrimSpace(memoryContext.Block) != "" {
 			dynamicSystemPrompt += "\n\n" + memoryContext.Block
+			recentToolNames = memoryContext.RecentToolNames
 			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
 				config.F("recent_turn_count", memoryContext.RecentTurnCount),
 			)
 		}
+	}
+	if a.mcpProvider != nil && len(recentToolNames) > 0 {
+		mcpCandidates := make([]string, 0, len(recentToolNames))
+		for _, name := range recentToolNames {
+			if !a.registry.HasHandler(name) {
+				mcpCandidates = append(mcpCandidates, name)
+			}
+		}
+		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, senderID, mcpCandidates))
 	}
 
 	initialTools := a.toolsForRequest(ctx, senderID, toolExposure)

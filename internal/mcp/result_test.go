@@ -25,11 +25,8 @@ func TestFlattenToolResultTextStructuredErrorAndEmpty(t *testing.T) {
 	}
 
 	toolErr, err := flattenToolResult(&gomcp.CallToolResult{IsError: true})
-	if err != nil {
-		t.Fatalf("flatten error result returned error: %v", err)
-	}
-	if toolErr != "Error: MCP tool returned an unspecified error." {
-		t.Fatalf("flatten error result = %q", toolErr)
+	if err == nil || !strings.Contains(err.Error(), "MCP tool returned an unspecified error") {
+		t.Fatalf("flatten error result = %q, %v", toolErr, err)
 	}
 
 	empty, err := flattenToolResult(&gomcp.CallToolResult{})

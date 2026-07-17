@@ -43,7 +43,7 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 		t.Fatalf("expected current-turn image in prompt, got %+v", lastMessage.Images)
 	}
 
-	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
 	}
-	agent, _ := newTestAgent(t, chat, nil, reg)
+	agent, store := newTestAgent(t, chat, nil, reg)
 
 	var chunks []StreamChunk
 	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
@@ -103,6 +103,13 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}
 	if toolCallIndex < 0 || toolResultIndex < 0 || toolResultIndex <= toolCallIndex || chunks[toolResultIndex].Tool.ResultText != "lookup result" {
 		t.Fatalf("unexpected stream chunks: %+v", chunks)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || strings.Join(turns[0].ToolNames, ",") != "test.lookup" {
+		t.Fatalf("successful tool annotation was not persisted: %+v", turns)
 	}
 }
 
@@ -168,7 +175,7 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 		t.Fatalf("unexpected retry prompt: %+v", lastMessage)
 	}
 
-	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +211,7 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 		t.Fatalf("expected fallback content chunk, got %+v", chunks)
 	}
 
-	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +277,7 @@ func TestProcessUsesFriendlyFallbackAfterRepeatedOllamaParserError(t *testing.T)
 	if contentChunks != 1 {
 		t.Fatalf("fallback chunks = %d, want 1: %+v", contentChunks, chunks)
 	}
-	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +363,7 @@ func TestProcessUsesImageSizeFallbackAfterFiveStoppedRunnerAttempts(t *testing.T
 	if contentChunks != 1 {
 		t.Fatalf("fallback chunks = %d, want 1", contentChunks)
 	}
-	turns, err := store.RecentSessionTurns("session-1", 1, 1)
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil || len(turns) != 1 || turns[0].AssistantText != imageSizeFallback {
 		t.Fatalf("fallback turn was not persisted: turns=%+v err=%v", turns, err)
 	}
@@ -553,6 +560,51 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	}
 }
 
+func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.mcpProvider = &fakeMCPProvider{}
+	if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "prior question", "prior answer", []string{"home.turn_on", "home.tools", "web.search"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	request := primaryRequests(chat.requests)[0]
+	if !requestHasTool(request, "home.turn_on") {
+		t.Fatalf("first request did not pre-expose recent MCP tool: %+v", toolNames(request))
+	}
+	if !strings.Contains(request.Messages[0].Content, "Tools used: home.turn_on, home.tools, web.search") {
+		t.Fatalf("system prompt missing compact tool annotation:\n%s", request.Messages[0].Content)
+	}
+}
+
+func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.mcpProvider = &fakeMCPProvider{}
+	if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "old question", "old answer", []string{"home.turn_on"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "recent question", "recent answer", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	request := primaryRequests(chat.requests)[0]
+	if requestHasTool(request, "home.turn_on") {
+		t.Fatalf("first request exposed tool from fifth-oldest turn: %+v", toolNames(request))
+	}
+	if strings.Contains(request.Messages[0].Content, "old question") {
+		t.Fatalf("system prompt included fifth-oldest turn:\n%s", request.Messages[0].Content)
+	}
+}
+
 func toolCallResponse(id, name string, args map[string]interface{}) *llm.ChatResponse {
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: id, Function: llm.ToolFunction{Name: name, Arguments: args}}}}}
 }
@@ -614,6 +666,15 @@ type fakeMCPProvider struct{}
 
 func (p *fakeMCPProvider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool {
 	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.tools", Description: "Search Home Assistant tools", Parameters: llm.ToolParameters{Type: "object"}}}}
+}
+
+func (p *fakeMCPProvider) ResolveTools(ctx context.Context, userID string, names []string) []string {
+	for _, name := range names {
+		if name == "home.turn_on" {
+			return []string{name}
+		}
+	}
+	return nil
 }
 
 func (p *fakeMCPProvider) LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool {

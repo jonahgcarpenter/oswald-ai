@@ -110,16 +110,17 @@ Per request it does the following:
    - current speaker identity when available
    - user `system_rules` memory when available
 5. Load automatic retrieved context from recent SQLite-backed session turns
-6. Estimate prompt size against the active model budget
-7. Build the chat message array: system prompt, retrieved SQLite session context, current user prompt, and any current-turn images
-8. Call the LLM gateway with default-visible tools plus any MCP-discovered tools exposed for this request
-9. If the model emits tool calls:
+6. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
+7. Estimate prompt size against the active model budget
+8. Build the chat message array: system prompt, retrieved SQLite session context, current user prompt, and any current-turn images
+9. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
+10. If the model emits tool calls:
    - execute each tool handler
    - append tool results as `tool` messages
    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
-10. If tool failures exhaust the retry budget, make one final model call with tools disabled
-11. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to session memory
-12. Return the final `AgentResponse`
+11. If tool failures exhaust the retry budget, make one final model call with tools disabled
+12. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to session memory
+13. Return the final `AgentResponse`
 
 Multimodal request notes:
 
@@ -190,7 +191,8 @@ Oswald keeps three distinct memory layers.
 - Stored in SQLite table `session_turns`
 - Keyed by gateway-provided `SessionKey` and canonical user ID
 - Stores only completed final user/assistant turn pairs
-- Recent completed exchanges are automatically included in the structured retrieved-memory block when budget permits
+- Recent completed exchanges are automatically included in the structured retrieved-memory block when budget permits, with a compact `Tools used:` annotation when applicable
+- Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
 - Each stored turn has an optional `expires_at`; expired turns are deleted when recent session turns are read
 - Tool messages and intermediate reasoning are intentionally not persisted
 

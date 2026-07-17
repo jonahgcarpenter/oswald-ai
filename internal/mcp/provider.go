@@ -39,6 +39,50 @@ func (p *Provider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool
 	return tools
 }
 
+// ResolveTools returns historical MCP tool names that remain available to userID.
+func (p *Provider) ResolveTools(ctx context.Context, userID string, names []string) []string {
+	if p == nil || p.manager == nil || len(names) == 0 {
+		return nil
+	}
+
+	servers := make([]string, 0)
+	seenServers := map[string]bool{}
+	candidates := make([]string, 0, len(names))
+	seenCandidates := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		server, remote, ok := splitToolName(name)
+		if !ok || strings.EqualFold(remote, "tools") || seenCandidates[name] {
+			continue
+		}
+		seenCandidates[name] = true
+		candidates = append(candidates, name)
+		if !seenServers[server] {
+			seenServers[server] = true
+			servers = append(servers, server)
+		}
+	}
+
+	available := map[string]bool{}
+	for _, server := range servers {
+		specs, info, err := p.manager.ServerToolSpecs(ctx, userID, server)
+		if err != nil || info.Status != serverStatusConnected {
+			continue
+		}
+		for _, spec := range specs {
+			available[spec.Name] = true
+		}
+	}
+
+	resolved := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		if available[name] {
+			resolved = append(resolved, name)
+		}
+	}
+	return resolved
+}
+
 func (p *Provider) LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool {
 	if p == nil || p.manager == nil || len(exposed) == 0 {
 		return nil
