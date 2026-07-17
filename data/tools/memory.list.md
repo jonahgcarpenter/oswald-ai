@@ -11,5 +11,5 @@ Do not use this for normal memory retrieval during conversation; use memory.sear
 | Name     | Type    | Required | Description                                                                                                                                                                |
 | -------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | scope    | string  | no       | Optional scope filter: `short_term` or `long_term`.                                                                                                                        |
-| category | string  | no       | Optional category filter: `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, `tasks`, or `notes`. |
+| category | string  | no       | Optional category filter: `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, or `notes`. |
 | limit    | integer | no       | Maximum memories to return; defaults to 25.                                                                                                                                |

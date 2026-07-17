@@ -27,7 +27,7 @@ const (
 )
 
 // ValidCategories lists supported memory categories in display order.
-var ValidCategories = []string{"identity", "system_rules", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "tasks", "notes"}
+var ValidCategories = []string{"identity", "system_rules", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "notes"}
 
 // MemoryEntry is a single short-term or long-term user memory.
 type MemoryEntry struct {
