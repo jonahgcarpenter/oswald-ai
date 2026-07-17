@@ -5,9 +5,10 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with seven builtin model tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with eight builtin model tools:
 
 - `web.search`
+- `time.current`
 - `memory.save`
 - `memory.search`
 - `memory.list`
@@ -105,7 +106,6 @@ Per request it does the following:
 2. Inject `SenderID` into context so tools can identify the current user
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
-   - current date and time
    - soul content
    - current speaker identity when available
    - user `system_rules` memory when available
@@ -336,6 +336,7 @@ Tools are split into schema and runtime layers.
 Current builtin tools:
 
 - `web.search` — SearXNG-backed search
+- `time.current` — authoritative current date and time in a requested IANA timezone
 - `memory.save` — explicitly store or update user facts
 - `memory.search` — retrieve relevant stored user facts
 - `memory.list` — inspect active stored user facts
@@ -343,6 +344,7 @@ Current builtin tools:
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
 Recent completed exchanges are injected automatically from session memory. Durable user-memory retrieval and saving are model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
+Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
 
@@ -695,7 +697,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 - Session chat history is stored in SQLite `session_turns` with TTL expiry
 - WebSocket gateway has no authentication layer
-- Only seven builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
+- Only eight builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
 - MCP servers are configured dynamically in SQLite rather than hard-coded to one provider
 - Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
 

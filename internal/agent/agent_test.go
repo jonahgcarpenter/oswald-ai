@@ -446,6 +446,21 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 	}
 }
 
+func TestProcessDoesNotInjectCurrentTimeIntoSystemPrompt(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+
+	system := primaryRequests(chat.requests)[0].Messages[0]
+	if strings.Contains(system.Content, "# Current Date and Time") {
+		t.Fatalf("system prompt contains injected current time: %q", system.Content)
+	}
+}
+
 func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)

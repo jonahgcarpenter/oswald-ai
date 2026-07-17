@@ -2,9 +2,11 @@ package builtin
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
@@ -19,6 +21,11 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 		return fmt.Errorf("failed to initialize web.search tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("path", cfg.SearxngURL))
+
+	if err := reg.RegisterHandler("time.current", registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
+		return fmt.Errorf("failed to initialize time.current tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", "time.current"))
 
 	if err := reg.RegisterHandler("memory.save", registry.Handler(usermemory.NewSaveHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize memory.save tool: %w", err)

@@ -12,7 +12,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Iterative tool-calling agent loop on top of an OpenAI-compatible LLM gateway
 - iMessage, Discord, and WebSocket gateway
 - HACS integration for Home Assistant [here](https://github.com/jonahgcarpenter/has-oswald-conversation)
-- Builtin `web.search`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- Builtin `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
 - User & Global MCP integrations
 - SQLite-backed session chat memory with TTL expiry
 - Per-user persistent memory in SQLite and a live-editable soul file
