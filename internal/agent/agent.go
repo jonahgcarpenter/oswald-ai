@@ -478,11 +478,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
-	// Build the dynamic system prompt: timestamp + soul + speaker identity.
+	// Build the dynamic system prompt from soul and speaker identity.
 	// Only system_rules memory is injected automatically here; relevant user and
 	// session memories are added below as a structured retrieved-memory block.
 	var promptParts []string
-	promptParts = append(promptParts, "# Current Date and Time\n"+time.Now().UTC().Format(time.RFC1123))
 	promptParts = append(promptParts, soulContent)
 
 	speakerLine := a.currentSpeakerLine(reqLog, senderID)
