@@ -118,3 +118,10 @@ func TestMessagePreviewCollapsesWhitespaceAndLimitsRunes(t *testing.T) {
 		t.Fatalf("unexpected preview %q", got)
 	}
 }
+
+func TestMessagePreviewRedactsConnectionCodes(t *testing.T) {
+	got := MessagePreview("/connect OSW-0123-4567-89AB-CDEF-GHJK", 100)
+	if got != "/connect OSW-[redacted]" {
+		t.Fatalf("unexpected redacted preview %q", got)
+	}
+}

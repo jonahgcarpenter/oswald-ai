@@ -240,6 +240,45 @@ func TestWebSocketGatewayPersistsFirstMessageDisplayName(t *testing.T) {
 	}
 }
 
+func TestWebSocketGatewayRefreshesCanonicalOwnerAfterAccountMerge(t *testing.T) {
+	wg, b, chat := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
+	defer conn.Close()
+	if err := conn.WriteMessage(gorilla.TextMessage, []byte("first")); err != nil {
+		t.Fatalf("write first message: %v", err)
+	}
+	_ = readAgentResponse(t, conn)
+	websocketOwner, ok, err := wg.Links.ResolveAccount("websocket", "alice")
+	if err != nil || !ok {
+		t.Fatalf("resolve websocket owner: owner=%q ok=%v err=%v", websocketOwner, ok, err)
+	}
+	discordOwner, err := wg.Links.EnsureAccount("discord", "900", "Discord Owner")
+	if err != nil {
+		t.Fatalf("ensure discord owner: %v", err)
+	}
+	challenge, err := wg.Links.CreateChallenge(context.Background(), identity.Principal{CanonicalUserID: discordOwner, Gateway: "discord", ExternalID: "900", Assurance: identity.AssuranceDiscordGateway}, "req")
+	if err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	if _, err := wg.Links.ConfirmChallenge(context.Background(), identity.Principal{CanonicalUserID: websocketOwner, Gateway: "websocket", ExternalID: "alice", Assurance: identity.AssuranceWebSocketSignedToken}, challenge.Code, "req"); err != nil {
+		t.Fatalf("confirm challenge: %v", err)
+	}
+
+	if err := conn.WriteMessage(gorilla.TextMessage, []byte("second")); err != nil {
+		t.Fatalf("write second message: %v", err)
+	}
+	_ = readAgentResponse(t, conn)
+	if chat.principal.CanonicalUserID != discordOwner {
+		t.Fatalf("refreshed principal user = %q, want %q", chat.principal.CanonicalUserID, discordOwner)
+	}
+}
+
 type wsFakeChatter struct {
 	requests  []llm.ChatRequest
 	principal identity.Principal
@@ -275,8 +314,9 @@ func newWebSocketTestGateway(t *testing.T) (*Gateway, *broker.Broker, *wsFakeCha
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	links := accountlinking.NewService(dbPath, memories, nil, log)
 	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)

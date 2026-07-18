@@ -22,6 +22,8 @@ type Request struct {
 	ChatID      string
 	SessionKey  string
 	DisplayName string
+	IsDirect    bool
+	IsGroup     bool
 
 	Raw      string
 	Name     string

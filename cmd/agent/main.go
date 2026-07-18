@@ -85,11 +85,6 @@ func main() {
 	defer userMemStore.Close() // nolint:errcheck
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
 
-	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, rootLog.Server("account_link"))
-	if err := accountLinkService.Initialize(); err != nil {
-		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
-	}
-	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP config store", config.ErrorField(err))
@@ -97,6 +92,12 @@ func main() {
 	defer mcpStore.Close() // nolint:errcheck
 	mcpManager := mcp.NewManagerFromStore(mcpStore, rootLog)
 	mcpProvider := mcp.NewProvider(mcpManager)
+	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, mcpManager, rootLog.Server("account_link"))
+	if err := accountLinkService.Initialize(); err != nil {
+		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
+	}
+	defer accountLinkService.Close() // nolint:errcheck
+	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
 	commandService, err := commandbuiltin.NewService(accountLinkService, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))

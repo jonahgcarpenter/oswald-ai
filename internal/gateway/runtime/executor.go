@@ -79,6 +79,8 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				ChatID:      req.ChatID,
 				SessionKey:  req.SessionKey,
 				DisplayName: req.DisplayName,
+				IsDirect:    req.IsDirect,
+				IsGroup:     req.IsGroup,
 				Raw:         decision.Prompt,
 			})
 			response = result.Text

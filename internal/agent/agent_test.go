@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
@@ -743,7 +744,17 @@ func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *re
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
-	userStore, err := usermemory.NewSQLiteStore(filepath.Join(dir, "oswald.db"), embedder, "embed-model", log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	db, err := database.Open(dbPath, log)
+	if err != nil {
+		t.Fatalf("open account database: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, "user-1", now, now); err != nil {
+		t.Fatalf("seed account user: %v", err)
+	}
+	db.Close() // nolint:errcheck
+	userStore, err := usermemory.NewSQLiteStore(dbPath, embedder, "embed-model", log)
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}

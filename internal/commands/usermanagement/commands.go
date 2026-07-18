@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 const bannedMessage = "You are banned from using Oswald."
@@ -45,22 +46,21 @@ func (h *handler) Definition() commands.Definition {
 
 // Execute processes one admin command.
 func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
-	actorID := req.Principal.CanonicalUserID
 	switch req.Name {
 	case "users":
 		return h.handleUsers()
 	case "user":
 		return h.handleUser(req.Args)
 	case "admin":
-		return h.handleSetAdmin(actorID, req.Args, true)
+		return h.handleSetAdmin(req.Principal, req.Args, true)
 	case "unadmin":
-		return h.handleSetAdmin(actorID, req.Args, false)
+		return h.handleSetAdmin(req.Principal, req.Args, false)
 	case "ban":
-		return h.handleBan(actorID, req.Args)
+		return h.handleBan(req.Principal, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(actorID, req.Args)
+		return h.handleDeleteUser(req.Principal, req.Args)
 	case "unban":
-		return h.handleUnban(actorID, req.Args)
+		return h.handleUnban(req.Principal, req.Args)
 	default:
 		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}
@@ -98,12 +98,12 @@ func (h *handler) handleUser(args []string) (commands.Result, error) {
 	return commands.Result{Text: renderUser(user)}, nil
 }
 
-func (h *handler) handleSetAdmin(actorID string, args []string, isAdmin bool) (commands.Result, error) {
+func (h *handler) handleSetAdmin(principal identity.Principal, args []string, isAdmin bool) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.SetAdmin(actorID, targetID, isAdmin); err != nil {
+	if err := h.users.SetAdminAs(principal, targetID, isAdmin); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not update admin status: %v", err)}, nil
 	}
 	if isAdmin {
@@ -112,7 +112,7 @@ func (h *handler) handleSetAdmin(actorID string, args []string, isAdmin bool) (c
 	return commands.Result{Text: fmt.Sprintf("Removed admin from %s.", targetID)}, nil
 }
 
-func (h *handler) handleBan(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleBan(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) < 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
@@ -121,29 +121,29 @@ func (h *handler) handleBan(actorID string, args []string) (commands.Result, err
 	if len(args) > 1 {
 		reason = strings.Join(args[1:], " ")
 	}
-	if err := h.users.BanUser(actorID, targetID, reason); err != nil {
+	if err := h.users.BanUserAs(principal, targetID, reason); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not ban user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Banned %s.", targetID)}, nil
 }
 
-func (h *handler) handleUnban(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleUnban(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.UnbanUser(actorID, targetID); err != nil {
+	if err := h.users.UnbanUserAs(principal, targetID); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not unban user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
 }
 
-func (h *handler) handleDeleteUser(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleDeleteUser(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.DeleteUser(actorID, targetID); err != nil {
+	if err := h.users.DeleteUserAs(principal, targetID); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID)}, nil

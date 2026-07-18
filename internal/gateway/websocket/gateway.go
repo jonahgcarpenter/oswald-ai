@@ -82,6 +82,15 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			log.Debug("gateway.connection.closed", "websocket connection closed", config.F("chat_id", remoteAddr), config.ErrorField(err))
 			break
 		}
+		if principal.Valid() {
+			currentOwner, ok, resolveErr := wg.Links.ResolveAccount("websocket", normalizedUserID)
+			if resolveErr != nil || !ok {
+				log.Error("gateway.account.resolve_failed", "failed to refresh websocket account ownership", config.F("request_id", requestID), config.F("session_id", sessionKey), config.ErrorField(resolveErr))
+				_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "account identity is no longer available"), time.Now().Add(time.Second))
+				return
+			}
+			principal.CanonicalUserID = currentOwner
+		}
 
 		// Attempt to decode a structured IncomingMessage. Plain-text prompts keep
 		// working, but identity is always bound by the handshake token.

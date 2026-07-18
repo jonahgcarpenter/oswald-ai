@@ -186,23 +186,121 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	if err := s.ensureAccountUser(winnerUserID); err != nil {
 		return err
 	}
+	intro, err := s.ReadIntro(winnerUserID)
+	if err != nil {
+		return err
+	}
+	if s.speakerLineResolver != nil {
+		intro, err = s.speakerLineResolver(winnerUserID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve merged user intro: %w", err)
+		}
+	}
 	tx, err := s.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("failed to begin memory merge: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
-	for _, stmt := range []string{
-		`UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`,
-		`UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`,
-	} {
-		if _, err := tx.Exec(stmt, winnerUserID, loserUserID); err != nil {
-			return fmt.Errorf("failed to merge memory users: %w", err)
-		}
-	}
-	if _, err := tx.Exec(`DELETE FROM user_memory_profiles WHERE canonical_user_id = ?`, loserUserID); err != nil {
-		return fmt.Errorf("failed to remove merged memory profile: %w", err)
+	if err := MergeUsersTx(context.Background(), tx, winnerUserID, loserUserID, intro); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+// MergeUsersTx moves loser-owned memory data to the winner using the supplied transaction.
+// It does not commit or roll back tx.
+func MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID, intro string) error {
+	if tx == nil {
+		return fmt.Errorf("user memory merge: transaction is required")
+	}
+	winnerID = strings.TrimSpace(winnerID)
+	loserID = strings.TrimSpace(loserID)
+	if winnerID == "" || loserID == "" {
+		return fmt.Errorf("user memory merge: winner and loser ids are required")
+	}
+	if winnerID == loserID {
+		return nil
+	}
+
+	duplicateJoin := `
+FROM memory_entries loser
+JOIN memory_entries winner
+	ON winner.canonical_user_id = ?
+	AND winner.scope = loser.scope
+	AND winner.statement_key = loser.statement_key
+WHERE loser.canonical_user_id = ?`
+	duplicateIDs := `SELECT loser.id ` + duplicateJoin
+	winnerForDuplicate := `
+SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_events.memory_id`
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET memory_id = (`+winnerForDuplicate+`) WHERE memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged memory events: %w", err)
+	}
+	winnerForSuperseded := `
+SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_entries.supersedes_id`
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET supersedes_id = (`+winnerForSuperseded+`) WHERE supersedes_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged supersedes references: %w", err)
+	}
+
+	var vectorTableExists int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_entry_vectors'`).Scan(&vectorTableExists)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to inspect memory vector table: %w", err)
+	}
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO memory_entry_vectors(rowid, embedding)
+SELECT winner.id, loser_vector.embedding
+FROM memory_entries loser
+JOIN memory_entries winner
+	ON winner.canonical_user_id = ?
+	AND winner.scope = loser.scope
+	AND winner.statement_key = loser.statement_key
+JOIN memory_entry_vectors loser_vector ON loser_vector.rowid = loser.id
+LEFT JOIN memory_entry_vectors winner_vector ON winner_vector.rowid = winner.id
+WHERE loser.canonical_user_id = ? AND winner_vector.rowid IS NULL
+`, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to preserve merged memory vectors: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors WHERE rowid IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to delete duplicate memory vectors: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to delete duplicate memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged session turns: %w", err)
+	}
+
+	now := formatTime(time.Now())
+	createdAt := now
+	err = tx.QueryRowContext(ctx, `
+SELECT created_at FROM user_memory_profiles
+WHERE canonical_user_id IN (?, ?)
+ORDER BY CASE canonical_user_id WHEN ? THEN 0 ELSE 1 END
+LIMIT 1`, winnerID, loserID, winnerID).Scan(&createdAt)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to read merged memory profile: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_memory_profiles WHERE canonical_user_id = ?`, loserID); err != nil {
+		return fmt.Errorf("failed to remove merged memory profile: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at = excluded.updated_at
+`, winnerID, strings.TrimSpace(intro), createdAt, now); err != nil {
+		return fmt.Errorf("failed to upsert merged memory profile: %w", err)
+	}
+	return nil
+}
+
+// MergeUsersTx moves user memory through a caller-owned transaction.
+func (s *Store) MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID, intro string) error {
+	return MergeUsersTx(ctx, tx, winnerID, loserID, intro)
 }
 
 // SaveMemory creates or updates a scoped memory entry.
@@ -638,8 +736,19 @@ func (s *Store) storeMemoryVector(rowID int64, embedding []float64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.sql.Exec(`INSERT OR REPLACE INTO memory_entry_vectors(rowid, embedding) VALUES (?, ?)`, rowID, serialized); err != nil {
+	result, err := s.sql.Exec(`
+INSERT OR REPLACE INTO memory_entry_vectors(rowid, embedding)
+SELECT ?, ? WHERE EXISTS (SELECT 1 FROM memory_entries WHERE id = ?)
+`, rowID, serialized, rowID)
+	if err != nil {
 		return fmt.Errorf("failed to store memory vector: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check stored memory vector: %w", err)
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("failed to store memory vector: memory entry %d no longer exists", rowID)
 	}
 	return nil
 }
@@ -816,10 +925,13 @@ func (s *Store) ensureAccountUser(userID string) error {
 	if strings.TrimSpace(userID) == "" {
 		return fmt.Errorf("user memory: user id is required")
 	}
-	now := formatTime(time.Now())
-	_, err := s.sql.Exec(`INSERT OR IGNORE INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, userID, now, now)
+	var exists int
+	err := s.sql.QueryRow(`SELECT 1 FROM account_users WHERE canonical_user_id = ?`, userID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("user memory: account user %q does not exist", userID)
+	}
 	if err != nil {
-		return fmt.Errorf("failed to ensure account user %q: %w", userID, err)
+		return fmt.Errorf("failed to check account user %q: %w", userID, err)
 	}
 	return nil
 }

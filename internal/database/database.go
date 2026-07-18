@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -27,7 +28,7 @@ func Open(path string, log *config.Logger) (*DB, error) {
 
 	sqlite_vec.Auto()
 
-	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -53,6 +54,24 @@ func (d *DB) SQL() *sql.DB {
 	return d.db
 }
 
+// WithTx executes fn in a transaction, committing on success and rolling back
+// when fn or the commit fails.
+func (d *DB) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin database transaction: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit database transaction: %w", err)
+	}
+	return nil
+}
+
 // Close closes the database connection.
 func (d *DB) Close() error {
 	if d == nil || d.db == nil {
@@ -69,6 +88,9 @@ func (d *DB) initialize() error {
 		return err
 	}
 	if err := d.initializeLinkedAccounts(); err != nil {
+		return err
+	}
+	if err := d.initializeAccountLinkChallenges(); err != nil {
 		return err
 	}
 	if err := d.initializeUserMemory(); err != nil {

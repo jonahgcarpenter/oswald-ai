@@ -16,7 +16,8 @@ const testWebSocketSigningKey = "0123456789abcdef0123456789abcdef"
 func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
 
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
 	services, err := NewServicesFromConfig(&config.Config{Port: "8000", WebSocketAuthSigningKey: testWebSocketSigningKey, WebSocketAuthMaxTokenTTL: 15 * time.Minute}, links, runtimeDeps, log)
@@ -39,7 +40,8 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 func TestNewServicesFromConfigRequiresWebSocketAuthentication(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
 
 	if _, err := NewServicesFromConfig(&config.Config{Port: "8000", WebSocketAuthMaxTokenTTL: 15 * time.Minute}, links, gatewayruntime.Dependencies{Log: log}, log); err == nil {
 		t.Fatal("expected missing websocket signing key error")

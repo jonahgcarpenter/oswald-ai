@@ -18,6 +18,7 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 		t.Fatalf("new store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1", "usr_2")
 
 	userOne := principalContext("usr_1", "same-external")
 	userTwo := principalContext("usr_2", "same-external")
