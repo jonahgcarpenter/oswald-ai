@@ -5,5 +5,5 @@ tmp/
 # database
 *.db
 
-# bkp
-bkp/
+# my plans
+PLAN.md
