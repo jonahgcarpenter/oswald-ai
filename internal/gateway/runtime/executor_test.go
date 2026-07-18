@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
@@ -176,12 +177,27 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
 	}
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, usermemory.NewStore(filepath.Join(dir, "users"), log), promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	dbPath := filepath.Join(dir, "users")
+	db, err := database.Open(dbPath, log)
+	if err != nil {
+		t.Fatalf("open account database: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, "user", now, now); err != nil {
+		db.Close() // nolint:errcheck
+		t.Fatalf("seed account user: %v", err)
+	}
+	db.Close() // nolint:errcheck
+	memory := usermemory.NewStore(dbPath, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService(pingHandler{})
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
-	return Dependencies{Broker: b, Commands: commandService, Log: log}, b.Shutdown
+	return Dependencies{Broker: b, Commands: commandService, Log: log}, func() {
+		b.Shutdown()
+		memory.Close() // nolint:errcheck
+	}
 }

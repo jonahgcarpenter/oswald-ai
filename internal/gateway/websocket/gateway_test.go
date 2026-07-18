@@ -46,7 +46,7 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 		t.Fatalf("unexpected plain response: %+v", plain)
 	}
 	primary := primaryWSRequests(chat.requests)
-	if len(primary) != 1 || primary[0].Messages[len(primary[0].Messages)-1].Content != "hello websocket" {
+	if len(primary) != 1 || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-1].Content, "<tenant_profile") || !strings.HasSuffix(primary[0].Messages[len(primary[0].Messages)-1].Content, "\n\nhello websocket") {
 		t.Fatalf("unexpected chat requests: %+v", primary)
 	}
 

@@ -18,7 +18,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. For each visible configured MCP server, the model sees a lightweight dynamic discovery tool named `<server>.tools`; actual MCP tools remain hidden and become visible only for the active request after `<server>.tools` lists them.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, and admin-only user-management commands: `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, and `/unban`.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, and admin-only user-management commands: `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, and `/unban`.
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -55,7 +55,7 @@ Current layers:
 4. Create the LLM gateway client
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
 6. Create the soul store and SQLite-backed persistent user-memory store
-7. Create the account-link service and command service with `/help`, `/connect`, `/disconnect`, and admin user-management commands
+7. Create the account-link service and command service with `/help`, `/connect`, `/disconnect`, `/reset`, and admin user-management commands
 8. Initialize optional MCP clients
 9. Load builtin tool schemas from `data/tools/*.md`, register builtin handlers, and prepare dynamic MCP discovery tools for configured servers
 10. Build enabled gateways from config
@@ -107,28 +107,26 @@ Per request it does the following:
 1. Create a request-scoped timeout from `LLM_GATEWAY_TIMEOUT + 30s` (`210s` by default)
 2. Inject the resolved principal into context so tools derive tenant ownership from its canonical user
 3. Read `data/memory/soul/soul.md` fresh from disk
-4. Build the dynamic system prompt from:
-   - soul content
-   - current speaker identity when available
-   - user `system_rules` memory when available
-5. Load automatic retrieved context from recent SQLite-backed session turns
-6. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
-7. Estimate prompt size against the active model budget
-8. Build the chat message array: system prompt, retrieved SQLite session context, current user prompt, and any current-turn images
-9. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
-10. If the model emits tool calls:
+4. Build deployment policy from soul content and gateway instructions
+5. Resolve the session's frozen, bounded, lower-authority tenant profile
+6. Load automatic retrieved context from recent SQLite-backed turns in the active session generation
+7. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
+8. Estimate prompt size against the active model budget
+9. Build the chat message array: deployment policy, frozen tenant profile, retrieved SQLite session context, current user prompt, and any current-turn images
+10. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
+11. If the model emits tool calls:
    - execute each tool handler
    - append tool results as `tool` messages
    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
-11. If tool failures exhaust the retry budget, make one final model call with tools disabled
-12. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to session memory
-13. Return the final `AgentResponse`
+12. If tool failures exhaust the retry budget, make one final model call with tools disabled
+13. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to the active session generation
+14. Return the final `AgentResponse`
 
 Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
-- Session turns are stored with a `24h` TTL and up to four recent completed exchanges are injected automatically when budget permits
+- Session turns are stored with a `24h` TTL and generation; up to four recent completed exchanges from the active generation are injected automatically when budget permits
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and memory query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 - Gateway/runtime, routing, memory, command, tool, LLM mapping, image normalization, and fake-client agent loop behavior are covered by local Go tests that do not call a live LLM
@@ -175,9 +173,14 @@ Oswald keeps three distinct memory layers.
 - Stored in `data/database/oswald.db` tables `user_memory_profiles` and `memory_entries`
 - Managed by the `memory.*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
-- Organized into categories like `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
+- Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
-- Only the `system_rules` category is injected automatically into the system prompt; other categories are retrieved on demand via tools
+- Eligible approved long-term identity, communication preference, durable preference, and environment facts are compiled into a deterministic profile capped at 2000 bytes
+- Canonical memory writes are approved in this phase; later memory-formation policy can introduce unapproved candidates
+- Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
+- A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
+- Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
+- Other durable categories remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`
 
 ### Account Links
 

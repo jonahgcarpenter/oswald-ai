@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -27,7 +28,7 @@ const (
 )
 
 // ValidCategories lists supported memory categories in display order.
-var ValidCategories = []string{"identity", "system_rules", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "notes"}
+var ValidCategories = []string{"identity", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "notes"}
 
 // MemoryEntry is a single short-term or long-term user memory.
 type MemoryEntry struct {
@@ -56,6 +57,7 @@ type SessionTurn struct {
 	ID            int64
 	SessionID     string
 	UserID        string
+	Generation    int
 	UserText      string
 	AssistantText string
 	ToolNames     []string
@@ -69,6 +71,7 @@ type SessionTurn struct {
 // ContextOptions controls request-time memory retrieval.
 type ContextOptions struct {
 	RecentTurns int
+	Generation  int
 
 	ContextBudgetChars int
 }
@@ -102,6 +105,8 @@ type Store struct {
 	log        *config.Logger
 	embedder   llm.Embedder
 	embedModel string
+	mutationMu sync.Mutex
+	userLocks  map[string]*sync.Mutex
 
 	speakerLineResolver func(string) (string, error)
 }
@@ -183,6 +188,8 @@ func (s *Store) MergeUsers(winnerUserID, loserUserID string) error {
 	if winnerUserID == "" || loserUserID == "" || winnerUserID == loserUserID {
 		return nil
 	}
+	unlock := s.lockUsers(winnerUserID, loserUserID)
+	defer unlock()
 	if err := s.ensureAccountUser(winnerUserID); err != nil {
 		return err
 	}
@@ -274,6 +281,22 @@ WHERE loser.canonical_user_id = ? AND winner_vector.rowid IS NULL
 	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged session turns: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tenant_session_generations (canonical_user_id, session_id, generation)
+SELECT ?, session_id, MAX(generation)
+FROM (
+	SELECT session_id, generation FROM tenant_session_generations WHERE canonical_user_id IN (?, ?)
+	UNION ALL
+	SELECT session_id, session_generation FROM session_turns WHERE canonical_user_id = ?
+)
+GROUP BY session_id
+ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET generation = MAX(generation, excluded.generation)
+`, winnerID, winnerID, loserID, winnerID); err != nil {
+		return fmt.Errorf("failed to preserve merged session generations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_session_generations WHERE canonical_user_id = ?`, loserID); err != nil {
+		return fmt.Errorf("failed to remove merged session generations: %w", err)
+	}
 
 	now := formatTime(time.Now())
 	createdAt := now
@@ -295,6 +318,9 @@ ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at 
 `, winnerID, strings.TrimSpace(intro), createdAt, now); err != nil {
 		return fmt.Errorf("failed to upsert merged memory profile: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_sessions WHERE canonical_user_id IN (?, ?)`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to invalidate merged tenant sessions: %w", err)
+	}
 	return nil
 }
 
@@ -308,6 +334,8 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 	if err := s.ensureAccountUser(userID); err != nil {
 		return MemoryEntry{}, err
 	}
+	unlock := s.lockUsers(userID)
+	defer unlock()
 	statement := strings.TrimSpace(req.Statement)
 	if statement == "" {
 		return MemoryEntry{}, fmt.Errorf("memory statement is required")
@@ -356,8 +384,8 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 	}
 
 	res, err := s.sql.Exec(`
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim, profile_approved)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 1)
 ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
 	category = excluded.category,
 	statement = excluded.statement,
@@ -370,7 +398,8 @@ ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
 	expires_at = excluded.expires_at,
 	supersedes_id = excluded.supersedes_id,
 	embedding_model = excluded.embedding_model,
-	embedding_dim = excluded.embedding_dim
+	embedding_dim = excluded.embedding_dim,
+	profile_approved = 1
 `, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance, strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), supersedesID, embeddingModel, embeddingDim)
 	if err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
@@ -486,24 +515,87 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 	if target == "" {
 		return 0, fmt.Errorf("memory target is required")
 	}
+	unlock := s.lockUsers(userID)
+	defer unlock()
+	tx, err := s.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin memory deletion: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
 	if strings.EqualFold(target, "all") {
-		res, err := s.sql.Exec(`UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND status = 'active'`, formatTime(time.Now()), userID)
+		res, err := tx.Exec(`UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND status != 'deleted'`, formatTime(time.Now()), userID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to delete memories for %q: %w", userID, err)
 		}
-		return res.RowsAffected()
+		count, err := res.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
+			return 0, err
+		}
+		return count, tx.Commit()
 	}
-	stmt := `UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status = 'active'`
+	stmt := `UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status != 'deleted'`
 	args := []any{formatTime(time.Now()), userID, statementKey(target)}
 	if normalizeOptionalScope(scope) != "" {
 		stmt += ` AND scope = ?`
 		args = append(args, normalizeScope(scope))
 	}
-	res, err := s.sql.Exec(stmt, args...)
+	res, err := tx.Exec(stmt, args...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete memory for %q: %w", userID, err)
 	}
-	return res.RowsAffected()
+	count, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
+}
+
+func deleteForgottenProfileVersionsTx(tx *sql.Tx, userID string) error {
+	if _, err := tx.Exec(`
+DELETE FROM tenant_profile_versions
+WHERE canonical_user_id = ? AND id IN (
+	SELECT facts.profile_version_id
+	FROM tenant_profile_version_facts facts
+	JOIN memory_entries entries ON entries.id = facts.source_memory_id
+	WHERE entries.canonical_user_id = ? AND entries.status = 'deleted'
+)
+`, userID, userID); err != nil {
+		return fmt.Errorf("failed to remove forgotten profile snapshots: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) lockUsers(userIDs ...string) func() {
+	ids := uniqueStrings(userIDs)
+	sort.Strings(ids)
+	s.mutationMu.Lock()
+	if s.userLocks == nil {
+		s.userLocks = make(map[string]*sync.Mutex)
+	}
+	locks := make([]*sync.Mutex, 0, len(ids))
+	for _, userID := range ids {
+		lock := s.userLocks[userID]
+		if lock == nil {
+			lock = &sync.Mutex{}
+			s.userLocks[userID] = lock
+		}
+		locks = append(locks, lock)
+	}
+	s.mutationMu.Unlock()
+	for _, lock := range locks {
+		lock.Lock()
+	}
+	return func() {
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].Unlock()
+		}
+	}
 }
 
 // Read renders all active memories for compatibility with older callers/tests.
@@ -545,8 +637,20 @@ func (s *Store) DeleteAll(userID string) error {
 
 // AppendSessionTurn stores a completed session exchange.
 func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
+	return s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false)
+}
+
+// AppendSessionTurnForGeneration stores a completed exchange in one frozen session generation.
+func (s *Store) AppendSessionTurnForGeneration(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {
+	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true)
+}
+
+func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration bool) error {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return nil
+	}
+	if generation <= 0 {
+		generation = 1
 	}
 	if err := s.ensureAccountUser(userID); err != nil {
 		return err
@@ -557,18 +661,46 @@ func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userTe
 		exp := now.Add(ttl).UTC()
 		expires = &exp
 	}
-	_, err := s.sql.Exec(`
-INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-`, sessionID, userID, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires))
+	query := `
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires)}
+	if validateGeneration {
+		query = `
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE EXISTS (
+	SELECT 1 FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
+)`
+		args = append(args, userID, sessionID, generation)
+	}
+	result, err := s.sql.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to append session turn: %w", err)
+	}
+	if validateGeneration {
+		count, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to check appended session turn: %w", err)
+		}
+		if count == 0 {
+			return nil
+		}
 	}
 	return nil
 }
 
 // RecentSessionTurns returns a user's newest completed session exchanges, newest first.
 func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count int) ([]SessionTurn, error) {
+	return s.recentSessionTurns(userID, sessionID, 0, offset, count)
+}
+
+// RecentSessionTurnsForGeneration returns turns from exactly one session generation.
+func (s *Store) RecentSessionTurnsForGeneration(userID, sessionID string, generation, offset, count int) ([]SessionTurn, error) {
+	return s.recentSessionTurns(userID, sessionID, generation, offset, count)
+}
+
+func (s *Store) recentSessionTurns(userID, sessionID string, generation, offset int, count int) ([]SessionTurn, error) {
 	if offset < 1 {
 		offset = 1
 	}
@@ -581,10 +713,15 @@ func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count i
 	if err := s.expireOldSessionTurns(); err != nil {
 		return nil, err
 	}
-	rows, err := s.sql.Query(`
-SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
-FROM session_turns WHERE canonical_user_id = ? AND session_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-`, userID, sessionID, count, offset-1)
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`
+	args := []any{userID, sessionID}
+	if generation > 0 {
+		query += ` AND session_generation = ?`
+		args = append(args, generation)
+	}
+	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, count, offset-1)
+	rows, err := s.sql.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session turns: %w", err)
 	}
@@ -613,7 +750,13 @@ func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query strin
 		opts.ContextBudgetChars = 12000
 	}
 
-	recent, err := s.RecentSessionTurns(userID, sessionID, 1, opts.RecentTurns)
+	var recent []SessionTurn
+	var err error
+	if opts.Generation > 0 {
+		recent, err = s.RecentSessionTurnsForGeneration(userID, sessionID, opts.Generation, 1, opts.RecentTurns)
+	} else {
+		recent, err = s.RecentSessionTurns(userID, sessionID, 1, opts.RecentTurns)
+	}
 	if err != nil {
 		return RetrievedContext{}, err
 	}
@@ -713,7 +856,7 @@ func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) 
 	var turn SessionTurn
 	var toolNames, topicTags, created string
 	var expires sql.NullString
-	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires); err != nil {
+	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.Generation, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &topicTags, &created, &expires); err != nil {
 		return SessionTurn{}, fmt.Errorf("failed to scan session turn: %w", err)
 	}
 	turn.ToolNames = splitCSV(toolNames)
@@ -974,6 +1117,9 @@ func normalizeCategory(cat string) string {
 	cat = strings.ReplaceAll(cat, " ", "_")
 	if cat == "preferences" {
 		cat = "durable_preferences"
+	}
+	if cat == "system_rules" {
+		cat = "communication_preferences"
 	}
 	for _, valid := range ValidCategories {
 		if cat == valid {
