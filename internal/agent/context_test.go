@@ -115,6 +115,34 @@ func TestAssemblePromptContextToolsAffectSelectionBudget(t *testing.T) {
 	}
 }
 
+func TestAssemblePromptContextAddsBoundedRecallToCurrentUser(t *testing.T) {
+	recall := []usermemory.RecallResult{{
+		Entry:      usermemory.MemoryEntry{ID: 1, Scope: "long_term", Category: "projects", Statement: "Project codename is Atlas", Confidence: 0.9, Importance: 4},
+		Score:      0.9,
+		Provenance: []usermemory.RecallProvenance{{Source: usermemory.RecallSourceLexical, Relevance: 1, Authority: usermemory.RecallAuthorityUserStated}},
+	}}
+	got := AssemblePromptContextWithRecall("policy", "profile", "What is the codename?", nil, recall, 2000, nil, nil, 100000)
+	if got.SelectedRecallCount != 1 || got.OmittedRecallCount != 0 || got.RecallChars == 0 {
+		t.Fatalf("unexpected recall selection: %+v", got)
+	}
+	current := got.Messages[len(got.Messages)-1]
+	if current.Role != "user" || !strings.Contains(current.Content, "What is the codename?") || !strings.Contains(current.Content, "UNTRUSTED LOWER-AUTHORITY REFERENCE") || !strings.Contains(current.Content, "Atlas") {
+		t.Fatalf("recall not attached to current user turn: %+v", current)
+	}
+	if strings.Contains(got.Messages[0].Content, "Atlas") || strings.Contains(got.Messages[1].Content, "Atlas") {
+		t.Fatalf("recall gained policy/profile authority: %+v", got.Messages)
+	}
+}
+
+func TestAssemblePromptContextOmitsRecallBeforeRequiredContent(t *testing.T) {
+	recall := []usermemory.RecallResult{{Entry: usermemory.MemoryEntry{ID: 1, Scope: "long_term", Category: "notes", Statement: strings.Repeat("memory ", 100), Confidence: 1, Importance: 5}, Score: 1}}
+	required := AssemblePromptContext("policy", "profile", "current", nil, nil, nil, 100000)
+	got := AssemblePromptContextWithRecall("policy", "profile", "current", nil, recall, 2000, nil, nil, required.EstimatedAfter)
+	if got.SelectedRecallCount != 0 || got.OmittedRecallCount != 1 || got.Messages[len(got.Messages)-1].Content != "current" {
+		t.Fatalf("optional recall displaced required content: %+v", got)
+	}
+}
+
 func roles(messages []llm.ChatMessage) string {
 	values := make([]string, len(messages))
 	for i, message := range messages {

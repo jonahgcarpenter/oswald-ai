@@ -3,6 +3,8 @@ package database
 import (
 	"database/sql"
 	"fmt"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 func (d *DB) initializeUserMemory() error {
@@ -171,6 +173,11 @@ ON tenant_sessions (expires_at);
 	}
 	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_profile_candidates ON memory_entries (canonical_user_id, profile_approved, status, scope, category, expires_at)`); err != nil {
 		return fmt.Errorf("failed to initialize profile candidate index: %w", err)
+	}
+	if err := d.initializeMemoryFTS5(); err != nil {
+		if d.log != nil {
+			d.log.Server("database.memory_fts").Warn("database.memory_fts.unavailable", "durable memory FTS index unavailable", config.F("status", "degraded"), config.ErrorField(err))
+		}
 	}
 	return nil
 }

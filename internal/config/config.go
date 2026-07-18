@@ -21,7 +21,7 @@ type Config struct {
 	MCPConfigEncryptionKey   string        // Key used to encrypt MCP server URLs and headers at rest
 	LLMGatewayURL            string        // LLM gateway API base URL (default: "http://localhost:8080")
 	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
-	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic session-memory retrieval
+	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic durable-memory retrieval
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey     string        // Optional gateway routing key for LLM gateway requests
 	LLMGatewayTimeout        time.Duration // Expected upstream LLM gateway timeout; local guard timeouts are derived from it

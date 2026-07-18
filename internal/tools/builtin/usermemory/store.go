@@ -106,6 +106,7 @@ type Store struct {
 	embedder   llm.Embedder
 	embedModel string
 	mutationMu sync.Mutex
+	vectorMu   sync.Mutex
 	userLocks  map[string]*sync.Mutex
 
 	speakerLineResolver func(string) (string, error)
@@ -272,11 +273,72 @@ WHERE loser.canonical_user_id = ? AND winner_vector.rowid IS NULL
 			return fmt.Errorf("failed to delete duplicate memory vectors: %w", err)
 		}
 	}
+	var tenantVectorTableExists int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_entry_vectors_v2'`).Scan(&tenantVectorTableExists)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to inspect tenant memory vector table: %w", err)
+	}
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO memory_entry_vectors_v2(rowid, canonical_user_id, embedding_model, scope, category, embedding)
+SELECT winner.id, ?, loser_vector.embedding_model, winner.scope, winner.category, loser_vector.embedding
+FROM memory_entries loser
+JOIN memory_entries winner
+	ON winner.canonical_user_id = ?
+	AND winner.scope = loser.scope
+	AND winner.statement_key = loser.statement_key
+JOIN memory_entry_vectors_v2 loser_vector ON loser_vector.rowid = loser.id
+LEFT JOIN memory_entry_vectors_v2 winner_vector ON winner_vector.rowid = winner.id
+WHERE loser.canonical_user_id = ? AND winner_vector.rowid IS NULL
+`, winnerID, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to preserve merged tenant memory vectors: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET embedding_model = (
+		SELECT loser.embedding_model
+		FROM memory_entries loser
+		JOIN memory_entry_vectors_v2 loser_vector ON loser_vector.rowid = loser.id
+		WHERE loser.canonical_user_id = ?
+			AND loser.scope = memory_entries.scope
+			AND loser.statement_key = memory_entries.statement_key
+		LIMIT 1
+	),
+	embedding_dim = (
+		SELECT loser.embedding_dim
+		FROM memory_entries loser
+		JOIN memory_entry_vectors_v2 loser_vector ON loser_vector.rowid = loser.id
+		WHERE loser.canonical_user_id = ?
+			AND loser.scope = memory_entries.scope
+			AND loser.statement_key = memory_entries.statement_key
+		LIMIT 1
+	)
+WHERE canonical_user_id = ? AND embedding_dim = 0
+	AND EXISTS (
+		SELECT 1
+		FROM memory_entries loser
+		JOIN memory_entry_vectors_v2 loser_vector ON loser_vector.rowid = loser.id
+		WHERE loser.canonical_user_id = ?
+			AND loser.scope = memory_entries.scope
+			AND loser.statement_key = memory_entries.statement_key
+	)
+`, loserID, loserID, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to preserve merged tenant memory vector metadata: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors_v2 WHERE rowid IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to delete duplicate tenant memory vectors: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to delete duplicate memories: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memories: %w", err)
+	}
+	if tenantVectorTableExists == 1 {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entry_vectors_v2 SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to move merged tenant memory vectors: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged session turns: %w", err)
@@ -383,7 +445,8 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		}
 	}
 
-	res, err := s.sql.Exec(`
+	var id int64
+	err := s.sql.QueryRow(`
 INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim, profile_approved)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 1)
 ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
@@ -400,20 +463,23 @@ ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
 	embedding_model = excluded.embedding_model,
 	embedding_dim = excluded.embedding_dim,
 	profile_approved = 1
-`, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance, strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), supersedesID, embeddingModel, embeddingDim)
+RETURNING id
+`, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance, strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), supersedesID, embeddingModel, embeddingDim).Scan(&id)
 	if err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
 	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		_ = s.sql.QueryRow(`SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ?`, userID, scope, statementKey(statement)).Scan(&id)
-	}
-	if err := s.storeMemoryVector(id, embedding); err != nil {
-		return MemoryEntry{}, err
+	if err := s.storeTenantMemoryVector(id, userID, embedding); err != nil {
+		_, _ = s.sql.Exec(`UPDATE memory_entries SET embedding_model = '', embedding_dim = 0 WHERE id = ? AND canonical_user_id = ?`, id, userID)
+		if s.log != nil {
+			s.log.Server("memory.vector").Warn("memory.vector.write_failed", "durable memory vector write failed", config.F("status", "degraded"), config.ErrorField(err))
+		}
 	}
 	entry, err := s.EntryByID(id)
 	if err != nil {
 		return MemoryEntry{}, err
+	}
+	if entry.UserID != userID {
+		return MemoryEntry{}, fmt.Errorf("saved memory ownership mismatch")
 	}
 	s.recordEvent(entry.ID, "updated", "", req.SourceSessionID, "")
 	return entry, nil
@@ -435,14 +501,18 @@ func (s *Store) EntryByID(id int64) (MemoryEntry, error) {
 // Search returns active memories matching the requested filters.
 func (s *Store) Search(ctx context.Context, userID, scope, category, query string, limit int) ([]MemoryEntry, error) {
 	query = strings.TrimSpace(query)
-	var queryVector []float64
 	if query != "" {
-		queryVector = s.embedBestEffort(ctx, query)
+		results, stats := s.Recall(ctx, userID, query, RecallRequest{Scope: scope, Category: category, TopK: limit})
+		if !stats.LexicalAvailable && !stats.SemanticAvailable {
+			return nil, fmt.Errorf("durable memory retrieval indexes unavailable")
+		}
+		s.RecordRecallUsage(ctx, userID, results)
+		return recallResultsToEntries(results), nil
 	}
-	return s.searchWithVector(userID, scope, category, query, queryVector, limit)
+	return s.listActiveMemories(userID, scope, category, limit)
 }
 
-func (s *Store) searchWithVector(userID, scope, category, query string, queryVector []float64, limit int) ([]MemoryEntry, error) {
+func (s *Store) listActiveMemories(userID, scope, category string, limit int) ([]MemoryEntry, error) {
 	if limit <= 0 {
 		limit = 8
 	}
@@ -454,39 +524,16 @@ func (s *Store) searchWithVector(userID, scope, category, query string, queryVec
 	}
 	normalizedScope := normalizeOptionalScope(scope)
 	normalizedCategory := normalizeOptionalCategory(category)
-	query = strings.TrimSpace(query)
-	var entries []MemoryEntry
-	if query != "" {
-		if vectorEntries, ok, err := s.searchMemoryVectors(queryVector, userID, normalizedScope, normalizedCategory, limit); err != nil {
-			return nil, err
-		} else if ok {
-			entries = vectorEntries
-		} else {
-			var err error
-			entries, err = s.activeEntries(userID, normalizedScope, normalizedCategory)
-			if err != nil || len(entries) == 0 {
-				return entries, err
-			}
-			for i := range entries {
-				if strings.Contains(strings.ToLower(entries[i].Statement), strings.ToLower(query)) {
-					entries[i].Score = 0.55 + (float64(entries[i].Importance)/5)*0.20
-				}
-			}
-			sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
-		}
-	} else {
-		var err error
-		entries, err = s.activeEntries(userID, normalizedScope, normalizedCategory)
-		if err != nil || len(entries) == 0 {
-			return entries, err
-		}
-		sort.SliceStable(entries, func(i, j int) bool {
-			if entries[i].Importance == entries[j].Importance {
-				return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
-			}
-			return entries[i].Importance > entries[j].Importance
-		})
+	entries, err := s.activeEntries(userID, normalizedScope, normalizedCategory)
+	if err != nil || len(entries) == 0 {
+		return entries, err
 	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Importance == entries[j].Importance {
+			return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
+		}
+		return entries[i].Importance > entries[j].Importance
+	})
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
@@ -534,6 +581,9 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 		if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
 			return 0, err
 		}
+		if err := deleteInactiveVectorsTx(tx, userID); err != nil {
+			return 0, err
+		}
 		return count, tx.Commit()
 	}
 	stmt := `UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status != 'deleted'`
@@ -553,7 +603,29 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 	if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
 		return 0, err
 	}
+	if err := deleteInactiveVectorsTx(tx, userID); err != nil {
+		return 0, err
+	}
 	return count, tx.Commit()
+}
+
+func deleteInactiveVectorsTx(tx *sql.Tx, userID string) error {
+	var exists int
+	err := tx.QueryRow(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_entry_vectors_v2'`).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect tenant memory vectors for deletion: %w", err)
+	}
+	if _, err := tx.Exec(`
+DELETE FROM memory_entry_vectors_v2
+WHERE canonical_user_id = ? AND rowid IN (
+	SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status != 'active'
+)`, userID, userID); err != nil {
+		return fmt.Errorf("delete inactive tenant memory vectors: %w", err)
+	}
+	return nil
 }
 
 func deleteForgottenProfileVersionsTx(tx *sql.Tx, userID string) error {
@@ -742,8 +814,8 @@ func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string
 	return turns, rows.Err()
 }
 
-// BuildContext retrieves and formats automatic session context for a request.
-// Durable user memory is model-directed through memory.search.
+// BuildContext retrieves and formats the legacy automatic session context block.
+// Production prompt assembly retrieves session turns and durable recall separately.
 func (s *Store) BuildContext(ctx context.Context, userID, sessionID, query string, opts ContextOptions) (RetrievedContext, error) {
 	if strings.TrimSpace(userID) == "" {
 		return RetrievedContext{}, nil
@@ -873,86 +945,6 @@ func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) 
 	return turn, nil
 }
 
-func (s *Store) storeMemoryVector(rowID int64, embedding []float64) error {
-	if rowID <= 0 || len(embedding) == 0 {
-		return nil
-	}
-	if err := s.ensureVectorTable("memory_entry_vectors", len(embedding)); err != nil {
-		return err
-	}
-	serialized, err := serializeVector(embedding)
-	if err != nil {
-		return err
-	}
-	result, err := s.sql.Exec(`
-INSERT OR REPLACE INTO memory_entry_vectors(rowid, embedding)
-SELECT ?, ? WHERE EXISTS (SELECT 1 FROM memory_entries WHERE id = ?)
-`, rowID, serialized, rowID)
-	if err != nil {
-		return fmt.Errorf("failed to store memory vector: %w", err)
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check stored memory vector: %w", err)
-	}
-	if rowsAffected != 1 {
-		return fmt.Errorf("failed to store memory vector: memory entry %d no longer exists", rowID)
-	}
-	return nil
-}
-
-func (s *Store) searchMemoryVectors(queryVector []float64, userID, scope, category string, limit int) ([]MemoryEntry, bool, error) {
-	if len(queryVector) == 0 || !s.vectorTableExists("memory_entry_vectors") {
-		return nil, false, nil
-	}
-	serialized, err := serializeVector(queryVector)
-	if err != nil {
-		return nil, false, err
-	}
-	k := limit * 5
-	if k < limit {
-		k = limit
-	}
-	if k < 25 {
-		k = 25
-	}
-	query := `
-SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence, e.confidence, e.importance, e.status, e.source_session_id, e.created_at, e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0), e.embedding_model, e.embedding_dim, v.distance
-FROM memory_entry_vectors v
-JOIN memory_entries e ON e.id = v.rowid
-WHERE v.embedding MATCH ? AND v.k = ? AND e.canonical_user_id = ? AND e.status = 'active'`
-	args := []any{serialized, k, userID}
-	if scope != "" {
-		query += ` AND e.scope = ?`
-		args = append(args, scope)
-	}
-	if category != "" {
-		query += ` AND e.category = ?`
-		args = append(args, category)
-	}
-	query += ` ORDER BY v.distance LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.sql.Query(query, args...)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to search memory vectors: %w", err)
-	}
-	defer rows.Close()
-	entries := []MemoryEntry{}
-	for rows.Next() {
-		entry, distance, err := scanMemoryEntryWithDistance(rows)
-		if err != nil {
-			return nil, true, err
-		}
-		entry.Score = vectorHybridScore(distance, entry.Importance, entry.UpdatedAt)
-		entries = append(entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, true, err
-	}
-	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Score > entries[j].Score })
-	return entries, true, nil
-}
-
 func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEntry, float64, error) {
 	var entry MemoryEntry
 	var created, updated string
@@ -970,22 +962,6 @@ func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEn
 		entry.ExpiresAt = parseTime(expires.String)
 	}
 	return entry, distance, nil
-}
-
-func (s *Store) ensureVectorTable(name string, dimension int) error {
-	if dimension <= 0 {
-		return fmt.Errorf("embedding dimension must be positive")
-	}
-	if dim, ok := s.vectorTableDimension(name); ok && dim == dimension {
-		return nil
-	}
-	if _, err := s.sql.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, name)); err != nil {
-		return fmt.Errorf("failed to drop stale vector table %s: %w", name, err)
-	}
-	if _, err := s.sql.Exec(fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(embedding float[%d])`, name, dimension)); err != nil {
-		return fmt.Errorf("failed to create vector table %s: %w", name, err)
-	}
-	return nil
 }
 
 func (s *Store) vectorTableExists(name string) bool {
@@ -1030,10 +1006,6 @@ func distanceToSimilarity(distance float64) float64 {
 	return 1 / (1 + distance)
 }
 
-func vectorHybridScore(distance float64, importance int, updatedAt time.Time) float64 {
-	return distanceToSimilarity(distance)*0.55 + (float64(importance)/5)*0.20 + recencyScore(updatedAt)*0.15 + 0.10
-}
-
 func (s *Store) markSuperseded(userID, scope, statement string) (int64, error) {
 	var id int64
 	err := s.sql.QueryRow(`SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status = 'active'`, userID, normalizeScope(scope), statementKey(statement)).Scan(&id)
@@ -1053,6 +1025,19 @@ func (s *Store) expireOldMemories() error {
 	_, err := s.sql.Exec(`UPDATE memory_entries SET status = 'expired', updated_at = ? WHERE status = 'active' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()), formatTime(time.Now()))
 	if err != nil {
 		return fmt.Errorf("failed to expire memories: %w", err)
+	}
+	if s.vectorTableExists(memoryVectorTableV2) {
+		if _, err := s.sql.Exec(`
+DELETE FROM memory_entry_vectors_v2
+WHERE NOT EXISTS (
+	SELECT 1 FROM memory_entries entries
+	WHERE entries.id = memory_entry_vectors_v2.rowid
+		AND entries.canonical_user_id = memory_entry_vectors_v2.canonical_user_id
+		AND entries.status = 'active'
+		AND (entries.expires_at IS NULL OR entries.expires_at > ?)
+)`, formatTime(time.Now().UTC())); err != nil {
+			return fmt.Errorf("failed to reconcile tenant memory vectors: %w", err)
+		}
 	}
 	return nil
 }
@@ -1077,14 +1062,22 @@ func (s *Store) ensureAccountUser(userID string) error {
 }
 
 func (s *Store) embedBestEffort(ctx context.Context, text string) []float64 {
+	vector, _ := s.embed(ctx, text)
+	return vector
+}
+
+func (s *Store) embed(ctx context.Context, text string) ([]float64, error) {
 	if s == nil || s.embedder == nil || strings.TrimSpace(s.embedModel) == "" || strings.TrimSpace(text) == "" {
-		return nil
+		return nil, nil
 	}
 	resp, err := s.embedder.Embed(ctx, llm.EmbedRequest{Model: s.embedModel, Input: strings.TrimSpace(text)})
-	if err != nil || len(resp.Embeddings) == 0 {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("embed durable memory query: %w", err)
 	}
-	return append([]float64(nil), resp.Embeddings[0]...)
+	if resp == nil || len(resp.Embeddings) == 0 || len(resp.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("embed durable memory query: provider returned no vector")
+	}
+	return append([]float64(nil), resp.Embeddings[0]...), nil
 }
 
 func memoryEmbeddingText(scope, category, statement, evidence string) string {

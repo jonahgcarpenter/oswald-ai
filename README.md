@@ -15,6 +15,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Builtin `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
 - User & Global MCP integrations
 - SQLite-backed session chat memory with role-correct, budget-aware history and TTL expiry
+- Tenant-scoped hybrid durable-memory recall using FTS5 and sqlite-vec
 - FIFO execution per user/session, with parallel processing across independent conversations
 - Per-user persistent memory in SQLite and a live-editable soul file
 - Fully local runtime with no cloud hosted model dependency
@@ -28,6 +29,8 @@ Oswald uses three memory layers:
 - Session chat memory: recent completed exchanges in SQLite `session_turns`, replayed as complete `user`/`assistant` pairs that fit the active model budget and expired by an independent cleanup loop
 
 `AGENTS.md` documents the full runtime and architecture in detail.
+
+Local Go builds and tests must enable SQLite FTS5, for example `go test -tags sqlite_fts5 ./...`.
 
 ## Usage
 
@@ -111,7 +114,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/mcp disable` | `/mcp disable <name>` | Disable one of your MCP servers. |
 | `/mcp test` | `/mcp test <name>` | Connect to one of your MCP servers and report discovered tool count. |
 
-Eligible durable identity and preference memories are compiled into a bounded, lower-authority tenant profile. A profile is frozen for each conversation session; changes become automatic context in new sessions or after `/reset`, while deeper memory remains available through memory tools.
+Eligible durable identity and preference memories are compiled into a bounded, lower-authority tenant profile. A profile is frozen for each conversation session; changes become automatic context in new sessions or after `/reset`. Each current turn also receives a small, budgeted set of relevant tenant-scoped memories from hybrid lexical and semantic recall, while `memory.search` remains available for deeper investigation.
 
 ### Admin Commands
 

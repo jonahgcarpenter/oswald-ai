@@ -71,15 +71,47 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 		if userID == "" {
 			return "", fmt.Errorf("memory.search: no user identity available in this context")
 		}
-		entries, err := store.Search(ctx, userID, stringArg(args, "scope"), stringArg(args, "category"), stringArg(args, "query"), intArg(args, "limit", 8))
-		if err != nil {
-			return "", err
+		limit := intArg(args, "limit", 8)
+		query := stringArg(args, "query")
+		if strings.TrimSpace(query) == "" {
+			entries, err := store.ListMemories(userID, stringArg(args, "scope"), stringArg(args, "category"), limit)
+			if err != nil {
+				return "", err
+			}
+			if len(entries) == 0 {
+				return "No matching memories found for this user.", nil
+			}
+			return RenderMemory("", entries), nil
 		}
-		if len(entries) == 0 {
+		results, stats := store.Recall(ctx, userID, query, RecallRequest{
+			Scope: stringArg(args, "scope"), Category: stringArg(args, "category"), TopK: limit,
+		})
+		searchLog := requestLog(log, ctx)
+		if stats.LexicalError != nil {
+			searchLog.Warn("agent.tool.memory.search_lexical_degraded", "memory search lexical channel degraded", config.F("tool_name", "memory.search"), config.F("status", "degraded"), config.ErrorField(stats.LexicalError))
+		}
+		if stats.SemanticError != nil {
+			searchLog.Warn("agent.tool.memory.search_semantic_degraded", "memory search semantic channel degraded", config.F("tool_name", "memory.search"), config.F("status", "degraded"), config.ErrorField(stats.SemanticError))
+		}
+		if !stats.LexicalAvailable && !stats.SemanticAvailable {
+			return "", fmt.Errorf("memory.search: retrieval indexes unavailable")
+		}
+		if len(results) == 0 {
+			if stats.LexicalError != nil || stats.SemanticError != nil {
+				return "No matching memories found in the available retrieval channel; recall is partially degraded.", nil
+			}
 			return "No matching memories found for this user.", nil
 		}
-		requestLog(log, ctx).Debug("agent.tool.memory.searched", "searched memory", config.F("tool_name", "memory.search"), config.F("returned_count", len(entries)))
-		return RenderMemory("", entries), nil
+		store.RecordRecallUsage(ctx, userID, results)
+		searchLog.Debug("agent.tool.memory.searched", "searched memory",
+			config.F("tool_name", "memory.search"), config.F("returned_count", len(results)),
+			config.F("lexical_candidate_count", stats.LexicalCandidateCount),
+			config.F("semantic_candidate_count", stats.SemanticCandidateCount))
+		output := RenderDurableMemoryRecall(results, 12000)
+		if stats.LexicalError != nil || stats.SemanticError != nil {
+			output = "Recall is partially degraded; results come from the available retrieval channel.\n\n" + output
+		}
+		return output, nil
 	}
 }
 
