@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
@@ -38,29 +39,60 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 		}
 		evidence := stringArg(args, "evidence")
 		if evidence == "" {
-			evidence = "The user explicitly asked this to be remembered"
+			remembered, ok := memoryformation.ParseExplicitRemember(meta.CurrentUserText)
+			if !ok {
+				return "", fmt.Errorf("memory.save: current user turn is not an explicit remember request")
+			}
+			evidence = remembered
 		}
 		ttlDays := intArg(args, "ttl_days", 0)
 		ttl := time.Duration(0)
 		if ttlDays > 0 {
 			ttl = time.Duration(ttlDays) * 24 * time.Hour
 		}
-		entry, err := store.SaveMemory(ctx, userID, SaveRequest{
-			Scope:           stringArg(args, "scope"),
-			Category:        stringArg(args, "category"),
-			Statement:       statement,
-			Evidence:        evidence,
-			Confidence:      floatArg(args, "confidence", 0.9),
-			Importance:      intArg(args, "importance", 3),
-			SourceSessionID: meta.SessionID,
-			TTL:             ttl,
-			Supersedes:      stringArg(args, "supersedes"),
+		scope := memoryformation.Scope(stringArg(args, "scope"))
+		if scope == "" {
+			scope = memoryformation.ScopeShortTerm
+		}
+		contentContext := memoryformation.ContextDirectAssertion
+		if scope == memoryformation.ScopeShortTerm {
+			contentContext = memoryformation.ContextTemporaryState
+		}
+		category := memoryformation.Category(stringArg(args, "category"))
+		if category == "" {
+			category = memoryformation.CategoryNotes
+		}
+		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+			SourceUserText:   meta.CurrentUserText,
+			Statement:        statement,
+			Evidence:         evidence,
+			Provenance:       memoryformation.ProvenanceUserStatement,
+			ClaimedAuthority: memoryformation.AuthorityUserDirect,
+			Sensitivity:      memoryformation.SensitivityLow,
+			Mode:             memoryformation.ModeExplicitRemember,
+			Scope:            scope,
+			Category:         category,
+			Context:          contentContext,
+			Confidence:       floatArg(args, "confidence", 0.9),
+			Importance:       intArg(args, "importance", 3),
+			TTL:              ttl,
 		})
 		if err != nil {
 			return "", err
 		}
-		requestLog(log, ctx).Debug("agent.tool.memory.saved", "saved memory", config.F("tool_name", "memory.save"), config.F("scope", entry.Scope), config.F("category", entry.Category))
-		return fmt.Sprintf("Saved %s memory (%s): %s", entry.Scope, entry.Category, entry.Statement), nil
+		if output.Decision == memoryformation.DecisionDisallowed {
+			return "", fmt.Errorf("memory.save: %s", output.Reason)
+		}
+		candidate, _, err := store.ProposeCandidate(ctx, userID, CandidateProposal{
+			Output:              output,
+			Source:              FormationSource{RequestID: meta.RequestID, SessionID: meta.SessionID, Model: meta.Model, ExtractorVersion: FormationExtractorVersion, ToolName: "memory.save"},
+			SupersedesStatement: stringArg(args, "supersedes"),
+		})
+		if err != nil {
+			return "", err
+		}
+		requestLog(log, ctx).Debug("agent.tool.memory.candidate_staged", "staged explicit memory candidate", config.F("tool_name", "memory.save"), config.F("scope", candidate.Scope), config.F("category", candidate.Category), config.F("candidate_id", candidate.ID))
+		return fmt.Sprintf("Accepted explicit %s memory candidate (%s). It will be published after this turn is persisted.", candidate.Scope, candidate.Category), nil
 	}
 }
 

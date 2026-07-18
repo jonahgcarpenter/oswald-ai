@@ -2,7 +2,6 @@ package usermemory
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -129,7 +128,7 @@ func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, cate
 SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
 	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
-	e.embedding_model, e.embedding_dim,
+	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity,
 	bm25(memory_entries_fts, 0.0, 1.0, 0.5)
 FROM memory_entries_fts
 JOIN memory_entries e ON e.id = memory_entries_fts.rowid
@@ -137,6 +136,7 @@ WHERE memory_entries_fts MATCH ?
 	AND memory_entries_fts.canonical_user_id = ?
 	AND e.canonical_user_id = ?
 	AND e.status = 'active'
+	AND e.approval_state = 'approved'
 	AND (e.expires_at IS NULL OR e.expires_at > ?)`
 	args := []any{match, userID, userID, formatTime(time.Now().UTC())}
 	if scope != "" {
@@ -186,12 +186,13 @@ func (s *Store) semanticRecallCandidates(ctx context.Context, userID, scope, cat
 SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
 	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
-	e.embedding_model, e.embedding_dim, v.distance
+	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity, v.distance
 FROM memory_entry_vectors_v2 v
 JOIN memory_entries e ON e.id = v.rowid
 WHERE v.embedding MATCH ? AND v.k = ?
 	AND v.canonical_user_id = ? AND v.embedding_model = ?
 	AND e.canonical_user_id = ? AND e.status = 'active'
+	AND e.approval_state = 'approved'
 	AND e.embedding_model = ? AND e.embedding_dim = ?
 	AND (e.expires_at IS NULL OR e.expires_at > ?)`
 	args := []any{serialized, limit, userID, s.embedModel, userID, s.embedModel, len(queryVector), formatTime(time.Now().UTC())}
@@ -264,8 +265,13 @@ func ftsTenantRecallQuery(userID string, terms []string) string {
 }
 
 func recallAuthorityForEntry(entry MemoryEntry) RecallAuthority {
-	if strings.TrimSpace(entry.SourceSessionID) != "" {
+	switch entry.SourceAuthority {
+	case "user_confirmed", "verified_external":
+		return RecallAuthorityVerified
+	case "user_direct":
 		return RecallAuthorityUserStated
+	case "model":
+		return RecallAuthorityInferred
 	}
 	return RecallAuthorityUnknown
 }
@@ -339,41 +345,6 @@ JOIN memory_entries entries ON entries.id = old.rowid
 			_, _ = s.sql.Exec(`DROP TABLE memory_entry_vectors_v2`)
 			return fmt.Errorf("migrate tenant memory vector index: %w", err)
 		}
-	}
-	return nil
-}
-
-func (s *Store) storeTenantMemoryVector(rowID int64, userID string, embedding []float64) error {
-	if rowID <= 0 {
-		return nil
-	}
-	if len(embedding) == 0 {
-		if s.vectorTableExists(memoryVectorTableV2) {
-			_, _ = s.sql.Exec(`DELETE FROM memory_entry_vectors_v2 WHERE rowid = ?`, rowID)
-		}
-		return nil
-	}
-	if err := s.ensureTenantVectorTable(len(embedding)); err != nil {
-		return err
-	}
-	serialized, err := serializeVector(embedding)
-	if err != nil {
-		return err
-	}
-	result, err := s.sql.Exec(`
-INSERT OR REPLACE INTO memory_entry_vectors_v2(rowid, canonical_user_id, embedding_model, scope, category, embedding)
-SELECT id, canonical_user_id, ?, scope, category, ?
-FROM memory_entries
-WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, s.embedModel, serialized, rowID, userID)
-	if err != nil {
-		return fmt.Errorf("store tenant memory vector: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("check stored tenant memory vector: %w", err)
-	}
-	if rows != 1 {
-		return sql.ErrNoRows
 	}
 	return nil
 }

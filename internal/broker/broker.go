@@ -34,6 +34,7 @@ type Request struct {
 	Principal    identity.Principal
 	DisplayName  string
 	SessionKey   string
+	IsDirect     bool
 	Prompt       string
 	Images       []llm.InputImage
 	StreamFunc   func(agent.StreamChunk)
@@ -123,6 +124,7 @@ func (b *Broker) Submit(req *Request) error {
 			resp, err := b.agent.Process(agent.Request{
 				RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 				SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
+				IsDirect: req.IsDirect,
 			})
 			deliverResult(req.ResponseChan, Result{Response: resp, Err: err})
 			return nil

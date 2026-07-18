@@ -153,9 +153,15 @@ INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_t
 		t.Fatalf("migrate database: %v", err)
 	}
 	defer db.Close() // nolint:errcheck
-	var category string
+	var category, provenanceType, sourceAuthority, formationMode, approvalState, approvedAt, validFrom string
 	var approved, generation int
-	if err := db.SQL().QueryRow(`SELECT category, profile_approved FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(&category, &approved); err != nil {
+	if err := db.SQL().QueryRow(`
+SELECT category, profile_approved, provenance_type, source_authority, formation_mode,
+	approval_state, approved_at, valid_from
+FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(
+		&category, &approved, &provenanceType, &sourceAuthority, &formationMode,
+		&approvalState, &approvedAt, &validFrom,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SQL().QueryRow(`SELECT session_generation FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&generation); err != nil {
@@ -163,6 +169,12 @@ INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_t
 	}
 	if category != "communication_preferences" || approved != 1 || generation != 1 {
 		t.Fatalf("category=%q approved=%d generation=%d", category, approved, generation)
+	}
+	if provenanceType != "legacy_import" || sourceAuthority != "unknown" || formationMode != "legacy_import" || approvalState != "approved" {
+		t.Fatalf("legacy formation metadata = %q, %q, %q, %q", provenanceType, sourceAuthority, formationMode, approvalState)
+	}
+	if approvedAt != "2026-01-01T00:00:00Z" || validFrom != "2026-01-01T00:00:00Z" {
+		t.Fatalf("legacy lifecycle timestamps approved=%q valid=%q", approvedAt, validFrom)
 	}
 	for _, table := range []string{"tenant_profile_versions", "tenant_profile_version_facts", "tenant_sessions"} {
 		var count int
@@ -225,6 +237,29 @@ VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'grows orchids.', 'Kee
 		t.Fatalf("delete memory: %v", err)
 	}
 	assertFTSMatchCount(t, db, "user-a", "bonsai", 0)
+}
+
+func TestMemoryFTS5IndexesOnlyApprovedActiveMemories(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.SQL().Exec(`
+INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, status, approval_state, created_at, updated_at)
+VALUES ('user-a', 'long_term', 'notes', 'Pending nebula fact.', 'pending nebula fact.', 'pending', 'active', 'proposed', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	assertFTSMatchCount(t, db, "user-a", "nebula", 0)
+	if _, err := db.SQL().Exec(`UPDATE memory_entries SET approval_state = 'approved' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	assertFTSMatchCount(t, db, "user-a", "nebula", 1)
+	if _, err := db.SQL().Exec(`UPDATE memory_entries SET status = 'superseded' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	assertFTSMatchCount(t, db, "user-a", "nebula", 0)
 }
 
 func TestMemoryFTS5InitializationIsIdempotent(t *testing.T) {

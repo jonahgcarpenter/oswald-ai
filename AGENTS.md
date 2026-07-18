@@ -37,13 +37,15 @@ Current layers:
 7. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
 8. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
 9. `internal/broker/` — request queue and worker pool
-10. `internal/agent/` — iterative tool-calling agent loop
-11. `internal/promptbudget/` — model context budget and prompt token estimates
-12. `internal/tools/` — tool registry, builtin handlers, and schema loading
-13. `internal/mcp/` — optional MCP client sessions and discovered tools
-14. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-15. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-16. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+10. `internal/memoryformation/` — pure evidence validation, sensitivity classification, and activation policy
+11. `internal/formationruntime/` — durable serialized post-turn extraction and retry worker
+12. `internal/agent/` — iterative tool-calling agent loop
+13. `internal/promptbudget/` — model context budget and prompt token estimates
+14. `internal/tools/` — tool registry, builtin handlers, and schema loading
+15. `internal/mcp/` — optional MCP client sessions and discovered tools
+16. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+17. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+18. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
 
 ## Startup Flow
 
@@ -62,7 +64,8 @@ Current layers:
 11. Create the agent
 12. Start the broker worker pool
 13. Start each gateway in its own goroutine
-14. Wait for shutdown signal, drain the broker, and close MCP clients
+14. Start the serialized durable-memory formation worker
+15. Wait for shutdown signal, drain the broker and formation worker, and close MCP clients
 
 ## Request Lifecycle
 
@@ -81,6 +84,7 @@ Every request follows the same high-level path:
 11. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 12. The final response is returned to the shared runtime
 13. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
+14. After successful delivery, the runtime marks the persisted turn formation-eligible and durably enqueues optional post-turn extraction
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -184,6 +188,14 @@ Oswald keeps three distinct memory layers.
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
+- New durable facts pass through canonical candidate states (`proposed`, `pending_confirmation`, `approved`, or `rejected`) before approved publication into the memory lifecycle (`active`, `superseded`, `expired`, or `deleted`)
+- Every published memory retains exact evidence, source request/session/turn, provenance, source authority, formation mode, sensitivity, and approval metadata
+- A serialized durable worker extracts only from the persisted cleaned user turn after successful response delivery; jobs use leases, idempotency keys, startup reconciliation, bounded immediate retries, and delayed dead-job redrive
+- Directly stated low-sensitivity preferences, project/environment facts, and bounded task state may activate automatically after deterministic evidence validation; model inferences remain proposed
+- Automatically extracted identity/contact and high-impact interaction facts require conversational confirmation in an authenticated direct session; only the exact presented phrases are accepted
+- Explicit `memory.save` requests satisfy confirmation for the new fact, including sensitive data, but ambiguous replacement targets still require conversational confirmation and no candidate can publish before its source turn is persisted
+- Canonical publication, supersession, FTS/vector state, evidence, audit history, and latest profile advancement commit in one SQLite transaction; configured embedding failure leaves the approved candidate retryable
+- `memory.forget` immediately scrubs canonical statements, evidence, candidate content, FTS/vector rows, and profile snapshots while retaining content-free lifecycle/audit tombstones
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
@@ -364,7 +376,7 @@ Current builtin tools:
 
 - `web.search` — SearXNG-backed search
 - `time.current` — authoritative current date and time in a requested IANA timezone
-- `memory.save` — explicitly store or update user facts
+- `memory.save` — stage facts only when the current authenticated user explicitly asks Oswald to remember or correct them
 - `memory.search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts

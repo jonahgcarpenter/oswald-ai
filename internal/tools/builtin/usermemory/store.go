@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 const (
@@ -49,6 +50,10 @@ type MemoryEntry struct {
 	SupersedesID    int64
 	EmbeddingModel  string
 	EmbeddingDim    int
+	ProvenanceType  string
+	SourceAuthority string
+	ApprovalState   string
+	Sensitivity     string
 	Score           float64
 }
 
@@ -108,6 +113,8 @@ type Store struct {
 	mutationMu sync.Mutex
 	vectorMu   sync.Mutex
 	userLocks  map[string]*sync.Mutex
+
+	formationFailpoint func(string) error
 
 	speakerLineResolver func(string) (string, error)
 }
@@ -229,6 +236,12 @@ func MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID, intro stri
 	if winnerID == loserID {
 		return nil
 	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
+		return fmt.Errorf("defer memory merge foreign keys: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged session turns: %w", err)
+	}
 
 	duplicateJoin := `
 FROM memory_entries loser
@@ -247,6 +260,33 @@ SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_events.memory_id`
 SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_entries.supersedes_id`
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET supersedes_id = (`+winnerForSuperseded+`) WHERE supersedes_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to redirect merged supersedes references: %w", err)
+	}
+	winnerForCandidatePublished := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_candidates.published_memory_id`
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET published_memory_id = (`+winnerForCandidatePublished+`) WHERE published_memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged candidate publications: %w", err)
+	}
+	winnerForCandidateSupersedes := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_candidates.supersedes_memory_id`
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET supersedes_memory_id = (`+winnerForCandidateSupersedes+`) WHERE supersedes_memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged candidate supersession: %w", err)
+	}
+	winnerForEvidence := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_evidence.memory_id`
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET memory_id = (`+winnerForEvidence+`) WHERE memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged memory evidence: %w", err)
+	}
+	for _, column := range []string{"source_memory_id", "target_memory_id"} {
+		winnerForRelation := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_relations.` + column
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_relations SET `+column+` = (`+winnerForRelation+`) WHERE `+column+` IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
+			return fmt.Errorf("failed to redirect merged memory relation %s: %w", column, err)
+		}
+	}
+	winnerForFormationAudit := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_formation_audit.memory_id`
+	if _, err := tx.ExecContext(ctx, `
+DROP TABLE IF EXISTS temp.merge_audit_memory_links;
+CREATE TEMP TABLE merge_audit_memory_links AS
+SELECT id AS audit_id, (`+winnerForFormationAudit+`) AS replacement_memory_id
+FROM memory_formation_audit WHERE canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)
+`, winnerID, loserID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("snapshot merged formation audit memory: %w", err)
 	}
 
 	var vectorTableExists int
@@ -332,16 +372,69 @@ WHERE canonical_user_id = ? AND embedding_dim = 0
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to delete duplicate memories: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+DROP TABLE IF EXISTS temp.merge_candidate_links;
+DROP TABLE IF EXISTS temp.merge_memory_links;
+CREATE TEMP TABLE merge_candidate_links AS
+	SELECT id, published_memory_id, supersedes_memory_id, source_turn_id FROM memory_candidates WHERE canonical_user_id = ?;
+CREATE TEMP TABLE merge_memory_links AS
+	SELECT id, candidate_id, source_turn_id FROM memory_entries WHERE canonical_user_id = ?;
+UPDATE memory_candidates SET published_memory_id = NULL, supersedes_memory_id = NULL, source_turn_id = NULL WHERE canonical_user_id = ?;
+UPDATE memory_entries SET candidate_id = NULL, source_turn_id = NULL WHERE canonical_user_id = ?;
+`, loserID, loserID, loserID, loserID); err != nil {
+		return fmt.Errorf("prepare merged formation ownership: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memory candidates: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memory evidence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_relations SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memory relations: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memory formation jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO memory_formation_audit (
+	canonical_user_id, idempotency_key, event_type, candidate_id, memory_id, job_id,
+	request_id, session_id, turn_id, actor_type, actor_id, created_at, metadata
+)
+SELECT ?, 'merge:' || ? || ':' || audit.id, audit.event_type, audit.candidate_id,
+	COALESCE(links.replacement_memory_id, audit.memory_id), audit.job_id,
+	audit.request_id, audit.session_id, audit.turn_id, audit.actor_type, audit.actor_id,
+	audit.created_at, audit.metadata
+FROM memory_formation_audit audit
+LEFT JOIN merge_audit_memory_links links ON links.audit_id = audit.id
+WHERE audit.canonical_user_id = ?
+ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING;
+DROP TABLE merge_audit_memory_links;
+`, winnerID, loserID, loserID); err != nil {
+		return fmt.Errorf("copy merged memory formation audit: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_candidates
+SET published_memory_id = (SELECT published_memory_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id),
+	supersedes_memory_id = (SELECT supersedes_memory_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id),
+	source_turn_id = (SELECT source_turn_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id)
+WHERE canonical_user_id = ? AND id IN (SELECT id FROM merge_candidate_links);
+UPDATE memory_entries
+SET candidate_id = (SELECT candidate_id FROM merge_memory_links links WHERE links.id = memory_entries.id),
+	source_turn_id = (SELECT source_turn_id FROM merge_memory_links links WHERE links.id = memory_entries.id)
+WHERE canonical_user_id = ? AND id IN (SELECT id FROM merge_memory_links);
+DROP TABLE merge_candidate_links;
+DROP TABLE merge_memory_links;
+`, winnerID, winnerID); err != nil {
+		return fmt.Errorf("restore merged formation relationships: %w", err)
 	}
 	if tenantVectorTableExists == 1 {
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_entry_vectors_v2 SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 			return fmt.Errorf("failed to move merged tenant memory vectors: %w", err)
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to move merged session turns: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tenant_session_generations (canonical_user_id, session_id, generation)
@@ -424,8 +517,12 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		expiresAt = &exp
 	}
 	embedding := append([]float64(nil), req.Embedding...)
-	if len(embedding) == 0 {
-		embedding = s.embedBestEffort(ctx, memoryEmbeddingText(scope, category, statement, evidence))
+	if len(embedding) == 0 && strings.TrimSpace(s.embedModel) != "" {
+		var err error
+		embedding, err = s.embed(ctx, memoryEmbeddingText(scope, category, statement, evidence))
+		if err != nil {
+			return MemoryEntry{}, err
+		}
 	}
 	embeddingModel := ""
 	embeddingDim := 0
@@ -434,21 +531,33 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		embeddingDim = len(embedding)
 	}
 
-	var supersedesID any
-	if strings.TrimSpace(req.Supersedes) != "" {
-		id, err := s.markSuperseded(userID, scope, req.Supersedes)
+	var serialized []byte
+	if len(embedding) > 0 {
+		if err := s.ensureTenantVectorTable(len(embedding)); err != nil {
+			return MemoryEntry{}, err
+		}
+		var err error
+		serialized, err = serializeVector(embedding)
 		if err != nil {
 			return MemoryEntry{}, err
 		}
-		if id > 0 {
-			supersedesID = id
+	}
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return MemoryEntry{}, fmt.Errorf("begin legacy memory publication: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+	var supersedesID int64
+	if strings.TrimSpace(req.Supersedes) != "" {
+		err := tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status = 'active'`, userID, scope, statementKey(req.Supersedes)).Scan(&supersedesID)
+		if err != nil && err != sql.ErrNoRows {
+			return MemoryEntry{}, fmt.Errorf("resolve superseded memory: %w", err)
 		}
 	}
-
 	var id int64
-	err := s.sql.QueryRow(`
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim, profile_approved)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 1)
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at, expires_at, supersedes_id, embedding_model, embedding_dim, profile_approved, provenance_type, source_authority, formation_mode, sensitivity, approval_state, approved_at, approved_by, valid_from, valid_until)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 1, 'legacy_import', 'unknown', 'legacy_direct_save', 'unknown', 'approved', ?, 'legacy_api', ?, ?)
 ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
 	category = excluded.category,
 	statement = excluded.statement,
@@ -462,17 +571,61 @@ ON CONFLICT(canonical_user_id, scope, statement_key) DO UPDATE SET
 	supersedes_id = excluded.supersedes_id,
 	embedding_model = excluded.embedding_model,
 	embedding_dim = excluded.embedding_dim,
-	profile_approved = 1
+	profile_approved = 1,
+	approval_state = 'approved',
+	approved_at = excluded.approved_at,
+	approved_by = excluded.approved_by,
+	valid_from = excluded.valid_from,
+	valid_until = excluded.valid_until
 RETURNING id
-`, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance, strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), supersedesID, embeddingModel, embeddingDim).Scan(&id)
+	`, userID, scope, category, statement, statementKey(statement), evidence, confidence, importance,
+		strings.TrimSpace(req.SourceSessionID), formatTime(now), formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), embeddingModel, embeddingDim,
+		formatTime(now), formatTime(now), nullableTime(expiresAt)).Scan(&id)
 	if err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
 	}
-	if err := s.storeTenantMemoryVector(id, userID, embedding); err != nil {
-		_, _ = s.sql.Exec(`UPDATE memory_entries SET embedding_model = '', embedding_dim = 0 WHERE id = ? AND canonical_user_id = ?`, id, userID)
-		if s.log != nil {
-			s.log.Server("memory.vector").Warn("memory.vector.write_failed", "durable memory vector write failed", config.F("status", "degraded"), config.ErrorField(err))
+	if supersedesID == id && supersedesID > 0 {
+		return MemoryEntry{}, fmt.Errorf("memory cannot supersede itself")
+	}
+	if len(serialized) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO memory_entry_vectors_v2(rowid, canonical_user_id, embedding_model, scope, category, embedding) VALUES (?, ?, ?, ?, ?, ?)`, id, userID, s.embedModel, scope, category, serialized); err != nil {
+			return MemoryEntry{}, fmt.Errorf("publish legacy memory vector: %w", err)
 		}
+	} else if s.vectorTableExists(memoryVectorTableV2) {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors_v2 WHERE rowid = ? AND canonical_user_id = ?`, id, userID); err != nil {
+			return MemoryEntry{}, fmt.Errorf("remove stale legacy memory vector: %w", err)
+		}
+	}
+	if supersedesID > 0 {
+		result, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'superseded', invalidated_at = ?, invalidation_reason = 'legacy_replacement', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, formatTime(now), formatTime(now), supersedesID, userID)
+		if err != nil {
+			return MemoryEntry{}, fmt.Errorf("supersede legacy memory: %w", err)
+		}
+		count, _ := result.RowsAffected()
+		if count != 1 {
+			return MemoryEntry{}, fmt.Errorf("superseded legacy memory is no longer active")
+		}
+		if s.vectorTableExists(memoryVectorTableV2) {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors_v2 WHERE rowid = ? AND canonical_user_id = ?`, supersedesID, userID); err != nil {
+				return MemoryEntry{}, err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations(canonical_user_id, idempotency_key, relation_type, source_memory_id, target_memory_id, created_at) VALUES (?, ?, 'supersedes', ?, ?, ?) ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING`, userID, formationKey("legacy-supersedes", id, supersedesID), id, supersedesID, formatTime(now)); err != nil {
+			return MemoryEntry{}, err
+		}
+	}
+	meta := requestctx.MetadataFromContext(ctx)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events(memory_id, event_type, request_id, session_id, created_at, metadata) VALUES (?, 'updated', ?, ?, ?, '{"source":"legacy_api"}')`, id, meta.RequestID, firstNonEmptyFormation(meta.SessionID, req.SourceSessionID), formatTime(now)); err != nil {
+		return MemoryEntry{}, fmt.Errorf("record legacy memory event: %w", err)
+	}
+	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("legacy-save", id, formatTime(now)), "memory.legacy_saved", 0, id, 0, FormationSource{RequestID: meta.RequestID, SessionID: firstNonEmptyFormation(meta.SessionID, req.SourceSessionID)}, "legacy_api", "compatibility save"); err != nil {
+		return MemoryEntry{}, err
+	}
+	if _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+		return MemoryEntry{}, fmt.Errorf("advance profile after legacy save: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryEntry{}, fmt.Errorf("commit legacy memory publication: %w", err)
 	}
 	entry, err := s.EntryByID(id)
 	if err != nil {
@@ -481,13 +634,12 @@ RETURNING id
 	if entry.UserID != userID {
 		return MemoryEntry{}, fmt.Errorf("saved memory ownership mismatch")
 	}
-	s.recordEvent(entry.ID, "updated", "", req.SourceSessionID, "")
 	return entry, nil
 }
 
 // EntryByID reads a memory entry by ID.
 func (s *Store) EntryByID(id int64) (MemoryEntry, error) {
-	rows, err := s.sql.Query(`SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim FROM memory_entries WHERE id = ?`, id)
+	rows, err := s.sql.Query(`SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim, provenance_type, source_authority, approval_state, sensitivity FROM memory_entries WHERE id = ?`, id)
 	if err != nil {
 		return MemoryEntry{}, err
 	}
@@ -570,7 +722,8 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 	}
 	defer tx.Rollback() // nolint:errcheck
 	if strings.EqualFold(target, "all") {
-		res, err := tx.Exec(`UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND status != 'deleted'`, formatTime(time.Now()), userID)
+		now := formatTime(time.Now())
+		res, err := tx.Exec(`UPDATE memory_entries SET status = 'deleted', statement = '', statement_key = 'erased:' || id, evidence = '', erased_at = ?, erasure_reason = 'user_forget', updated_at = ? WHERE canonical_user_id = ? AND status != 'deleted'`, now, now, userID)
 		if err != nil {
 			return 0, fmt.Errorf("failed to delete memories for %q: %w", userID, err)
 		}
@@ -584,10 +737,14 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 		if err := deleteInactiveVectorsTx(tx, userID); err != nil {
 			return 0, err
 		}
+		if err := eraseForgottenFormationTx(tx, userID, true); err != nil {
+			return 0, err
+		}
 		return count, tx.Commit()
 	}
-	stmt := `UPDATE memory_entries SET status = 'deleted', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status != 'deleted'`
-	args := []any{formatTime(time.Now()), userID, statementKey(target)}
+	now := formatTime(time.Now())
+	stmt := `UPDATE memory_entries SET status = 'deleted', statement = '', statement_key = 'erased:' || id, evidence = '', erased_at = ?, erasure_reason = 'user_forget', updated_at = ? WHERE canonical_user_id = ? AND statement_key = ? AND status != 'deleted'`
+	args := []any{now, now, userID, statementKey(target)}
 	if normalizeOptionalScope(scope) != "" {
 		stmt += ` AND scope = ?`
 		args = append(args, normalizeScope(scope))
@@ -606,7 +763,57 @@ func (s *Store) Forget(userID, target, scope string) (int64, error) {
 	if err := deleteInactiveVectorsTx(tx, userID); err != nil {
 		return 0, err
 	}
+	if err := eraseForgottenFormationTx(tx, userID, false); err != nil {
+		return 0, err
+	}
 	return count, tx.Commit()
+}
+
+func eraseForgottenFormationTx(tx *sql.Tx, userID string, eraseAll bool) error {
+	now := formatTime(time.Now().UTC())
+	if eraseAll {
+		if _, err := tx.Exec(`
+UPDATE memory_evidence SET content = '' WHERE canonical_user_id = ?;
+UPDATE memory_formation_jobs SET extraction_payload = '' WHERE canonical_user_id = ?;
+UPDATE memory_candidates
+SET statement = '', statement_key = 'erased:' || id, evidence_summary = '', state = 'rejected',
+	decision_reason = 'user_forget_all', decided_at = ?, decided_by = 'user', updated_at = ?
+WHERE canonical_user_id = ?;
+`, userID, userID, now, now, userID); err != nil {
+			return fmt.Errorf("erase all tenant memory formation content: %w", err)
+		}
+		return nil
+	}
+	if _, err := tx.Exec(`
+UPDATE memory_evidence
+SET content = ''
+WHERE canonical_user_id = ? AND (
+	memory_id IN (SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted')
+	OR candidate_id IN (
+		SELECT candidate_id FROM memory_entries
+		WHERE canonical_user_id = ? AND status = 'deleted' AND candidate_id IS NOT NULL
+	)
+);
+
+UPDATE memory_formation_jobs
+SET extraction_payload = ''
+WHERE canonical_user_id = ? AND source_turn_id IN (
+	SELECT source_turn_id FROM memory_candidates
+	WHERE canonical_user_id = ? AND published_memory_id IN (
+		SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
+	) AND source_turn_id IS NOT NULL
+);
+
+UPDATE memory_candidates
+SET statement = '', statement_key = 'erased:' || id, evidence_summary = '', state = 'rejected',
+	decision_reason = 'user_forget', decided_at = ?, decided_by = 'user', updated_at = ?
+WHERE canonical_user_id = ? AND published_memory_id IN (
+	SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
+);
+`, userID, userID, userID, userID, userID, userID, now, now, userID, userID); err != nil {
+		return fmt.Errorf("erase forgotten memory formation content: %w", err)
+	}
+	return nil
 }
 
 func deleteInactiveVectorsTx(tx *sql.Tx, userID string) error {
@@ -635,7 +842,7 @@ WHERE canonical_user_id = ? AND id IN (
 	SELECT facts.profile_version_id
 	FROM tenant_profile_version_facts facts
 	JOIN memory_entries entries ON entries.id = facts.source_memory_id
-	WHERE entries.canonical_user_id = ? AND entries.status = 'deleted'
+	WHERE entries.canonical_user_id = ? AND entries.status IN ('deleted', 'expired')
 )
 `, userID, userID); err != nil {
 		return fmt.Errorf("failed to remove forgotten profile snapshots: %w", err)
@@ -689,7 +896,7 @@ func (s *Store) ReadCategory(userID, category string) (string, error) {
 	return RenderMemory("", entries), nil
 }
 
-// SetWithContext stores a long-term memory for compatibility with memory.save handlers.
+// SetWithContext stores a long-term memory for legacy callers and migrations.
 func (s *Store) SetWithContext(ctx context.Context, userID, statement, evidence, category string) error {
 	_, err := s.SaveMemory(ctx, userID, SaveRequest{Scope: ScopeLongTerm, Category: category, Statement: statement, Evidence: evidence, Confidence: 0.9, Importance: 3})
 	return err
@@ -709,57 +916,62 @@ func (s *Store) DeleteAll(userID string) error {
 
 // AppendSessionTurn stores a completed session exchange.
 func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	return s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false)
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false)
+	return err
 }
 
 // AppendSessionTurnForGeneration stores a completed exchange in one frozen session generation.
 func (s *Store) AppendSessionTurnForGeneration(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true)
+	return err
+}
+
+// AppendSessionTurnForGenerationResult stores a completed exchange and returns
+// the authoritative inserted turn for post-response formation work.
+func (s *Store) AppendSessionTurnForGenerationResult(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) (StoredSessionTurn, error) {
 	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true)
 }
 
-func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration bool) error {
+func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration bool) (StoredSessionTurn, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
-		return nil
+		return StoredSessionTurn{}, nil
 	}
 	if generation <= 0 {
 		generation = 1
 	}
 	if err := s.ensureAccountUser(userID); err != nil {
-		return err
+		return StoredSessionTurn{}, err
 	}
 	now := time.Now().UTC()
+	requestID := requestctx.MetadataFromContext(ctx).RequestID
 	var expires *time.Time
 	if ttl > 0 {
 		exp := now.Add(ttl).UTC()
 		expires = &exp
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires)}
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	RETURNING id`
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires), requestID}
 	if validateGeneration {
 		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
-)`
+	)
+	RETURNING id`
 		args = append(args, userID, sessionID, generation)
 	}
-	result, err := s.sql.ExecContext(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to append session turn: %w", err)
-	}
-	if validateGeneration {
-		count, err := result.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("failed to check appended session turn: %w", err)
+	var id int64
+	if err := s.sql.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
+		if validateGeneration && err == sql.ErrNoRows {
+			return StoredSessionTurn{}, nil
 		}
-		if count == 0 {
-			return nil
-		}
+		return StoredSessionTurn{}, fmt.Errorf("failed to append session turn: %w", err)
 	}
-	return nil
+	return StoredSessionTurn{ID: id, UserID: userID, SessionID: sessionID, Generation: generation, UserText: strings.TrimSpace(userText)}, nil
 }
 
 // RecentSessionTurns returns a user's newest completed session exchanges, newest first.
@@ -884,7 +1096,7 @@ func writeTurns(b *strings.Builder, turns []SessionTurn) {
 }
 
 func (s *Store) activeEntries(userID, scope, category string) ([]MemoryEntry, error) {
-	query := `SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim FROM memory_entries WHERE canonical_user_id = ? AND status = 'active'`
+	query := `SELECT id, canonical_user_id, scope, category, statement, evidence, confidence, importance, status, source_session_id, created_at, updated_at, last_used_at, expires_at, COALESCE(supersedes_id, 0), embedding_model, embedding_dim, provenance_type, source_authority, approval_state, sensitivity FROM memory_entries WHERE canonical_user_id = ? AND status = 'active' AND approval_state = 'approved'`
 	args := []any{userID}
 	if scope != "" {
 		query += ` AND scope = ?`
@@ -915,7 +1127,7 @@ func scanMemoryEntry(rows interface{ Scan(...any) error }) (MemoryEntry, error) 
 	var entry MemoryEntry
 	var created, updated string
 	var lastUsed, expires sql.NullString
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim); err != nil {
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim, &entry.ProvenanceType, &entry.SourceAuthority, &entry.ApprovalState, &entry.Sensitivity); err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to scan memory entry: %w", err)
 	}
 	entry.CreatedAt = parseTime(created)
@@ -950,7 +1162,7 @@ func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEn
 	var created, updated string
 	var lastUsed, expires sql.NullString
 	var distance float64
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim, &distance); err != nil {
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &entry.SourceSessionID, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.EmbeddingModel, &entry.EmbeddingDim, &entry.ProvenanceType, &entry.SourceAuthority, &entry.ApprovalState, &entry.Sensitivity, &distance); err != nil {
 		return MemoryEntry{}, 0, fmt.Errorf("failed to scan memory vector result: %w", err)
 	}
 	entry.CreatedAt = parseTime(created)
@@ -1006,40 +1218,9 @@ func distanceToSimilarity(distance float64) float64 {
 	return 1 / (1 + distance)
 }
 
-func (s *Store) markSuperseded(userID, scope, statement string) (int64, error) {
-	var id int64
-	err := s.sql.QueryRow(`SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status = 'active'`, userID, normalizeScope(scope), statementKey(statement)).Scan(&id)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("failed to find superseded memory: %w", err)
-	}
-	if _, err := s.sql.Exec(`UPDATE memory_entries SET status = 'superseded', updated_at = ? WHERE id = ?`, formatTime(time.Now()), id); err != nil {
-		return 0, fmt.Errorf("failed to supersede memory: %w", err)
-	}
-	return id, nil
-}
-
 func (s *Store) expireOldMemories() error {
-	_, err := s.sql.Exec(`UPDATE memory_entries SET status = 'expired', updated_at = ? WHERE status = 'active' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()), formatTime(time.Now()))
-	if err != nil {
-		return fmt.Errorf("failed to expire memories: %w", err)
-	}
-	if s.vectorTableExists(memoryVectorTableV2) {
-		if _, err := s.sql.Exec(`
-DELETE FROM memory_entry_vectors_v2
-WHERE NOT EXISTS (
-	SELECT 1 FROM memory_entries entries
-	WHERE entries.id = memory_entry_vectors_v2.rowid
-		AND entries.canonical_user_id = memory_entry_vectors_v2.canonical_user_id
-		AND entries.status = 'active'
-		AND (entries.expires_at IS NULL OR entries.expires_at > ?)
-)`, formatTime(time.Now().UTC())); err != nil {
-			return fmt.Errorf("failed to reconcile tenant memory vectors: %w", err)
-		}
-	}
-	return nil
+	_, err := s.CleanupExpiredSessions(context.Background(), time.Now().UTC())
+	return err
 }
 
 func (s *Store) recordEvent(memoryID int64, eventType, requestID, sessionID, metadata string) {

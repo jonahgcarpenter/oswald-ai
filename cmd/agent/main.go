@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/commands/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/formationruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -106,6 +107,8 @@ func main() {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
+	formationService := formationruntime.NewService(userMemStore, formationruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, rootLog)
+	formationService.Start(context.Background())
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
@@ -121,9 +124,10 @@ func main() {
 	}
 
 	runtimeDeps := gatewayruntime.Dependencies{
-		Commands: commandService,
-		Access:   accountLinkService,
-		Log:      rootLog,
+		Commands:  commandService,
+		Access:    accountLinkService,
+		Log:       rootLog,
+		Formation: formationService,
 	}
 	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
 	if err != nil {
@@ -180,6 +184,7 @@ func main() {
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
 	requestBroker.Shutdown()
+	formationService.Stop()
 	if err := mcpManager.Close(); err != nil {
 		log.Warn("app.mcp.shutdown_failed", "failed to shut down MCP clients", config.ErrorField(err), config.F("status", "degraded"))
 	}
