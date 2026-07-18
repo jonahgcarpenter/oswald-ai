@@ -35,7 +35,7 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := dialWebSocket(t, server.URL)
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
 	defer conn.Close()
 
 	if err := conn.WriteMessage(gorilla.TextMessage, []byte("hello websocket")); err != nil {
@@ -70,7 +70,7 @@ func TestWebSocketGatewayStructuredImageDowngrade(t *testing.T) {
 	}))
 	defer server.Close()
 
-	conn := dialWebSocket(t, server.URL)
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
 	defer conn.Close()
 
 	msg := IncomingMessage{
@@ -93,8 +93,150 @@ func TestWebSocketGatewayStructuredImageDowngrade(t *testing.T) {
 	if !strings.Contains(prompt, "describe this") || !strings.Contains(prompt, "unsupported attachment: bad.png") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
-	if chat.principal.CanonicalUserID == "" || chat.principal.Gateway != "websocket" || chat.principal.ExternalID != "alice" || chat.principal.Assurance != identity.AssuranceSelfAsserted {
+	if chat.principal.CanonicalUserID == "" || chat.principal.Gateway != "websocket" || chat.principal.ExternalID != "alice" || chat.principal.Assurance != identity.AssuranceWebSocketSignedToken || !chat.principal.Authenticated() {
 		t.Fatalf("unexpected principal: %+v", chat.principal)
+	}
+}
+
+func TestWebSocketGatewayRejectsUnauthenticatedHandshake(t *testing.T) {
+	wg, b, chat := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	_, resp, err := gorilla.DefaultDialer.Dial(wsURL, nil)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") != "Bearer" {
+		t.Fatalf("unexpected unauthenticated handshake: response=%+v err=%v", resp, err)
+	}
+	users, err := wg.Links.ListUsers()
+	if err != nil || len(users) != 0 || len(chat.requests) != 0 {
+		t.Fatalf("authentication failure created state: users=%+v requests=%d err=%v", users, len(chat.requests), err)
+	}
+}
+
+func TestWebSocketGatewayRejectsIdentitySwitch(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
+	defer conn.Close()
+	if err := conn.WriteJSON(IncomingMessage{UserID: "bob", Prompt: "hello"}); err != nil {
+		t.Fatalf("write mismatched identity: %v", err)
+	}
+	_, _, err := conn.ReadMessage()
+	closeErr, ok := err.(*gorilla.CloseError)
+	if !ok || closeErr.Code != gorilla.ClosePolicyViolation {
+		t.Fatalf("identity switch error = %v, want policy violation", err)
+	}
+	users, err := wg.Links.ListUsers()
+	if err != nil || len(users) != 0 {
+		t.Fatalf("identity switch resolved another account: users=%+v err=%v", users, err)
+	}
+}
+
+func TestWebSocketGatewayRejectsCrossOrigin(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	token, err := wg.Authenticator.Issue("alice", "Alice", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	headers := http.Header{"Authorization": []string{"Bearer " + token}, "Origin": []string{"https://evil.example"}}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	_, resp, err := gorilla.DefaultDialer.Dial(wsURL, headers)
+	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected cross-origin handshake: response=%+v err=%v", resp, err)
+	}
+}
+
+func TestWebSocketGatewayDoesNotCreateAccountBeforeUpgradeAndMessage(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	token, err := wg.Authenticator.Issue("alice", "Alice", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request malformed upgrade: %v", err)
+	}
+	resp.Body.Close()
+	users, err := wg.Links.ListUsers()
+	if err != nil || len(users) != 0 {
+		t.Fatalf("malformed upgrade created account: users=%+v err=%v", users, err)
+	}
+}
+
+func TestWebSocketGatewayClosesConnectionWhenTokenExpires(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	token, err := wg.Authenticator.Issue("alice", "Alice", 2*time.Second)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := gorilla.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + token}})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	_, _, err = conn.ReadMessage()
+	closeErr, ok := err.(*gorilla.CloseError)
+	if !ok || closeErr.Code != gorilla.ClosePolicyViolation {
+		t.Fatalf("token expiry error = %v, want policy violation", err)
+	}
+}
+
+func TestWebSocketGatewayPersistsFirstMessageDisplayName(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+
+	token, err := wg.Authenticator.Issue("alice", "", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := gorilla.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + token}})
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(IncomingMessage{DisplayName: "Alice Example", Prompt: "/ping"}); err != nil {
+		t.Fatalf("write message: %v", err)
+	}
+	_ = readAgentResponse(t, conn)
+	users, err := wg.Links.ListUsers()
+	if err != nil || len(users) != 1 || len(users[0].Accounts) != 1 || users[0].Accounts[0].DisplayName != "Alice Example" {
+		t.Fatalf("display name not persisted: users=%+v err=%v", users, err)
 	}
 }
 
@@ -147,14 +289,22 @@ func newWebSocketTestGateway(t *testing.T) (*Gateway, *broker.Broker, *wsFakeCha
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
-	wg := &Gateway{Links: links, Runtime: gatewayruntime.Dependencies{Commands: commandService, Log: log}, Log: log}
+	auth, err := NewAuthenticator(testSigningKey, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("new authenticator: %v", err)
+	}
+	wg := &Gateway{Authenticator: auth, Links: links, Runtime: gatewayruntime.Dependencies{Commands: commandService, Log: log}, Log: log}
 	return wg, b, chat
 }
 
-func dialWebSocket(t *testing.T, serverURL string) *gorilla.Conn {
+func dialWebSocket(t *testing.T, serverURL string, auth *Authenticator, subject string) *gorilla.Conn {
 	t.Helper()
+	token, err := auth.Issue(subject, "Alice", 10*time.Minute)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
 	wsURL := "ws" + strings.TrimPrefix(serverURL, "http")
-	conn, _, err := gorilla.DefaultDialer.Dial(wsURL, nil)
+	conn, _, err := gorilla.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + token}})
 	if err != nil {
 		t.Fatalf("dial websocket: %v", err)
 	}

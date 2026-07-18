@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
@@ -14,12 +15,17 @@ import (
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
 func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
+	webSocketAuth, err := localws.NewAuthenticator(cfg.WebSocketAuthSigningKey, cfg.WebSocketAuthMaxTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("configure websocket authentication: %w", err)
+	}
 	services := []Service{
 		&localws.Gateway{
-			Port:    cfg.Port,
-			Links:   links,
-			Runtime: runtimeDeps,
-			Log:     log,
+			Port:          cfg.Port,
+			Authenticator: webSocketAuth,
+			Links:         links,
+			Runtime:       runtimeDeps,
+			Log:           log,
 		},
 	}
 

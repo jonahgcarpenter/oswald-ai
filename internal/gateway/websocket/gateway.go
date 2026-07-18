@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -36,15 +39,41 @@ func (wg *Gateway) Start(b *broker.Broker) error {
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
 func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
 	log := wg.log()
+	authenticated, err := wg.Authenticator.Authenticate(r)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.Warn("gateway.authentication.failed", "websocket authentication failed", config.F("status", "rejected"))
+		return
+	}
+	if !originAllowed(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		log.Warn("gateway.origin.rejected", "websocket origin rejected", config.F("status", "rejected"))
+		return
+	}
+	normalizedUserID, err := accountlinking.NormalizeIdentifier("websocket", authenticated.Subject)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.Warn("gateway.authentication.subject_invalid", "websocket token subject is invalid", config.F("status", "rejected"))
+		return
+	}
+	sessionKey := "websocket:" + normalizedUserID
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Warn("gateway.connection.upgrade_failed", "websocket upgrade failed", config.ErrorField(err))
 		return
 	}
 	defer conn.Close()
+	expiryTimer := time.AfterFunc(time.Until(authenticated.ExpiresAt), func() {
+		log.Debug("gateway.authentication.expired", "websocket authentication expired", config.F("session_id", sessionKey))
+		_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "authentication expired"), time.Now().Add(time.Second))
+		_ = conn.Close()
+	})
+	defer expiryTimer.Stop()
 
-	// remoteAddr is used as the fallback identity for clients that send plain text.
 	remoteAddr := conn.RemoteAddr().String()
+	var principal identity.Principal
 
 	for {
 		requestID := config.NewRequestID()
@@ -54,17 +83,26 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			break
 		}
 
-		// Attempt to decode a structured IncomingMessage. Fall back to treating
-		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
-		// clients keep working without modification.
-		var userPrompt, userID, displayName string
+		// Attempt to decode a structured IncomingMessage. Plain-text prompts keep
+		// working, but identity is always bound by the handshake token.
+		var userPrompt string
+		displayName := authenticated.DisplayName
 		var userImages []llm.InputImage
 		var userUnsupported []string
 		var incoming IncomingMessage
 		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
-			userID = incoming.UserID
-			displayName = incoming.DisplayName
+			if incoming.UserID != "" {
+				claimedUserID, claimErr := accountlinking.NormalizeIdentifier("websocket", incoming.UserID)
+				if claimErr != nil || claimedUserID != normalizedUserID {
+					log.Warn("gateway.authentication.identity_mismatch", "websocket message attempted to change authenticated identity", config.F("request_id", requestID), config.F("status", "rejected"))
+					_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "message identity does not match authenticated subject"), time.Now().Add(time.Second))
+					return
+				}
+			}
+			if displayName == "" {
+				displayName = incoming.DisplayName
+			}
 			images, unsupported := wg.decodeIncomingImages(incoming.Images)
 			userImages = images
 			userUnsupported = unsupported
@@ -79,37 +117,21 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			}
 		} else {
 			userPrompt = string(message)
-			userID = remoteAddr
 		}
-
-		// Build the session key from the gateway identity while keeping
-		// persistent memory keyed separately by canonical user ID.
-		sessionIdentity := userID
-		if sessionIdentity == "" {
-			sessionIdentity = remoteAddr
-			userID = remoteAddr
-		}
-		normalizedUserID, normErr := accountlinking.NormalizeIdentifier("websocket", userID)
-		if normErr != nil {
-			errorPayload := agent.AgentResponse{Error: normErr.Error()}
-			errBytes, _ := json.Marshal(errorPayload)
-			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-			continue
-		}
-		sessionKey := "websocket:" + sessionIdentity
-
-		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
-		if err != nil {
-			log.Error("gateway.account.resolve_failed", "failed to resolve websocket account",
-				config.F("request_id", requestID),
-				config.F("session_id", sessionKey),
-				config.F("user_id", normalizedUserID),
-				config.ErrorField(err),
-			)
-			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
-			errBytes, _ := json.Marshal(errorPayload)
-			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-			continue
+		if !principal.Valid() {
+			canonicalUserID, resolveErr := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
+			if resolveErr != nil {
+				log.Error("gateway.account.resolve_failed", "failed to resolve websocket account", config.F("request_id", requestID), config.F("session_id", sessionKey), config.ErrorField(resolveErr))
+				errorPayload, _ := json.Marshal(agent.AgentResponse{Error: "Failed to resolve account identity"})
+				_ = conn.WriteMessage(messageType, errorPayload)
+				return
+			}
+			principal = identity.Principal{
+				CanonicalUserID: canonicalUserID,
+				Gateway:         "websocket",
+				ExternalID:      normalizedUserID,
+				Assurance:       identity.AssuranceWebSocketSignedToken,
+			}
 		}
 
 		firstChunk := true
@@ -127,14 +149,9 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		}
 
 		gatewayruntime.Execute(gatewayruntime.Request{
-			RequestID: requestID,
-			ChatID:    sessionKey,
-			Principal: identity.Principal{
-				CanonicalUserID: canonicalUserID,
-				Gateway:         "websocket",
-				ExternalID:      normalizedUserID,
-				Assurance:       identity.AssuranceSelfAsserted,
-			},
+			RequestID:   requestID,
+			ChatID:      sessionKey,
+			Principal:   principal,
 			DisplayName: displayName,
 			SessionKey:  sessionKey,
 			IsDirect:    true,

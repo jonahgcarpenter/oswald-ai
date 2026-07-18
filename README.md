@@ -60,21 +60,36 @@ Can you elaborate on that?
 
 ### WebSocket API
 
-Currently used for the Home Assistant integration [here](https://github.com/jonahgcarpenter/has-oswald-conversation).
+Designed for the Home Assistant integration [here](https://github.com/jonahgcarpenter/has-oswald-conversation). The integration must be updated to issue or receive signed subject tokens before connecting to an authenticated Oswald deployment.
 
-Connect to `ws://localhost:8000/ws`:
+WebSocket connections require a short-lived signed token. Generate a signing key once and configure it in Oswald:
 
 ```bash
-# Using websocat
-websocat ws://localhost:8000/ws
+export WEBSOCKET_AUTH_SIGNING_KEY="$(openssl rand -base64 32)"
+export WEBSOCKET_AUTH_MAX_TOKEN_TTL=15m
+```
+
+Issue a token whose subject is the stable WebSocket user identity, then connect with a bearer header:
+
+```bash
+TOKEN="$(go run ./cmd/ws-token -subject alice -name Alice -ttl 15m)"
+websocat -H="Authorization: Bearer $TOKEN" ws://127.0.0.1:8000/ws
 
 # Send a prompt
 What is Bitcoins current price?
 
-# Receive streaming chunks, then final JSON:
-# "Bitcoin is currently..."
+# Receive typed streaming chunks, then final JSON:
+# {"type":"content","text":"Bitcoin is currently..."}
 # {"model":"<gateway-route-or-model>","response":"..."}
 ```
+
+Structured clients may continue sending `user_id`, but it must match the signed token subject and cannot select request ownership. Plain-text payloads use the same authenticated subject. A connection is permanently bound to one subject.
+
+Use `wss://` through a TLS-terminating reverse proxy whenever traffic leaves a trusted host. Signing authenticates identity but does not encrypt `ws://` traffic. The Home Assistant integration must provide an `Authorization: Bearer <token>` header and mint or receive a subject-bound token for each connection.
+
+The native browser `WebSocket` API cannot set an `Authorization` header. Browser clients require a trusted proxy or a future cookie/session authentication mode; the signed-token transport is intended for service and command-line clients.
+
+Treat `WEBSOCKET_AUTH_SIGNING_KEY` as issuer authority: anyone holding it can mint a token for any WebSocket subject. Give it only to Oswald and trusted identity-issuing services, never end users or browser clients.
 
 ## Commands
 

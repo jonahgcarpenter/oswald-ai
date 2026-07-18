@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -10,7 +11,9 @@ import (
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	Port                     string        // HTTP port for the WebSocket gateway (default: "8080")
+	Port                     string        // HTTP port for the WebSocket gateway (default: "8000")
+	WebSocketAuthSigningKey  string        // Raw or base64-encoded HMAC key used to verify WebSocket identity tokens
+	WebSocketAuthMaxTokenTTL time.Duration // Maximum accepted WebSocket identity token lifetime (default: 15m)
 	IMessagePort             string        // HTTP port for the BlueBubbles webhook listener (default: "8090")
 	IMessageWebhookPath      string        // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
 	BlueBubblesURL           string        // BlueBubbles server base URL; iMessage gateway disabled if empty
@@ -39,13 +42,19 @@ const (
 )
 
 // Load reads configuration from environment variables, with .env file support.
-// Missing variables fall back to sensible defaults.
-func Load() *Config {
+// Missing variables use defaults; invalid security-sensitive values return an error.
+func Load() (*Config, error) {
 	// Silently ignore missing .env — production environments use real env vars
 	godotenv.Load() // nolint: errcheck
+	webSocketMaxTTL, err := getEnvDurationStrict("WEBSOCKET_AUTH_MAX_TOKEN_TTL", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		Port:                     getEnv("PORT", "8000"),
+		WebSocketAuthSigningKey:  getEnv("WEBSOCKET_AUTH_SIGNING_KEY", ""),
+		WebSocketAuthMaxTokenTTL: webSocketMaxTTL,
 		IMessagePort:             getEnv("IMESSAGE_PORT", "8090"),
 		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
 		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
@@ -64,7 +73,7 @@ func Load() *Config {
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
-	}
+	}, nil
 }
 
 // getEnv retrieves an environment variable with a fallback to the default value
@@ -102,4 +111,16 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 		return defaultValue
 	}
 	return d
+}
+
+func getEnvDurationStrict(key string, defaultValue time.Duration) (time.Duration, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists || value == "" {
+		return defaultValue, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration", key)
+	}
+	return d, nil
 }

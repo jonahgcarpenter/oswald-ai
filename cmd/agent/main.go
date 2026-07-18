@@ -25,7 +25,10 @@ import (
 
 func main() {
 	// Load config
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		config.NewLogger(config.LevelInfo).Server("app").Fatal("app.config.invalid", "invalid runtime configuration", config.ErrorField(err))
+	}
 
 	// Initialize logger — all components receive this instance
 	rootLog := config.NewLogger(cfg.LogLevel)

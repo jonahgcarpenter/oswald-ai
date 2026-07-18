@@ -222,7 +222,7 @@ The prompt budget is the context window minus reserves for:
 
 Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 
-- WebSocket is always enabled
+- WebSocket is always enabled and startup fails unless signed-token authentication is configured
 - Discord is enabled only when `DISCORD_TOKEN` is set
 - iMessage is enabled only when both `BLUEBUBBLES_URL` and `BLUEBUBBLES_PASSWORD` are set
 
@@ -231,20 +231,25 @@ Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 Files:
 
 - `internal/gateway/websocket/gateway.go`
+- `internal/gateway/websocket/auth.go`
 - `internal/gateway/websocket/types.go`
 
 Behavior:
 
 - Listens on `/ws`
+- Requires a valid HS256 bearer token before upgrading the connection
+- Binds the connection to the token's subject, which is normalized and resolved once through the account-link service
 - Accepts either plain text or JSON input
 - JSON input fields:
   - `user_id`
   - `display_name`
   - `prompt`
   - `images`
-- If plain text is sent, the remote address is used as fallback identity
-- If `user_id` is present, it becomes the primary session identity and is normalized through the account-link service
-- WebSocket identities are explicitly self-asserted principals; canonical resolution does not authenticate them
+- Plain-text and JSON messages both use the authenticated token subject for ownership and session identity
+- If `user_id` is present, it must match the authenticated subject; attempts to switch identity close the connection
+- WebSocket principals use `websocket_signed_token` assurance and are authenticated independently from account-link verification
+- Browser origins must match the request host; non-browser clients may omit `Origin`
+- Native browser WebSocket clients cannot set the required bearer header; this mode targets trusted service and command-line clients
 - Supports text-only, image-only, and text-plus-image JSON requests
 - Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
@@ -704,7 +709,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 ## Known Limitations
 
 - Session chat history is stored in SQLite `session_turns` with TTL expiry
-- WebSocket gateway has no authentication layer
+- WebSocket HMAC tokens are short-lived but do not yet support individual server-side revocation
 - Only eight builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
 - MCP servers are configured dynamically in SQLite rather than hard-coded to one provider
 - Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
