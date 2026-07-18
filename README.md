@@ -102,12 +102,15 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/help` | `/help [command]` | List available commands or show usage for one command. |
 | `/connect` | `/connect [code\|cancel]` | In a direct chat, create a 10-minute one-time code or confirm a code from another authenticated account. |
 | `/disconnect` | `/disconnect [account_number]` | In a direct chat, disconnect a linked gateway account. The last linked account cannot be removed. |
+| `/reset` | `/reset` | Clear this conversation's session history and load the latest stable tenant profile. |
 | `/mcp servers` | `/mcp servers` | List your user-scoped MCP servers. |
 | `/mcp add` | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]` | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
 | `/mcp remove` | `/mcp remove <name>` | Remove one of your MCP servers. |
 | `/mcp enable` | `/mcp enable <name>` | Enable one of your MCP servers. |
 | `/mcp disable` | `/mcp disable <name>` | Disable one of your MCP servers. |
 | `/mcp test` | `/mcp test <name>` | Connect to one of your MCP servers and report discovered tool count. |
+
+Eligible durable identity and preference memories are compiled into a bounded, lower-authority tenant profile. A profile is frozen for each conversation session; changes become automatic context in new sessions or after `/reset`, while deeper memory remains available through memory tools.
 
 ### Admin Commands
 

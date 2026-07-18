@@ -487,38 +487,69 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
-	// Build the dynamic system prompt from soul and speaker identity.
-	// Only system_rules memory is injected automatically here; relevant user and
-	// session memories are added below as a structured retrieved-memory block.
+	// Keep deployment policy separate from the frozen lower-authority tenant profile.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
-
-	speakerLine := a.currentSpeakerLine(reqLog, senderID)
-	if speakerLine != "" {
-		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
-	}
 	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
 		promptParts = append(promptParts, gatewayPrompt)
 	}
-	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
-	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)
-
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
+	speakerLine := ""
+	profileContent := ""
+	memoryContextBlock := ""
+	sessionGeneration := 0
+	if a.userMemory != nil {
+		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
+		if err != nil {
+			reqLog.Error("agent.profile.load_failed", "failed to load tenant profile", config.F("status", "error"), config.ErrorField(err))
+			return nil, fmt.Errorf("resolve tenant profile: %w", err)
+		} else {
+			speakerLine = profile.SpeakerIntro
+			sessionGeneration = profile.Generation
+			profileContent = profile.Content
+			reqLog.Debug("agent.profile.loaded", "loaded frozen tenant profile",
+				config.F("profile_version", profile.Version),
+				config.F("latest_profile_version", profile.LatestVersion),
+				config.F("profile_fact_count", profile.FactCount),
+				config.F("profile_bytes", profile.Bytes),
+				config.F("session_generation", profile.Generation),
+				config.F("is_profile_new", profile.IsNewVersion),
+				config.F("is_session_new", profile.IsNewSession),
+			)
+			if profile.IsNewVersion {
+				reqLog.Info("agent.profile.version_advanced", "advanced tenant profile version",
+					config.F("profile_version", profile.LatestVersion),
+					config.F("profile_fact_count", profile.LatestFactCount),
+					config.F("profile_bytes", profile.LatestBytes),
+					config.F("status", "ok"),
+				)
+			}
+			if profile.IsNewSession {
+				reqLog.Info("agent.profile.session_bound", "bound tenant profile to session",
+					config.F("profile_version", profile.Version),
+					config.F("session_generation", profile.Generation),
+					config.F("status", "ok"),
+				)
+			}
+		}
+	}
+	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 
 	semanticQueryText, _ := stripReplyContext(userPrompt)
 	if semanticQueryText == "" {
 		semanticQueryText = userPrompt
 	}
 	var recentToolNames []string
-	if a.userMemory != nil {
+	if a.userMemory != nil && sessionGeneration > 0 {
 		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
 			RecentTurns:        memoryRecentTurns,
+			Generation:         sessionGeneration,
 			ContextBudgetChars: int(float64(a.budget.PromptBudget()*4) * memoryContextBudgetRatio),
 		})
 		if err != nil {
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
 		} else if strings.TrimSpace(memoryContext.Block) != "" {
-			dynamicSystemPrompt += "\n\n" + memoryContext.Block
+			memoryContextBlock = memoryContext.Block
 			recentToolNames = memoryContext.RecentToolNames
 			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
 				config.F("recent_turn_count", memoryContext.RecentTurnCount),
@@ -536,14 +567,23 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
+	userMessageParts := make([]string, 0, 3)
+	if profileContent != "" {
+		userMessageParts = append(userMessageParts, profileContent)
+	}
+	if memoryContextBlock != "" {
+		userMessageParts = append(userMessageParts, "<retrieved_session_context authority=\"user\">\n"+memoryContextBlock+"\n</retrieved_session_context>")
+	}
+	userMessageParts = append(userMessageParts, userPrompt)
+	modelUserPrompt := strings.Join(userMessageParts, "\n\n")
 	prune := promptbudget.Result{
-		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
-		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
+		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, modelUserPrompt, len(userImages), initialTools),
+		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, modelUserPrompt, len(userImages), initialTools),
 	}
 
 	messages := make([]llm.ChatMessage, 0, 2)
 	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
-	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: userImages})
+	messages = append(messages, llm.ChatMessage{Role: "user", Content: modelUserPrompt, Images: userImages})
 
 	if prune.EstimatedAfter > a.budget.PromptBudget() {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
@@ -855,8 +895,8 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
-	if finalContent != "" && a.userMemory != nil {
-		if err := a.userMemory.AppendSessionTurn(ctx, sessionKey, senderID, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL); err != nil {
+	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+		if err := a.userMemory.AppendSessionTurnForGeneration(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL); err != nil {
 			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
@@ -881,62 +921,4 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		Thinking: finalThinking,
 		Metrics:  mapMetrics(lastResp),
 	}, nil
-}
-
-func (a *Agent) currentSpeakerLine(log *config.Logger, senderID string) string {
-	if senderID == "" {
-		return ""
-	}
-
-	if a.userMemory != nil {
-		intro, err := a.userMemory.ReadIntro(senderID)
-		if err != nil {
-			log.Warn("agent.user_memory_intro.read_failed", "failed to read user memory intro", config.F("user_id", senderID), config.ErrorField(err))
-		} else if strings.TrimSpace(intro) != "" {
-			return strings.TrimSpace(intro)
-		}
-	}
-
-	return ""
-}
-
-func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []string {
-	if senderID == "" || a.userMemory == nil {
-		return nil
-	}
-
-	sections := make([]string, 0, 1)
-	if systemRules := a.userMemoryPromptSection(log, senderID, "system_rules", "## User System Rules"); systemRules != "" {
-		sections = append(sections, systemRules)
-	}
-	return sections
-}
-
-func (a *Agent) userMemoryPromptSection(log *config.Logger, senderID, category, heading string) string {
-	content, err := a.userMemory.ReadCategory(senderID, category)
-	if err != nil {
-		log.Warn("agent.user_memory_category.read_failed", "failed to read user memory category", config.F("category", category), config.F("user_id", senderID), config.ErrorField(err))
-		return ""
-	}
-	body := stripMarkdownHeading(content)
-	if body == "" {
-		return ""
-	}
-	return heading + "\n" + body
-}
-
-func stripMarkdownHeading(content string) string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return ""
-	}
-
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 {
-		return ""
-	}
-	if strings.HasPrefix(lines[0], "## ") {
-		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
-	}
-	return content
 }

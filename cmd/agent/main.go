@@ -76,8 +76,8 @@ func main() {
 	soulStore := soul.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
-	// The user memory store shares the account-link database but uses fresh memory
-	// tables keyed by canonical user IDs. There is no legacy memory migration path.
+	// The user memory store shares the account-link database and migrates legacy
+	// memory categories into the current canonical schema at startup.
 	userMemStore, err := usermemory.NewSQLiteStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
 	if err != nil {
 		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))
@@ -98,7 +98,7 @@ func main() {
 	}
 	defer accountLinkService.Close() // nolint:errcheck
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
-	commandService, err := commandbuiltin.NewService(accountLinkService, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	commandService, err := commandbuiltin.NewService(accountLinkService, userMemStore, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}

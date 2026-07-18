@@ -45,7 +45,7 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello discord" {
+	if !strings.Contains(last.Content, "<tenant_profile") || !strings.HasSuffix(last.Content, "\n\nhello discord") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if rest.lastMessageContent() != "discord response" {
@@ -94,7 +94,7 @@ func TestDiscordMentionedGuildMessageStripsMentionAndResolvesMentions(t *testing
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
 	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
-	if prompt != "hello @Bob" {
+	if !strings.Contains(prompt, "<tenant_profile") || !strings.HasSuffix(prompt, "\n\nhello @Bob") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
 }

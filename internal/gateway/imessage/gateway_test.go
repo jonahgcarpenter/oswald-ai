@@ -46,7 +46,7 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello imessage" {
+	if !strings.Contains(last.Content, "<tenant_profile") || !strings.HasSuffix(last.Content, "\n\nhello imessage") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if bb.sentMessage() != "imessage response" {
@@ -168,7 +168,7 @@ func TestIMessageWebhookDirectMessageRoutesAndReplies(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello from webhook" {
+	if !strings.Contains(last.Content, "<tenant_profile") || !strings.HasSuffix(last.Content, "\n\nhello from webhook") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if !bb.waitForSentCount(1) {
@@ -192,7 +192,7 @@ func TestIMessageWebhookGroupMentionRoutesCleanedText(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello" {
+	if !strings.Contains(last.Content, "<tenant_profile") || !strings.HasSuffix(last.Content, "\n\nhello") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 }

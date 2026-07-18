@@ -2,13 +2,16 @@ package builtin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
+	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // MCPDeps contains optional dependencies for MCP management commands.
@@ -18,9 +21,12 @@ type MCPDeps struct {
 }
 
 // NewService creates the application command service with all built-in commands.
-func NewService(users *accountlinking.Service, optionalMCP ...MCPDeps) (*commands.Service, error) {
+func NewService(users *accountlinking.Service, memory *usermemory.Store, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	if memory == nil {
+		return nil, fmt.Errorf("user memory store is required for built-in commands")
+	}
 	help := &helpHandler{auth: users}
-	registrations := []commands.Command{{Handler: help}}
+	registrations := []commands.Command{{Handler: help}, {Handler: sessioncommands.New(memory)}}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
 	}

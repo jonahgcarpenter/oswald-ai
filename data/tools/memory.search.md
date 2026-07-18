@@ -14,5 +14,5 @@ Do not use this as web search, public knowledge lookup, general conversation his
 | -------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | query    | string  | no       | Semantic search query. Omit only when filtering by scope/category is enough.                                                                                               |
 | scope    | string  | no       | Optional scope filter: `short_term` or `long_term`.                                                                                                                        |
-| category | string  | no       | Optional category filter: `identity`, `system_rules`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, or `notes`. |
+| category | string  | no       | Optional category filter: `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, or `notes`. |
 | limit    | integer | no       | Maximum memories to return; defaults to 8.                                                                                                                                 |
