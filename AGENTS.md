@@ -184,9 +184,13 @@ Oswald keeps three distinct memory layers.
 - Stored in `data/database/oswald.db`
 - Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
-- `/connect` and `/disconnect` operate on this store before any request reaches the agent loop
+- `/connect` creates or confirms a hashed, expiring, one-time challenge in a direct authenticated conversation
+- Confirmation atomically moves linked accounts, memories, sessions, moderation references, and re-encrypted MCP ownership before deleting the losing canonical user
+- The profile that creates the challenge remains the canonical winner; admin state is preserved if either profile was admin
+- Both participating external accounts are marked verified only after successful confirmation
+- `/disconnect` requires an authenticated direct conversation and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/admin`, `/unadmin`, `/ban`, and `/unban`
-- Linking can merge two canonical users when the requested external account is already attached elsewhere and the gateway sets do not conflict
+- Linking rejects banned profiles and profiles containing different accounts for the same gateway
 
 ### Session Chat Memory
 
@@ -238,7 +242,7 @@ Behavior:
 
 - Listens on `/ws`
 - Requires a valid HS256 bearer token before upgrading the connection
-- Binds the connection to the token's subject, which is normalized and resolved once through the account-link service
+- Binds the connection to the token's subject and re-resolves its canonical owner before every message so account merges take effect immediately
 - Accepts either plain text or JSON input
 - JSON input fields:
   - `user_id`

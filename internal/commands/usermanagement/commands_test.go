@@ -22,7 +22,7 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	service := newAdminCommandService(t, links)
 
 	for _, input := range []string{"/users", "/user " + userID, "/deleteuser " + userID} {
-		result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(userID), Raw: input})
+		result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(t, links, userID), Raw: input})
 		if err != nil {
 			t.Fatalf("execute %s err=%v", input, err)
 		}
@@ -47,7 +47,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 	}
 	service := newAdminCommandService(t, links)
 
-	response, err := executeCommand(t, service, adminID, "/users")
+	response, err := executeCommand(t, service, links, adminID, "/users")
 	if err != nil {
 		t.Fatalf("users err=%v", err)
 	}
@@ -55,7 +55,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 		t.Fatalf("unexpected users response: %q", response)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/user "+targetID)
+	response, err = executeCommand(t, service, links, adminID, "/user "+targetID)
 	if err != nil {
 		t.Fatalf("user err=%v", err)
 	}
@@ -63,17 +63,17 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 		t.Fatalf("unexpected user response: %q", response)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/user")
+	response, err = executeCommand(t, service, links, adminID, "/user")
 	if err != nil || response != "Show one canonical user.\nUse: /user <canonical_id>" {
 		t.Fatalf("usage response=%q err=%v", response, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/user usr_missing")
+	response, err = executeCommand(t, service, links, adminID, "/user usr_missing")
 	if err != nil || response != "User usr_missing not found." {
 		t.Fatalf("missing response=%q err=%v", response, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/admin "+targetID)
+	response, err = executeCommand(t, service, links, adminID, "/admin "+targetID)
 	if err != nil || !strings.Contains(response, "Marked "+targetID+" as admin.") {
 		t.Fatalf("admin response=%q err=%v", response, err)
 	}
@@ -82,12 +82,12 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 		t.Fatalf("expected target admin, got %v err=%v", isAdmin, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/unadmin "+adminID)
+	response, err = executeCommand(t, service, links, adminID, "/unadmin "+adminID)
 	if err != nil || !strings.Contains(response, "cannot remove admin from yourself") {
 		t.Fatalf("self unadmin response=%q err=%v", response, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/ban "+targetID+" spam")
+	response, err = executeCommand(t, service, links, adminID, "/ban "+targetID+" spam")
 	if err != nil || !strings.Contains(response, "Banned "+targetID+".") {
 		t.Fatalf("ban response=%q err=%v", response, err)
 	}
@@ -96,7 +96,7 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 		t.Fatalf("expected target banned, got %v err=%v", isBanned, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/unban "+targetID)
+	response, err = executeCommand(t, service, links, adminID, "/unban "+targetID)
 	if err != nil || !strings.Contains(response, "Unbanned "+targetID+".") {
 		t.Fatalf("unban response=%q err=%v", response, err)
 	}
@@ -105,17 +105,17 @@ func TestCommandHandlerUsersAdminBanAndUnban(t *testing.T) {
 		t.Fatalf("expected target unbanned, got %v err=%v", isBanned, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/deleteuser")
+	response, err = executeCommand(t, service, links, adminID, "/deleteuser")
 	if err != nil || response != "Delete a canonical user.\nUse: /deleteuser <canonical_id>" {
 		t.Fatalf("delete usage response=%q err=%v", response, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/deleteuser "+adminID)
+	response, err = executeCommand(t, service, links, adminID, "/deleteuser "+adminID)
 	if err != nil || !strings.Contains(response, "cannot delete yourself") {
 		t.Fatalf("self delete response=%q err=%v", response, err)
 	}
 
-	response, err = executeCommand(t, service, adminID, "/deleteuser "+targetID)
+	response, err = executeCommand(t, service, links, adminID, "/deleteuser "+targetID)
 	if err != nil || !strings.Contains(response, "Deleted "+targetID+".") {
 		t.Fatalf("delete response=%q err=%v", response, err)
 	}
@@ -137,20 +137,27 @@ func newAdminCommandService(t *testing.T, links *accountlinking.Service) *comman
 	return service
 }
 
-func executeCommand(t *testing.T, service *commands.Service, userID, raw string) (string, error) {
+func executeCommand(t *testing.T, service *commands.Service, links *accountlinking.Service, userID, raw string) (string, error) {
 	t.Helper()
-	result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(userID), Raw: raw})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(t, links, userID), Raw: raw})
 	return result.Text, err
 }
 
-func commandPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "external-" + userID, Assurance: identity.AssuranceDiscordGateway}
+func commandPrincipal(t *testing.T, links *accountlinking.Service, userID string) identity.Principal {
+	t.Helper()
+	accounts, err := links.AccountsForUser(userID)
+	if err != nil || len(accounts) == 0 {
+		t.Fatalf("resolve command principal for %s: accounts=%+v err=%v", userID, accounts, err)
+	}
+	account := accounts[0]
+	return identity.Principal{CanonicalUserID: userID, Gateway: account.Gateway, ExternalID: account.Identifier, Assurance: identity.AssuranceDiscordGateway}
 }
 
 func newTestService(t *testing.T) *accountlinking.Service {
 	t.Helper()
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	return accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	return accountlinking.NewService(dbPath, memories, nil, log)
 }

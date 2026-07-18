@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
@@ -64,7 +65,7 @@ func MessagePreview(text string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
-	preview := strings.TrimSpace(previewWhitespaceRE.ReplaceAllString(text, " "))
+	preview := config.SafeText(strings.TrimSpace(previewWhitespaceRE.ReplaceAllString(text, " ")))
 	runes := []rune(preview)
 	if len(runes) <= limit {
 		return preview

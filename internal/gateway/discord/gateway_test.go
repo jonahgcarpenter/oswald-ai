@@ -339,8 +339,9 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	links := accountlinking.NewService(dbPath, memories, nil, log)
 	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)

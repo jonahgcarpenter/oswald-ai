@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,15 +18,85 @@ import (
 
 // Manager owns scoped MCP client sessions and resolves tools for active users.
 type Manager struct {
-	store    *Store
-	sessions map[string]*server
-	mu       sync.Mutex
-	log      *config.Logger
+	store           *Store
+	sessions        map[string]*server
+	userGenerations map[string]uint64
+	mu              sync.Mutex
+	log             *config.Logger
 }
 
 // NewManagerFromStore creates a DB-backed MCP manager.
 func NewManagerFromStore(store *Store, log *config.Logger) *Manager {
-	return &Manager{store: store, sessions: make(map[string]*server), log: log.Server("mcp.manager")}
+	return &Manager{store: store, sessions: make(map[string]*server), userGenerations: make(map[string]uint64), log: log.Server("mcp.manager")}
+}
+
+// MergeUsersTx transfers user-scoped MCP configs in the supplied account merge transaction.
+func (m *Manager) MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID string) error {
+	if m == nil || m.store == nil {
+		return fmt.Errorf("MCP manager is not initialized")
+	}
+	return m.store.MergeUsersTx(ctx, tx, winnerID, loserID)
+}
+
+// DeleteUserTx removes user-scoped MCP configs in the supplied transaction.
+func (m *Manager) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string) error {
+	if m == nil || m.store == nil {
+		return fmt.Errorf("MCP manager is not initialized")
+	}
+	return m.store.DeleteUserTx(ctx, tx, userID)
+}
+
+// UserDeleteCommitted invalidates sessions owned by a deleted user.
+func (m *Manager) UserDeleteCommitted(userID string) {
+	if m == nil {
+		return
+	}
+	userID = strings.TrimSpace(userID)
+	prefix := ScopeUser + ":" + userID + ":"
+	var closeFns []func() error
+	m.mu.Lock()
+	m.userGenerations[userID]++
+	for key, srv := range m.sessions {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if srv != nil && srv.close != nil {
+			closeFns = append(closeFns, srv.close)
+		}
+		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
+	for _, closeFn := range closeFns {
+		closeFn() // nolint:errcheck
+	}
+}
+
+// UserMergeCommitted invalidates sessions affected by a committed user merge.
+func (m *Manager) UserMergeCommitted(winnerID, loserID string) {
+	if m == nil {
+		return
+	}
+	winnerID = strings.TrimSpace(winnerID)
+	loserID = strings.TrimSpace(loserID)
+	winnerPrefix := ScopeUser + ":" + winnerID + ":"
+	loserPrefix := ScopeUser + ":" + loserID + ":"
+	var closeFns []func() error
+	m.mu.Lock()
+	m.userGenerations[winnerID]++
+	m.userGenerations[loserID]++
+	for key, srv := range m.sessions {
+		if !strings.HasPrefix(key, winnerPrefix) && !strings.HasPrefix(key, loserPrefix) {
+			continue
+		}
+		if srv != nil && srv.close != nil {
+			closeFns = append(closeFns, srv.close)
+		}
+		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
+	for _, closeFn := range closeFns {
+		closeFn() // nolint:errcheck
+	}
 }
 
 // ServerInfos returns global and user-scoped MCP server metadata visible to userID.
@@ -196,31 +267,50 @@ func (m *Manager) resolveConfig(ctx context.Context, userID, name string) (Serve
 
 func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*server, error) {
 	key := scopeKey(cfg)
-	if srv := m.cached(key); srv != nil && srv.reason == "" {
+	m.mu.Lock()
+	srv := m.sessions[key]
+	generation := m.userGenerations[cfg.OwnerUserID]
+	m.mu.Unlock()
+	if srv != nil && srv.reason == "" {
 		return srv, nil
 	}
+	if cfg.Scope == ScopeUser {
+		current, ok, err := m.store.Get(ctx, cfg.Scope, cfg.OwnerUserID, cfg.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || current.ID != cfg.ID {
+			return nil, fmt.Errorf("MCP server ownership changed before connecting")
+		}
+		cfg = current
+	}
 	if _, err := parseAndValidateURL(ctx, cfg.URL, m.store.resolver); err != nil {
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	if cfg.Transport != TransportStreamableHTTP {
 		err := fmt.Errorf("MCP transport %q is not implemented", cfg.Transport)
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	session, closeFn, err := connectStreamableHTTP(ctx, cfg)
 	if err != nil {
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	tools, err := loadToolSpecs(ctx, cfg, session, m.log)
 	if err != nil {
 		closeFn() // nolint:errcheck
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
-	srv := &server{config: cfg, tools: tools, close: closeFn}
+	srv = &server{config: cfg, tools: tools, close: closeFn}
 	m.mu.Lock()
+	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+		m.mu.Unlock()
+		closeFn() // nolint:errcheck
+		return nil, fmt.Errorf("MCP server ownership changed while connecting")
+	}
 	if old := m.sessions[key]; old != nil && old.close != nil {
 		old.close() // nolint:errcheck
 	}
@@ -230,9 +320,12 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*serve
 	return srv, nil
 }
 
-func (m *Manager) rememberError(key string, cfg ServerConfig, err error) {
+func (m *Manager) rememberError(key string, cfg ServerConfig, generation uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+		return
+	}
 	m.sessions[key] = &server{config: cfg, reason: config.SafeErrorText(err)}
 }
 

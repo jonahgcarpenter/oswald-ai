@@ -14,14 +14,6 @@ type UserRecord = database.AccountUser
 
 type fileData = database.AccountLinkData
 
-// LinkResult describes the outcome of linking an external account.
-type LinkResult struct {
-	CanonicalUserID string
-	AlreadyLinked   bool
-	Merged          bool
-	LinkedAccount   LinkedAccount
-}
-
 // UserSummary is the command-facing view of a canonical user.
 type UserSummary struct {
 	CanonicalUserID string

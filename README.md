@@ -100,8 +100,8 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | Command | Usage | Description |
 | --- | --- | --- |
 | `/help` | `/help [command]` | List available commands or show usage for one command. |
-| `/connect` | `/connect [gateway_number identifier]` | Link another gateway account to your canonical user. Run without arguments to list gateway options. |
-| `/disconnect` | `/disconnect [account_number]` | Disconnect a linked gateway account. Run without arguments to list connected accounts. The last linked account cannot be removed. |
+| `/connect` | `/connect [code\|cancel]` | In a direct chat, create a 10-minute one-time code or confirm a code from another authenticated account. |
+| `/disconnect` | `/disconnect [account_number]` | In a direct chat, disconnect a linked gateway account. The last linked account cannot be removed. |
 | `/mcp servers` | `/mcp servers` | List your user-scoped MCP servers. |
 | `/mcp add` | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]` | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
 | `/mcp remove` | `/mcp remove <name>` | Remove one of your MCP servers. |

@@ -17,6 +17,7 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	addTestUsers(t, store, "user_1", "user_2")
 	ctx := context.Background()
 	for _, cfg := range []ServerConfig{
 		{Scope: ScopeGlobal, Name: "github", Transport: TransportStreamableHTTP, URL: "https://example.com/github", Enabled: true},
@@ -64,6 +65,7 @@ func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
 	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
