@@ -23,6 +23,8 @@ import (
 const (
 	sessionHistoryCandidateLimit = 100
 	recentToolExposureTurns      = 4
+	automaticRecallTopK          = 4
+	automaticRecallCharLimit     = 2000
 	sessionTurnTTL               = 24 * time.Hour
 	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
@@ -532,6 +534,31 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
+	var recalledMemories []usermemory.RecallResult
+	if a.userMemory != nil {
+		recallQuery, _ := stripReplyContext(userPrompt)
+		recallStarted := time.Now()
+		var recallStats usermemory.RecallStats
+		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, usermemory.RecallRequest{TopK: automaticRecallTopK})
+		if recallStats.LexicalError != nil {
+			reqLog.Warn("agent.memory.recall.lexical_degraded", "durable memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
+		}
+		if recallStats.SemanticError != nil {
+			reqLog.Warn("agent.memory.recall.semantic_degraded", "durable memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
+		}
+		reqLog.Debug("agent.memory.recall.complete", "completed durable memory recall",
+			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
+			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
+			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
+			config.F("below_threshold_count", recallStats.BelowThresholdCount),
+			config.F("selected_memory_count", recallStats.SelectedCount),
+			config.F("min_selected_score", recallStats.MinSelectedScore),
+			config.F("max_selected_score", recallStats.MaxSelectedScore),
+			config.F("is_lexical_available", recallStats.LexicalAvailable),
+			config.F("is_vector_available", recallStats.SemanticAvailable),
+			config.F("duration_ms", time.Since(recallStarted).Milliseconds()),
+		)
+	}
 
 	var recentTurns []usermemory.SessionTurn
 	var recentToolNames []string
@@ -566,7 +593,10 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, profileContent, userPrompt, userImages, recentTurns, initialTools, a.budget.UsableInputLimit())
+	promptContext := AssemblePromptContextWithRecall(dynamicSystemPrompt, profileContent, userPrompt, userImages, recalledMemories, automaticRecallCharLimit, recentTurns, initialTools, a.budget.UsableInputLimit())
+	if a.userMemory != nil {
+		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
+	}
 	messages := promptContext.Messages
 	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
@@ -577,6 +607,9 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	reqLog.Debug("agent.context.selected", "selected complete session exchanges",
 		config.F("selected_turn_count", promptContext.SelectedTurnCount),
 		config.F("omitted_turn_count", promptContext.OmittedTurnCount),
+		config.F("selected_memory_count", promptContext.SelectedRecallCount),
+		config.F("omitted_memory_count", promptContext.OmittedRecallCount),
+		config.F("recall_chars", promptContext.RecallChars),
 		config.F("estimated_before", promptContext.EstimatedBefore),
 		config.F("estimated_after", promptContext.EstimatedAfter),
 	)

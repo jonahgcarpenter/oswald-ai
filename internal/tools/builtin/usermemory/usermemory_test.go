@@ -75,6 +75,33 @@ func TestMemoryHandlersRejectMissingPrincipal(t *testing.T) {
 	}
 }
 
+func TestMemorySearchReportsTotalAndPartialDegradation(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	_, err = store.SaveMemory(context.Background(), "usr_1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user lives in Porto.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`DROP TABLE memory_entries_fts`); err != nil {
+		t.Fatal(err)
+	}
+	search := NewSearchHandler(store, log)
+	result, err := search(principalContext("usr_1", "alice"), map[string]interface{}{"query": "Where is home?"})
+	if err != nil || !strings.Contains(result, "partially degraded") || !strings.Contains(result, "Porto") {
+		t.Fatalf("partial search result=%q err=%v", result, err)
+	}
+
+	store.embedder = nil
+	if _, err := search(principalContext("usr_1", "alice"), map[string]interface{}{"query": "Porto"}); err == nil || !strings.Contains(err.Error(), "indexes unavailable") {
+		t.Fatalf("total degradation error = %v", err)
+	}
+}
+
 func principalContext(userID, externalID string) context.Context {
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: externalID, Assurance: identity.AssuranceSelfAsserted}
 	ctx := requestctx.WithPrincipal(context.Background(), principal)

@@ -108,11 +108,11 @@ func main() {
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
-		log.Info("app.memory_vector.enabled", "enabled semantic session-memory retrieval",
+		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
 			config.F("embedding_model", cfg.LLMGatewayEmbeddingModel),
 		)
 	} else {
-		log.Debug("app.memory_vector.disabled", "semantic session-memory retrieval disabled")
+		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
 	}
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)

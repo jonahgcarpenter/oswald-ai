@@ -398,7 +398,7 @@ func TestProcessFailsWhenTenantProfileCannotBeResolved(t *testing.T) {
 	}
 }
 
-func TestProcessIncludesRoleCorrectSessionContextWithoutSemanticLookup(t *testing.T) {
+func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
@@ -420,8 +420,8 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutSemanticLookup(t *testin
 		t.Fatalf("process: %v", err)
 	}
 	newEmbeddings := embedder.inputs[seedEmbeddingCount:]
-	if len(newEmbeddings) != 0 {
-		t.Fatalf("expected no automatic embeddings during request, got %d inputs: %+v", len(newEmbeddings), newEmbeddings)
+	if len(newEmbeddings) != 1 || newEmbeddings[0] != "follow up" {
+		t.Fatalf("automatic recall embeddings = %+v, want current prompt", newEmbeddings)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
 	if len(messages) != 15 || messages[2].Role != "user" || messages[2].Content != "older unrelated" || messages[3].Role != "assistant" || messages[3].Content != "old a" {
@@ -429,6 +429,43 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutSemanticLookup(t *testin
 	}
 	if messages[len(messages)-1].Role != "user" || messages[len(messages)-1].Content != "follow up" {
 		t.Fatalf("current request is not the final user message: %+v", messages)
+	}
+}
+
+func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "Atlas."}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	_, err := store.SaveMemory(context.Background(), "user-1", usermemory.SaveRequest{
+		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The project codename is Atlas.", Evidence: "The user named it.", Confidence: 0.95, Importance: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveMemory(context.Background(), "user-2", usermemory.SaveRequest{
+		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "What is the project codename?", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	messages := primaryRequests(chat.requests)[0].Messages
+	current := messages[len(messages)-1]
+	if !strings.Contains(current.Content, "UNTRUSTED LOWER-AUTHORITY REFERENCE") || !strings.Contains(current.Content, "Atlas") {
+		t.Fatalf("automatic recall missing from current user turn: %+v", current)
+	}
+	if strings.Contains(current.Content, "Borealis") || strings.Contains(messages[0].Content, "Atlas") {
+		t.Fatalf("recall crossed tenant or authority boundary: %+v", messages)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].UserText != "What is the project codename?" || strings.Contains(turns[0].UserText, "Atlas") {
+		t.Fatalf("injected recall was persisted: %+v", turns)
 	}
 }
 

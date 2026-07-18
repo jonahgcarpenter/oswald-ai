@@ -1,0 +1,252 @@
+package usermemory
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+)
+
+type fixedRecallEmbedder struct {
+	vector []float64
+	err    error
+}
+
+func (f fixedRecallEmbedder) Embed(context.Context, llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &llm.EmbedResponse{Embeddings: [][]float64{append([]float64(nil), f.vector...)}}, nil
+}
+
+func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1", "user-2")
+	ctx := context.Background()
+	_, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "The deployment identifier is ZXQ-741.", Evidence: "project notes", Confidence: 0.9, Importance: 4, SourceSessionID: "session-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Private ZXQ-741 details for another tenant.", Evidence: "private", Confidence: 1, Importance: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, stats := store.Recall(ctx, "user-1", "ZXQ-741", RecallRequest{TopK: 4})
+	if stats.LexicalError != nil || !stats.LexicalAvailable || stats.LexicalCandidateCount != 1 {
+		t.Fatalf("unexpected FTS stats: %+v", stats)
+	}
+	if len(results) != 1 || results[0].Entry.UserID != "user-1" || strings.Contains(results[0].Entry.Statement, "Private") {
+		t.Fatalf("tenant-scoped FTS results = %+v", results)
+	}
+	if results[0].Authority != RecallAuthorityUserStated || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUserStated {
+		t.Fatalf("persisted source authority missing: %+v", results[0])
+	}
+}
+
+func TestRecallVectorPrefilterPreventsForeignNeighborCrowding(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1", "user-2")
+	ctx := context.Background()
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user's favorite color is purple.", Evidence: "user statement", Confidence: 0.9, Importance: 4, Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		_, err = store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Foreign private fact %d", i), Evidence: "foreign", Confidence: 1, Importance: 5, Embedding: []float64{1, 0}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, stats := store.Recall(ctx, "user-1", "Which shade do I enjoy?", RecallRequest{TopK: 4})
+	if stats.SemanticError != nil || !stats.SemanticAvailable || stats.SemanticCandidateCount != 1 {
+		t.Fatalf("unexpected vector stats: %+v", stats)
+	}
+	if len(results) != 1 || results[0].Entry.UserID != "user-1" || !strings.Contains(results[0].Entry.Statement, "purple") {
+		t.Fatalf("tenant-prefiltered vector results = %+v", results)
+	}
+}
+
+func TestRecallVectorPrefiltersScopeBeforeKNN(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project home is Lisbon.", Evidence: "user statement", Embedding: []float64{0.9, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Closer unrelated note %d", i), Evidence: "note", Embedding: []float64{1, 0}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, stats := store.Recall(ctx, "user-1", "Where is the base?", RecallRequest{Category: "projects", CandidateLimit: 4, TopK: 2})
+	if stats.SemanticError != nil || len(results) != 1 || results[0].Entry.Category != "projects" {
+		t.Fatalf("metadata-prefiltered results=%+v stats=%+v", results, stats)
+	}
+}
+
+func TestRecallRemovesInactiveVectorsBeforeKNN(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "Active home city is Porto.", Evidence: "user statement", Embedding: []float64{0.9, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		statement := fmt.Sprintf("Obsolete home city %d", i)
+		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: statement, Evidence: "obsolete", Embedding: []float64{1, 0}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Forget("user-1", statement, ScopeLongTerm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, stats := store.Recall(ctx, "user-1", "Where is home?", RecallRequest{CandidateLimit: 4, TopK: 2})
+	if stats.SemanticError != nil || len(results) != 1 || !strings.Contains(results[0].Entry.Statement, "Porto") {
+		t.Fatalf("active vector results=%+v stats=%+v", results, stats)
+	}
+}
+
+func TestRecallDegradesIndependentlyWhenFTSIsUnavailable(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user lives in Lisbon.", Evidence: "user statement", Confidence: 1, Importance: 4, Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`DROP TABLE memory_entries_fts`); err != nil {
+		t.Fatal(err)
+	}
+
+	results, stats := store.Recall(context.Background(), "user-1", "Where is home?", RecallRequest{TopK: 2})
+	if stats.LexicalError == nil || stats.SemanticError != nil || len(results) != 1 {
+		t.Fatalf("degraded hybrid recall results=%+v stats=%+v", results, stats)
+	}
+}
+
+func TestRecallFallsBackToFTSWhenEmbeddingFails(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: fmt.Errorf("embedding offline")}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Exact project name is Meridian.", Evidence: "user statement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, stats := store.Recall(context.Background(), "user-1", "Meridian", RecallRequest{TopK: 2})
+	if stats.SemanticError == nil || stats.LexicalError != nil || len(results) != 1 {
+		t.Fatalf("FTS fallback results=%+v stats=%+v", results, stats)
+	}
+}
+
+func TestRecallDoesNotDropIncompatibleLiveVectorIndex(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project codename is Helios.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0, 0}}
+	results, stats := store.Recall(context.Background(), "user-1", "Helios", RecallRequest{TopK: 2})
+	if stats.SemanticError == nil || stats.LexicalError != nil || len(results) != 1 {
+		t.Fatalf("dimension fallback results=%+v stats=%+v", results, stats)
+	}
+	if dimension, ok := store.vectorTableDimension(memoryVectorTableV2); !ok || dimension != 2 {
+		t.Fatalf("live vector dimension = %d available=%v, want unchanged dimension 2", dimension, ok)
+	}
+}
+
+func TestRecallExcludesSupersededCorrection(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	_, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "The launch meeting is Monday.", Evidence: "initial schedule"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "The launch meeting is Tuesday.", Evidence: "corrected schedule", Supersedes: "The launch meeting is Monday."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, _ := store.Recall(ctx, "user-1", "launch meeting", RecallRequest{TopK: 4})
+	if len(results) != 1 || !strings.Contains(results[0].Entry.Statement, "Tuesday") {
+		t.Fatalf("correction recall results = %+v", results)
+	}
+}
+
+func TestRecallOmitsExpiredMemories(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	_, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary launch code ORBITAL.", Evidence: "temporary", TTL: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	results, _ := store.Recall(context.Background(), "user-1", "ORBITAL", RecallRequest{TopK: 2})
+	if len(results) != 0 {
+		t.Fatalf("expired recall results = %+v", results)
+	}
+}
+
+func TestMergeMovesTenantVectorOwnership(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "winner", "loser")
+	_, err = store.SaveMemory(context.Background(), "loser", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user was born in Porto.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MergeUsers("winner", "loser"); err != nil {
+		t.Fatal(err)
+	}
+	results, stats := store.Recall(context.Background(), "winner", "Where was I born?", RecallRequest{TopK: 2})
+	if stats.SemanticError != nil || len(results) != 1 || results[0].Entry.UserID != "winner" {
+		t.Fatalf("merged recall results=%+v stats=%+v", results, stats)
+	}
+	var loserVectors int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE canonical_user_id = 'loser'`).Scan(&loserVectors); err != nil {
+		t.Fatal(err)
+	}
+	if loserVectors != 0 {
+		t.Fatalf("loser vector count = %d", loserVectors)
+	}
+}

@@ -110,18 +110,20 @@ Per request it does the following:
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build deployment policy from soul content and gateway instructions
 5. Resolve the session's frozen, bounded, lower-authority tenant profile
-6. Load completed exchanges from recent SQLite-backed turns in the active session generation
-7. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
-8. Select the newest contiguous suffix of complete exchanges that fits the active model input budget
-9. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, historical `user`/`assistant` pairs in chronological order, and the current request as the final `user` message with any current-turn images
-10. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
-11. If the model emits tool calls:
+6. Retrieve tenant-scoped lexical and semantic durable-memory candidates for the cleaned current request
+7. Hybrid-rank, threshold, deduplicate, diversify, and bound recalled memories
+8. Load completed exchanges from recent SQLite-backed turns in the active session generation
+9. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
+10. Select bounded recall and then the newest contiguous suffix of complete exchanges that fits the active model input budget
+11. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, historical `user`/`assistant` pairs in chronological order, and the current request plus explicitly untrusted recall as the final `user` message with any current-turn images
+12. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
+13. If the model emits tool calls:
    - execute each tool handler
    - append tool results as `tool` messages
    - repeat until no tool calls remain or the consecutive tool-failure limit is hit
-12. If tool failures exhaust the retry budget, make one final model call with tools disabled
-13. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to the active session generation
-14. Return the final `AgentResponse`
+14. If tool failures exhaust the retry budget, make one final model call with tools disabled
+15. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to the active session generation
+16. Return the final `AgentResponse`
 
 Multimodal request notes:
 
@@ -181,7 +183,11 @@ Oswald keeps three distinct memory layers.
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
-- Other durable categories remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`
+- Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
+- Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
+- Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
+- Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
+- `memory.search` uses the same hybrid engine with a larger output cap for deeper investigation; `memory.list`, `memory.save`, and `memory.forget` remain explicit tools
 
 ### Account Links
 
@@ -210,6 +216,7 @@ Oswald keeps three distinct memory layers.
 Prompt-budget behavior:
 
 - The agent estimates the complete request, including tools and images, before calling the LLM gateway
+- Optional durable recall is selected as whole records before session history and is omitted before required policy, profile, or current-turn content
 - History selection never splits UTF-8 content or a user/assistant pair; it stops at the first complete pair that does not fit
 - If required deployment policy, tenant profile, and current-turn content exceed the usable input budget, history is omitted and the request proceeds with a warning log
 
@@ -358,12 +365,12 @@ Current builtin tools:
 - `web.search` — SearXNG-backed search
 - `time.current` — authoritative current date and time in a requested IANA timezone
 - `memory.save` — explicitly store or update user facts
-- `memory.search` — retrieve relevant stored user facts
+- `memory.search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-Recent completed exchanges are injected automatically from session memory. Durable user-memory retrieval and saving are model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
+Recent completed exchanges and bounded query-relevant durable recall are injected automatically. Deeper durable retrieval and all memory mutation remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
@@ -445,9 +452,9 @@ Image validation is centralized in `internal/media/images.go`.
 ## Build, Run, and Verification
 
 ```bash
-go run ./cmd/agent/main.go
-go build -o ./tmp/main ./cmd/agent/main.go
-go test ./...
+go run -tags sqlite_fts5 ./cmd/agent/main.go
+go build -tags sqlite_fts5 -o ./tmp/main ./cmd/agent/main.go
+go test -tags sqlite_fts5 ./...
 gofmt -w .
 ```
 

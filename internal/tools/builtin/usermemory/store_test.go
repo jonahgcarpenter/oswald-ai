@@ -2,6 +2,7 @@ package usermemory
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,6 +70,35 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no active memories, got %+v", entries)
+	}
+}
+
+func TestSaveMemoryUpsertKeepsTenantScopedIDAndVector(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1", "user-2")
+	ctx := context.Background()
+	first, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User one fact.", Evidence: "first", Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User two private fact.", Evidence: "private", Embedding: []float64{0, 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User one fact.", Evidence: "updated without embedding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != first.ID || updated.UserID != "user-1" || updated.Statement != "User one fact." {
+		t.Fatalf("upsert returned wrong tenant memory: %+v", updated)
+	}
+	var secondVectors int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE rowid = ? AND canonical_user_id = 'user-2'`, second.ID).Scan(&secondVectors); err != nil {
+		t.Fatal(err)
+	}
+	if secondVectors != 1 {
+		t.Fatalf("foreign tenant vector count = %d, want 1", secondVectors)
 	}
 }
 
@@ -273,8 +303,11 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	}
 }
 
-func TestMergeUsersTxPreservesLoserOnlyVectorInVecTable(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+func TestMergeUsersTxPreservesLoserOnlyVectorInTenantVecTable(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("seed without vector")}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "winner", "loser")
 	ctx := context.Background()
@@ -298,14 +331,19 @@ func TestMergeUsersTxPreservesLoserOnlyVectorInVecTable(t *testing.T) {
 	}
 
 	var winnerVectors, loserVectors int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors WHERE rowid = ?`, winner.ID).Scan(&winnerVectors); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE rowid = ? AND canonical_user_id = 'winner'`, winner.ID).Scan(&winnerVectors); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors WHERE rowid = ?`, loser.ID).Scan(&loserVectors); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE rowid = ?`, loser.ID).Scan(&loserVectors); err != nil {
 		t.Fatal(err)
 	}
 	if winnerVectors != 1 || loserVectors != 0 {
 		t.Fatalf("winner vectors=%d loser vectors=%d", winnerVectors, loserVectors)
+	}
+	store.embedder = fixedRecallEmbedder{vector: []float64{0.1, 0.2}}
+	results, stats := store.Recall(ctx, "winner", "unmatched semantic query", RecallRequest{TopK: 2})
+	if stats.SemanticError != nil || len(results) != 1 || results[0].Entry.ID != winner.ID {
+		t.Fatalf("merged duplicate semantic recall results=%+v stats=%+v", results, stats)
 	}
 }
 

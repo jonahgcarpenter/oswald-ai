@@ -17,7 +17,7 @@ COPY data/tools/ ./data/tools/
 COPY data/memory/soul/soul.md ./data/memory/soul/soul.md
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=1 go build -o oswald-agent ./cmd/agent/main.go
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-agent ./cmd/agent/main.go
 
 FROM debian:bookworm-slim
 
