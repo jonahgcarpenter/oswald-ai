@@ -30,10 +30,11 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
 	}
 	args := append([]string(nil), req.Args...)
+	actorID := req.Principal.CanonicalUserID
 	scope := mcpmanager.ScopeUser
-	owner := req.UserID
+	owner := actorID
 	if args[0] == "global" {
-		if err := h.requireAdmin(req.UserID); err != nil {
+		if err := h.requireAdmin(actorID); err != nil {
 			return commands.Result{Text: err.Error()}, nil
 		}
 		scope = mcpmanager.ScopeGlobal
@@ -48,7 +49,7 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	}
 	switch args[0] {
 	case "servers", "list":
-		return h.list(ctx, req.UserID, scope)
+		return h.list(ctx, actorID, scope)
 	case "add":
 		return h.add(ctx, scope, owner, args[1:])
 	case "remove", "delete":
@@ -58,7 +59,7 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	case "disable":
 		return h.setEnabled(ctx, scope, owner, args[1:], false)
 	case "test":
-		return h.test(ctx, req.UserID, scope, owner, args[1:])
+		return h.test(ctx, actorID, scope, owner, args[1:])
 	default:
 		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
 	}

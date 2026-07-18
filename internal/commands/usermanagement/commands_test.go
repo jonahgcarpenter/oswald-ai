@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -21,7 +22,7 @@ func TestCommandHandlerRequiresAdmin(t *testing.T) {
 	service := newAdminCommandService(t, links)
 
 	for _, input := range []string{"/users", "/user " + userID, "/deleteuser " + userID} {
-		result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: input})
+		result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(userID), Raw: input})
 		if err != nil {
 			t.Fatalf("execute %s err=%v", input, err)
 		}
@@ -138,8 +139,12 @@ func newAdminCommandService(t *testing.T, links *accountlinking.Service) *comman
 
 func executeCommand(t *testing.T, service *commands.Service, userID, raw string) (string, error) {
 	t.Helper()
-	result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: raw})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: commandPrincipal(userID), Raw: raw})
 	return result.Text, err
+}
+
+func commandPrincipal(userID string) identity.Principal {
+	return identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "external-" + userID, Assurance: identity.AssuranceDiscordGateway}
 }
 
 func newTestService(t *testing.T) *accountlinking.Service {

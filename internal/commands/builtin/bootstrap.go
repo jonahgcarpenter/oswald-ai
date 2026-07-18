@@ -48,7 +48,7 @@ func (h helpHandler) Definition() commands.Definition {
 }
 
 func (h helpHandler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
-	definitions, err := h.visibleDefinitions(ctx, req.UserID)
+	definitions, err := h.visibleDefinitions(ctx, req.Principal.CanonicalUserID)
 	if err != nil {
 		return commands.Result{}, err
 	}

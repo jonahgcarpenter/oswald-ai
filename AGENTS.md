@@ -31,18 +31,19 @@ Current layers:
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/commands/` — shared command routing and command implementations
 3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
-4. `internal/commands/usermanagement/` — admin, ban, and canonical-user inspection commands
-5. `internal/database/` — SQLite schema, account-link persistence, user memory tables, and sqlite-vec setup
-6. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
-7. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
-8. `internal/broker/` — request queue and worker pool
-9. `internal/agent/` — iterative tool-calling agent loop
-10. `internal/promptbudget/` — model context budget and prompt token estimates
-11. `internal/tools/` — tool registry, builtin handlers, and schema loading
-12. `internal/mcp/` — optional MCP client sessions and discovered tools
-13. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-14. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-15. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+4. `internal/identity/` — typed request principals and identity assurance
+5. `internal/commands/usermanagement/` — admin, ban, and canonical-user inspection commands
+6. `internal/database/` — SQLite schema, account-link persistence, user memory tables, and sqlite-vec setup
+7. `internal/gateway/` — gateway bootstrap, shared gateway runtime, and implementations
+8. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
+9. `internal/broker/` — request queue and worker pool
+10. `internal/agent/` — iterative tool-calling agent loop
+11. `internal/promptbudget/` — model context budget and prompt token estimates
+12. `internal/tools/` — tool registry, builtin handlers, and schema loading
+13. `internal/mcp/` — optional MCP client sessions and discovered tools
+14. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+15. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+16. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
 
 ## Startup Flow
 
@@ -70,15 +71,16 @@ Every request follows the same high-level path:
 1. A gateway receives user input
 2. The gateway normalizes text, attachments, sender metadata, and reply context
 3. The gateway resolves or creates the canonical user identity through `internal/commands/accountlinking/`
-4. The gateway builds a `runtime.Request` with normalized gateway facts like `IsMention`, `IsReplyToBot`, and `IsCommand`
-5. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
-6. The runtime checks the canonical user's ban status before executing commands or submitting to the agent
-7. Slash commands are handled by the shared command service without reaching the agent loop
-8. The runtime submits a `broker.Request` when the request should reach the LLM
-9. A broker worker calls `(*Agent).Process()`
-10. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
-11. The final response is returned to the shared runtime
-12. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
+4. The gateway creates an `identity.Principal` containing the canonical user, normalized external identity, gateway, and identity assurance
+5. The gateway builds a `runtime.Request` with that principal and normalized gateway facts like `IsMention`, `IsReplyToBot`, and `IsCommand`
+6. `internal/gateway/runtime.Execute()` applies shared routing, command handling, fallback handling, and broker submission
+7. The runtime checks the principal's canonical user ban status before executing commands or submitting to the agent
+8. Slash commands are handled by the shared command service without reaching the agent loop
+9. The runtime submits a `broker.Request` carrying the same principal when the request should reach the LLM
+10. A broker worker calls `(*Agent).Process()` with a typed agent request
+11. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
+12. The final response is returned to the shared runtime
+13. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -103,7 +105,7 @@ The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`.
 Per request it does the following:
 
 1. Create a request-scoped timeout from `LLM_GATEWAY_TIMEOUT + 30s` (`210s` by default)
-2. Inject `SenderID` into context so tools can identify the current user
+2. Inject the resolved principal into context so tools derive tenant ownership from its canonical user
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build the dynamic system prompt from:
    - soul content
@@ -242,6 +244,7 @@ Behavior:
   - `images`
 - If plain text is sent, the remote address is used as fallback identity
 - If `user_id` is present, it becomes the primary session identity and is normalized through the account-link service
+- WebSocket identities are explicitly self-asserted principals; canonical resolution does not authenticate them
 - Supports text-only, image-only, and text-plus-image JSON requests
 - Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
@@ -654,6 +657,7 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | `internal/commands/parser.go`                  | Slash-command parser                         |
 | `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
 | `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
+| `internal/identity/principal.go`                | Typed request principal and assurance        |
 | `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
 | `internal/media/images.go`                     | Image normalization and validation           |
 | `internal/gateway/runtime/`                    | Shared gateway request execution             |
@@ -683,10 +687,12 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 
 1. Create `internal/gateway/<name>/`
 2. Implement `gateway.Service`
-3. Normalize inbound messages into `runtime.Request`
-4. Implement a gateway-specific `runtime.Responder`
-5. Wire it in `internal/gateway/bootstrap.go`
-6. Do not import concrete gateway packages directly in `cmd/agent/main.go`
+3. Add the gateway's assurance value and validity mapping in `internal/identity/`
+4. Resolve a typed principal and normalize inbound messages into `runtime.Request`
+5. Implement a gateway-specific `runtime.Responder`
+6. Wire it in `internal/gateway/bootstrap.go`
+7. Add principal assurance and validity tests
+8. Do not import concrete gateway packages directly in `cmd/agent/main.go`
 
 ### Changing Personality
 

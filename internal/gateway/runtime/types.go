@@ -5,6 +5,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 )
@@ -25,9 +26,8 @@ type AccessChecker interface {
 // Request is the gateway-neutral representation executed by the shared runtime.
 type Request struct {
 	RequestID   string
-	Gateway     string
 	ChatID      string
-	SenderID    string
+	Principal   identity.Principal
 	DisplayName string
 	SessionKey  string
 

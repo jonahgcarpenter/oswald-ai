@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
@@ -223,6 +224,17 @@ type AgentResponse struct {
 	Metrics  *ModelMetrics `json:"metrics,omitempty"`
 }
 
+// Request contains one fully resolved request submitted to the agent.
+type Request struct {
+	RequestID   string
+	Principal   identity.Principal
+	DisplayName string
+	SessionKey  string
+	Prompt      string
+	Images      []llm.InputImage
+	StreamFunc  func(StreamChunk)
+}
+
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
@@ -240,10 +252,10 @@ type Agent struct {
 
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
 type MCPProvider interface {
-	DiscoveryTools(ctx context.Context, userID string) []llm.Tool
-	ResolveTools(ctx context.Context, userID string, names []string) []string
-	LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool
-	Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error)
+	DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool
+	ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string
+	LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool
+	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error)
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
@@ -355,19 +367,19 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	}
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, senderID string, exposure *toolruntime.Exposure) []llm.Tool {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *toolruntime.Exposure) []llm.Tool {
 	tools := a.registry.LLMToolsForVisibility(exposure.Visibility())
 	if a.mcpProvider == nil {
 		return tools
 	}
-	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, senderID)...)
-	tools = append(tools, a.mcpProvider.LLMTools(ctx, senderID, exposure.ExposedMCPTools())...)
+	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, principal)...)
+	tools = append(tools, a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools())...)
 	return tools
 }
 
-func (a *Agent) executeTool(ctx context.Context, senderID string, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (string, error) {
+func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (string, error) {
 	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, senderID, name, args, exposure.ExposedMCPTools()); handled {
+		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
 			return result, err
 		}
 	}
@@ -431,23 +443,21 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 // before generating its final response. Thinking tokens, content tokens, and
 // agent status messages are streamed via streamCallback if provided.
 //
-// sessionKey identifies the conversation session for memory retrieval and
-// persistence. Passing an empty sessionKey disables memory for this request
-// (stateless one-shot behaviour).
-//
-// senderID is the stable internal user identifier for the current request. It is
-// injected into the request context so that tools such as memory.* can
-// identify the user without needing the session key. An empty senderID disables
-// user-scoped tool behaviour.
-//
-// displayName is the human-readable name supplied by the active gateway.
-// The agent prefers the persistent-memory intro and canonical account links for
-// speaker identity, but keeps this argument for request logging.
-//
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(requestID string, gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []llm.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+func (a *Agent) Process(request Request) (*AgentResponse, error) {
+	if !request.Principal.Valid() {
+		return nil, fmt.Errorf("agent request has no valid principal")
+	}
+	requestID := request.RequestID
+	gateway := request.Principal.Gateway
+	sessionKey := request.SessionKey
+	senderID := request.Principal.CanonicalUserID
+	displayName := request.DisplayName
+	userPrompt := request.Prompt
+	userImages := request.Images
+	streamCallback := request.StreamFunc
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
 	reqLog.Debug("agent.request.start", "agent request started",
@@ -459,14 +469,12 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	ctx, cancel := context.WithTimeout(context.Background(), a.requestTimeout)
 	defer cancel()
 
-	// Inject the sender ID into the context so tool handlers can identify
-	// which user this request belongs to without coupling to the session key.
-	ctx = requestctx.WithSenderID(ctx, senderID)
+	// Inject the resolved actor so tool handlers derive ownership from the same
+	// principal used by gateways, commands, and the broker.
+	ctx = requestctx.WithPrincipal(ctx, request.Principal)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
 		RequestID: requestID,
 		SessionID: sessionKey,
-		SenderID:  senderID,
-		Gateway:   gateway,
 		Model:     a.model,
 	})
 	toolExposure := toolruntime.NewExposure()
@@ -524,10 +532,10 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				mcpCandidates = append(mcpCandidates, name)
 			}
 		}
-		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, senderID, mcpCandidates))
+		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 
-	initialTools := a.toolsForRequest(ctx, senderID, toolExposure)
+	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
 	prune := promptbudget.Result{
 		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
 		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
@@ -597,7 +605,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		accumulatedContent.Reset()
 
 		req.Messages = messages
-		req.Tools = a.toolsForRequest(ctx, senderID, toolExposure)
+		req.Tools = a.toolsForRequest(ctx, request.Principal, toolExposure)
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),
@@ -701,7 +709,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 			var toolContent string
 
-			result, execErr := a.executeTool(ctx, senderID, toolName, tc.Function.Arguments, toolExposure)
+			result, execErr := a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				consecutiveToolFailures++

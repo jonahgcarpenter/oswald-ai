@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -309,10 +310,14 @@ func (g *Gateway) processIncomingMessage(msg webhookMessage) {
 	g.startProcessingIndicators(chat.GUID, requestID)
 
 	gatewayruntime.Execute(gatewayruntime.Request{
-		RequestID:    requestID,
-		Gateway:      "imessage",
-		ChatID:       chat.GUID,
-		SenderID:     canonicalUserID,
+		RequestID: requestID,
+		ChatID:    chat.GUID,
+		Principal: identity.Principal{
+			CanonicalUserID: canonicalUserID,
+			Gateway:         "imessage",
+			ExternalID:      normalizedSenderID,
+			Assurance:       identity.AssuranceBlueBubblesWebhook,
+		},
 		DisplayName:  displayName,
 		SessionKey:   sessionKey,
 		IsDirect:     !isGroup,

@@ -31,9 +31,9 @@ func (h *handler) Definition() commands.Definition {
 func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
 	switch req.Name {
 	case "connect":
-		return h.handleConnect(req.UserID, req.Args)
+		return h.handleConnect(req.Principal.CanonicalUserID, req.Args)
 	case "disconnect":
-		return h.handleDisconnect(req.UserID, req.Args)
+		return h.handleDisconnect(req.Principal.CanonicalUserID, req.Args)
 	default:
 		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}

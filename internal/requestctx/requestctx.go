@@ -2,13 +2,17 @@
 // metadata through the tool execution pipeline.
 package requestctx
 
-import "context"
+import (
+	"context"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+)
 
 type contextKey string
 
 const (
 	requestMetaKey contextKey = "request_meta"
-	senderIDKey    contextKey = "sender_id"
+	principalKey   contextKey = "principal"
 	toolExposeKey  contextKey = "tool_exposer"
 )
 
@@ -21,20 +25,18 @@ type ToolExposer interface {
 type Metadata struct {
 	RequestID string
 	SessionID string
-	SenderID  string
-	Gateway   string
 	Model     string
 }
 
-// WithSenderID returns a copy of ctx with the sender's user ID attached.
-func WithSenderID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, senderIDKey, id)
+// WithPrincipal returns a copy of ctx with the resolved request actor attached.
+func WithPrincipal(ctx context.Context, principal identity.Principal) context.Context {
+	return context.WithValue(ctx, principalKey, principal)
 }
 
-// SenderIDFromContext extracts the sender's user ID from ctx.
-func SenderIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(senderIDKey).(string)
-	return id
+// PrincipalFromContext extracts the resolved request actor from ctx.
+func PrincipalFromContext(ctx context.Context) (identity.Principal, bool) {
+	principal, ok := ctx.Value(principalKey).(identity.Principal)
+	return principal, ok
 }
 
 // WithMetadata returns a copy of ctx with request metadata attached.
@@ -45,9 +47,6 @@ func WithMetadata(ctx context.Context, meta Metadata) context.Context {
 // MetadataFromContext extracts request metadata from ctx.
 func MetadataFromContext(ctx context.Context) Metadata {
 	meta, _ := ctx.Value(requestMetaKey).(Metadata)
-	if meta.SenderID == "" {
-		meta.SenderID = SenderIDFromContext(ctx)
-	}
 	return meta
 }
 

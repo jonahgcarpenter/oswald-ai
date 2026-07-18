@@ -23,8 +23,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -51,6 +53,10 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	}
 	if _, ok := dg.lookupReply("sent-1"); !ok {
 		t.Fatal("expected sent bot reply remembered")
+	}
+	principal := chat.lastPrincipal()
+	if principal.CanonicalUserID == "" || principal.Gateway != "discord" || principal.ExternalID != "123" || principal.Assurance != identity.AssuranceDiscordGateway {
+		t.Fatalf("unexpected principal: %+v", principal)
 	}
 }
 
@@ -247,18 +253,26 @@ func testDiscordJPEG(t *testing.T) []byte {
 }
 
 type discordFakeChatter struct {
-	mu       sync.Mutex
-	requests []llm.ChatRequest
+	mu        sync.Mutex
+	requests  []llm.ChatRequest
+	principal identity.Principal
 }
 
-func (f *discordFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *discordFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
+	f.principal, _ = requestctx.PrincipalFromContext(ctx)
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "discord response"}}, nil
+}
+
+func (f *discordFakeChatter) lastPrincipal() identity.Principal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.principal
 }
 
 func primaryDiscordRequests(requests []llm.ChatRequest) []llm.ChatRequest {

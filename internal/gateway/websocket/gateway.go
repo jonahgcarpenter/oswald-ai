@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
@@ -126,10 +127,14 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		}
 
 		gatewayruntime.Execute(gatewayruntime.Request{
-			RequestID:   requestID,
-			Gateway:     "websocket",
-			ChatID:      sessionKey,
-			SenderID:    canonicalUserID,
+			RequestID: requestID,
+			ChatID:    sessionKey,
+			Principal: identity.Principal{
+				CanonicalUserID: canonicalUserID,
+				Gateway:         "websocket",
+				ExternalID:      normalizedUserID,
+				Assurance:       identity.AssuranceSelfAsserted,
+			},
 			DisplayName: displayName,
 			SessionKey:  sessionKey,
 			IsDirect:    true,

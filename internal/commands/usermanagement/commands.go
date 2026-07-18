@@ -45,21 +45,22 @@ func (h *handler) Definition() commands.Definition {
 
 // Execute processes one admin command.
 func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	actorID := req.Principal.CanonicalUserID
 	switch req.Name {
 	case "users":
 		return h.handleUsers()
 	case "user":
 		return h.handleUser(req.Args)
 	case "admin":
-		return h.handleSetAdmin(req.UserID, req.Args, true)
+		return h.handleSetAdmin(actorID, req.Args, true)
 	case "unadmin":
-		return h.handleSetAdmin(req.UserID, req.Args, false)
+		return h.handleSetAdmin(actorID, req.Args, false)
 	case "ban":
-		return h.handleBan(req.UserID, req.Args)
+		return h.handleBan(actorID, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(req.UserID, req.Args)
+		return h.handleDeleteUser(actorID, req.Args)
 	case "unban":
-		return h.handleUnban(req.UserID, req.Args)
+		return h.handleUnban(actorID, req.Args)
 	default:
 		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}

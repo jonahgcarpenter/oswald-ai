@@ -5,6 +5,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
@@ -20,9 +21,8 @@ const (
 // one Result to ResponseChan when processing completes.
 type Request struct {
 	RequestID    string                  // Per-prompt correlation identifier
-	Channel      string                  // Gateway name (e.g., "discord", "websocket")
 	ChatID       string                  // Conversation/room identifier
-	SenderID     string                  // User identifier
+	Principal    identity.Principal      // Resolved request actor and identity assurance
 	DisplayName  string                  // Human-readable display name for the sender (optional)
 	SessionKey   string                  // Unique conversation context key
 	Prompt       string                  // The user's message text
@@ -46,16 +46,21 @@ type Result struct {
 // concurrency control: at most workerCount requests are processed in parallel,
 // with excess requests queued in the channel.
 type Broker struct {
-	agent       *agent.Agent
+	agent       Processor
 	requests    chan *Request
 	workerCount int
 	wg          sync.WaitGroup
 	log         *config.Logger
 }
 
+// Processor handles one typed agent request.
+type Processor interface {
+	Process(agent.Request) (*agent.AgentResponse, error)
+}
+
 // NewBroker creates a Broker with the given agent, fixed worker pool size,
 // and logger. Call Start() to begin dispatching requests.
-func NewBroker(aiAgent *agent.Agent, workerCount int, log *config.Logger) *Broker {
+func NewBroker(aiAgent Processor, workerCount int, log *config.Logger) *Broker {
 	return &Broker{
 		agent:       aiAgent,
 		requests:    make(chan *Request, requestQueueSize),
@@ -82,7 +87,7 @@ func (b *Broker) Start() {
 func (b *Broker) Submit(req *Request) {
 	b.log.Debug("broker.request.queued", "queued broker request",
 		config.F("request_id", req.RequestID),
-		config.F("gateway", req.Channel),
+		config.F("gateway", req.Principal.Gateway),
 		config.F("chat_id", req.ChatID),
 		config.F("session_id", req.SessionKey),
 	)
@@ -92,7 +97,7 @@ func (b *Broker) Submit(req *Request) {
 	default:
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID),
-			config.F("gateway", req.Channel),
+			config.F("gateway", req.Principal.Gateway),
 			config.F("chat_id", req.ChatID),
 			config.F("status", "rejected"),
 			config.F("reason", "queue_full"),
@@ -127,11 +132,19 @@ func (b *Broker) runWorker(id int) {
 		b.log.Debug("broker.worker.processing", "broker worker processing request",
 			config.F("worker_id", id),
 			config.F("request_id", req.RequestID),
-			config.F("gateway", req.Channel),
+			config.F("gateway", req.Principal.Gateway),
 			config.F("chat_id", req.ChatID),
 		)
 
-		resp, err := b.agent.Process(req.RequestID, req.Channel, req.SessionKey, req.SenderID, req.DisplayName, req.Prompt, req.Images, req.StreamFunc)
+		resp, err := b.agent.Process(agent.Request{
+			RequestID:   req.RequestID,
+			Principal:   req.Principal,
+			DisplayName: req.DisplayName,
+			SessionKey:  req.SessionKey,
+			Prompt:      req.Prompt,
+			Images:      req.Images,
+			StreamFunc:  req.StreamFunc,
+		})
 
 		req.ResponseChan <- Result{
 			Response: resp,

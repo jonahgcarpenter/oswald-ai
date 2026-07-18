@@ -18,8 +18,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -91,12 +93,19 @@ func TestWebSocketGatewayStructuredImageDowngrade(t *testing.T) {
 	if !strings.Contains(prompt, "describe this") || !strings.Contains(prompt, "unsupported attachment: bad.png") {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
+	if chat.principal.CanonicalUserID == "" || chat.principal.Gateway != "websocket" || chat.principal.ExternalID != "alice" || chat.principal.Assurance != identity.AssuranceSelfAsserted {
+		t.Fatalf("unexpected principal: %+v", chat.principal)
+	}
 }
 
-type wsFakeChatter struct{ requests []llm.ChatRequest }
+type wsFakeChatter struct {
+	requests  []llm.ChatRequest
+	principal identity.Principal
+}
 
-func (f *wsFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *wsFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
+	f.principal, _ = requestctx.PrincipalFromContext(ctx)
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -28,7 +29,7 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 		}
 	}
 	provider := NewProvider(NewManagerFromStore(store, config.NewLogger(config.LevelError)))
-	tools := provider.DiscoveryTools(ctx, "user_1")
+	tools := provider.DiscoveryTools(ctx, testPrincipal("user_1"))
 	names := map[string]bool{}
 	for _, tool := range tools {
 		names[tool.Function.Name] = true
@@ -49,6 +50,10 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 		if _, ok := tool.Function.Parameters.Properties["limit"]; ok {
 			t.Fatal("home.tools schema unexpectedly includes limit parameter")
 		}
+	}
+	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "websocket", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
+	if tools := provider.DiscoveryTools(ctx, invalid); len(tools) != 0 {
+		t.Fatalf("invalid principal received discovery tools: %+v", tools)
 	}
 }
 
@@ -71,13 +76,17 @@ func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
 	}}
 	provider := NewProvider(manager)
 
-	resolved := provider.ResolveTools(ctx, "user_1", []string{"home.turn_on", "home.tools", "web.search", "home.missing", "home.turn_on"})
+	resolved := provider.ResolveTools(ctx, testPrincipal("user_1"), []string{"home.turn_on", "home.tools", "web.search", "home.missing", "home.turn_on"})
 	if len(resolved) != 1 || resolved[0] != "home.turn_on" {
 		t.Fatalf("resolved tools = %+v", resolved)
 	}
-	if resolved := provider.ResolveTools(ctx, "user_2", []string{"home.turn_on"}); len(resolved) != 0 {
+	if resolved := provider.ResolveTools(ctx, testPrincipal("user_2"), []string{"home.turn_on"}); len(resolved) != 0 {
 		t.Fatalf("resolved another user's tools: %+v", resolved)
 	}
+}
+
+func testPrincipal(userID string) identity.Principal {
+	return identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: userID, Assurance: identity.AssuranceSelfAsserted}
 }
 
 func TestSearchToolsReturnsAllToolsWithoutQuery(t *testing.T) {
