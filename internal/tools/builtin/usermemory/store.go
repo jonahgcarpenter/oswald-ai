@@ -692,36 +692,41 @@ WHERE EXISTS (
 
 // RecentSessionTurns returns a user's newest completed session exchanges, newest first.
 func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(userID, sessionID, 0, offset, count)
+	return s.recentSessionTurns(context.Background(), userID, sessionID, 0, offset, count)
 }
 
 // RecentSessionTurnsForGeneration returns turns from exactly one session generation.
 func (s *Store) RecentSessionTurnsForGeneration(userID, sessionID string, generation, offset, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(userID, sessionID, generation, offset, count)
+	return s.recentSessionTurns(context.Background(), userID, sessionID, generation, offset, count)
 }
 
-func (s *Store) recentSessionTurns(userID, sessionID string, generation, offset int, count int) ([]SessionTurn, error) {
+// RecentCompletedExchanges returns complete newest-first exchanges for one tenant session generation.
+func (s *Store) RecentCompletedExchanges(ctx context.Context, userID, sessionID string, generation, limit int) ([]SessionTurn, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" || generation <= 0 {
+		return nil, fmt.Errorf("recent session exchanges require user, session, and generation")
+	}
+	return s.recentSessionTurns(ctx, userID, sessionID, generation, 1, limit)
+}
+
+func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string, generation, offset int, count int) ([]SessionTurn, error) {
 	if offset < 1 {
 		offset = 1
 	}
 	if count < 1 {
 		count = 1
 	}
-	if count > 10 {
-		count = 10
+	if count > 100 {
+		count = 100
 	}
-	if err := s.expireOldSessionTurns(); err != nil {
-		return nil, err
-	}
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`
-	args := []any{userID, sessionID}
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
+	args := []any{userID, sessionID, formatTime(time.Now())}
 	if generation > 0 {
 		query += ` AND session_generation = ?`
 		args = append(args, generation)
 	}
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, count, offset-1)
-	rows, err := s.sql.Query(query, args...)
+	rows, err := s.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session turns: %w", err)
 	}
@@ -1048,14 +1053,6 @@ func (s *Store) expireOldMemories() error {
 	_, err := s.sql.Exec(`UPDATE memory_entries SET status = 'expired', updated_at = ? WHERE status = 'active' AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()), formatTime(time.Now()))
 	if err != nil {
 		return fmt.Errorf("failed to expire memories: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) expireOldSessionTurns() error {
-	_, err := s.sql.Exec(`DELETE FROM session_turns WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime(?)`, formatTime(time.Now()))
-	if err != nil {
-		return fmt.Errorf("failed to expire session turns: %w", err)
 	}
 	return nil
 }

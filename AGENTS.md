@@ -88,10 +88,11 @@ The loop is iterative, not single-pass. The model may call tools zero or more ti
 
 The broker lives in `internal/broker/` and sits between gateways and the agent.
 
-- Requests are queued through a shared buffered channel
-- A fixed worker pool limits concurrent `Process()` calls
+- Requests and commands are scheduled in FIFO lanes keyed by canonical user and session
+- Only the head of each lane can occupy a worker, so independent conversations can run in parallel without concurrent work in the same session
+- A fixed worker pool limits concurrent lane-head execution
 - If the queue is full, the broker returns an immediate fallback response instead of blocking forever
-- Shutdown closes the queue and waits for in-flight work to finish
+- Shutdown rejects new work and drains all accepted lane work before returning
 
 Relevant config:
 
@@ -109,10 +110,10 @@ Per request it does the following:
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build deployment policy from soul content and gateway instructions
 5. Resolve the session's frozen, bounded, lower-authority tenant profile
-6. Load automatic retrieved context from recent SQLite-backed turns in the active session generation
+6. Load completed exchanges from recent SQLite-backed turns in the active session generation
 7. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
-8. Estimate prompt size against the active model budget
-9. Build the chat message array: deployment policy, frozen tenant profile, retrieved SQLite session context, current user prompt, and any current-turn images
+8. Select the newest contiguous suffix of complete exchanges that fits the active model input budget
+9. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, historical `user`/`assistant` pairs in chronological order, and the current request as the final `user` message with any current-turn images
 10. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
 11. If the model emits tool calls:
    - execute each tool handler
@@ -126,7 +127,7 @@ Multimodal request notes:
 
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
-- Session turns are stored with a `24h` TTL and generation; up to four recent completed exchanges from the active generation are injected automatically when budget permits
+- Session turns are stored with a `24h` TTL and generation; complete recent exchanges from the active generation are injected automatically when budget permits
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and memory query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 - Gateway/runtime, routing, memory, command, tool, LLM mapping, image normalization, and fake-client agent loop behavior are covered by local Go tests that do not call a live LLM
@@ -200,15 +201,17 @@ Oswald keeps three distinct memory layers.
 - Stored in SQLite table `session_turns`
 - Keyed by gateway-provided `SessionKey` and canonical user ID
 - Stores only completed final user/assistant turn pairs
-- Recent completed exchanges are automatically included in the structured retrieved-memory block when budget permits, with a compact `Tools used:` annotation when applicable
+- Recent completed exchanges are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
 - Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
-- Each stored turn has an optional `expires_at`; expired turns are deleted when recent session turns are read
+- Each stored turn has an optional `expires_at`; an immediate startup sweep and hourly cleanup remove expired turns independently of reads
+- Cleanup preserves generation counters so reset or expired session generations are never reused, and retains profile versions referenced by active sessions
 - Tool messages and intermediate reasoning are intentionally not persisted
 
 Prompt-budget behavior:
 
-- The agent estimates prompt size before calling the LLM gateway
-- If the assembled prompt exceeds the budget, the request still proceeds with a warning log; session turns are not compacted or rewritten
+- The agent estimates the complete request, including tools and images, before calling the LLM gateway
+- History selection never splits UTF-8 content or a user/assistant pair; it stops at the first complete pair that does not fit
+- If required deployment policy, tenant profile, and current-turn content exceed the usable input budget, history is omitted and the request proceeds with a warning log
 
 ## Context Budget Resolution
 

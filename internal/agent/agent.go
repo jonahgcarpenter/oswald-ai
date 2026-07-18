@@ -21,16 +21,15 @@ import (
 )
 
 const (
-	memoryRecentTurns        = 4
-	memoryRetrievalLimit     = 12
-	memoryContextBudgetRatio = 0.15
-	sessionTurnTTL           = 24 * time.Hour
-	emptyResponseRetryPrompt = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
-	emptyResponseFallback    = "I blanked on the actual answer. Try again and I'll take another shot."
-	imageSizeFallback        = "Your image is too big. Crop it and try again."
-	maxImageModelAttempts    = 5
-	imageRetryScale          = 0.75
-	imageInitialScaleMaxEdge = 1920
+	sessionHistoryCandidateLimit = 100
+	recentToolExposureTurns      = 4
+	sessionTurnTTL               = 24 * time.Hour
+	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
+	imageSizeFallback            = "Your image is too big. Crop it and try again."
+	maxImageModelAttempts        = 5
+	imageRetryScale              = 0.75
+	imageInitialScaleMaxEdge     = 1920
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -496,7 +495,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 	speakerLine := ""
 	profileContent := ""
-	memoryContextBlock := ""
 	sessionGeneration := 0
 	if a.userMemory != nil {
 		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
@@ -535,24 +533,25 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 
-	semanticQueryText, _ := stripReplyContext(userPrompt)
-	if semanticQueryText == "" {
-		semanticQueryText = userPrompt
-	}
+	var recentTurns []usermemory.SessionTurn
 	var recentToolNames []string
 	if a.userMemory != nil && sessionGeneration > 0 {
-		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
-			RecentTurns:        memoryRecentTurns,
-			Generation:         sessionGeneration,
-			ContextBudgetChars: int(float64(a.budget.PromptBudget()*4) * memoryContextBudgetRatio),
-		})
+		var err error
+		recentTurns, err = a.userMemory.RecentCompletedExchanges(ctx, senderID, sessionKey, sessionGeneration, sessionHistoryCandidateLimit)
 		if err != nil {
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
-		} else if strings.TrimSpace(memoryContext.Block) != "" {
-			memoryContextBlock = memoryContext.Block
-			recentToolNames = memoryContext.RecentToolNames
+			recentTurns = nil
+		} else {
+			toolTurnCount := len(recentTurns)
+			if toolTurnCount > recentToolExposureTurns {
+				toolTurnCount = recentToolExposureTurns
+			}
+			for _, turn := range recentTurns[:toolTurnCount] {
+				recentToolNames = append(recentToolNames, turn.ToolNames...)
+			}
+			recentToolNames = uniqueToolNames(recentToolNames)
 			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
-				config.F("recent_turn_count", memoryContext.RecentTurnCount),
+				config.F("candidate_turn_count", len(recentTurns)),
 			)
 		}
 	}
@@ -567,30 +566,20 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
-	userMessageParts := make([]string, 0, 3)
-	if profileContent != "" {
-		userMessageParts = append(userMessageParts, profileContent)
-	}
-	if memoryContextBlock != "" {
-		userMessageParts = append(userMessageParts, "<retrieved_session_context authority=\"user\">\n"+memoryContextBlock+"\n</retrieved_session_context>")
-	}
-	userMessageParts = append(userMessageParts, userPrompt)
-	modelUserPrompt := strings.Join(userMessageParts, "\n\n")
-	prune := promptbudget.Result{
-		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, modelUserPrompt, len(userImages), initialTools),
-		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, modelUserPrompt, len(userImages), initialTools),
-	}
-
-	messages := make([]llm.ChatMessage, 0, 2)
-	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
-	messages = append(messages, llm.ChatMessage{Role: "user", Content: modelUserPrompt, Images: userImages})
-
-	if prune.EstimatedAfter > a.budget.PromptBudget() {
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, profileContent, userPrompt, userImages, recentTurns, initialTools, a.budget.UsableInputLimit())
+	messages := promptContext.Messages
+	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
-			config.F("estimated_after", prune.EstimatedAfter),
-			config.F("prompt_budget", a.budget.PromptBudget()),
+			config.F("estimated_after", promptContext.EstimatedAfter),
+			config.F("prompt_budget", promptContext.InputLimit),
 		)
 	}
+	reqLog.Debug("agent.context.selected", "selected complete session exchanges",
+		config.F("selected_turn_count", promptContext.SelectedTurnCount),
+		config.F("omitted_turn_count", promptContext.OmittedTurnCount),
+		config.F("estimated_before", promptContext.EstimatedBefore),
+		config.F("estimated_after", promptContext.EstimatedAfter),
+	)
 
 	req := llm.ChatRequest{
 		Model:  a.model,
@@ -705,7 +694,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		lastResp = resp
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
-				config.F("estimated_after", prune.EstimatedAfter),
+				config.F("estimated_after", promptContext.EstimatedAfter),
 				config.F("actual_prompt_tokens", resp.PromptTokens),
 			)
 		}

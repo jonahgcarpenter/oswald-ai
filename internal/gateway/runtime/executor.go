@@ -72,18 +72,20 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		response := "Unknown command: /"
 		var err error
 		if deps.Commands != nil {
-			var result commands.Result
-			result, err = deps.Commands.Execute(context.Background(), commands.Request{
-				RequestID:   req.RequestID,
-				Principal:   req.Principal,
-				ChatID:      req.ChatID,
-				SessionKey:  req.SessionKey,
-				DisplayName: req.DisplayName,
-				IsDirect:    req.IsDirect,
-				IsGroup:     req.IsGroup,
-				Raw:         decision.Prompt,
-			})
-			response = result.Text
+			executeCommand := func() error {
+				result, commandErr := deps.Commands.Execute(context.Background(), commands.Request{
+					RequestID: req.RequestID, Principal: req.Principal, ChatID: req.ChatID,
+					SessionKey: req.SessionKey, DisplayName: req.DisplayName,
+					IsDirect: req.IsDirect, IsGroup: req.IsGroup, Raw: decision.Prompt,
+				})
+				response = result.Text
+				return commandErr
+			}
+			if deps.Broker != nil {
+				err = deps.Broker.RunInLane(context.Background(), req.Principal, req.SessionKey, executeCommand)
+			} else {
+				err = executeCommand()
+			}
 		}
 		if err != nil {
 			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(err))

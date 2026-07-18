@@ -1,6 +1,9 @@
 package broker
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
@@ -9,48 +12,65 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-const (
-	// requestQueueSize is the maximum number of requests that can be buffered
-	// in the broker channel before Submit rejects new callers.
-	requestQueueSize = 10
+const requestQueueSize = 10
+
+var (
+	// ErrQueueFull indicates that the broker has reached its global work limit.
+	ErrQueueFull = errors.New("broker queue full")
+	// ErrShuttingDown indicates that the broker no longer accepts new work.
+	ErrShuttingDown = errors.New("broker is shutting down")
 )
 
-// Request carries a single user request from a gateway into the broker.
-// The gateway populates routing metadata, the user prompt, and an optional
-// stream callback for real-time token delivery. The broker writes exactly
-// one Result to ResponseChan when processing completes.
-type Request struct {
-	RequestID    string                  // Per-prompt correlation identifier
-	ChatID       string                  // Conversation/room identifier
-	Principal    identity.Principal      // Resolved request actor and identity assurance
-	DisplayName  string                  // Human-readable display name for the sender (optional)
-	SessionKey   string                  // Unique conversation context key
-	Prompt       string                  // The user's message text
-	Images       []llm.InputImage        // Optional: current-turn image attachments for multimodal models
-	StreamFunc   func(agent.StreamChunk) // Optional: streaming callback (nil for non-streaming gateways)
-	ResponseChan chan Result             // Broker writes the final result here; must be buffered(1)
+// LaneKey identifies work that must execute serially and in acceptance order.
+type LaneKey struct {
+	CanonicalUserID string
+	SessionID       string
 }
 
-// Result is the response payload the broker delivers back to the originating
-// gateway via Request.ResponseChan.
+// Request carries a single user request from a gateway into the broker.
+type Request struct {
+	RequestID    string
+	ChatID       string
+	Principal    identity.Principal
+	DisplayName  string
+	SessionKey   string
+	Prompt       string
+	Images       []llm.InputImage
+	StreamFunc   func(agent.StreamChunk)
+	ResponseChan chan Result
+}
+
+// Result is the response payload delivered to the originating gateway.
 type Result struct {
 	Response *agent.AgentResponse
 	Err      error
 }
 
-// Broker sits between gateways and the agent. It owns a fixed-size worker pool
-// that consumes Requests from a shared channel and routes responses back to the
-// originating gateway via each request's ResponseChan.
-//
-// This decouples gateway transport logic from agent processing and provides
-// concurrency control: at most workerCount requests are processed in parallel,
-// with excess requests queued in the channel.
+type work struct {
+	key     LaneKey
+	run     func() error
+	finish  func(error)
+	request *Request
+}
+
+// Broker schedules FIFO work per canonical-user/session lane while allowing
+// unrelated lanes to use the worker pool concurrently.
 type Broker struct {
 	agent       Processor
-	requests    chan *Request
 	workerCount int
-	wg          sync.WaitGroup
+	ready       chan *work
 	log         *config.Logger
+
+	mu          sync.Mutex
+	lanes       map[LaneKey][]*work
+	outstanding int
+	accepting   bool
+	started     bool
+
+	workWG    sync.WaitGroup
+	workerWG  sync.WaitGroup
+	startOnce sync.Once
+	shutdown  sync.Once
 }
 
 // Processor handles one typed agent request.
@@ -58,99 +78,216 @@ type Processor interface {
 	Process(agent.Request) (*agent.AgentResponse, error)
 }
 
-// NewBroker creates a Broker with the given agent, fixed worker pool size,
-// and logger. Call Start() to begin dispatching requests.
+// NewBroker creates a lane-aware broker. Call Start before production use.
 func NewBroker(aiAgent Processor, workerCount int, log *config.Logger) *Broker {
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	capacity := requestQueueSize + workerCount
+	if capacity < requestQueueSize {
+		capacity = requestQueueSize
+	}
 	return &Broker{
 		agent:       aiAgent,
-		requests:    make(chan *Request, requestQueueSize),
 		workerCount: workerCount,
+		ready:       make(chan *work, capacity),
 		log:         log,
+		lanes:       make(map[LaneKey][]*work),
+		accepting:   true,
 	}
 }
 
-// Start launches the worker pool goroutines. Each worker processes requests
-// from the shared channel until it is closed by Shutdown().
+// Start launches the worker pool once.
 func (b *Broker) Start() {
-	for i := range b.workerCount {
-		b.wg.Add(1)
-		go b.runWorker(i + 1)
-	}
-	b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
+	b.startOnce.Do(func() {
+		b.mu.Lock()
+		b.started = true
+		b.mu.Unlock()
+		for i := 0; i < b.workerCount; i++ {
+			b.workerWG.Add(1)
+			go b.runWorker(i + 1)
+		}
+		b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
+	})
 }
 
-// Submit enqueues a request for processing. If the internal queue is full
-// (i.e., all workers are busy and requestQueueSize requests are already
-// waiting), it immediately returns a hardcoded response to the caller instead of
-// blocking. The caller must set req.ResponseChan to a buffered(1) channel before
-// calling Submit; the broker will write exactly one result to it.
-func (b *Broker) Submit(req *Request) {
+// Submit enqueues an agent request. Rejected requests receive one immediate result.
+func (b *Broker) Submit(req *Request) error {
+	if req.ResponseChan == nil {
+		req.ResponseChan = make(chan Result, 1)
+	}
+	w := &work{
+		key:     laneKey(req.Principal, req.SessionKey),
+		request: req,
+		run: func() error {
+			resp, err := b.agent.Process(agent.Request{
+				RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
+				SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
+			})
+			deliverResult(req.ResponseChan, Result{Response: resp, Err: err})
+			return nil
+		},
+		finish: func(err error) {
+			if err != nil {
+				deliverResult(req.ResponseChan, Result{Err: err})
+			}
+		},
+	}
 	b.log.Debug("broker.request.queued", "queued broker request",
-		config.F("request_id", req.RequestID),
-		config.F("gateway", req.Principal.Gateway),
-		config.F("chat_id", req.ChatID),
-		config.F("session_id", req.SessionKey),
-	)
-
-	select {
-	case b.requests <- req:
-	default:
+		config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+		config.F("chat_id", req.ChatID), config.F("session_id", req.SessionKey))
+	if err := b.enqueue(w); err != nil {
+		reason := "queue_full"
+		text := "request rejected: broker queue full"
+		if errors.Is(err, ErrShuttingDown) {
+			reason = "shutting_down"
+			text = "request rejected: broker shutting down"
+		}
 		b.log.Warn("broker.request.rejected", "rejected broker request",
-			config.F("request_id", req.RequestID),
-			config.F("gateway", req.Principal.Gateway),
-			config.F("chat_id", req.ChatID),
-			config.F("status", "rejected"),
-			config.F("reason", "queue_full"),
-		)
-		req.ResponseChan <- Result{
-			Response: &agent.AgentResponse{
-				Response: config.SafeText("request rejected: broker queue full"),
-			},
-		}
+			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
+		deliverResult(req.ResponseChan, Result{Response: &agent.AgentResponse{Response: config.SafeText(text)}})
+		return err
+	}
+	return nil
+}
+
+// RunInLane runs a synchronous gateway operation in the same FIFO lane used by agent work.
+func (b *Broker) RunInLane(ctx context.Context, principal identity.Principal, sessionID string, operation func() error) error {
+	if operation == nil {
+		return fmt.Errorf("broker lane operation is required")
+	}
+	done := make(chan error, 1)
+	w := &work{key: laneKey(principal, sessionID), run: operation, finish: func(err error) { done <- err }}
+	if err := b.enqueue(w); err != nil {
+		return err
+	}
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-// Shutdown closes the request channel, signalling all workers to stop after
-// draining any queued requests, then waits for all in-flight Process() calls
-// to complete before returning. New Submit() calls must not be made after
-// Shutdown() is called.
+func (b *Broker) enqueue(w *work) error {
+	b.mu.Lock()
+	if !b.accepting {
+		b.mu.Unlock()
+		return ErrShuttingDown
+	}
+	limit := requestQueueSize + b.workerCount
+	if b.outstanding >= limit {
+		b.mu.Unlock()
+		return ErrQueueFull
+	}
+	lane := b.lanes[w.key]
+	b.lanes[w.key] = append(lane, w)
+	b.outstanding++
+	b.workWG.Add(1)
+	isHead := len(lane) == 0
+	if isHead {
+		b.ready <- w
+	}
+	b.mu.Unlock()
+	return nil
+}
+
+// Shutdown rejects new work, drains every accepted lane, and stops workers.
 func (b *Broker) Shutdown() {
-	b.log.Info("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", len(b.requests)))
-	close(b.requests)
-	b.wg.Wait()
-	b.log.Info("broker.shutdown.complete", "broker shutdown complete")
+	b.shutdown.Do(func() {
+		b.mu.Lock()
+		b.accepting = false
+		queued := b.outstanding
+		started := b.started
+		b.mu.Unlock()
+		b.log.Info("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
+		if started && b.workerCount > 0 {
+			b.workWG.Wait()
+		} else {
+			b.rejectPendingWork()
+		}
+		close(b.ready)
+		b.workerWG.Wait()
+		b.log.Info("broker.shutdown.complete", "broker shutdown complete")
+	})
 }
 
-// runWorker is the body of a single broker worker goroutine. It reads
-// Requests from the shared channel, calls Agent.Process(), and delivers
-// the result back to the gateway via the request's ResponseChan.
-func (b *Broker) runWorker(id int) {
-	defer b.wg.Done()
-	b.log.Debug("broker.worker.started", "broker worker started", config.F("worker_id", id))
-
-	for req := range b.requests {
-		b.log.Debug("broker.worker.processing", "broker worker processing request",
-			config.F("worker_id", id),
-			config.F("request_id", req.RequestID),
-			config.F("gateway", req.Principal.Gateway),
-			config.F("chat_id", req.ChatID),
-		)
-
-		resp, err := b.agent.Process(agent.Request{
-			RequestID:   req.RequestID,
-			Principal:   req.Principal,
-			DisplayName: req.DisplayName,
-			SessionKey:  req.SessionKey,
-			Prompt:      req.Prompt,
-			Images:      req.Images,
-			StreamFunc:  req.StreamFunc,
-		})
-
-		req.ResponseChan <- Result{
-			Response: resp,
-			Err:      err,
-		}
+func (b *Broker) rejectPendingWork() {
+	b.mu.Lock()
+	var pending []*work
+	for _, lane := range b.lanes {
+		pending = append(pending, lane...)
 	}
+	b.lanes = make(map[LaneKey][]*work)
+	b.outstanding = 0
+	b.mu.Unlock()
+	for _, w := range pending {
+		w.finish(ErrShuttingDown)
+		b.workWG.Done()
+	}
+}
 
+func (b *Broker) runWorker(id int) {
+	defer b.workerWG.Done()
+	b.log.Debug("broker.worker.started", "broker worker started", config.F("worker_id", id))
+	for w := range b.ready {
+		if w.request != nil {
+			b.log.Debug("broker.worker.processing", "broker worker processing request",
+				config.F("worker_id", id), config.F("request_id", w.request.RequestID),
+				config.F("gateway", w.request.Principal.Gateway), config.F("chat_id", w.request.ChatID))
+		}
+		err := safeRun(w.run)
+		w.finish(err)
+		b.complete(w)
+	}
 	b.log.Debug("broker.worker.stopped", "broker worker stopped", config.F("worker_id", id))
+}
+
+func (b *Broker) complete(completed *work) {
+	b.mu.Lock()
+	lane := b.lanes[completed.key]
+	if len(lane) > 0 {
+		lane = lane[1:]
+	}
+	b.outstanding--
+	var next *work
+	if len(lane) == 0 {
+		delete(b.lanes, completed.key)
+	} else {
+		b.lanes[completed.key] = lane
+		next = lane[0]
+	}
+	b.mu.Unlock()
+	b.workWG.Done()
+	if next != nil {
+		b.ready <- next
+	}
+}
+
+func safeRun(run func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("broker operation panicked: %v", recovered)
+		}
+	}()
+	return run()
+}
+
+func deliverResult(ch chan Result, result Result) (delivered bool) {
+	defer func() {
+		if recover() != nil {
+			delivered = false
+		}
+	}()
+	select {
+	case ch <- result:
+		return true
+	default:
+		return false
+	}
+}
+
+func laneKey(principal identity.Principal, sessionID string) LaneKey {
+	return LaneKey{CanonicalUserID: principal.CanonicalUserID, SessionID: sessionID}
 }
