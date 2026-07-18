@@ -232,7 +232,7 @@ func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.T
 	rows, err := tx.QueryContext(ctx, `
 SELECT id, category, statement, scope, status, profile_approved != 0, confidence, importance, expires_at
 FROM memory_entries
-WHERE canonical_user_id = ?
+WHERE canonical_user_id = ? AND approval_state = 'approved'
 `, userID)
 	if err != nil {
 		return SessionProfile{}, fmt.Errorf("read tenant profile candidates: %w", err)

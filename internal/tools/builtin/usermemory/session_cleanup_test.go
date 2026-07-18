@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
 func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
@@ -73,6 +74,66 @@ func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
 	}
 	if next.Generation != expiredProfile.Generation+1 {
 		t.Fatalf("next generation = %d, want %d", next.Generation, expiredProfile.Generation+1)
+	}
+}
+
+func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	ctx := context.Background()
+	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary secret code.", Evidence: "temporary", TTL: time.Nanosecond, Embedding: []float64{1, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingInput := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4}
+	output, err := memoryformation.Evaluate(pendingInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(ctx, "user", CandidateProposal{Output: output, IdempotencyKey: "old-pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID := seedFormationTurn(t, store, "user", "session", "source")
+	jobID, err := store.EnqueueFormationJob(ctx, FormationSource{TurnID: turnID, SessionID: "session", ExtractorVersion: FormationExtractorVersion}, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET created_at = ? WHERE id = ?; UPDATE memory_formation_jobs SET state = 'succeeded', completed_at = ? WHERE id = ?`, formatTime(now.Add(-31*24*time.Hour)), candidate.ID, formatTime(now.Add(-8*24*time.Hour)), jobID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	counts, err := store.CleanupExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.MemoryEntriesExpired != 1 || counts.CandidatesErased != 1 || counts.FormationJobsDeleted != 1 {
+		t.Fatalf("cleanup counts=%+v", counts)
+	}
+	var status, candidateStatement, evidence string
+	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT statement FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&candidateStatement); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT content FROM memory_evidence WHERE candidate_id = ?`, candidate.ID).Scan(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if status != "expired" || candidateStatement != "" || evidence != "" {
+		t.Fatalf("status=%s candidate=%q evidence=%q", status, candidateStatement, evidence)
+	}
+	var ftsCount, vectorCount int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries_fts WHERE rowid = ?`, memory.ID).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE rowid = ?`, memory.ID).Scan(&vectorCount); err != nil {
+		t.Fatal(err)
+	}
+	if ftsCount != 0 || vectorCount != 0 {
+		t.Fatalf("expired derived rows: fts=%d vectors=%d", ftsCount, vectorCount)
 	}
 }
 

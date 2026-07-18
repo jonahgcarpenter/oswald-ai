@@ -2,7 +2,6 @@ package usermemory
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,6 +62,17 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 	}
 	if deleted != 1 {
 		t.Fatalf("expected one deleted row, got %d", deleted)
+	}
+	var erasedStatement, erasedEvidence string
+	if err := store.sql.QueryRow(`SELECT statement, evidence FROM memory_entries WHERE id = ?`, entry.ID).Scan(&erasedStatement, &erasedEvidence); err != nil {
+		t.Fatal(err)
+	}
+	var ftsCount int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries_fts WHERE rowid = ?`, entry.ID).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if erasedStatement != "" || erasedEvidence != "" || ftsCount != 0 {
+		t.Fatalf("forgotten content retained: statement=%q evidence=%q fts=%d", erasedStatement, erasedEvidence, ftsCount)
 	}
 	entries, err = store.ListMemories("usr_test", "", "", 10)
 	if err != nil {
@@ -304,7 +314,7 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 }
 
 func TestMergeUsersTxPreservesLoserOnlyVectorInTenantVecTable(t *testing.T) {
-	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("seed without vector")}, "test-embed", config.NewLogger(config.LevelError))
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), nil, "test-embed", config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}

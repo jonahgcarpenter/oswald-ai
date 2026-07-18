@@ -20,7 +20,7 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 	t.Cleanup(func() { store.Close() })
 	seedAccountUsers(t, store, "usr_1", "usr_2")
 
-	userOne := principalContext("usr_1", "same-external")
+	userOne := requestctx.WithMetadata(principalContext("usr_1", "same-external"), requestctx.Metadata{RequestID: "req", SessionID: "session", Model: "test", CurrentUserText: "Remember that I like purple."})
 	userTwo := principalContext("usr_2", "same-external")
 	save := NewSaveHandler(store, log)
 	list := NewListHandler(store, log)
@@ -34,6 +34,13 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 		"importance": 3,
 	}); err != nil {
 		t.Fatalf("save memory: %v", err)
+	}
+	var candidateID int64
+	if err := store.sql.QueryRow(`SELECT id FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'req'`).Scan(&candidateID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCandidate(context.Background(), "usr_1", candidateID); err != nil {
+		t.Fatal(err)
 	}
 
 	otherList, err := list(userTwo, map[string]interface{}{})
@@ -51,7 +58,7 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list owner: %v", err)
 	}
-	if !strings.Contains(ownerList, "The user likes purple.") {
+	if !strings.Contains(ownerList, "I like purple.") {
 		t.Fatalf("owner memory missing after other user forget: %q", ownerList)
 	}
 }

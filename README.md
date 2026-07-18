@@ -13,6 +13,7 @@ The model receives the user prompt, can call registered tools, and then returns 
 - iMessage, Discord, and WebSocket gateway
 - HACS integration for Home Assistant [here](https://github.com/jonahgcarpenter/has-oswald-conversation)
 - Builtin `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- Traceable durable-memory formation with grounded candidates, conservative automatic policy, conversational confirmation for sensitive facts, atomic publication, and recoverable post-turn extraction
 - User & Global MCP integrations
 - SQLite-backed session chat memory with role-correct, budget-aware history and TTL expiry
 - Tenant-scoped hybrid durable-memory recall using FTS5 and sqlite-vec

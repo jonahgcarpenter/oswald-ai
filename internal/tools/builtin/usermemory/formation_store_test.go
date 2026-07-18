@@ -1,0 +1,584 @@
+package usermemory
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+)
+
+func TestFormationCandidatePublicationIsIdempotentAndTraceable(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	output := evaluatedFormationCandidate(t, "I use Go for project Atlas", "I use Go for project Atlas", "The user uses Go for project Atlas.", memoryformation.CategoryProjects)
+	proposal := CandidateProposal{Output: output, IdempotencyKey: "candidate-1", Source: FormationSource{RequestID: "req-1", SessionID: "session-1", ExtractorVersion: FormationExtractorVersion}}
+	candidate, created, err := store.ProposeCandidate(ctx, "user-1", proposal)
+	if err != nil || !created || candidate.State != "approved" {
+		t.Fatalf("propose candidate=%+v created=%v err=%v", candidate, created, err)
+	}
+	duplicate, created, err := store.ProposeCandidate(ctx, "user-1", proposal)
+	if err != nil || created || duplicate.ID != candidate.ID {
+		t.Fatalf("idempotent proposal=%+v created=%v err=%v", duplicate, created, err)
+	}
+	memory, err := store.PublishCandidate(ctx, "user-1", candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.PublishCandidate(ctx, "user-1", candidate.ID)
+	if err != nil || again.ID != memory.ID {
+		t.Fatalf("idempotent publication=%+v err=%v", again, err)
+	}
+	var approval, provenance, authority, mode, sensitivity string
+	var candidateID int64
+	if err := store.sql.QueryRow(`SELECT approval_state, provenance_type, source_authority, formation_mode, sensitivity, candidate_id FROM memory_entries WHERE id = ?`, memory.ID).Scan(&approval, &provenance, &authority, &mode, &sensitivity, &candidateID); err != nil {
+		t.Fatal(err)
+	}
+	if approval != "approved" || provenance != "user_statement" || authority != "user_direct" || mode != "automatic_extraction" || sensitivity != "low" || candidateID != candidate.ID {
+		t.Fatalf("unexpected formation metadata: approval=%s provenance=%s authority=%s mode=%s sensitivity=%s candidate=%d", approval, provenance, authority, mode, sensitivity, candidateID)
+	}
+	for table, want := range map[string]int{"memory_evidence": 2, "memory_formation_audit": 2, "tenant_profile_versions": 1} {
+		var got int
+		if err := store.sql.QueryRow(`SELECT count(*) FROM ` + table).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s count=%d want=%d", table, got, want)
+		}
+	}
+}
+
+func TestFormationPublicationRollbackKeepsOldMemoryActive(t *testing.T) {
+	stages := []string{"validated", "canonical_written", "vector_written", "supersession_written", "audit_written", "profile_written", "candidate_published"}
+	for _, stage := range stages {
+		t.Run(stage, func(t *testing.T) {
+			store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+			defer store.Close() // nolint:errcheck
+			seedAccountUsers(t, store, "user-1")
+			old, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: "The user lives in Boston.", Evidence: "legacy", Confidence: 1, Importance: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			output := evaluatedFormationCandidate(t, "I moved to Porto", "I moved to Porto", "The user lives in Porto.", memoryformation.CategoryEnvironment)
+			candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "replace", Source: FormationSource{RequestID: "req"}, SupersedesStatement: old.Statement})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.sql.Exec(`UPDATE memory_candidates SET state = 'approved' WHERE id = ?`, candidate.ID); err != nil {
+				t.Fatal(err)
+			}
+			store.formationFailpoint = func(current string) error {
+				if current == stage {
+					return fmt.Errorf("injected %s failure", stage)
+				}
+				return nil
+			}
+			if _, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID); err == nil {
+				t.Fatal("expected publication failure")
+			}
+			store.formationFailpoint = nil
+			var status string
+			if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, old.ID).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != "active" {
+				t.Fatalf("old status=%s want active", status)
+			}
+			var replacements int
+			if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries WHERE canonical_user_id = 'user-1' AND statement = 'The user lives in Porto.'`).Scan(&replacements); err != nil {
+				t.Fatal(err)
+			}
+			if replacements != 0 {
+				t.Fatalf("replacement count=%d after rollback", replacements)
+			}
+			loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+			if err != nil || loaded.PublishedMemoryID != 0 {
+				t.Fatalf("candidate after rollback=%+v err=%v", loaded, err)
+			}
+		})
+	}
+}
+
+func TestApprovedCandidatePublishesAfterEmbeddingRecovery(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("embedding offline")}, "embed-model", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "embedding-recovery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID); err == nil {
+		t.Fatal("expected embedding failure")
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.State != "approved" || loaded.PublishedMemoryID != 0 {
+		t.Fatalf("candidate after outage=%+v err=%v", loaded, err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := store.ApprovedUnpublishedCandidates(context.Background(), 10)
+	if err != nil || len(retryable) != 0 {
+		t.Fatalf("undelivered candidate became retryable: %+v err=%v", retryable, err)
+	}
+	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0}}
+	published, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || published.ID == 0 {
+		t.Fatalf("publish after recovery=%+v err=%v", published, err)
+	}
+}
+
+func TestDuplicateCorrectionStillSupersedesOldMemory(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	old, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: "The user lives in Boston.", Evidence: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "Remember that I live in Porto", Statement: "The user lives in Porto.", Evidence: "I live in Porto", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeExplicitRemember, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: output.Statement, Evidence: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "duplicate-correction", SupersedesStatement: old.Statement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "user")
+	if err != nil || published.ID != existing.ID {
+		t.Fatalf("published=%+v err=%v", published, err)
+	}
+	var status string
+	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, old.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "superseded" {
+		t.Fatalf("old status=%s", status)
+	}
+}
+
+func TestAutomaticContradictionWaitsForConfirmationAndPreservesHistory(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	old, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: "The user lives in Boston.", Evidence: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := evaluatedFormationCandidate(t, "I live in Porto.", "I live in Porto.", "The user lives in Porto.", memoryformation.CategoryEnvironment)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "automatic-contradiction"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.State != "pending_confirmation" || candidate.SupersedesMemoryID != old.ID || candidate.SupersedesStatement != old.Statement {
+		t.Fatalf("contradiction candidate=%+v", candidate)
+	}
+	var oldStatus string
+	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, old.ID).Scan(&oldStatus); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != "active" {
+		t.Fatalf("old memory changed before confirmation: %s", oldStatus)
+	}
+	var relations int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_relations WHERE canonical_user_id = 'user-1' AND source_candidate_id = ? AND target_memory_id = ? AND relation_type = 'contradicts'`, candidate.ID, old.ID).Scan(&relations); err != nil {
+		t.Fatal(err)
+	}
+	if relations != 1 {
+		t.Fatalf("contradiction relation count=%d", relations)
+	}
+	newMemory, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, old.ID).Scan(&oldStatus); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.ListMemories("user-1", "", "environment", 10)
+	if err != nil || oldStatus != "superseded" || len(active) != 1 || active[0].ID != newMemory.ID {
+		t.Fatalf("old_status=%s active=%+v new=%+v err=%v", oldStatus, active, newMemory, err)
+	}
+}
+
+func TestFormationCanReactivateInactiveExactStatement(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	first, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.PublishCandidate(context.Background(), "user-1", first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET status = 'expired' WHERE id = ?`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reactivated, err := store.PublishCandidate(context.Background(), "user-1", second.ID)
+	if err != nil || reactivated.ID != memory.ID || reactivated.Status != "active" {
+		t.Fatalf("reactivated=%+v err=%v", reactivated, err)
+	}
+}
+
+func TestExpiredPublishedMemoryErasesCandidateEvidence(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "expire-published"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET expires_at = ? WHERE id = ?`, formatTime(now.Add(-time.Minute)), memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CleanupExpiredSessions(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.State != "rejected" {
+		t.Fatalf("expired candidate=%+v err=%v", loaded, err)
+	}
+	canonical, err := store.EntryByID(memory.ID)
+	if err != nil || canonical.Statement != "" || canonical.Evidence != "" || canonical.Status != "expired" {
+		t.Fatalf("expired canonical memory=%+v err=%v", canonical, err)
+	}
+	var profileFacts int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM tenant_profile_version_facts WHERE source_memory_id = ?`, memory.ID).Scan(&profileFacts); err != nil {
+		t.Fatal(err)
+	}
+	if profileFacts != 0 {
+		t.Fatalf("expired memory remains in %d profile snapshots", profileFacts)
+	}
+}
+
+func TestPendingCandidateDecisionAndPublication(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	in := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4}
+	output, err := memoryformation.Evaluate(in)
+	if err != nil || output.Approval != memoryformation.ApprovalPendingConfirmation {
+		t.Fatalf("policy output=%+v err=%v", output, err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingCandidate(context.Background(), "user-1")
+	if err != nil || pending.ID != candidate.ID {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	memory, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "authenticated_user")
+	if err != nil || memory.ID == 0 {
+		t.Fatalf("approved memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestDeliveredConfirmationIsAuthorizedInEachPresentedSession(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	in := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4}
+	output, err := memoryformation.Evaluate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "multi-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sessionID := range []string{"session-a", "session-b"} {
+		if err := store.MarkConfirmationPresented(context.Background(), "user-1", sessionID, 1, "request-"+sessionID, candidate.ID); err != nil {
+			t.Fatal(err)
+		}
+		presented, err := store.PresentedPendingCandidate(context.Background(), "user-1", sessionID, 1)
+		if err != nil || presented.ID != candidate.ID {
+			t.Fatalf("session %s candidate=%+v err=%v", sessionID, presented, err)
+		}
+	}
+	if _, err := store.PresentedPendingCandidate(context.Background(), "user-1", "session-a", 2); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("new session generation reused old confirmation: %v", err)
+	}
+	available, err := store.UnpresentedPendingCandidate(context.Background(), "user-1", "session-a", 2)
+	if err != nil || available.ID != candidate.ID {
+		t.Fatalf("candidate not available in new generation: %+v err=%v", available, err)
+	}
+}
+
+func TestPendingConfirmationCanRetryAfterPublicationFailure(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("offline")}, "embed-model", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	in := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4}
+	output, err := memoryformation.Evaluate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "retry-confirmation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "user"); err == nil {
+		t.Fatal("expected failed publication")
+	}
+	approved, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || approved.State != "approved" {
+		t.Fatalf("durable approval=%+v err=%v", approved, err)
+	}
+	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0}}
+	memory, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || memory.ID == 0 {
+		t.Fatalf("confirmation retry memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestForgetAllErasesUnpublishedCandidateContent(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	in := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4}
+	output, err := memoryformation.Evaluate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "unpublished"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID := seedFormationTurn(t, store, "user-1", "session", "sensitive source")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{TurnID: turnID, SessionID: "session", ExtractorVersion: FormationExtractorVersion}, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveFormationJobArtifact(context.Background(), job, `[{"evidence":"sensitive source"}]`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Forget("user-1", "all", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.State != "rejected" {
+		t.Fatalf("forgotten candidate=%+v err=%v", loaded, err)
+	}
+	artifact, err := store.FormationJobArtifact(context.Background(), job)
+	if err != nil || artifact != "" {
+		t.Fatalf("forgotten formation artifact=%q err=%v", artifact, err)
+	}
+}
+
+func TestFormationJobLeaseRetryAndReplay(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	turnID := seedFormationTurn(t, store, "user-1", "session-1", "Remember this")
+	source := FormationSource{RequestID: "req", SessionID: "session-1", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: FormationExtractorVersion}
+	firstID, err := store.EnqueueFormationJob(context.Background(), source, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := store.EnqueueFormationJob(context.Background(), source, "user-1")
+	if err != nil || firstID != secondID {
+		t.Fatalf("replayed job id=%d want=%d err=%v", secondID, firstID, err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.ID != firstID || job.AttemptCount != 1 {
+		t.Fatalf("claimed job=%+v err=%v", job, err)
+	}
+	if err := store.RetryFormationJob(context.Background(), job, "extractor failed", 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Second)), firstID); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.AttemptCount != 2 {
+		t.Fatalf("retried job=%+v err=%v", job, err)
+	}
+	if err := store.CompleteFormationJob(context.Background(), job, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ClaimFormationJob(context.Background(), time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("claim after completion error=%v", err)
+	}
+}
+
+func TestFormationReconciliationRequiresDeliveryMarkerAndRedrivesDeadJobs(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	deliveredTurn := seedFormationTurn(t, store, "user-1", "session", "delivered")
+	_ = seedFormationTurn(t, store, "user-1", "session", "not delivered")
+	if err := store.MarkFormationEligible(context.Background(), "user-1", deliveredTurn); err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.ReconcileFormationJobs(context.Background(), "model", FormationExtractorVersion)
+	if err != nil || created != 1 {
+		t.Fatalf("reconciled=%d err=%v", created, err)
+	}
+	created, err = store.ReconcileFormationJobs(context.Background(), "model", FormationExtractorVersion)
+	if err != nil || created != 0 {
+		t.Fatalf("second reconciliation=%d err=%v", created, err)
+	}
+	var jobID int64
+	if err := store.sql.QueryRow(`SELECT id FROM memory_formation_jobs WHERE source_turn_id = ?`, deliveredTurn).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', attempt_count = 5, completed_at = ?, updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), formatTime(time.Now().Add(-time.Hour)), jobID); err != nil {
+		t.Fatal(err)
+	}
+	redriven, err := store.RedriveDeadFormationJobs(context.Background(), 5*time.Minute)
+	if err != nil || redriven != 1 {
+		t.Fatalf("redriven=%d err=%v", redriven, err)
+	}
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "retry" {
+		t.Fatalf("state=%s err=%v", state, err)
+	}
+	for cycle := 1; cycle < 3; cycle++ {
+		if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
+			t.Fatal(err)
+		}
+		redriven, err = store.RedriveDeadFormationJobs(context.Background(), time.Minute)
+		if err != nil || redriven != 1 {
+			t.Fatalf("redrive cycle %d count=%d err=%v", cycle+1, redriven, err)
+		}
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
+		t.Fatal(err)
+	}
+	redriven, err = store.RedriveDeadFormationJobs(context.Background(), time.Minute)
+	if err != nil || redriven != 0 {
+		t.Fatalf("quarantined redrive count=%d err=%v", redriven, err)
+	}
+}
+
+func TestApprovedPublicationRecoverySurvivesSourceTurnExpiry(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	turnID := seedFormationTurn(t, store, "user-1", "session", "I use Go for Atlas")
+	if err := store.MarkFormationEligible(context.Background(), "user-1", turnID); err != nil {
+		t.Fatal(err)
+	}
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "eligible-recovery", Source: FormationSource{TurnID: turnID, SessionID: "session"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET updated_at = ? WHERE id = ?; DELETE FROM session_turns WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), candidate.ID, turnID); err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := store.ApprovedUnpublishedCandidates(context.Background(), 10)
+	if err != nil || len(retryable) != 1 || retryable[0].ID != candidate.ID || !retryable[0].FormationEligibleAt.After(time.Time{}) {
+		t.Fatalf("retryable after turn expiry=%+v err=%v", retryable, err)
+	}
+}
+
+func TestMergeMovesFormationCandidatesJobsAndAudit(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "winner", "loser")
+	turnID := seedFormationTurn(t, store, "loser", "session", "I use Go for Atlas")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	publishedCandidate, _, err := store.ProposeCandidate(context.Background(), "loser", CandidateProposal{Output: output, IdempotencyKey: "published", Source: FormationSource{RequestID: "req-published", SessionID: "session", TurnID: turnID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := store.PublishCandidate(context.Background(), "loser", publishedCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingInput := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4}
+	pendingOutput, err := memoryformation.Evaluate(pendingInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _, err := store.ProposeCandidate(context.Background(), "loser", CandidateProposal{Output: pendingOutput, IdempotencyKey: "pending", Source: FormationSource{RequestID: "req-pending", SessionID: "session", TurnID: turnID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "req-job", SessionID: "session", SessionGeneration: 1, TurnID: turnID, ExtractorVersion: FormationExtractorVersion}, "loser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MergeUsers("winner", "loser"); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories("winner", "", "", 10)
+	if err != nil || len(memories) != 1 || memories[0].ID != published.ID {
+		t.Fatalf("merged memories=%+v err=%v", memories, err)
+	}
+	mergedPending, err := store.PendingCandidate(context.Background(), "winner")
+	if err != nil || mergedPending.ID != pending.ID || mergedPending.SourceTurnID != turnID {
+		t.Fatalf("merged pending=%+v err=%v", mergedPending, err)
+	}
+	if _, err := store.FormationJobState(context.Background(), "winner", jobID); err != nil {
+		t.Fatalf("merged job: %v", err)
+	}
+	var loserRows, auditRows int
+	if err := store.sql.QueryRow(`SELECT (SELECT count(*) FROM memory_candidates WHERE canonical_user_id = 'loser') + (SELECT count(*) FROM memory_formation_jobs WHERE canonical_user_id = 'loser')`).Scan(&loserRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_formation_audit WHERE canonical_user_id = 'winner'`).Scan(&auditRows); err != nil {
+		t.Fatal(err)
+	}
+	if loserRows != 0 || auditRows == 0 {
+		t.Fatalf("loser rows=%d winner audit rows=%d", loserRows, auditRows)
+	}
+}
+
+func evaluatedFormationCandidate(t *testing.T, source, evidence, statement string, category memoryformation.Category) memoryformation.CandidateOutput {
+	t.Helper()
+	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: source, Statement: statement, Evidence: evidence, Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: category, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func seedFormationTurn(t *testing.T, store *Store, userID, sessionID, userText string) int64 {
+	t.Helper()
+	now := formatTime(time.Now().UTC())
+	result, err := store.sql.Exec(`INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, created_at) VALUES (?, ?, 1, ?, 'answer', ?)`, sessionID, userID, userText, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

@@ -45,8 +45,8 @@ func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
 	if len(results) != 1 || results[0].Entry.UserID != "user-1" || strings.Contains(results[0].Entry.Statement, "Private") {
 		t.Fatalf("tenant-scoped FTS results = %+v", results)
 	}
-	if results[0].Authority != RecallAuthorityUserStated || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUserStated {
-		t.Fatalf("persisted source authority missing: %+v", results[0])
+	if results[0].Authority != RecallAuthorityUnknown || len(results[0].Provenance) == 0 || results[0].Provenance[0].Authority != RecallAuthorityUnknown {
+		t.Fatalf("legacy save authority should remain unknown: %+v", results[0])
 	}
 }
 
@@ -158,7 +158,7 @@ func TestRecallFallsBackToFTSWhenEmbeddingFails(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
-	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Exact project name is Meridian.", Evidence: "user statement"})
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Exact project name is Meridian.", Evidence: "user statement", Embedding: []float64{1, 0}})
 	if err != nil {
 		t.Fatal(err)
 	}

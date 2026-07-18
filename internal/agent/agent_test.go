@@ -18,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -469,6 +470,56 @@ func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 	}
 }
 
+func TestProcessConversationallyConfirmsPendingMemory(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I can answer that. Please reply `yes remember it` or `no do not save it`."}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction,
+		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity,
+		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "pending-phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "websocket", ExternalID: "user-1", Assurance: identity.AssuranceWebSocketSignedToken}
+	first, err := agent.Process(Request{RequestID: "req-1", Principal: principal, DisplayName: "Display", SessionKey: "session-1", IsDirect: true, Prompt: "yes remember it"})
+	if err != nil || first.Response == "" {
+		t.Fatalf("first response=%+v err=%v", first, err)
+	}
+	messages := primaryRequests(chat.requests)[0].Messages
+	if !strings.Contains(messages[0].Content, "server-managed memory confirmation") || !strings.Contains(messages[len(messages)-1].Content, "pending_memory_confirmation") || !strings.Contains(messages[len(messages)-1].Content, "555-0100") {
+		t.Fatalf("pending confirmation not safely presented: %+v", messages)
+	}
+	unconfirmed, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || unconfirmed.PublishedMemoryID != 0 {
+		t.Fatalf("unsolicited confirmation changed candidate: %+v err=%v", unconfirmed, err)
+	}
+	if first.PendingConfirmationCandidateID != candidate.ID {
+		t.Fatalf("pending confirmation id=%d want=%d", first.PendingConfirmationCandidateID, candidate.ID)
+	}
+	if err := store.MarkConfirmationPresented(context.Background(), "user-1", "session-1", first.SessionGeneration, "req-1", candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	requestCount := len(chat.requests)
+	confirmed, err := agent.Process(Request{RequestID: "req-2", Principal: principal, DisplayName: "Display", SessionKey: "session-1", IsDirect: true, Prompt: "yes remember it"})
+	if err != nil || confirmed.Response != "I'll remember that." {
+		t.Fatalf("confirmation response=%+v err=%v", confirmed, err)
+	}
+	if len(chat.requests) != requestCount {
+		t.Fatal("exact confirmation unexpectedly called the model")
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.PublishedMemoryID == 0 {
+		t.Fatalf("confirmed candidate=%+v err=%v", loaded, err)
+	}
+}
+
 func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
@@ -863,8 +914,15 @@ func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *re
 	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?), (?, ?, ?)`, "user-1", now, now, "user-2", now, now); err != nil {
 		t.Fatalf("seed account user: %v", err)
 	}
+	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, linked_at, verified) VALUES ('websocket', 'user-1', 'user-1', 'User 1', ?, 1), ('websocket', 'user-2', 'user-2', 'User 2', ?, 1)`, now, now); err != nil {
+		t.Fatalf("seed linked accounts: %v", err)
+	}
 	db.Close() // nolint:errcheck
-	userStore, err := usermemory.NewSQLiteStore(dbPath, embedder, "embed-model", log)
+	embeddingModel := ""
+	if embedder != nil {
+		embeddingModel = "embed-model"
+	}
+	userStore, err := usermemory.NewSQLiteStore(dbPath, embedder, embeddingModel, log)
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}

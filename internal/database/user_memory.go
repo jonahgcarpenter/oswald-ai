@@ -37,8 +37,27 @@ CREATE TABLE IF NOT EXISTS memory_entries (
 	embedding_model TEXT NOT NULL DEFAULT '',
 	embedding_dim INTEGER NOT NULL DEFAULT 0,
 	profile_approved INTEGER NOT NULL DEFAULT 0 CHECK (profile_approved IN (0, 1)),
+	candidate_id INTEGER,
+	provenance_type TEXT NOT NULL DEFAULT 'legacy_import',
+	source_authority TEXT NOT NULL DEFAULT 'unknown',
+	source_request_id TEXT NOT NULL DEFAULT '',
+	source_turn_id INTEGER,
+	formation_mode TEXT NOT NULL DEFAULT 'legacy_import',
+	sensitivity TEXT NOT NULL DEFAULT 'unknown',
+	approval_state TEXT NOT NULL DEFAULT 'approved' CHECK (approval_state IN ('proposed', 'pending_confirmation', 'approved', 'rejected')),
+	approved_at TEXT NOT NULL DEFAULT '',
+	approved_by TEXT NOT NULL DEFAULT '',
+	valid_from TEXT NOT NULL DEFAULT '',
+	valid_until TEXT,
+	invalidated_at TEXT,
+	invalidation_reason TEXT NOT NULL DEFAULT '',
+	erased_at TEXT,
+	erasure_reason TEXT NOT NULL DEFAULT '',
+	erasure_request_id TEXT NOT NULL DEFAULT '',
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	FOREIGN KEY (supersedes_id) REFERENCES memory_entries(id) ON DELETE SET NULL,
+	FOREIGN KEY (candidate_id) REFERENCES memory_candidates(id) ON DELETE SET NULL,
+	FOREIGN KEY (source_turn_id) REFERENCES session_turns(id) ON DELETE SET NULL,
 	UNIQUE (canonical_user_id, scope, statement_key)
 );
 
@@ -169,6 +188,9 @@ ON tenant_sessions (expires_at);
 		return fmt.Errorf("failed to initialize session cleanup indexes: %w", err)
 	}
 	if err := d.migrateStableTenantProfiles(); err != nil {
+		return err
+	}
+	if err := d.migrateMemoryFormationSchema(); err != nil {
 		return err
 	}
 	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_profile_candidates ON memory_entries (canonical_user_id, profile_approved, status, scope, category, expires_at)`); err != nil {

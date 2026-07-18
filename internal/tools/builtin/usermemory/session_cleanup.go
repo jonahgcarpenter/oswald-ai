@@ -13,6 +13,9 @@ type SessionCleanupCounts struct {
 	SessionTurnsDeleted    int64
 	TenantSessionsDeleted  int64
 	ProfileVersionsDeleted int64
+	MemoryEntriesExpired   int64
+	CandidatesErased       int64
+	FormationJobsDeleted   int64
 }
 
 // SessionCleaner removes expired session state.
@@ -38,6 +41,88 @@ func (s *Store) CleanupExpiredSessions(ctx context.Context, now time.Time) (Sess
 	defer tx.Rollback() // nolint:errcheck
 
 	result, err := tx.ExecContext(ctx, `
+UPDATE memory_entries
+SET status = 'expired', statement = '', statement_key = 'expired:' || id, evidence = '',
+	invalidated_at = ?, invalidation_reason = 'ttl_expired', erased_at = ?, erasure_reason = 'ttl_expired', updated_at = ?
+WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
+`, nowText, nowText, nowText, nowText)
+	if err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("expire durable memories: %w", err)
+	}
+	if counts.MemoryEntriesExpired, err = result.RowsAffected(); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("count expired durable memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE memory_formation_jobs
+SET extraction_payload = ''
+WHERE source_turn_id IN (
+	SELECT source_turn_id FROM memory_candidates
+	WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
+		AND source_turn_id IS NOT NULL
+);
+UPDATE memory_evidence SET content = ''
+WHERE canonical_user_id IN (SELECT canonical_user_id FROM memory_entries WHERE status = 'expired')
+	AND (memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
+		OR candidate_id IN (SELECT candidate_id FROM memory_entries WHERE status = 'expired' AND candidate_id IS NOT NULL));
+UPDATE memory_candidates
+SET statement = '', statement_key = 'erased:' || id, evidence_summary = '', state = 'rejected',
+	decision_reason = 'published_memory_expired', decided_at = ?, decided_by = 'retention', updated_at = ?
+WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired');
+`, nowText, nowText); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("erase expired published memory provenance: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM tenant_profile_versions
+WHERE id IN (
+	SELECT facts.profile_version_id
+	FROM tenant_profile_version_facts facts
+	JOIN memory_entries entries ON entries.id = facts.source_memory_id
+	WHERE entries.status = 'expired'
+)
+`); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("delete expired memory profile snapshots: %w", err)
+	}
+	var vectorsExist int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'memory_entry_vectors_v2'`).Scan(&vectorsExist); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("inspect memory vectors during cleanup: %w", err)
+	}
+	if vectorsExist != 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors_v2 WHERE rowid IN (SELECT id FROM memory_entries WHERE status != 'active')`); err != nil {
+			return SessionCleanupCounts{}, fmt.Errorf("delete inactive memory vectors: %w", err)
+		}
+	}
+	result, err = tx.ExecContext(ctx, `
+UPDATE memory_candidates
+SET statement = '', statement_key = 'erased:' || id, evidence_summary = '', state = 'rejected',
+	decision_reason = 'candidate_retention_expired', decided_at = ?, decided_by = 'retention', updated_at = ?
+WHERE (state IN ('proposed', 'pending_confirmation', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL))
+	AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
+`, nowText, nowText, nowText, formatTime(now.Add(-30*24*time.Hour)))
+	if err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("erase expired memory candidates: %w", err)
+	}
+	if counts.CandidatesErased, err = result.RowsAffected(); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("count erased memory candidates: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '' WHERE candidate_id IN (SELECT id FROM memory_candidates WHERE statement = '' AND state = 'rejected')`); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("erase expired candidate evidence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET extraction_payload = '' WHERE source_turn_id IN (SELECT source_turn_id FROM memory_candidates WHERE statement = '' AND state = 'rejected' AND source_turn_id IS NOT NULL)`); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("erase retained formation artifacts: %w", err)
+	}
+	result, err = tx.ExecContext(ctx, `
+DELETE FROM memory_formation_jobs
+WHERE (state IN ('succeeded', 'skipped') AND completed_at <= ?)
+	OR (state = 'dead' AND completed_at <= ?)
+`, formatTime(now.Add(-7*24*time.Hour)), formatTime(now.Add(-30*24*time.Hour)))
+	if err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("delete retained memory formation jobs: %w", err)
+	}
+	if counts.FormationJobsDeleted, err = result.RowsAffected(); err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("count deleted memory formation jobs: %w", err)
+	}
+
+	result, err = tx.ExecContext(ctx, `
 DELETE FROM session_turns
 WHERE (expires_at IS NOT NULL AND expires_at <= ?)
    OR EXISTS (
@@ -114,10 +199,13 @@ func RunSessionCleanup(ctx context.Context, cleaner SessionCleaner, interval tim
 				config.F("session_turn_count", counts.SessionTurnsDeleted),
 				config.F("tenant_session_count", counts.TenantSessionsDeleted),
 				config.F("profile_version_count", counts.ProfileVersionsDeleted),
+				config.F("memory_expired_count", counts.MemoryEntriesExpired),
+				config.F("candidate_erased_count", counts.CandidatesErased),
+				config.F("formation_job_deleted_count", counts.FormationJobsDeleted),
 				config.F("duration_ms", time.Since(started).Milliseconds()),
 				config.F("status", "ok"),
 			}
-			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted == 0 {
+			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted+counts.MemoryEntriesExpired+counts.CandidatesErased+counts.FormationJobsDeleted == 0 {
 				logger.Debug("memory.session_cleanup.complete", "session cleanup completed", fields...)
 			} else {
 				logger.Info("memory.session_cleanup.complete", "session cleanup completed", fields...)

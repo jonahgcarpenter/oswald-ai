@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,6 +92,45 @@ func TestExecuteUsesPrincipalCanonicalUserForAccess(t *testing.T) {
 	}
 }
 
+func TestExecuteEnqueuesFormationOnlyAfterResponseDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	responder := &fakeResponder{}
+	enqueuer := &fakeFormationEnqueuer{responder: responder}
+	deps.Formation = enqueuer
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || !enqueuer.called || enqueuer.userID != "user" || enqueuer.source.TurnID <= 0 {
+		t.Fatalf("outcome=%+v enqueuer=%+v", outcome, enqueuer)
+	}
+	if !enqueuer.responseDelivered {
+		t.Fatal("formation was enqueued before response delivery")
+	}
+}
+
+func TestExecuteMarksConfirmationOnlyAfterSuccessfulDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := responseRuntimeProcessor{response: &agent.AgentResponse{Model: "model", Response: "answer\n\nReply exactly `yes remember it`.", PendingConfirmationCandidateID: 42}}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	enqueuer := &fakeFormationEnqueuer{responder: responder}
+	deps := Dependencies{Broker: b, Log: log, Formation: enqueuer}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if !enqueuer.presentCalled || !enqueuer.responseDelivered || enqueuer.candidateID != 42 {
+		t.Fatalf("confirmation presentation=%+v", enqueuer)
+	}
+
+	failedResponder := &fakeResponder{sendErr: errors.New("offline")}
+	failedEnqueuer := &fakeFormationEnqueuer{responder: failedResponder}
+	deps.Formation = failedEnqueuer
+	Execute(Request{RequestID: "req-2", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
+	if failedEnqueuer.presentCalled {
+		t.Fatal("failed delivery marked confirmation as presented")
+	}
+}
+
 func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
@@ -148,6 +188,7 @@ type fakeResponder struct {
 	command  string
 	agent    *agent.AgentResponse
 	agentErr string
+	sendErr  error
 }
 
 func (r *fakeResponder) StartProcessing() (func(), error) {
@@ -167,7 +208,7 @@ func (r *fakeResponder) SendCommandResponse(text string) error {
 
 func (r *fakeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	r.agent = response
-	return nil
+	return r.sendErr
 }
 
 func (r *fakeResponder) SendAgentError(text string) error {
@@ -189,6 +230,37 @@ type fakeAccess struct {
 	banned bool
 	reason string
 	userID string
+}
+
+type fakeFormationEnqueuer struct {
+	responder         *fakeResponder
+	called            bool
+	responseDelivered bool
+	userID            string
+	source            usermemory.FormationSource
+	presentCalled     bool
+	candidateID       int64
+}
+
+func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
+	f.called = true
+	f.responseDelivered = f.responder.agent != nil
+	f.userID = userID
+	f.source = source
+	return nil
+}
+
+func (f *fakeFormationEnqueuer) MarkConfirmationPresented(_ context.Context, _, _ string, _ int, _ string, candidateID int64) error {
+	f.presentCalled = true
+	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
+	f.candidateID = candidateID
+	return nil
+}
+
+type responseRuntimeProcessor struct{ response *agent.AgentResponse }
+
+func (p responseRuntimeProcessor) Process(agent.Request) (*agent.AgentResponse, error) {
+	return p.response, nil
 }
 
 func (a *fakeAccess) BanStatus(userID string) (bool, string, error) {

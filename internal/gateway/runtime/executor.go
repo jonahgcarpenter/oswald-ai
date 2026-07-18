@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // Execute applies shared routing policy, command handling, and broker submission.
@@ -139,6 +140,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		Principal:    req.Principal,
 		DisplayName:  req.DisplayName,
 		SessionKey:   req.SessionKey,
+		IsDirect:     req.IsDirect,
 		Prompt:       decision.Prompt,
 		Images:       decision.Images,
 		StreamFunc:   req.StreamFunc,
@@ -168,6 +170,22 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
+		if deps.Formation != nil && result.Response.PendingConfirmationCandidateID > 0 {
+			if presentErr := deps.Formation.MarkConfirmationPresented(context.Background(), userID, req.SessionKey, result.Response.SessionGeneration, req.RequestID, result.Response.PendingConfirmationCandidateID); presentErr != nil {
+				log.Warn("memory.confirmation.present_failed", "failed to mark delivered memory confirmation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("candidate_id", result.Response.PendingConfirmationCandidateID), config.F("status", "degraded"), config.ErrorField(presentErr))
+			}
+		}
+		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
+			source := usermemory.FormationSource{
+				RequestID: req.RequestID, SessionID: req.SessionKey,
+				SessionGeneration: result.Response.SessionGeneration,
+				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
+				ExtractorVersion: usermemory.FormationExtractorVersion,
+			}
+			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
+				log.Warn("memory.formation.job.enqueue_failed", "failed to enqueue post-turn memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
+			}
+		}
 	}
 	return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
 }
