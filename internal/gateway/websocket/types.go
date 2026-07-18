@@ -2,6 +2,8 @@ package websocket
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	gorilla "github.com/gorilla/websocket"
 
@@ -12,10 +14,11 @@ import (
 
 // Gateway handles local WebSocket connections for testing and client access.
 type Gateway struct {
-	Port    string
-	Links   *accountlinking.Service
-	Runtime gatewayruntime.Dependencies
-	Log     *config.Logger
+	Port          string
+	Authenticator *Authenticator
+	Links         *accountlinking.Service
+	Runtime       gatewayruntime.Dependencies
+	Log           *config.Logger
 }
 
 func (wg *Gateway) log() *config.Logger {
@@ -23,14 +26,14 @@ func (wg *Gateway) log() *config.Logger {
 }
 
 // IncomingMessage is the JSON payload clients send over the WebSocket connection.
-// UserID identifies the sender for persistent memory and session keying.
+// UserID is retained for client compatibility and must match the authenticated
+// token subject when present; it never selects request ownership.
 // DisplayName is an optional human-readable name for the sender; it is injected
 // into the system prompt so the model knows who it is speaking with.
 // Prompt is the user's message text.
 //
-// Clients that send a plain text string (non-JSON) are handled with legacy
-// fallback behaviour: the raw text is used as the prompt and the connection's
-// remote address is used as both the user ID and session key.
+// Clients may send a plain text string instead; the raw text becomes the prompt
+// while identity and session ownership still come from the handshake token.
 type IncomingMessage struct {
 	UserID      string          `json:"user_id"`
 	DisplayName string          `json:"display_name"`
@@ -48,7 +51,20 @@ type IncomingImage struct {
 var upgrader = gorilla.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
+	CheckOrigin:     originAllowed,
+}
+
+func originAllowed(r *http.Request) bool {
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
 		return true
-	},
+	}
+	if len(origins) != 1 {
+		return false
+	}
+	origin, err := url.Parse(origins[0])
+	if err != nil || !origin.IsAbs() || (origin.Scheme != "http" && origin.Scheme != "https") || origin.User != nil || (origin.Path != "" && origin.Path != "/") || origin.RawQuery != "" || origin.Fragment != "" {
+		return false
+	}
+	return strings.EqualFold(origin.Host, r.Host)
 }

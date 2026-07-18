@@ -54,3 +54,23 @@ func TestParseLevelAndRequestID(t *testing.T) {
 		t.Fatalf("NewRequestID() = %q, want req_ plus 16 hex chars", id)
 	}
 }
+
+func TestLoadReadsWebSocketAuthenticationConfig(t *testing.T) {
+	t.Setenv("WEBSOCKET_AUTH_SIGNING_KEY", "0123456789abcdef0123456789abcdef")
+	t.Setenv("WEBSOCKET_AUTH_MAX_TOKEN_TTL", "10m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WebSocketAuthSigningKey != "0123456789abcdef0123456789abcdef" || cfg.WebSocketAuthMaxTokenTTL != 10*time.Minute {
+		t.Fatalf("unexpected websocket auth config: key_set=%t ttl=%s", cfg.WebSocketAuthSigningKey != "", cfg.WebSocketAuthMaxTokenTTL)
+	}
+}
+
+func TestLoadRejectsInvalidWebSocketTokenTTL(t *testing.T) {
+	t.Setenv("WEBSOCKET_AUTH_MAX_TOKEN_TTL", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid websocket token TTL error")
+	}
+}

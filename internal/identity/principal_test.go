@@ -13,6 +13,8 @@ func TestPrincipalValidityAndAuthentication(t *testing.T) {
 		{name: "unknown assurance", principal: Principal{CanonicalUserID: "usr_1", Gateway: "test", ExternalID: "one", Assurance: "unknown"}, valid: false},
 		{name: "mismatched assurance", principal: Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "one", Assurance: AssuranceDiscordGateway}, valid: false},
 		{name: "self asserted", principal: Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "one", Assurance: AssuranceSelfAsserted}, valid: true},
+		{name: "signed websocket", principal: Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "one", Assurance: AssuranceWebSocketSignedToken}, valid: true, authenticated: true},
+		{name: "signed websocket on discord", principal: Principal{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "one", Assurance: AssuranceWebSocketSignedToken}, valid: false},
 		{name: "discord", principal: Principal{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "1", Assurance: AssuranceDiscordGateway}, valid: true, authenticated: true},
 		{name: "imessage", principal: Principal{CanonicalUserID: "usr_1", Gateway: "imessage", ExternalID: "+15551234567", Assurance: AssuranceBlueBubblesWebhook}, valid: true, authenticated: true},
 	}
