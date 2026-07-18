@@ -398,7 +398,7 @@ func TestProcessFailsWhenTenantProfileCannotBeResolved(t *testing.T) {
 	}
 }
 
-func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) {
+func TestProcessIncludesRoleCorrectSessionContextWithoutSemanticLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
@@ -424,18 +424,11 @@ func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) 
 		t.Fatalf("expected no automatic embeddings during request, got %d inputs: %+v", len(newEmbeddings), newEmbeddings)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	foundRecent := false
-	foundOlder := false
-	for _, msg := range messages {
-		if msg.Content != "" && contains(msg.Content, "recent four") {
-			foundRecent = true
-		}
-		if msg.Content != "" && contains(msg.Content, "older relevant") {
-			foundOlder = true
-		}
+	if len(messages) != 15 || messages[2].Role != "user" || messages[2].Content != "older unrelated" || messages[3].Role != "assistant" || messages[3].Content != "old a" {
+		t.Fatalf("history roles or chronology are wrong: %+v", messages)
 	}
-	if !foundRecent || foundOlder {
-		t.Fatalf("expected recent session context only, got messages %+v", messages)
+	if messages[len(messages)-1].Role != "user" || messages[len(messages)-1].Content != "follow up" {
+		t.Fatalf("current request is not the final user message: %+v", messages)
 	}
 }
 
@@ -591,8 +584,14 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	if !requestHasTool(request, "home.turn_on") {
 		t.Fatalf("first request did not pre-expose recent MCP tool: %+v", toolNames(request))
 	}
-	if !messagesContain(request.Messages, "Tools used: home.turn_on, home.tools, web.search") {
-		t.Fatalf("system messages missing compact tool annotation: %+v", request.Messages)
+	foundAnnotation := false
+	for _, message := range request.Messages {
+		if message.Role == "assistant" && strings.Contains(message.Content, "Tools used: home.turn_on, home.tools, web.search") {
+			foundAnnotation = true
+		}
+	}
+	if !foundAnnotation {
+		t.Fatalf("assistant history missing compact tool annotation: %+v", request.Messages)
 	}
 }
 
@@ -628,7 +627,7 @@ func TestProcessFreezesTenantProfileUntilNewSession(t *testing.T) {
 	if !strings.Contains(latestProfile, "concise replies") || latestProfile == firstProfile {
 		t.Fatalf("new session did not receive latest profile: %q", latestProfile)
 	}
-	if len(requests[0].Messages) != 2 || requests[0].Messages[1].Role != "user" || !strings.Contains(requests[1].Messages[1].Content, "authority=\"lower\"") {
+	if len(requests[0].Messages) != 3 || requests[0].Messages[1].Role != "user" || !strings.Contains(requests[1].Messages[1].Content, "authority=\"lower\"") {
 		t.Fatalf("tenant profile is not lower-authority user context: %+v", requests[0].Messages)
 	}
 }

@@ -14,7 +14,8 @@ The model receives the user prompt, can call registered tools, and then returns 
 - HACS integration for Home Assistant [here](https://github.com/jonahgcarpenter/has-oswald-conversation)
 - Builtin `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
 - User & Global MCP integrations
-- SQLite-backed session chat memory with TTL expiry
+- SQLite-backed session chat memory with role-correct, budget-aware history and TTL expiry
+- FIFO execution per user/session, with parallel processing across independent conversations
 - Per-user persistent memory in SQLite and a live-editable soul file
 - Fully local runtime with no cloud hosted model dependency
 
@@ -24,7 +25,7 @@ Oswald uses three memory layers:
 
 - Soul memory: `data/memory/soul/soul.md`, read fresh on every request
 - Persistent user memory: `data/database/oswald.db`, managed by `memory.*` tools
-- Session chat memory: recent completed exchanges in SQLite `session_turns`, expired by TTL
+- Session chat memory: recent completed exchanges in SQLite `session_turns`, replayed as complete `user`/`assistant` pairs that fit the active model budget and expired by an independent cleanup loop
 
 `AGENTS.md` documents the full runtime and architecture in detail.
 

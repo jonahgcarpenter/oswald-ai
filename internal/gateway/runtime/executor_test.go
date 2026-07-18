@@ -105,6 +105,42 @@ func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	}
 }
 
+func TestExecuteSerializesCommandBehindAgentRequest(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &blockingRuntimeProcessor{started: make(chan struct{}), release: make(chan struct{})}
+	b := broker.NewBroker(processor, 2, log)
+	b.Start()
+	defer b.Shutdown()
+	commandService, err := commands.NewService(pingHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := Dependencies{Broker: b, Commands: commandService, Log: log}
+	principal := testPrincipal("user")
+	llmDone := make(chan Outcome, 1)
+	go func() {
+		llmDone <- Execute(Request{RequestID: "llm", Principal: principal, SessionKey: "session", IsMention: true, Text: "hello"}, deps, &fakeResponder{})
+	}()
+	<-processor.started
+	commandResponder := &fakeResponder{}
+	commandDone := make(chan Outcome, 1)
+	go func() {
+		commandDone <- Execute(Request{RequestID: "command", Principal: principal, SessionKey: "session", Text: "/ping"}, deps, commandResponder)
+	}()
+	select {
+	case <-commandDone:
+		t.Fatal("command overtook active same-session agent request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(processor.release)
+	if outcome := <-llmDone; outcome.Err != nil {
+		t.Fatalf("agent outcome: %+v", outcome)
+	}
+	if outcome := <-commandDone; outcome.Err != nil || commandResponder.command != "pong:user:/ping" {
+		t.Fatalf("command outcome=%+v responder=%+v", outcome, commandResponder)
+	}
+}
+
 type fakeResponder struct {
 	started  bool
 	cleaned  bool
@@ -168,6 +204,17 @@ type runtimeFakeChatter struct{}
 
 func (runtimeFakeChatter) Chat(context.Context, llm.ChatRequest, func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "agent response"}}, nil
+}
+
+type blockingRuntimeProcessor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingRuntimeProcessor) Process(agent.Request) (*agent.AgentResponse, error) {
+	close(p.started)
+	<-p.release
+	return &agent.AgentResponse{Response: "agent response"}, nil
 }
 
 func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {

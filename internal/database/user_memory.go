@@ -154,6 +154,18 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	if err := d.ensureUserMemoryColumn("session_turns", "session_generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	if _, err := d.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_session_turns_context
+ON session_turns (canonical_user_id, session_id, session_generation, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_session_turns_expiry
+ON session_turns (expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tenant_sessions_expiry
+ON tenant_sessions (expires_at);
+`); err != nil {
+		return fmt.Errorf("failed to initialize session cleanup indexes: %w", err)
+	}
 	if err := d.migrateStableTenantProfiles(); err != nil {
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,6 +85,8 @@ func main() {
 	}
 	defer userMemStore.Close() // nolint:errcheck
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
+	cleanupCtx, cancelSessionCleanup := context.WithCancel(context.Background())
+	var cleanupWG sync.WaitGroup
 
 	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
@@ -145,6 +148,11 @@ func main() {
 	// limit and routes responses back to the originating gateway.
 	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, rootLog.Server("broker"))
 	requestBroker.Start()
+	cleanupWG.Add(1)
+	go func() {
+		defer cleanupWG.Done()
+		usermemory.RunSessionCleanup(cleanupCtx, userMemStore, time.Hour, rootLog)
+	}()
 
 	// Boot up all registered gateways dynamically
 	log.Info("app.start", "starting application")
@@ -166,6 +174,8 @@ func main() {
 	<-stop // The main thread will pause here indefinitely until a signal is received
 
 	log.Info("app.shutdown", "shutting down application")
+	cancelSessionCleanup()
+	cleanupWG.Wait()
 
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
