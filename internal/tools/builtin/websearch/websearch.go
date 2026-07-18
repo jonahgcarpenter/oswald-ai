@@ -91,7 +91,8 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 		}
 
 		meta := requestctx.MetadataFromContext(ctx)
-		log.Agent("agent.tool.web.search", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model).Debug(
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		log.Agent("agent.tool.web.search", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model).Debug(
 			"agent.tool.web.search.start",
 			"starting web search tool",
 			config.F("tool_name", "web.search"),

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 func TestServiceExecutesKnownUnknownAndAdminCommands(t *testing.T) {
@@ -16,24 +18,61 @@ func TestServiceExecutesKnownUnknownAndAdminCommands(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	result, err := service.Execute(context.Background(), Request{UserID: "user", Raw: "/ping one two"})
+	result, err := service.Execute(context.Background(), Request{Principal: testPrincipal("user"), Raw: "/ping one two"})
 	if err != nil || result.Text != "ran ping:one two" {
 		t.Fatalf("known command result=%+v err=%v", result, err)
 	}
 
-	result, err = service.Execute(context.Background(), Request{UserID: "user", Raw: "/missing"})
+	result, err = service.Execute(context.Background(), Request{Principal: testPrincipal("user"), Raw: "/missing"})
 	if err != nil || result.Text != "Unknown command: /missing" {
 		t.Fatalf("unknown command result=%+v err=%v", result, err)
 	}
 
-	result, err = service.Execute(context.Background(), Request{UserID: "user", Raw: "/secret"})
+	result, err = service.Execute(context.Background(), Request{Principal: testPrincipal("user"), Raw: "/secret"})
 	if err != nil || result.Text != "You are not allowed to use admin commands." {
 		t.Fatalf("non-admin result=%+v err=%v", result, err)
 	}
 
-	result, err = service.Execute(context.Background(), Request{UserID: "admin", Raw: "/secret"})
+	result, err = service.Execute(context.Background(), Request{Principal: testPrincipal("admin"), Raw: "/secret"})
 	if err != nil || result.Text != "ran secret:" {
 		t.Fatalf("admin result=%+v err=%v", result, err)
+	}
+}
+
+func TestServiceRejectsInvalidPrincipal(t *testing.T) {
+	service, err := NewService(fakeCommand{name: "ping"})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if _, err := service.Execute(context.Background(), Request{Raw: "/ping"}); err == nil {
+		t.Fatal("expected invalid principal error")
+	}
+}
+
+func TestServicePropagatesPrincipalToHandler(t *testing.T) {
+	want := identity.Principal{
+		CanonicalUserID: "user",
+		Gateway:         "discord",
+		ExternalID:      "123",
+		Assurance:       identity.AssuranceDiscordGateway,
+	}
+	var got identity.Principal
+	service, err := NewService(HandlerFunc{
+		DefinitionValue: Definition{Name: "principal"},
+		ExecuteFunc: func(_ context.Context, req Request) (Result, error) {
+			got = req.Principal
+			return Result{Text: "ok"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if _, err := service.Execute(context.Background(), Request{Principal: want, Raw: "/principal"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got != want {
+		t.Fatalf("principal = %+v, want %+v", got, want)
 	}
 }
 
@@ -65,6 +104,10 @@ func (c fakeCommand) Execute(_ context.Context, req Request) (Result, error) {
 
 type fakeAuthorizer struct {
 	admins map[string]bool
+}
+
+func testPrincipal(userID string) identity.Principal {
+	return identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "external-" + userID, Assurance: identity.AssuranceDiscordGateway}
 }
 
 func (a fakeAuthorizer) IsAdmin(userID string) (bool, error) {

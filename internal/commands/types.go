@@ -1,6 +1,10 @@
 package commands
 
-import "context"
+import (
+	"context"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+)
 
 // Definition describes a command registered with the command service.
 type Definition struct {
@@ -14,8 +18,7 @@ type Definition struct {
 // Request is the gateway-neutral command execution context.
 type Request struct {
 	RequestID   string
-	UserID      string
-	Gateway     string
+	Principal   identity.Principal
 	ChatID      string
 	SessionKey  string
 	DisplayName string

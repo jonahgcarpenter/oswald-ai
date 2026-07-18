@@ -11,7 +11,8 @@ import (
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
-	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+	principal, _ := requestctx.PrincipalFromContext(ctx)
+	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 }
 
 // NewReadHandler returns a tool handler for the soul.read tool.

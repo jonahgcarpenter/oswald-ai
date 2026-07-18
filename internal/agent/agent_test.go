@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
@@ -27,7 +28,7 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{testInputImage(t, 800, 600)}, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{testInputImage(t, 800, 600)}, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, reg)
 
 	var chunks []StreamChunk
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -127,7 +128,7 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.maxToolFailureRetries = 1
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 	}
 	agent, store := newTestAgent(t, chat, nil, reg)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -192,7 +193,7 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, nil)
 
 	var chunks []StreamChunk
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -234,7 +235,7 @@ func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestProcessUsesFriendlyFallbackAfterRepeatedOllamaParserError(t *testing.T)
 	agent, store := newTestAgent(t, chat, nil, nil)
 	var chunks []StreamChunk
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -290,7 +291,7 @@ func TestProcessDoesNotRetryUnrelatedModelError(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: "out of memory"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestProcessRetriesStoppedModelRunnerWithExponentiallySmallerImages(t *testi
 	agent, _ := newTestAgent(t, chat, nil, nil)
 	input := testInputImage(t, 800, 600)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{input}, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{input}, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestProcessUsesImageSizeFallbackAfterFiveStoppedRunnerAttempts(t *testing.T
 	agent, store := newTestAgent(t, chat, nil, nil)
 	var chunks []StreamChunk
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{testInputImage(t, 800, 600)}, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", []llm.InputImage{testInputImage(t, 800, 600)}, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -373,7 +374,7 @@ func TestProcessDoesNotRetryStoppedModelRunnerWithoutImages(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped`}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	resp, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestProcessIncludesRecentSessionContextWithoutSemanticLookup(t *testing.T) 
 	}
 	seedEmbeddingCount := len(embedder.inputs)
 
-	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
+	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -427,7 +428,7 @@ func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	_, err := agent.Process("req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -442,7 +443,7 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -457,7 +458,7 @@ func TestProcessDoesNotInjectCurrentTimeIntoSystemPrompt(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -476,7 +477,7 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 		t.Fatalf("sync speaker intro: %v", err)
 	}
 
-	_, err := agent.Process("req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -538,7 +539,7 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
 
-	resp, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
+	resp, err := processAgent(agent, "req-mcp", "websocket", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -568,7 +569,7 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
@@ -593,7 +594,7 @@ func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
 		}
 	}
 
-	if _, err := agent.Process("req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-mcp", "websocket", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
@@ -664,11 +665,11 @@ type fakeEmbedder struct {
 
 type fakeMCPProvider struct{}
 
-func (p *fakeMCPProvider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool {
+func (p *fakeMCPProvider) DiscoveryTools(context.Context, identity.Principal) []llm.Tool {
 	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.tools", Description: "Search Home Assistant tools", Parameters: llm.ToolParameters{Type: "object"}}}}
 }
 
-func (p *fakeMCPProvider) ResolveTools(ctx context.Context, userID string, names []string) []string {
+func (p *fakeMCPProvider) ResolveTools(_ context.Context, _ identity.Principal, names []string) []string {
 	for _, name := range names {
 		if name == "home.turn_on" {
 			return []string{name}
@@ -677,14 +678,14 @@ func (p *fakeMCPProvider) ResolveTools(ctx context.Context, userID string, names
 	return nil
 }
 
-func (p *fakeMCPProvider) LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool {
+func (p *fakeMCPProvider) LLMTools(_ context.Context, _ identity.Principal, exposed map[string]bool) []llm.Tool {
 	if !exposed["home.turn_on"] {
 		return nil
 	}
 	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.turn_on", Description: "Turn on a light", Parameters: llm.ToolParameters{Type: "object"}}}}
 }
 
-func (p *fakeMCPProvider) Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error) {
+func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, name string, _ map[string]interface{}, exposed map[string]bool) (string, bool, error) {
 	if name == "home.tools" {
 		if exposer := requestctx.ToolExposerFromContext(ctx); exposer != nil {
 			exposer.ExposeTools([]string{"home.turn_on"})
@@ -695,6 +696,30 @@ func (p *fakeMCPProvider) Execute(ctx context.Context, userID, name string, args
 		return "light turned on", true, nil
 	}
 	return "", false, nil
+}
+
+func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayName, prompt string, images []llm.InputImage, streamFunc func(StreamChunk)) (*AgentResponse, error) {
+	assurance := identity.AssuranceSelfAsserted
+	switch gateway {
+	case "discord":
+		assurance = identity.AssuranceDiscordGateway
+	case "imessage":
+		assurance = identity.AssuranceBlueBubblesWebhook
+	}
+	return agent.Process(Request{
+		RequestID: requestID,
+		Principal: identity.Principal{
+			CanonicalUserID: userID,
+			Gateway:         gateway,
+			ExternalID:      userID,
+			Assurance:       assurance,
+		},
+		DisplayName: displayName,
+		SessionKey:  sessionKey,
+		Prompt:      prompt,
+		Images:      images,
+		StreamFunc:  streamFunc,
+	})
 }
 
 func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {

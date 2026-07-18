@@ -13,13 +13,8 @@ import (
 
 // Execute applies shared routing policy, command handling, and broker submission.
 func Execute(req Request, deps Dependencies, responder Responder) Outcome {
-	log := deps.Log.Server("gateway.runtime", config.F("gateway", req.Gateway))
+	log := deps.Log.Server("gateway.runtime", config.F("gateway", req.Principal.Gateway))
 	decision := routing.Decide(routing.Input{
-		Gateway:            req.Gateway,
-		ChatID:             req.ChatID,
-		SenderID:           req.SenderID,
-		DisplayName:        req.DisplayName,
-		SessionKey:         req.SessionKey,
 		IsDirect:           req.IsDirect,
 		IsGroup:            req.IsGroup,
 		IsMention:          req.IsMention,
@@ -41,11 +36,17 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		}
 		return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
 	}
+	if !req.Principal.Valid() {
+		err := responder.SendAgentError("Failed to resolve account identity")
+		log.Error("gateway.account.invalid_principal", "request has no valid principal", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID))
+		return Outcome{Action: decision.Action, Reason: "invalid_principal", Err: err}
+	}
+	userID := req.Principal.CanonicalUserID
 
-	if deps.Access != nil && req.SenderID != "" {
-		isBanned, banReason, err := deps.Access.BanStatus(req.SenderID)
+	if deps.Access != nil {
+		isBanned, banReason, err := deps.Access.BanStatus(userID)
 		if err != nil {
-			log.Error("gateway.access_check.failed", "failed to check user access", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))
+			log.Error("gateway.access_check.failed", "failed to check user access", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(err))
 			sendErr := responder.SendAgentError(config.SafeErrorText(err))
 			if sendErr != nil {
 				log.Error("gateway.send.failed", "failed to send access error response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(sendErr))
@@ -74,8 +75,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			var result commands.Result
 			result, err = deps.Commands.Execute(context.Background(), commands.Request{
 				RequestID:   req.RequestID,
-				UserID:      req.SenderID,
-				Gateway:     req.Gateway,
+				Principal:   req.Principal,
 				ChatID:      req.ChatID,
 				SessionKey:  req.SessionKey,
 				DisplayName: req.DisplayName,
@@ -84,7 +84,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			response = result.Text
 		}
 		if err != nil {
-			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", req.SenderID), config.ErrorField(err))
+			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(err))
 			response = config.SafeErrorText(err)
 		}
 		sendErr := responder.SendCommandResponse(response)
@@ -99,7 +99,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("request_id", req.RequestID),
 			config.F("chat_id", req.ChatID),
 			config.F("session_id", req.SessionKey),
-			config.F("user_id", req.SenderID),
+			config.F("user_id", userID),
 			config.F("command", commandName),
 			config.F("response_chars", len(response)),
 			config.F("duration_ms", time.Since(startedAt).Milliseconds()),
@@ -120,7 +120,8 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		config.F("request_id", req.RequestID),
 		config.F("chat_id", req.ChatID),
 		config.F("session_id", req.SessionKey),
-		config.F("user_id", req.SenderID),
+		config.F("user_id", userID),
+		config.F("identity_assurance", req.Principal.Assurance),
 		config.F("image_count", len(decision.Images)),
 		config.F("is_group", req.IsGroup),
 		config.F("is_mention", req.IsMention),
@@ -130,9 +131,8 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 
 	brokerReq := &broker.Request{
 		RequestID:    req.RequestID,
-		Channel:      req.Gateway,
 		ChatID:       req.ChatID,
-		SenderID:     req.SenderID,
+		Principal:    req.Principal,
 		DisplayName:  req.DisplayName,
 		SessionKey:   req.SessionKey,
 		Prompt:       decision.Prompt,
@@ -160,7 +160,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("request_id", req.RequestID),
 			config.F("chat_id", req.ChatID),
 			config.F("session_id", req.SessionKey),
-			config.F("user_id", req.SenderID),
+			config.F("user_id", userID),
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)

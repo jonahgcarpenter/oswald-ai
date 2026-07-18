@@ -12,13 +12,22 @@ import (
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
-	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+	principal, _ := requestctx.PrincipalFromContext(ctx)
+	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
+}
+
+func canonicalUserID(ctx context.Context) string {
+	principal, _ := requestctx.PrincipalFromContext(ctx)
+	if !principal.Valid() {
+		return ""
+	}
+	return principal.CanonicalUserID
 }
 
 // NewSaveHandler returns a Handler for explicit user-requested memory saves.
 func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := requestctx.SenderIDFromContext(ctx)
+		userID := canonicalUserID(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.save: no user identity available in this context")
 		}
@@ -58,7 +67,7 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 // NewSearchHandler returns a Handler for memory search.
 func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := requestctx.SenderIDFromContext(ctx)
+		userID := canonicalUserID(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.search: no user identity available in this context")
 		}
@@ -77,7 +86,7 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 // NewListHandler returns a Handler for listing active memory.
 func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := requestctx.SenderIDFromContext(ctx)
+		userID := canonicalUserID(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.list: no user identity available in this context")
 		}
@@ -97,7 +106,7 @@ func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 // NewForgetHandler returns a Handler for deleting active memories.
 func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := requestctx.SenderIDFromContext(ctx)
+		userID := canonicalUserID(ctx)
 		if userID == "" {
 			return "", fmt.Errorf("memory.forget: no user identity available in this context")
 		}

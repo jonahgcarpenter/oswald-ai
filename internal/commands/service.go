@@ -76,6 +76,9 @@ func NewServiceWithCommands(commands ...Command) (*Service, error) {
 
 // Execute parses and runs a command attempt. Unknown attempts return a user-facing result.
 func (s *Service) Execute(ctx context.Context, req Request) (Result, error) {
+	if !req.Principal.Valid() {
+		return Result{}, fmt.Errorf("command request has no valid principal")
+	}
 	parsed, ok := Parse(req.Raw)
 	if !ok || parsed.Name == "" {
 		return Result{Text: "Unknown command: /"}, nil

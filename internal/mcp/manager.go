@@ -299,7 +299,8 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 	}
 	return ToolSpec{Name: localName, Description: description, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
 		meta := requestctx.MetadataFromContext(ctx)
-		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
 		if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -544,10 +545,14 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 	})
 
 	gatewayruntime.Execute(gatewayruntime.Request{
-		RequestID:    requestID,
-		Gateway:      "discord",
-		ChatID:       msg.ChannelID,
-		SenderID:     canonicalUserID,
+		RequestID: requestID,
+		ChatID:    msg.ChannelID,
+		Principal: identity.Principal{
+			CanonicalUserID: canonicalUserID,
+			Gateway:         "discord",
+			ExternalID:      normalizedAuthorID,
+			Assurance:       identity.AssuranceDiscordGateway,
+		},
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
 		IsDirect:     msg.GuildID == "",

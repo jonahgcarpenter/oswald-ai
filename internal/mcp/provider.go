@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -21,11 +22,11 @@ func NewProvider(manager *Manager) *Provider {
 	return &Provider{manager: manager}
 }
 
-func (p *Provider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool {
-	if p == nil || p.manager == nil || p.manager.store == nil {
+func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool {
+	if p == nil || p.manager == nil || p.manager.store == nil || !principal.Valid() {
 		return nil
 	}
-	configs, err := p.manager.store.ListForUser(ctx, userID)
+	configs, err := p.manager.store.ListForUser(ctx, principal.CanonicalUserID)
 	if err != nil {
 		return nil
 	}
@@ -39,9 +40,9 @@ func (p *Provider) DiscoveryTools(ctx context.Context, userID string) []llm.Tool
 	return tools
 }
 
-// ResolveTools returns historical MCP tool names that remain available to userID.
-func (p *Provider) ResolveTools(ctx context.Context, userID string, names []string) []string {
-	if p == nil || p.manager == nil || len(names) == 0 {
+// ResolveTools returns historical MCP tool names that remain available to the principal.
+func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string {
+	if p == nil || p.manager == nil || len(names) == 0 || !principal.Valid() {
 		return nil
 	}
 
@@ -65,7 +66,7 @@ func (p *Provider) ResolveTools(ctx context.Context, userID string, names []stri
 
 	available := map[string]bool{}
 	for _, server := range servers {
-		specs, info, err := p.manager.ServerToolSpecs(ctx, userID, server)
+		specs, info, err := p.manager.ServerToolSpecs(ctx, principal.CanonicalUserID, server)
 		if err != nil || info.Status != serverStatusConnected {
 			continue
 		}
@@ -83,11 +84,11 @@ func (p *Provider) ResolveTools(ctx context.Context, userID string, names []stri
 	return resolved
 }
 
-func (p *Provider) LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool {
-	if p == nil || p.manager == nil || len(exposed) == 0 {
+func (p *Provider) LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool {
+	if p == nil || p.manager == nil || len(exposed) == 0 || !principal.Valid() {
 		return nil
 	}
-	specs := p.manager.ToolSpecs(ctx, userID)
+	specs := p.manager.ToolSpecs(ctx, principal.CanonicalUserID)
 	tools := make([]llm.Tool, 0, len(specs))
 	for _, spec := range specs {
 		if !exposed[spec.Name] {
@@ -98,8 +99,8 @@ func (p *Provider) LLMTools(ctx context.Context, userID string, exposed map[stri
 	return tools
 }
 
-func (p *Provider) Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error) {
-	if p == nil || p.manager == nil || !strings.Contains(name, ".") {
+func (p *Provider) Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error) {
+	if p == nil || p.manager == nil || !principal.Valid() || !strings.Contains(name, ".") {
 		return "", false, nil
 	}
 	server, remote, ok := strings.Cut(name, ".")
@@ -107,16 +108,16 @@ func (p *Provider) Execute(ctx context.Context, userID, name string, args map[st
 		return "", false, nil
 	}
 	if remote == "tools" {
-		result, err := p.discover(ctx, userID, server, args)
+		result, err := p.discover(ctx, principal, server, args)
 		return result, true, err
 	}
 	if !exposed[name] {
 		return "", false, nil
 	}
-	if _, visible := p.manager.ServerInfo(ctx, userID, server); !visible {
+	if _, visible := p.manager.ServerInfo(ctx, principal.CanonicalUserID, server); !visible {
 		return "", false, nil
 	}
-	result, err := p.manager.Execute(ctx, userID, name, args)
+	result, err := p.manager.Execute(ctx, principal.CanonicalUserID, name, args)
 	return result, true, err
 }
 
@@ -133,9 +134,9 @@ func discoveryTool(server string) llm.Tool {
 	}}
 }
 
-func (p *Provider) discover(ctx context.Context, userID, server string, args map[string]interface{}) (string, error) {
+func (p *Provider) discover(ctx context.Context, principal identity.Principal, server string, args map[string]interface{}) (string, error) {
 	query := strings.TrimSpace(stringArg(args, "query"))
-	entries, info, err := p.Catalog(ctx, userID, server)
+	entries, info, err := p.Catalog(ctx, principal.CanonicalUserID, server)
 	if err != nil {
 		return fmt.Sprintf("No configured MCP server named %q.", server), nil
 	}
@@ -162,7 +163,7 @@ func (p *Provider) discover(ctx context.Context, userID, server string, args map
 	}
 	meta := requestctx.MetadataFromContext(ctx)
 	if p.manager.log != nil {
-		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.discovery", "listed MCP tools", config.F("server", info.Name), config.F("query", query), config.F("tool_count", len(tools)))
 	}
 	return formatDiscoveryResult(info.Name, query, tools), nil

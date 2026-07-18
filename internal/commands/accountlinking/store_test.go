@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -107,7 +108,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 }
 
 func executeAccountCommand(service *commands.Service, userID, raw string) (string, error) {
-	result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: raw})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "100", Assurance: identity.AssuranceDiscordGateway}, Raw: raw})
 	return result.Text, err
 }
 

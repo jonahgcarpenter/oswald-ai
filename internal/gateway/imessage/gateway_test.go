@@ -19,8 +19,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -55,6 +57,10 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	}
 	if _, ok := g.lookupMessage("sent-1"); !ok {
 		t.Fatal("expected sent bot message remembered")
+	}
+	principal := chat.lastPrincipal()
+	if principal.CanonicalUserID == "" || principal.Gateway != "imessage" || principal.ExternalID != "+15551234567" || principal.Assurance != identity.AssuranceBlueBubblesWebhook {
+		t.Fatalf("unexpected principal: %+v", principal)
 	}
 }
 
@@ -586,18 +592,26 @@ func TestChooseContactDisplayNameFallbackOrder(t *testing.T) {
 }
 
 type imFakeChatter struct {
-	mu       sync.Mutex
-	requests []llm.ChatRequest
+	mu        sync.Mutex
+	requests  []llm.ChatRequest
+	principal identity.Principal
 }
 
-func (f *imFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *imFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
+	f.principal, _ = requestctx.PrincipalFromContext(ctx)
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "imessage response"}}, nil
+}
+
+func (f *imFakeChatter) lastPrincipal() identity.Principal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.principal
 }
 
 func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
