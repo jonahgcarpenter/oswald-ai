@@ -109,7 +109,7 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.MemoryEntriesExpired != 1 || counts.CandidatesErased != 1 || counts.FormationJobsDeleted != 1 {
+	if counts.MemoryEntriesExpired != 1 || counts.CandidatesErased != 1 || counts.FormationJobsDeleted != 0 {
 		t.Fatalf("cleanup counts=%+v", counts)
 	}
 	var status, candidateStatement, evidence string
@@ -125,15 +125,12 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	if status != "expired" || candidateStatement != "" || evidence != "" {
 		t.Fatalf("status=%s candidate=%q evidence=%q", status, candidateStatement, evidence)
 	}
-	var ftsCount, vectorCount int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries_fts WHERE rowid = ?`, memory.ID).Scan(&ftsCount); err != nil {
+	var deleteChanges int
+	if err := store.sql.QueryRow(`SELECT count(*) FROM derived_index_changes WHERE entity_kind = 'memory' AND entity_id = ? AND operation = 'delete'`, memory.ID).Scan(&deleteChanges); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE rowid = ?`, memory.ID).Scan(&vectorCount); err != nil {
-		t.Fatal(err)
-	}
-	if ftsCount != 0 || vectorCount != 0 {
-		t.Fatalf("expired derived rows: fts=%d vectors=%d", ftsCount, vectorCount)
+	if deleteChanges != 1 {
+		t.Fatalf("expired memory delete changes=%d", deleteChanges)
 	}
 }
 

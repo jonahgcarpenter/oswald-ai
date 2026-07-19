@@ -42,6 +42,7 @@ type CandidateProposal struct {
 	Source              FormationSource
 	IdempotencyKey      string
 	SupersedesStatement string
+	FormationJob        *FormationJob
 	CompactionJob       *SessionCompactionJob
 }
 
@@ -90,6 +91,7 @@ type FormationJob struct {
 	Model             string
 	ExtractorVersion  string
 	AttemptCount      int
+	LeaseUntil        time.Time
 }
 
 // StoredSessionTurn identifies an exchange that was actually persisted.
@@ -172,6 +174,26 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 		return FormationCandidate{}, false, fmt.Errorf("begin memory candidate proposal: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
+	if job := proposal.FormationJob; job != nil {
+		if userID != job.UserID || proposal.Source.RequestID != job.RequestID || proposal.Source.SessionID != job.SessionID || proposal.Source.SessionGeneration != job.SessionGeneration || proposal.Source.TurnID != job.TurnID || job.LeaseUntil.IsZero() {
+			return FormationCandidate{}, false, fmt.Errorf("formation candidate scope does not match fenced job")
+		}
+		fenced, err := tx.ExecContext(ctx, `
+UPDATE memory_formation_jobs SET updated_at = updated_at
+WHERE id = ? AND canonical_user_id = ? AND state = 'running'
+	AND lease_until = ? AND julianday(lease_until) > julianday(?)
+	AND EXISTS (
+		SELECT 1 FROM account_users active
+		WHERE active.canonical_user_id = memory_formation_jobs.canonical_user_id
+			AND active.lifecycle_state = 'active'
+	)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+		if err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("fence formation candidate: %w", err)
+		}
+		if count, _ := fenced.RowsAffected(); count != 1 {
+			return FormationCandidate{}, false, fmt.Errorf("fence formation candidate: stale or cancelled job lease")
+		}
+	}
 	if job := proposal.CompactionJob; job != nil {
 		fenced, err := tx.ExecContext(ctx, `
 UPDATE session_compaction_jobs SET updated_at = updated_at
@@ -283,23 +305,6 @@ func (s *Store) PublishCandidate(ctx context.Context, userID string, candidateID
 		_, _ = s.sql.ExecContext(ctx, `UPDATE memory_candidates SET state = 'rejected', decision_reason = 'candidate_expired_before_publication', decided_at = ?, decided_by = 'retention', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'approved' AND published_memory_id IS NULL`, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), candidateID, userID)
 		return MemoryEntry{}, fmt.Errorf("memory candidate %d expired before publication", candidateID)
 	}
-	var embedding []float64
-	if strings.TrimSpace(s.embedModel) != "" {
-		embedding, err = s.embed(ctx, memoryEmbeddingText(candidate.Scope, candidate.Category, candidate.Statement, candidate.Evidence))
-		if err != nil {
-			return MemoryEntry{}, err
-		}
-		if err := s.ensureTenantVectorTable(len(embedding)); err != nil {
-			return MemoryEntry{}, err
-		}
-	}
-	var serialized []byte
-	if len(embedding) > 0 {
-		serialized, err = serializeVector(embedding)
-		if err != nil {
-			return MemoryEntry{}, err
-		}
-	}
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return MemoryEntry{}, fmt.Errorf("begin memory publication: %w", err)
@@ -351,11 +356,12 @@ func (s *Store) PublishCandidate(ctx context.Context, userID string, candidateID
 		if err := tx.Commit(); err != nil {
 			return MemoryEntry{}, fmt.Errorf("commit duplicate memory evidence: %w", err)
 		}
+		s.signalDerivedIndex()
 		return s.EntryByID(duplicateID)
 	}
 	var memoryID int64
 	var inactiveID int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status != 'active' ORDER BY updated_at DESC, id DESC LIMIT 1`, userID, candidate.Scope, statementKey(candidate.Statement)).Scan(&inactiveID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status IN ('expired', 'superseded') ORDER BY updated_at DESC, id DESC LIMIT 1`, userID, candidate.Scope, statementKey(candidate.Statement)).Scan(&inactiveID)
 	if err != nil && err != sql.ErrNoRows {
 		return MemoryEntry{}, fmt.Errorf("read inactive duplicate memory: %w", err)
 	}
@@ -369,12 +375,13 @@ UPDATE memory_entries SET category = ?, statement = ?, statement_key = ?, eviden
 	embedding_model = ?, embedding_dim = ?, profile_approved = 1, candidate_id = ?, provenance_type = ?,
 	source_authority = ?, source_request_id = ?, source_turn_id = ?, formation_mode = ?, sensitivity = ?,
 	approval_state = 'approved', approved_at = ?, approved_by = ?, valid_from = ?, valid_until = ?,
-	invalidated_at = NULL, invalidation_reason = '', erased_at = NULL, erasure_reason = ''
+	invalidated_at = NULL, invalidation_reason = '', erased_at = NULL, erasure_reason = '',
+	forgotten_at = NULL, hard_delete_after = NULL, lifecycle_request_id = ''
 WHERE id = ? AND canonical_user_id = ?
 RETURNING id
 `, candidate.Category, candidate.Statement, statementKey(candidate.Statement), candidate.Evidence,
 			candidate.Confidence, candidate.Importance, candidate.SourceSessionID, formatTime(now), nullableFormationTime(candidate.ExpiresAt), nullableID(candidate.SupersedesMemoryID),
-			s.embedModel, len(embedding), candidate.ID, candidate.Provenance, candidate.SourceAuthority,
+			"", 0, candidate.ID, candidate.Provenance, candidate.SourceAuthority,
 			candidate.SourceRequestID, nullableID(candidate.SourceTurnID), candidate.FormationMode, candidate.Sensitivity,
 			formatTime(now), candidateDecisionActor(candidate), formatTime(now), nullableFormationTime(candidate.ExpiresAt), inactiveID, userID).Scan(&memoryID)
 	} else {
@@ -390,7 +397,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?,
 RETURNING id
 `, userID, candidate.Scope, candidate.Category, candidate.Statement, statementKey(candidate.Statement),
 			candidate.Evidence, candidate.Confidence, candidate.Importance, candidate.SourceSessionID,
-			formatTime(now), formatTime(now), nullableFormationTime(candidate.ExpiresAt), s.embedModel, len(embedding),
+			formatTime(now), formatTime(now), nullableFormationTime(candidate.ExpiresAt), "", 0,
 			candidate.ID, candidate.Provenance, candidate.SourceAuthority, candidate.SourceRequestID,
 			nullableID(candidate.SourceTurnID), candidate.FormationMode, candidate.Sensitivity,
 			formatTime(now), candidateDecisionActor(candidate), formatTime(now), nullableFormationTime(candidate.ExpiresAt)).Scan(&memoryID)
@@ -401,13 +408,8 @@ RETURNING id
 	if err := s.formationStage("canonical_written"); err != nil {
 		return MemoryEntry{}, err
 	}
-	if len(serialized) > 0 {
-		if _, err := tx.ExecContext(ctx, `
-INSERT OR REPLACE INTO memory_entry_vectors_v2(rowid, canonical_user_id, embedding_model, scope, category, embedding)
-VALUES (?, ?, ?, ?, ?, ?)
-`, memoryID, userID, s.embedModel, candidate.Scope, candidate.Category, serialized); err != nil {
-			return MemoryEntry{}, fmt.Errorf("publish memory vector: %w", err)
-		}
+	if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", memoryID, "upsert", "publish:"+formatTime(now)); err != nil {
+		return MemoryEntry{}, err
 	}
 	if err := s.formationStage("vector_written"); err != nil {
 		return MemoryEntry{}, err
@@ -444,6 +446,7 @@ VALUES (?, ?, ?, ?, ?, ?)
 	if err := tx.Commit(); err != nil {
 		return MemoryEntry{}, fmt.Errorf("commit memory publication: %w", err)
 	}
+	s.signalDerivedIndex()
 	return s.EntryByID(memoryID)
 }
 
@@ -665,7 +668,12 @@ ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
 // MarkFormationEligible records successful response delivery before enqueue.
 func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID int64) error {
 	now := formatTime(time.Now().UTC())
-	result, err := s.sql.ExecContext(ctx, `UPDATE session_turns SET formation_eligible_at = COALESCE(formation_eligible_at, ?), delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, now, turnID, userID)
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark turn eligible: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET formation_eligible_at = COALESCE(formation_eligible_at, ?), delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, now, turnID, userID)
 	if err != nil {
 		return fmt.Errorf("mark turn eligible for memory formation: %w", err)
 	}
@@ -673,6 +681,13 @@ func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID
 	if count != 1 {
 		return sql.ErrNoRows
 	}
+	if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", turnID, "upsert", "formation-eligible:"+now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mark turn eligible: %w", err)
+	}
+	s.signalDerivedIndex()
 	return nil
 }
 
@@ -730,6 +745,7 @@ func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (For
 		lease = time.Minute
 	}
 	now := time.Now().UTC()
+	leaseUntil := now.Add(lease)
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return FormationJob{}, err
@@ -749,7 +765,7 @@ ORDER BY available_at, id LIMIT 1
 	if err != nil {
 		return FormationJob{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_until = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ?`, formatTime(now), formatTime(now.Add(lease)), formatTime(now), job.ID, job.UserID)
+	result, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_until = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ?`, formatTime(now), formatTime(leaseUntil), formatTime(now), job.ID, job.UserID)
 	if err != nil {
 		return FormationJob{}, err
 	}
@@ -758,6 +774,7 @@ ORDER BY available_at, id LIMIT 1
 		return FormationJob{}, sql.ErrNoRows
 	}
 	job.AttemptCount++
+	job.LeaseUntil = leaseUntil
 	if err := tx.Commit(); err != nil {
 		return FormationJob{}, err
 	}
@@ -886,10 +903,8 @@ WHERE id = ? AND canonical_user_id = ? AND status = 'active'
 	if count != 1 {
 		return fmt.Errorf("superseded memory is no longer active")
 	}
-	if s.vectorTableExists(memoryVectorTableV2) {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entry_vectors_v2 WHERE rowid = ? AND canonical_user_id = ?`, oldMemoryID, userID); err != nil {
-			return fmt.Errorf("remove superseded memory vector: %w", err)
-		}
+	if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", oldMemoryID, "delete", "supersede:"+formatTime(now)); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_relations (canonical_user_id, idempotency_key, relation_type, source_memory_id, target_memory_id, created_at)

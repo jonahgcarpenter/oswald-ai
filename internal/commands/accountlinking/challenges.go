@@ -73,6 +73,50 @@ type storedChallenge struct {
 	ResultUserID        sql.NullString
 }
 
+// ResolveChallengeFenceTargets resolves the stored and current owners involved
+// in a possible confirmation without consuming the challenge. Confirmation
+// re-resolves these identities transactionally after the fences are held.
+func (s *Service) ResolveChallengeFenceTargets(ctx context.Context, principal identity.Principal, code string) ([]string, error) {
+	if err := validateAuthenticatedPrincipal(principal); err != nil {
+		return nil, err
+	}
+	codeHash, err := hashChallengeCode(code)
+	if err != nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureInitializedLocked(); err != nil {
+		return nil, err
+	}
+
+	ids := []string{principal.CanonicalUserID}
+	confirmingOwner, _, err := accountOwnerDB(ctx, s.db.SQL(), principal.Gateway, principal.ExternalID)
+	if err != nil && !errors.Is(err, ErrPrincipalMismatch) {
+		return nil, err
+	}
+	if confirmingOwner != "" {
+		ids = append(ids, confirmingOwner)
+	}
+	var initiatorID, gateway, identifier string
+	err = s.db.SQL().QueryRowContext(ctx, `SELECT initiator_user_id, initiator_gateway, initiator_identifier FROM account_link_challenges WHERE code_hash = ?`, codeHash).Scan(&initiatorID, &gateway, &identifier)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ids, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve account-link challenge fences: %w", err)
+	}
+	ids = append(ids, initiatorID)
+	initiatorOwner, _, err := accountOwnerDB(ctx, s.db.SQL(), gateway, identifier)
+	if err != nil && !errors.Is(err, ErrPrincipalMismatch) {
+		return nil, err
+	}
+	if initiatorOwner != "" {
+		ids = append(ids, initiatorOwner)
+	}
+	return ids, nil
+}
+
 // CreateChallenge creates a short-lived code for another authenticated account to confirm.
 func (s *Service) CreateChallenge(ctx context.Context, principal identity.Principal, requestID string) (LinkChallenge, error) {
 	if err := validateAuthenticatedPrincipal(principal); err != nil {
@@ -283,8 +327,15 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET invalidated_at = ?, invalidated_by_user_id = ?, invalidated_reason = 'user_merged' WHERE initiator_user_id = ? AND id != ? AND consumed_at IS NULL AND invalidated_at IS NULL`, formatChallengeTime(now), winnerID, loserID, challenge.ID); err != nil {
 			return fmt.Errorf("invalidate merged user challenges: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET result_user_id = ? WHERE result_user_id = ?`, winnerID, loserID); err != nil {
-			return fmt.Errorf("rewrite merged account-link results: %w", err)
+		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET initiator_user_id = CASE WHEN initiator_user_id = ? THEN ? ELSE initiator_user_id END, consumed_by_user_id = CASE WHEN consumed_by_user_id = ? THEN ? ELSE consumed_by_user_id END, result_user_id = CASE WHEN result_user_id = ? THEN ? ELSE result_user_id END, invalidated_by_user_id = CASE WHEN invalidated_by_user_id = ? THEN ? ELSE invalidated_by_user_id END WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, loserID, loserID, loserID); err != nil {
+			return fmt.Errorf("rewrite merged account-link audit ownership: %w", err)
+		}
+		var remainingChallengeReferences int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, loserID, loserID, loserID).Scan(&remainingChallengeReferences); err != nil {
+			return fmt.Errorf("verify merged account-link audit ownership: %w", err)
+		}
+		if remainingChallengeReferences != 0 {
+			return fmt.Errorf("verify merged account-link audit ownership: %d loser references remain", remainingChallengeReferences)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM account_users WHERE canonical_user_id = ?`, loserID); err != nil {
 			return fmt.Errorf("delete merged canonical user: %w", err)
@@ -389,9 +440,17 @@ func principalOwnerTx(ctx context.Context, tx *sql.Tx, principal identity.Princi
 }
 
 func accountOwnerTx(ctx context.Context, tx *sql.Tx, gateway, identifier string) (string, bool, error) {
+	return accountOwnerDB(ctx, tx, gateway, identifier)
+}
+
+type accountOwnerQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func accountOwnerDB(ctx context.Context, db accountOwnerQuerier, gateway, identifier string) (string, bool, error) {
 	var owner string
 	var banned bool
-	err := tx.QueryRowContext(ctx, `SELECT la.canonical_user_id, au.is_banned != 0 FROM linked_accounts la JOIN account_users au ON au.canonical_user_id = la.canonical_user_id WHERE la.gateway = ? AND la.identifier = ?`, gateway, identifier).Scan(&owner, &banned)
+	err := db.QueryRowContext(ctx, `SELECT la.canonical_user_id, au.is_banned != 0 FROM linked_accounts la JOIN account_users au ON au.canonical_user_id = la.canonical_user_id WHERE la.gateway = ? AND la.identifier = ?`, gateway, identifier).Scan(&owner, &banned)
 	if err == sql.ErrNoRows {
 		return "", false, ErrPrincipalMismatch
 	}

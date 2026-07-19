@@ -261,7 +261,7 @@ func TestCanonicalSaveApprovesPreviouslyUnapprovedMemory(t *testing.T) {
 	}
 }
 
-func TestMergeStartsFreshGenerationWithMergedProfile(t *testing.T) {
+func TestMergePreservesFrozenSessionAndPublishesMergedProfile(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "winner", "loser")
@@ -303,8 +303,12 @@ func TestMergeStartsFreshGenerationWithMergedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	turns, err := store.RecentSessionTurnsForGeneration("winner", "shared", merged.Generation, 1, 4)
-	if err != nil || merged.Generation <= winnerSession.Generation || len(turns) != 0 || !strings.Contains(merged.Content, "concise replies") {
+	if err != nil || merged.Generation <= winnerSession.Generation || len(turns) != 1 || turns[0].UserText != "loser old" || !strings.Contains(merged.Content, "concise replies") || merged.LatestVersion <= merged.Version {
 		t.Fatalf("merged profile=%+v turns=%+v err=%v", merged, turns, err)
+	}
+	latest, err := store.ResolveSessionProfile(context.Background(), "winner", "new-session", time.Hour)
+	if err != nil || !strings.Contains(latest.Content, "The user is Ada.") || !strings.Contains(latest.Content, "concise replies") {
+		t.Fatalf("latest merged profile=%+v err=%v", latest, err)
 	}
 }
 
@@ -339,7 +343,7 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 	}
 }
 
-func TestConcurrentSaveCannotResurrectForgottenMemory(t *testing.T) {
+func TestSaveDoesNotCallEmbeddingProvider(t *testing.T) {
 	embedder := &blockingProfileEmbedder{started: make(chan struct{}), release: make(chan struct{})}
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), embedder, "test-embedding", config.NewLogger(config.LevelError))
 	if err != nil {
@@ -347,33 +351,13 @@ func TestConcurrentSaveCannotResurrectForgottenMemory(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
-	saveErr := make(chan error, 1)
-	go func() {
-		_, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5})
-		saveErr <- err
-	}()
-	<-embedder.started
-	forgetStarted := make(chan struct{})
-	forgetErr := make(chan error, 1)
-	go func() {
-		close(forgetStarted)
-		_, err := store.Forget("user", "all", "")
-		forgetErr <- err
-	}()
-	<-forgetStarted
-	close(embedder.release)
-	if err := <-saveErr; err != nil {
+	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-forgetErr; err != nil {
-		t.Fatal(err)
-	}
-	var status string
-	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != StatusDeleted {
-		t.Fatalf("concurrent save resurrected memory with status %q", status)
+	select {
+	case <-embedder.started:
+		t.Fatal("canonical save called embedding provider")
+	default:
 	}
 }
 

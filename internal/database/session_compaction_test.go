@@ -165,42 +165,21 @@ VALUES ('session', 'legacy', 'hello', 'hi', '2026-01-01T00:00:00Z', '2026-01-01T
 	}
 }
 
-func TestSessionTurnsFTSBackfillAndSynchronization(t *testing.T) {
+func TestSessionTurnsFTSInitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
 	db := openTestDB(t)
 	insertSessionTestUser(t, db, "user-a")
 	insertSessionTestUser(t, db, "user-b")
 
-	if _, err := db.SQL().Exec(`
-DROP TRIGGER session_turns_fts_insert;
-DROP TRIGGER session_turns_fts_update;
-DROP TRIGGER session_turns_fts_delete;
-DROP TABLE session_turns_fts;`); err != nil {
-		t.Fatal(err)
-	}
-	turnID := insertSessionTestTurn(t, db, "user-a", "session-a", 1, "observed a quasar", "recorded the pulsar")
+	insertSessionTestTurn(t, db, "user-a", "session-a", 1, "observed a quasar", "recorded the pulsar")
 	if err := db.initializeSessionTurnsFTS5(); err != nil {
-		t.Fatalf("backfill transcript FTS: %v", err)
-	}
-	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "quasar", 1)
-	assertSessionFTSMatchCount(t, db, "user-b", "session-a", 1, "quasar", 0)
-
-	if _, err := db.SQL().Exec(`UPDATE session_turns SET user_text = 'observed a comet', assistant_text = 'recorded the asteroid' WHERE id = ?`, turnID); err != nil {
-		t.Fatal(err)
+		t.Fatalf("initialize transcript FTS: %v", err)
 	}
 	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "quasar", 0)
-	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "comet", 1)
-	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "asteroid", 1)
-
-	if _, err := db.SQL().Exec(`UPDATE session_turns SET canonical_user_id = 'user-b', session_id = 'session-b', session_generation = 2 WHERE id = ?`, turnID); err != nil {
-		t.Fatal(err)
+	assertSessionFTSMatchCount(t, db, "user-b", "session-a", 1, "quasar", 0)
+	var triggers int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'session_turns_fts_%'`).Scan(&triggers); err != nil || triggers != 0 {
+		t.Fatalf("transcript FTS trigger count=%d err=%v", triggers, err)
 	}
-	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "comet", 0)
-	assertSessionFTSMatchCount(t, db, "user-b", "session-b", 2, "comet", 1)
-
-	if _, err := db.SQL().Exec(`DELETE FROM session_turns WHERE id = ?`, turnID); err != nil {
-		t.Fatal(err)
-	}
-	assertSessionFTSMatchCount(t, db, "user-b", "session-b", 2, "comet", 0)
 }
 
 func insertSessionTestUser(t *testing.T, db *DB, userID string) {

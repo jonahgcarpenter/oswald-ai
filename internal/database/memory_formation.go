@@ -56,7 +56,23 @@ func (d *DB) migrateMemoryFormationSchema() error {
 		return err
 	}
 
-	if _, err := tx.Exec(`
+	if _, err := tx.Exec(memoryFormationSchemaSQL); err != nil {
+		return fmt.Errorf("create memory formation schema: %w", err)
+	}
+
+	if _, err := tx.Exec(memoryFormationBackfillSQL); err != nil {
+		return fmt.Errorf("backfill legacy memory formation metadata: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, memoryFormationMigration); err != nil {
+		return fmt.Errorf("record memory formation migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit memory formation migration: %w", err)
+	}
+	return nil
+}
+
+const memoryFormationSchemaSQL = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entries_tenant_id
 ON memory_entries (canonical_user_id, id);
 
@@ -405,11 +421,9 @@ ON memory_entries (canonical_user_id, source_request_id);
 
 CREATE INDEX IF NOT EXISTS idx_memory_entries_source_turn
 ON memory_entries (canonical_user_id, source_turn_id);
-`); err != nil {
-		return fmt.Errorf("create memory formation schema: %w", err)
-	}
+`
 
-	if _, err := tx.Exec(`
+const memoryFormationBackfillSQL = `
 UPDATE memory_entries
 SET provenance_type = 'legacy_import',
 	source_authority = 'unknown',
@@ -418,17 +432,7 @@ SET provenance_type = 'legacy_import',
 	approval_state = 'approved',
 	approved_at = created_at,
 	valid_from = created_at
-`); err != nil {
-		return fmt.Errorf("backfill legacy memory formation metadata: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO schema_migrations (name, applied_at) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, memoryFormationMigration); err != nil {
-		return fmt.Errorf("record memory formation migration: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit memory formation migration: %w", err)
-	}
-	return nil
-}
+`
 
 func ensureColumnTx(tx *sql.Tx, table, name, definition string) error {
 	rows, err := tx.Query(`PRAGMA table_info(` + table + `)`)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,9 +15,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/formationruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/indexruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/maintenanceruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
@@ -86,10 +88,8 @@ func main() {
 		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))
 	}
 	defer userMemStore.Close() // nolint:errcheck
+	userMemStore.SetRetentionPolicy(cfg.RetentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
-	cleanupCtx, cancelSessionCleanup := context.WithCancel(context.Background())
-	var cleanupWG sync.WaitGroup
-
 	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP config store", config.ErrorField(err))
@@ -103,7 +103,11 @@ func main() {
 	}
 	defer accountLinkService.Close() // nolint:errcheck
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
-	commandService, err := commandbuiltin.NewService(accountLinkService, userMemStore, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	indexService := indexruntime.NewService(userMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
+	indexService.Start(context.Background())
+	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
+	maintenanceService.Start(context.Background())
+	commandService, err := commandbuiltin.NewServiceWithPrivacy(accountLinkService, userMemStore, commandbuiltin.PrivacyDeps{Policy: cfg.RetentionPolicy, Logger: rootLog.Server("privacy")}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
@@ -126,17 +130,21 @@ func main() {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 
+	privacyBus := privacyruntime.NewBus()
 	runtimeDeps := gatewayruntime.Dependencies{
 		Commands:   commandService,
 		Access:     accountLinkService,
 		Log:        rootLog,
 		Formation:  formationService,
 		Compaction: compactionService,
+		PrivacyBus: privacyBus,
 	}
 	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
 	if err != nil {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}
+	privacyDispatcher := privacyruntime.NewService(userMemStore, privacyBus, rootLog)
+	privacyDispatcher.Start(context.Background())
 
 	agentEngine := agent.NewAgent(
 		llmClient,
@@ -156,12 +164,6 @@ func main() {
 	// limit and routes responses back to the originating gateway.
 	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, rootLog.Server("broker"))
 	requestBroker.Start()
-	cleanupWG.Add(1)
-	go func() {
-		defer cleanupWG.Done()
-		usermemory.RunSessionCleanup(cleanupCtx, userMemStore, time.Hour, rootLog)
-	}()
-
 	// Boot up all registered gateways dynamically
 	log.Info("app.start", "starting application")
 	for _, gw := range activeGateways {
@@ -182,12 +184,13 @@ func main() {
 	<-stop // The main thread will pause here indefinitely until a signal is received
 
 	log.Info("app.shutdown", "shutting down application")
-	cancelSessionCleanup()
-	cleanupWG.Wait()
+	maintenanceService.Stop()
+	privacyDispatcher.Stop()
 
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
 	requestBroker.Shutdown()
+	indexService.Stop()
 	formationService.Stop()
 	compactionService.Stop()
 	if err := mcpManager.Close(); err != nil {

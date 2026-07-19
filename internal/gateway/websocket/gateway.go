@@ -65,6 +65,8 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 		return
 	}
 	defer conn.Close()
+	wg.trackConnection(normalizedUserID, conn)
+	defer wg.untrackConnection(normalizedUserID, conn)
 	expiryTimer := time.AfterFunc(time.Until(authenticated.ExpiresAt), func() {
 		log.Debug("gateway.authentication.expired", "websocket authentication expired", config.F("session_id", sessionKey))
 		_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "authentication expired"), time.Now().Add(time.Second))
@@ -171,6 +173,27 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			StreamFunc:  streamFunc,
 		}, wg.runtimeDependencies(b), &runtimeResponder{conn: conn, messageType: messageType})
 	}
+}
+
+func (wg *Gateway) trackConnection(subject string, conn *gorilla.Conn) {
+	wg.connectionsMu.Lock()
+	if wg.connections == nil {
+		wg.connections = make(map[string]map[*gorilla.Conn]struct{})
+	}
+	if wg.connections[subject] == nil {
+		wg.connections[subject] = make(map[*gorilla.Conn]struct{})
+	}
+	wg.connections[subject][conn] = struct{}{}
+	wg.connectionsMu.Unlock()
+}
+
+func (wg *Gateway) untrackConnection(subject string, conn *gorilla.Conn) {
+	wg.connectionsMu.Lock()
+	delete(wg.connections[subject], conn)
+	if len(wg.connections[subject]) == 0 {
+		delete(wg.connections, subject)
+	}
+	wg.connectionsMu.Unlock()
 }
 
 func (wg *Gateway) runtimeDependencies(b *broker.Broker) gatewayruntime.Dependencies {

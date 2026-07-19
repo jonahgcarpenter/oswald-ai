@@ -17,6 +17,12 @@ type fixedRecallEmbedder struct {
 	err    error
 }
 
+type panicRecallEmbedder struct{}
+
+func (panicRecallEmbedder) Embed(context.Context, llm.EmbedRequest) (*llm.EmbedResponse, error) {
+	panic("embedding provider called while semantic recall is disabled")
+}
+
 func (f fixedRecallEmbedder) Embed(context.Context, llm.EmbedRequest) (*llm.EmbedResponse, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -38,6 +44,7 @@ func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(ctx, "user-1", "ZXQ-741", RecallRequest{TopK: 4})
 	if stats.LexicalError != nil || !stats.LexicalAvailable || stats.LexicalCandidateCount != 1 {
 		t.Fatalf("unexpected FTS stats: %+v", stats)
@@ -69,6 +76,7 @@ func TestRecallVectorPrefilterPreventsForeignNeighborCrowding(t *testing.T) {
 		}
 	}
 
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(ctx, "user-1", "Which shade do I enjoy?", RecallRequest{TopK: 4})
 	if stats.SemanticError != nil || !stats.SemanticAvailable || stats.SemanticCandidateCount != 1 {
 		t.Fatalf("unexpected vector stats: %+v", stats)
@@ -96,6 +104,7 @@ func TestRecallVectorPrefiltersScopeBeforeKNN(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(ctx, "user-1", "Where is the base?", RecallRequest{Category: "projects", CandidateLimit: 4, TopK: 2})
 	if stats.SemanticError != nil || len(results) != 1 || results[0].Entry.Category != "projects" {
 		t.Fatalf("metadata-prefiltered results=%+v stats=%+v", results, stats)
@@ -124,6 +133,7 @@ func TestRecallRemovesInactiveVectorsBeforeKNN(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(ctx, "user-1", "Where is home?", RecallRequest{CandidateLimit: 4, TopK: 2})
 	if stats.SemanticError != nil || len(results) != 1 || !strings.Contains(results[0].Entry.Statement, "Porto") {
 		t.Fatalf("active vector results=%+v stats=%+v", results, stats)
@@ -141,7 +151,12 @@ func TestRecallDegradesIndependentlyWhenFTSIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`DROP TABLE memory_entries_fts`); err != nil {
+	rebuildTestIndexes(t, store)
+	liveFTS, err := store.LiveIndexRevision(context.Background(), IndexKindMemoryFTS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`DROP TABLE ` + liveFTS.TableName); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,6 +178,7 @@ func TestRecallFallsBackToFTSWhenEmbeddingFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(context.Background(), "user-1", "Meridian", RecallRequest{TopK: 2})
 	if stats.SemanticError == nil || stats.LexicalError != nil || len(results) != 1 {
 		t.Fatalf("FTS fallback results=%+v stats=%+v", results, stats)
@@ -180,13 +196,45 @@ func TestRecallDoesNotDropIncompatibleLiveVectorIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rebuildTestIndexes(t, store)
 	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0, 0}}
 	results, stats := store.Recall(context.Background(), "user-1", "Helios", RecallRequest{TopK: 2})
 	if stats.SemanticError == nil || stats.LexicalError != nil || len(results) != 1 {
 		t.Fatalf("dimension fallback results=%+v stats=%+v", results, stats)
 	}
-	if dimension, ok := store.vectorTableDimension(memoryVectorTableV2); !ok || dimension != 2 {
+	liveVector, err := store.LiveIndexRevision(context.Background(), IndexKindMemoryVector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dimension, ok := store.vectorTableDimension(liveVector.TableName); !ok || dimension != 2 {
 		t.Fatalf("live vector dimension = %d available=%v, want unchanged dimension 2", dimension, ok)
+	}
+}
+
+func TestRecallDisablesSemanticWhenConfiguredModelIsEmpty(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	if _, err := store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Statement: "Semantic recall can be disabled."}); err != nil {
+		t.Fatal(err)
+	}
+	rebuildTestIndexes(t, store)
+	live, err := store.LiveIndexRevision(context.Background(), IndexKindMemoryVector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.embedModel = ""
+	store.embedder = panicRecallEmbedder{}
+	_, stats := store.Recall(context.Background(), "user-1", "disabled", RecallRequest{TopK: 2})
+	if stats.SemanticAvailable || stats.SemanticError != nil || stats.SemanticCandidateCount != 0 {
+		t.Fatalf("semantic recall was not disabled: %+v", stats)
+	}
+	retained, err := store.LiveIndexRevision(context.Background(), IndexKindMemoryVector)
+	if err != nil || retained.ID != live.ID {
+		t.Fatalf("disabled semantic recall changed retained live revision: retained=%+v err=%v", retained, err)
 	}
 }
 
@@ -203,6 +251,7 @@ func TestRecallExcludesSupersededCorrection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rebuildTestIndexes(t, store)
 	results, _ := store.Recall(ctx, "user-1", "launch meeting", RecallRequest{TopK: 4})
 	if len(results) != 1 || !strings.Contains(results[0].Entry.Statement, "Tuesday") {
 		t.Fatalf("correction recall results = %+v", results)
@@ -218,6 +267,7 @@ func TestRecallOmitsExpiredMemories(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
+	rebuildTestIndexes(t, store)
 	results, _ := store.Recall(context.Background(), "user-1", "ORBITAL", RecallRequest{TopK: 2})
 	if len(results) != 0 {
 		t.Fatalf("expired recall results = %+v", results)
@@ -238,12 +288,17 @@ func TestMergeMovesTenantVectorOwnership(t *testing.T) {
 	if err := store.MergeUsers("winner", "loser"); err != nil {
 		t.Fatal(err)
 	}
+	rebuildTestIndexes(t, store)
 	results, stats := store.Recall(context.Background(), "winner", "Where was I born?", RecallRequest{TopK: 2})
 	if stats.SemanticError != nil || len(results) != 1 || results[0].Entry.UserID != "winner" {
 		t.Fatalf("merged recall results=%+v stats=%+v", results, stats)
 	}
 	var loserVectors int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entry_vectors_v2 WHERE canonical_user_id = 'loser'`).Scan(&loserVectors); err != nil {
+	liveVector, err := store.LiveIndexRevision(context.Background(), IndexKindMemoryVector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT count(*) FROM ` + liveVector.TableName + ` WHERE canonical_user_id = 'loser'`).Scan(&loserVectors); err != nil {
 		t.Fatal(err)
 	}
 	if loserVectors != 0 {

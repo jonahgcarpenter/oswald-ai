@@ -19,7 +19,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. For each visible configured MCP server, the model sees a lightweight dynamic discovery tool named `<server>.tools`; actual MCP tools remain hidden and become visible only for the active request after `<server>.tools` lists them.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, and admin-only user-management commands: `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, and `/unban`.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/privacy`, user MCP management, and admin-only user-management and global MCP commands. The nine builtin model tools remain unchanged; privacy operations are commands and are never exposed to the model as tools.
 
 Oswald now supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -48,6 +48,9 @@ Current layers:
 17. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 18. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
 19. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+20. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
+21. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
+22. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
 
 ## Startup Flow
 
@@ -58,17 +61,38 @@ Current layers:
 3. Derive local HTTP and agent request timeouts from `LLM_GATEWAY_TIMEOUT`
 4. Create the LLM gateway client
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
-6. Create the soul store and SQLite-backed persistent user-memory store
-7. Create the account-link service and command service with `/help`, `/connect`, `/disconnect`, `/reset`, and admin user-management commands
-8. Initialize optional MCP clients
-9. Load builtin tool schemas from `data/tools/*.md`, register builtin handlers, and prepare dynamic MCP discovery tools for configured servers
-10. Build enabled gateways from config
-11. Create the agent
-12. Start the broker worker pool
-13. Start each gateway in its own goroutine
-14. Start the serialized durable-memory formation worker
-15. Start the serialized durable session-compaction worker, including startup reconciliation and active-session planning
-16. Wait for shutdown signal, drain the broker and formation worker, stop the compaction worker, and close MCP clients
+6. Create the soul store
+7. Open the shared SQLite-backed user-memory store and run ordered database migrations `v1` through `v11`
+8. Initialize the account-link and optional MCP services
+9. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
+10. Create the command service, including `/privacy`, and start durable formation and session-compaction workers
+11. Load builtin tool schemas from `data/tools/*.md`, register builtin handlers, and prepare dynamic MCP discovery tools for configured servers
+12. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
+13. Create the agent and start the broker worker pool
+14. Start each gateway in its own goroutine
+15. Wait for shutdown signal, then stop maintenance and privacy dispatch, drain the broker, stop index/formation/compaction workers, and close MCP clients
+
+### Ordered Schema Migrations
+
+Database startup serializes schema initialization and applies this exact registry in order:
+
+| Version | Name | Purpose |
+| --- | --- | --- |
+| `v1` | `legacy_core_schema` | Frozen account, linked-account, challenge, memory/session, cleanup-index, and MCP baseline. |
+| `v2` | `stable_tenant_profiles` | Demote legacy `system_rules`, approve migrated profile facts, and record the legacy profile ledger. |
+| `v3` | `canonical_memory_formation` | Add canonical provenance/approval columns, formation candidates/evidence/jobs/audit, and backfill. |
+| `v4` | `session_compaction` | Add delivery state and durable summary, source-link, and compaction-job schema. |
+| `v5` | `memory_fts` | Optional FTS5 durable-memory baseline. |
+| `v6` | `session_transcript_fts` | Optional FTS5 delivered-transcript baseline. |
+| `v7` | `memory_operations_privacy` | Add account lifecycle fencing, forgotten-memory lifecycle fields, tenant-safe events, privacy operations, derived-index revisions/outbox, and maintenance runs. |
+| `v8` | `privacy_operation_corrections` | Expand privacy operation types and correct privacy/audit retention triggers. |
+| `v9` | `privacy_operation_retention` | Permit dependency-safe deletion only for completed privacy and redacted audit tombstones. |
+| `v10` | `memory_event_redaction_retention` | Add event redaction/update timestamps and automatic redaction timestamping. |
+| `v11` | `privacy_invalidation_outbox` | Add the leased, retryable durable runtime-invalidation outbox. |
+
+The registry must be contiguous and have unique non-empty names and definitions. The database stores each version, name, SHA-256 checksum of the frozen definition, and application time in `schema_migration_versions`. Startup rejects unknown versions and any name/checksum drift. Exact symbolic checksums emitted by the first ordered framework for `v1` through `v6` are accepted only as known legacy values; after all rows pass validation they are removed and those frozen idempotent migrations are reapplied and recorded with definition checksums.
+
+All pending migrations run on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table rebuilds. `PRAGMA foreign_key_check` must pass before commit, foreign keys are restored afterward, and any required migration or integrity failure aborts startup. Only `v5` and `v6` are optional: `ErrFTS5Unavailable` logs `database.schema.optional_unavailable`, records that frozen version, and allows startup with the affected lexical capability degraded. Other errors fail startup.
 
 ## Request Lifecycle
 
@@ -198,12 +222,27 @@ Oswald keeps three distinct memory layers.
 - Directly stated low-sensitivity preferences, project/environment facts, and bounded task state may activate automatically after deterministic evidence validation; model inferences remain proposed
 - Automatically extracted identity/contact and high-impact interaction facts require conversational confirmation in an authenticated direct session; only the exact presented phrases are accepted
 - Explicit `memory.save` requests satisfy confirmation for the new fact, including sensitive data, but ambiguous replacement targets still require conversational confirmation and no candidate can publish before its source turn is persisted
-- Canonical publication, supersession, FTS/vector state, evidence, audit history, and latest profile advancement commit in one SQLite transaction; configured embedding failure leaves the approved candidate retryable
-- `memory.forget` immediately scrubs canonical statements, evidence, candidate content, FTS/vector rows, and profile snapshots while retaining content-free lifecycle/audit tombstones
+- Canonical publication, supersession, evidence, audit history, profile advancement, and a durable derived-index outbox entry commit in one SQLite transaction; FTS/vector tables are derived asynchronously rather than part of canonical publication
+- `memory.forget` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
 - `memory.search` uses the same hybrid engine with a larger output cap for deeper investigation; `memory.list`, `memory.save`, and `memory.forget` remain explicit tools
+- Every `memory.*` handler and `transcript.search` requires a valid authenticated request principal and derives ownership from its canonical user
+- Addressed ordinary group turns continue to use the authenticated sender's private memory by explicit product decision; group chats do not create a shared memory tenant
+
+### Canonical and Derived State
+
+- Canonical account, memory, profile, candidate, audit, session, summary, job, privacy, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
+- FTS5 memory/transcript tables and sqlite-vec memory tables are rebuildable derived revisions; `derived_index_changes` is the leased, idempotent canonical-mutation outbox
+- Startup bootstraps valid legacy index tables as revision one, removes legacy synchronization triggers, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
+- Canonical writes enqueue outbox changes transactionally. The serialized worker applies each change to all matching live and building revisions and retries stale canonical reads, leases, provider failures, and failed changes without weakening tenant predicates
+- Rebuilds create an internally named shadow table with kind, provider, model, dimension, schema version, and monotonically increasing revision metadata
+- Before publication, validation checks the physical vector dimension when applicable, exact canonical expected count, physical indexed count, canonical-user ownership joins, active/approved/unexpired memory eligibility, delivered active-generation transcript eligibility, and vector model identity
+- Publication retires the old live pointer and promotes the validated shadow revision atomically. Failed validation marks only the shadow failed, so the old live revision remains available
+- Maintenance removes orphan/non-canonical rows, marks missing/corrupt/coverage-mismatched live revisions unhealthy, and drops only internally generated retired or failed tables after the configured retention period
+- Lexical and semantic channels fail independently. Automatic recall and `memory.search` continue with the available channel and log the unavailable channel as degraded
+- During an embedding-model rebuild, semantic queries continue to embed with the old live revision's model until replacement publication; that old model must remain accessible from the provider
 
 ### Account Links
 
@@ -212,11 +251,57 @@ Oswald keeps three distinct memory layers.
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` creates or confirms a hashed, expiring, one-time challenge in a direct authenticated conversation
 - Confirmation atomically moves linked accounts, memories, sessions, moderation references, and re-encrypted MCP ownership before deleting the losing canonical user
+- The merge also preserves profile versions/counters, candidates/evidence/relations, formation and compaction jobs/audit, summaries/source links, generation counters, privacy-safe events, and pending derived-index changes; loser-owned rows are verified absent before commit
 - The profile that creates the challenge remains the canonical winner; admin state is preserved if either profile was admin
 - Both participating external accounts are marked verified only after successful confirmation
 - `/disconnect` requires an authenticated direct conversation and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/admin`, `/unadmin`, `/ban`, and `/unban`
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
+
+### Privacy Commands and Erasure
+
+`/privacy` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and a direct conversation. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
+
+Commands:
+
+- `/privacy inspect [memories|candidates|sessions|all] [page]` returns pages of 25 lifecycle records with stable IDs and no memory/session content; memory and candidate IDs are positive decimals, while session records identify the session and generation
+- `/privacy export` creates one read-transaction `oswald.user-export.v1` JSON snapshot; user MCP rows include metadata and a redacted endpoint, never encrypted URLs, headers, or credentials
+- `/privacy forget-memory <id>` immediately removes one memory from profile and retrieval serving state, marks it forgotten, and schedules canonical/source-exchange scrubbing after `MEMORY_FORGOTTEN_CONTENT_GRACE` (`720h` by default)
+- `/privacy delete-memory <id>` immediately scrubs one exact memory, related candidate/evidence/audit/event/relation data, derived rows, profile copies, and its linked source exchange
+- `/privacy delete-candidate <id>` immediately scrubs one exact candidate, any published memory, related evidence/audit/relations, derived rows, and linked source exchanges
+- `/privacy delete-session` deletes only the current session's current generation, including turns, summaries, compaction jobs, and transcript-index rows, then advances the preserved generation counter
+- `/privacy delete-all-memories` requires confirmation and scrubs all memories/candidates and linked source exchanges while preserving the canonical user and unrelated sessions
+- `/privacy delete-account` requires confirmation and erases the canonical user, linked accounts, memories, sessions, profiles, candidates, audit, jobs, derived work/rows, account-link state, and user-owned MCP configuration
+- `/privacy confirm <code>` consumes a one-time challenge bound to the initiating normalized gateway identity; codes expire after 10 minutes and cannot be replayed or confirmed by another linked actor
+
+Exact-ID commands reject non-positive or non-decimal IDs. Export parts are limited to 8 MiB each and 10 parts/80 MiB total. Multipart exports are raw ordered byte ranges named `.partNNN`; concatenate them byte-for-byte in filename order to reconstruct the exact JSON document.
+
+Forget is not immediate hard deletion. It removes all serving copies immediately, but canonical content remains during the configured grace period and is scrubbed by maintenance when due. Immediate delete, session delete, confirmed delete-all, and confirmed user erasure do not use that grace period. Completed operations leave only dependency-safe content-free tombstones until retention permits removal.
+
+Every privacy mutation durably enqueues its external-identity and session invalidation scope in the same transaction. The dispatcher reconciles expired leases at startup, polls every second, retries subscriber failures with bounded exponential backoff, and scrubs the outbox payload on completion. Account-erasure close events use a short recovery delay so the command path can deliver confirmation before immediately publishing the same invalidation; a crash still dispatches the durable event afterward. Gateways discard affected reply/session caches; account erasure also closes matching authenticated connections. If the erased external identity sends a later message, normal account resolution creates a new blank canonical user rather than restoring erased state.
+
+Retention configuration uses positive Go durations and a positive batch size:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MEMORY_FORGOTTEN_CONTENT_GRACE` | `720h` | Delay before forgotten canonical content and its source exchange are scrubbed. |
+| `MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION` | `720h` | Retain content-bearing audit/job payloads before redaction. |
+| `MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION` | `8760h` | Retain dependency-safe content-free tombstones. |
+| `MEMORY_RETIRED_INDEX_RETENTION` | `168h` | Retain internally generated retired/failed index tables. |
+| `MEMORY_SESSION_INACTIVITY` | `24h` | Active session lifetime before expiry cleanup. |
+| `MEMORY_CANDIDATE_CONTENT_RETENTION` | `720h` | Retain non-published candidate content before redaction. |
+| `MEMORY_SUCCESSFUL_JOB_RETENTION` | `168h` | Retain redacted successful/skipped formation and compaction jobs. |
+| `MEMORY_DEAD_JOB_RETENTION` | `720h` | Retain redacted dead jobs. |
+| `MEMORY_ACCOUNT_CHALLENGE_GRACE` | `24h` | Additional retention after account-link challenge expiry. |
+| `MEMORY_MAINTENANCE_INTERVAL` | `1h` | Serialized sweep interval after the immediate startup sweep. |
+| `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h` | Minimum interval between `PRAGMA optimize` runs. |
+| `MEMORY_MAINTENANCE_BATCH_SIZE` | `100` | Per-category row bound for one sweep. |
+
+Startup rejects non-positive values. Tombstone retention must be at least content-bearing retention, dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
+
+Maintenance is serialized and runs immediately, then at `MEMORY_MAINTENANCE_INTERVAL`. It checks foreign keys before any mutation, expires inactive sessions and short-term memory, performs bounded content redaction and dependency-safe tombstone deletion, hard-deletes due forgotten content/source exchanges, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades.
+
+SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NORMAL`, a 5-second busy timeout, immediate write locks, and a 1000-page WAL auto-checkpoint. Each sweep performs a passive WAL checkpoint, runs `incremental_vacuum(100)` only if SQLite is already in incremental auto-vacuum mode, and records/runs `PRAGMA optimize` when due. Maintenance logs only aggregate counts and durations.
 
 ### Session Chat Memory
 
@@ -762,6 +847,9 @@ Changes apply on the next request because the soul file is read fresh each time.
 - Only nine builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
 - MCP servers are configured dynamically in SQLite rather than hard-coded to one provider
 - Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
+- Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
+- Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
+- While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication
 
 Account-linking note:
 

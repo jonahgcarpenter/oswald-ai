@@ -56,3 +56,24 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	}
 	t.Fatal("transcript.search schema was not loaded")
 }
+
+func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, nil, "", log); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range reg.BuiltinCatalog() {
+		if entry.Name != "memory.forget" {
+			continue
+		}
+		if len(entry.Parameters) != 1 || entry.Parameters[0].Name != "memory_id" || entry.Parameters[0].Type != "integer" || !entry.Parameters[0].Required {
+			t.Fatalf("unexpected memory.forget parameters: %+v", entry.Parameters)
+		}
+		return
+	}
+	t.Fatal("memory.forget schema was not loaded")
+}

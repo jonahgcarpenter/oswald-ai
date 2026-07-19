@@ -158,7 +158,13 @@ func (s *Store) MarkSessionTurnDelivered(ctx context.Context, userID string, tur
 	if strings.TrimSpace(userID) == "" || turnID <= 0 {
 		return fmt.Errorf("mark session turn delivered: tenant and turn are required")
 	}
-	result, err := s.sql.ExecContext(ctx, `
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delivered session turn update: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
 UPDATE session_turns
 SET delivered_at = COALESCE(delivered_at, ?), delivery_failed_at = NULL
 WHERE id = ? AND canonical_user_id = ?
@@ -168,7 +174,7 @@ WHERE id = ? AND canonical_user_id = ?
 			AND active.session_id = session_turns.session_id
 			AND active.generation = session_turns.session_generation
 			AND julianday(active.expires_at) > julianday(?)
-	)`, formatTime(time.Now().UTC()), turnID, strings.TrimSpace(userID), formatTime(time.Now().UTC()))
+	)`, formatTime(now), turnID, strings.TrimSpace(userID), formatTime(now))
 	if err != nil {
 		return fmt.Errorf("mark session turn delivered: %w", err)
 	}
@@ -179,6 +185,13 @@ WHERE id = ? AND canonical_user_id = ?
 	if count != 1 {
 		return sql.ErrNoRows
 	}
+	if err := enqueueDerivedChangeTx(ctx, tx, strings.TrimSpace(userID), "session_turn", turnID, "upsert", "delivered:"+formatTime(now)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delivered session turn update: %w", err)
+	}
+	s.signalDerivedIndex()
 	return nil
 }
 

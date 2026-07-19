@@ -1,0 +1,176 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Privacy-safe Oswald memory, derived-index, retention, and privacy-operation health from structured Loki logs. No user, session, request, tool, or content fields are queried.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Completed and failed shadow-revision builds by privacy-safe index kind. Building state is not emitted continuously; this panel reports lifecycle outcomes.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum by (event, kind, status) (count_over_time({service=~\"$service\", component=\"indexruntime\", event=~\"index.rebuild.(complete|failed)\"} | json [$__range]))", "legendFormat": "{{kind}} {{event}} {{status}}", "queryType": "instant", "refId": "A"}],
+      "title": "Index Revision Build Outcomes",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Exact canonical-to-index coverage reported when a shadow revision validates and publishes.",
+      "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "max by (kind) (max_over_time({service=~\"$service\", component=\"indexruntime\", event=\"index.rebuild.complete\"} | json | unwrap coverage [$__interval]))", "legendFormat": "{{kind}}", "queryType": "range", "refId": "A"}],
+      "title": "Published Revision Coverage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Expected canonical rows versus physically indexed rows at rebuild completion.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "max by (kind) (max_over_time({service=~\"$service\", component=\"indexruntime\", event=\"index.rebuild.complete\"} | json | unwrap expected_count [$__interval]))", "legendFormat": "{{kind}} expected", "queryType": "range", "refId": "A"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "max by (kind) (max_over_time({service=~\"$service\", component=\"indexruntime\", event=\"index.rebuild.complete\"} | json | unwrap indexed_count [$__interval]))", "legendFormat": "{{kind}} indexed", "queryType": "range", "refId": "B"}
+      ],
+      "title": "Expected vs Indexed Rows",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Lexical and semantic retrieval channels fail independently; these events show requests that continued in degraded mode.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 5},
+      "id": 4,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum by (event) (count_over_time({service=~\"$service\", event=~\"agent.memory.recall.(lexical|semantic)_degraded|agent.tool.memory.search_(lexical|semantic)_degraded\"} [$__interval]))", "legendFormat": "{{event}}", "queryType": "range", "refId": "A"}],
+      "title": "Degraded Retrieval Channels",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Sweep duration, including retention, derived-index consistency work, and database hygiene.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 5},
+      "id": 5,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "quantile_over_time(0.95, {service=~\"$service\", component=\"maintenanceruntime\", event=~\"maintenance.sweep.(complete|failed)\"} | json | unwrap duration_ms [$__interval])", "legendFormat": "p95", "queryType": "range", "refId": "A"}],
+      "title": "Maintenance Duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Aggregate-only retention and consistency work. No row identifiers or content are present.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 5},
+      "id": 6,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap rows_changed [$__interval])", "legendFormat": "rows changed", "queryType": "range", "refId": "A"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap redacted_count [$__interval])", "legendFormat": "redacted", "queryType": "range", "refId": "B"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap tombstone_deleted_count [$__interval])", "legendFormat": "tombstones deleted", "queryType": "range", "refId": "C"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap index_row_deleted_count [$__interval])", "legendFormat": "orphan index rows", "queryType": "range", "refId": "D"}
+      ],
+      "title": "Maintenance Counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Failed sweeps and live revisions marked degraded by physical-table, corruption, or exact-coverage checks.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 11},
+      "id": 7,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum(count_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.failed\"} [$__interval]))", "legendFormat": "sweep failures", "queryType": "range", "refId": "A"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap index_revision_degraded_count [$__interval])", "legendFormat": "revisions degraded", "queryType": "range", "refId": "B"}
+      ],
+      "title": "Maintenance Failures and Coverage Degradation",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Privacy operation volume grouped only by operation type and status.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 11},
+      "id": 8,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum by (operation_type, status) (count_over_time({service=~\"$service\", component=\"privacy\", event=\"privacy.operation.complete\"} | json [$__interval]))", "legendFormat": "{{operation_type}} {{status}}", "queryType": "range", "refId": "A"}],
+      "title": "Privacy Operations by Type and Status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Privacy operation p95 duration. No actor, target, user, session, request, or record identifiers are selected.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 11},
+      "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "quantile_over_time(0.95, {service=~\"$service\", component=\"privacy\", event=\"privacy.operation.complete\"} | json | unwrap duration_ms [$__interval]) by (operation_type)", "legendFormat": "{{operation_type}}", "queryType": "range", "refId": "A"}],
+      "title": "Privacy Operation Duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Retry rate is the available invalidation-lag signal. Current logs do not emit outbox event age, so this is intentionally a proxy rather than measured lag.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 16},
+      "id": 10,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum(count_over_time({service=~\"$service\", component=\"privacy.dispatcher\", event=\"privacy.invalidation.dispatch_failed\"} [$__interval]))", "legendFormat": "dispatch retries", "queryType": "range", "refId": "A"}],
+      "title": "Invalidation Retry / Lag Proxy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Counts only implemented ingress identity mismatch and invalid-principal denial events. No IDs are extracted.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 16},
+      "id": 11,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum by (event) (count_over_time({service=~\"$service\", event=~\"gateway.authentication.identity_mismatch|gateway.account.invalid_principal\"} [$__interval]))", "legendFormat": "{{event}}", "queryType": "range", "refId": "A"}],
+      "title": "Identity / Isolation Denials",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "$datasource"},
+      "description": "Due forgotten-memory scrubs per sweep are a deletion-lag throughput proxy. Current logs do not emit per-record due age, so this panel does not claim measured time lag.",
+      "fieldConfig": {"defaults": {"min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 16},
+      "id": 12,
+      "options": {"legend": {"calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap forgotten_memory_count [$__interval])", "legendFormat": "due forgotten memories scrubbed", "queryType": "range", "refId": "A"},
+        {"datasource": {"type": "loki", "uid": "$datasource"}, "editorMode": "code", "expr": "sum_over_time({service=~\"$service\", component=\"maintenanceruntime\", event=\"maintenance.sweep.complete\"} | json | unwrap tombstone_deleted_count [$__interval])", "legendFormat": "retained tombstones deleted", "queryType": "range", "refId": "B"}
+      ],
+      "title": "Deletion Lag Proxy",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["oswald", "memory", "privacy", "loki"],
+  "templating": {
+    "list": [
+      {"current": {}, "hide": 0, "includeAll": false, "label": "Loki", "multi": false, "name": "datasource", "options": [], "query": "loki", "refresh": 1, "regex": "", "skipUrlSync": false, "type": "datasource"},
+      {"allValue": ".*", "current": {"text": "All", "value": "$__all"}, "datasource": {"type": "loki", "uid": "$datasource"}, "definition": "label_values(service)", "hide": 0, "includeAll": true, "label": "Service", "multi": true, "name": "service", "options": [], "query": "label_values(service)", "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"}
+    ]
+  },
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Oswald Memory Health",
+  "uid": "oswald-memory-health",
+  "version": 1,
+  "weekStart": ""
+}

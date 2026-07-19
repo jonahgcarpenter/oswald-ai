@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/indexruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
@@ -415,15 +416,12 @@ func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *te
 			t.Fatal(err)
 		}
 	}
-	seedEmbeddingCount := len(embedder.inputs)
-
 	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
-	newEmbeddings := embedder.inputs[seedEmbeddingCount:]
-	if len(newEmbeddings) != 1 || newEmbeddings[0] != "follow up" {
-		t.Fatalf("automatic recall embeddings = %+v, want current prompt", newEmbeddings)
+	if len(embedder.inputs) != 0 {
+		t.Fatalf("semantic recall embedded without a live vector revision: %+v", embedder.inputs)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
 	if len(messages) != 15 || messages[2].Role != "user" || messages[2].Content != "older unrelated" || messages[3].Role != "assistant" || messages[3].Content != "old a" {
@@ -491,6 +489,9 @@ func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 		Scope: usermemory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := indexruntime.NewService(store, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 

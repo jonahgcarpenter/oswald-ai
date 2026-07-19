@@ -26,6 +26,7 @@ func TestSearchTranscriptEnforcesScopeDeliveryAndActiveSessionRetention(t *testi
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", active, "undelivered quasar", "not visible", false, time.Hour)
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", active, "expired quasar", "not visible", true, -time.Hour)
 
+	rebuildTestIndexes(t, store)
 	results, err := store.SearchTranscript(context.Background(), "user-1", "session-1", active, "quasar", 20)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +55,7 @@ func TestSearchTranscriptMatchesUserAndAssistantAndQuotesQuerySyntax(t *testing.
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "The user mentioned nebula.", "No special response.", true, time.Hour)
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "A different request.", "The answer mentioned pulsar.", true, time.Hour)
 
+	rebuildTestIndexes(t, store)
 	for query, want := range map[string]string{
 		`nebula" OR canonical_user_id:*`: "nebula",
 		"pulsar":                         "pulsar",
@@ -77,6 +79,7 @@ func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T)
 		t.Fatal(err)
 	}
 
+	rebuildTestIndexes(t, store)
 	results, err := store.SearchTranscript(context.Background(), "user-1", "session-1", generation, "marker", 5)
 	if err != nil || len(results) != 0 {
 		t.Fatalf("stale generation results=%+v err=%v", results, err)
@@ -92,10 +95,15 @@ func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T)
 
 func TestSearchTranscriptReturnsStableUnavailableError(t *testing.T) {
 	store := newTranscriptTestStore(t)
-	if _, err := store.sql.Exec(`DROP TABLE session_turns_fts`); err != nil {
+	rebuildTestIndexes(t, store)
+	live, err := store.LiveIndexRevision(context.Background(), IndexKindTranscriptFTS)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.SearchTranscript(context.Background(), "user-1", "session-1", 1, "marker", 5)
+	if _, err := store.sql.Exec(`DROP TABLE ` + live.TableName); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.SearchTranscript(context.Background(), "user-1", "session-1", 1, "marker", 5)
 	if !errors.Is(err, ErrTranscriptSearchUnavailable) {
 		t.Fatalf("error = %v", err)
 	}
@@ -110,6 +118,7 @@ func TestSearchTranscriptCapsQueryResultsAndOutput(t *testing.T) {
 	}
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "marker "+strings.Repeat("x", maxTranscriptSearchChars), "oversized reply", true, time.Hour)
 
+	rebuildTestIndexes(t, store)
 	results, err := store.SearchTranscript(context.Background(), "user-1", "session-1", generation, "marker", 1000)
 	if err != nil {
 		t.Fatal(err)

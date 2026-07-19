@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,30 @@ func TestSubmitRejectsWhenQueueFull(t *testing.T) {
 		}
 	default:
 		t.Fatal("full queue did not reject immediately")
+	}
+}
+
+func TestRejectedLaneOperationReleasesReaderReservation(t *testing.T) {
+	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
+	defer b.Shutdown()
+	for i := 0; i < requestQueueSize+b.workerCount; i++ {
+		principal := identity.Principal{CanonicalUserID: fmt.Sprintf("filler-%d", i), Gateway: "websocket", ExternalID: fmt.Sprintf("filler-%d", i), Assurance: identity.AssuranceSelfAsserted}
+		if err := b.Submit(&Request{Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	if err := b.RunInLane(context.Background(), user, "session", func() error { return nil }); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("rejected lane error = %v", err)
+	}
+	b.mu.Lock()
+	fence := b.userFences["user"]
+	b.mu.Unlock()
+	fence.mu.Lock()
+	readers := fence.readers
+	fence.mu.Unlock()
+	if readers != 0 {
+		t.Fatalf("rejected lane leaked %d reader reservations", readers)
 	}
 }
 
@@ -219,6 +244,380 @@ func TestBrokerSameSessionDifferentUsersRunInParallel(t *testing.T) {
 		}
 	}
 	close(release)
+}
+
+func TestBrokerUserExclusiveFencesAllUserSessions(t *testing.T) {
+	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	activeStarted := make(chan struct{}, 2)
+	releaseActive := make(chan struct{})
+	for _, sessionID := range []string{"one", "two"} {
+		go func() {
+			_ = b.RunInLane(context.Background(), principal, sessionID, func() error {
+				activeStarted <- struct{}{}
+				<-releaseActive
+				return nil
+			})
+		}()
+	}
+	<-activeStarted
+	<-activeStarted
+	exclusiveStarted := make(chan struct{})
+	releaseExclusive := make(chan struct{})
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), principal, func() error {
+			close(exclusiveStarted)
+			<-releaseExclusive
+			return nil
+		})
+	}()
+	select {
+	case <-exclusiveStarted:
+		t.Fatal("exclusive work overlapped active same-user sessions")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseActive)
+	select {
+	case <-exclusiveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("exclusive work did not start after active sessions drained")
+	}
+	laterStarted := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), principal, "three", func() error { close(laterStarted); return nil })
+	}()
+	select {
+	case <-laterStarted:
+		t.Fatal("new same-user work overlapped exclusive work")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseExclusive)
+	select {
+	case <-laterStarted:
+	case <-time.After(time.Second):
+		t.Fatal("same-user work did not resume after exclusive work")
+	}
+}
+
+func TestBrokerUserExclusiveDoesNotOvertakeAcceptedReader(t *testing.T) {
+	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	blocker := identity.Principal{CanonicalUserID: "blocker", Gateway: "websocket", ExternalID: "blocker", Assurance: identity.AssuranceSelfAsserted}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	releaseBlocker := make(chan struct{})
+	blockerStarted := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), blocker, "session", func() error {
+			close(blockerStarted)
+			<-releaseBlocker
+			return nil
+		})
+	}()
+	<-blockerStarted
+	order := make(chan string, 2)
+	go func() {
+		_ = b.RunInLane(context.Background(), user, "accepted-first", func() error { order <- "reader"; return nil })
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		accepted := b.outstanding >= 2
+		b.mu.Unlock()
+		if accepted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reader was not accepted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), user, func() error { order <- "exclusive"; return nil })
+	}()
+	deadline = time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		fence := b.userFences["user"]
+		b.mu.Unlock()
+		fence.mu.Lock()
+		writerPending := fence.pendingWriters > 0
+		fence.mu.Unlock()
+		if writerPending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exclusive writer was not reserved")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseBlocker)
+	if first := <-order; first != "reader" {
+		t.Fatalf("first work = %q, want accepted reader", first)
+	}
+	if second := <-order; second != "exclusive" {
+		t.Fatalf("second work = %q, want exclusive", second)
+	}
+}
+
+func TestBrokerUserExclusiveDoesNotOvertakeSameLaneFollower(t *testing.T) {
+	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	headStarted := make(chan struct{})
+	releaseHead := make(chan struct{})
+	order := make(chan string, 2)
+	go func() {
+		_ = b.RunInLane(context.Background(), user, "same", func() error {
+			close(headStarted)
+			<-releaseHead
+			return nil
+		})
+	}()
+	<-headStarted
+	go func() {
+		_ = b.RunInLane(context.Background(), user, "same", func() error { order <- "follower"; return nil })
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		accepted := b.outstanding >= 2
+		b.mu.Unlock()
+		if accepted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lane follower was not accepted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), user, func() error { order <- "exclusive"; return nil })
+	}()
+	deadline = time.Now().Add(time.Second)
+	for {
+		b.mu.Lock()
+		fence := b.userFences["user"]
+		b.mu.Unlock()
+		fence.mu.Lock()
+		writerPending := fence.pendingWriters > 0
+		fence.mu.Unlock()
+		if writerPending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("exclusive writer was not reserved")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseHead)
+	if first := <-order; first != "follower" {
+		t.Fatalf("first work = %q, want lane follower", first)
+	}
+	if second := <-order; second != "exclusive" {
+		t.Fatalf("second work = %q, want exclusive", second)
+	}
+}
+
+func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "websocket", ExternalID: "winner", Assurance: identity.AssuranceSelfAsserted}
+	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "websocket", ExternalID: "loser", Assurance: identity.AssuranceSelfAsserted}
+	exclusiveStarted := make(chan struct{})
+	releaseExclusive := make(chan struct{})
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), winner, func() error {
+			close(exclusiveStarted)
+			<-releaseExclusive
+			return nil
+		})
+	}()
+	<-exclusiveStarted
+	req := &Request{
+		Principal:  loser,
+		SessionKey: "session",
+		RefreshPrincipal: func(principal identity.Principal) (identity.Principal, error) {
+			principal.CanonicalUserID = "winner"
+			return principal, nil
+		},
+		ResponseChan: make(chan Result, 1),
+	}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-processor.requests:
+		t.Fatal("refreshed request overlapped winner-exclusive work")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseExclusive)
+	select {
+	case processed := <-processor.requests:
+		if processed.Principal.CanonicalUserID != "winner" {
+			t.Fatalf("processed principal = %q", processed.Principal.CanonicalUserID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refreshed request did not resume")
+	}
+}
+
+func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "websocket", ExternalID: "winner", Assurance: identity.AssuranceSelfAsserted}
+	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "websocket", ExternalID: "loser", Assurance: identity.AssuranceSelfAsserted}
+	exclusiveStarted := make(chan struct{})
+	releaseExclusive := make(chan struct{})
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), winner, func() error {
+			close(exclusiveStarted)
+			<-releaseExclusive
+			return nil
+		})
+	}()
+	<-exclusiveStarted
+	refreshCount := 0
+	req := &Request{
+		Principal:  loser,
+		SessionKey: "session",
+		RefreshPrincipal: func(principal identity.Principal) (identity.Principal, error) {
+			refreshCount++
+			if refreshCount == 1 {
+				principal.CanonicalUserID = "winner"
+				return principal, nil
+			}
+			return identity.Principal{}, errors.New("account erased while queued")
+		},
+		ResponseChan: make(chan Result, 1),
+	}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseExclusive)
+	select {
+	case result := <-req.ResponseChan:
+		if result.Err == nil {
+			t.Fatal("stale refreshed principal reached processor")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale refreshed request did not finish")
+	}
+	select {
+	case <-processor.requests:
+		t.Fatal("processor received erased principal")
+	default:
+	}
+}
+
+func TestBrokerUserExclusiveDoesNotFenceOtherUsersAndReleasesAfterPanic(t *testing.T) {
+	b := NewBroker(nil, 3, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	other := identity.Principal{CanonicalUserID: "other", Gateway: "websocket", ExternalID: "other", Assurance: identity.AssuranceSelfAsserted}
+	exclusiveStarted := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = b.RunUserExclusive(context.Background(), user, func() error { close(exclusiveStarted); <-release; return nil })
+	}()
+	<-exclusiveStarted
+	otherStarted := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), other, "session", func() error { close(otherStarted); return nil })
+	}()
+	select {
+	case <-otherStarted:
+	case <-time.After(time.Second):
+		t.Fatal("exclusive work blocked a different user")
+	}
+	close(release)
+	if err := b.RunUserExclusive(context.Background(), user, func() error { panic("boom") }); err == nil {
+		t.Fatal("exclusive panic was not returned as an error")
+	}
+	if err := b.RunInLane(context.Background(), user, "after", func() error { return nil }); err != nil {
+		t.Fatalf("user fence remained locked after panic: %v", err)
+	}
+}
+
+func TestBrokerUsersExclusiveUsesStableOrderAndFencesEveryUser(t *testing.T) {
+	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	a := identity.Principal{CanonicalUserID: "a", Gateway: "websocket", ExternalID: "a", Assurance: identity.AssuranceSelfAsserted}
+	bUser := identity.Principal{CanonicalUserID: "b", Gateway: "websocket", ExternalID: "b", Assurance: identity.AssuranceSelfAsserted}
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	go func() {
+		_ = b.RunUsersExclusive(context.Background(), []string{"b", "a", "b"}, func() error {
+			close(firstStarted)
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstStarted
+
+	blocked := make(chan struct{}, 2)
+	go func() {
+		_ = b.RunInLane(context.Background(), a, "a-session", func() error { blocked <- struct{}{}; return nil })
+	}()
+	go func() {
+		_ = b.RunInLane(context.Background(), bUser, "b-session", func() error { blocked <- struct{}{}; return nil })
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("normal work overlapped a multi-user exclusive operation")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	for range 2 {
+		select {
+		case <-blocked:
+		case <-time.After(time.Second):
+			t.Fatal("fenced work did not resume")
+		}
+	}
+
+	done := make(chan error, 2)
+	go func() {
+		done <- b.RunUsersExclusive(context.Background(), []string{"a", "b"}, func() error { return nil })
+	}()
+	go func() {
+		done <- b.RunUsersExclusive(context.Background(), []string{"b", "a"}, func() error { return nil })
+	}()
+	for range 2 {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("opposite target order deadlocked")
+		}
+	}
+}
+
+func TestBrokerUsersExclusiveReleasesAllFencesAfterPanic(t *testing.T) {
+	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	if err := b.RunUsersExclusive(context.Background(), []string{"b", "a"}, func() error { panic("boom") }); err == nil {
+		t.Fatal("exclusive panic was not returned")
+	}
+	for _, userID := range []string{"a", "b"} {
+		principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: userID, Assurance: identity.AssuranceSelfAsserted}
+		if err := b.RunInLane(context.Background(), principal, "after", func() error { return nil }); err != nil {
+			t.Fatalf("fence %s remained locked: %v", userID, err)
+		}
+	}
 }
 
 func TestBrokerShutdownDrainsLaneFollowers(t *testing.T) {

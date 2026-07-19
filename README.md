@@ -17,6 +17,8 @@ The model receives the user prompt, can call registered tools, and then returns 
 - User & Global MCP integrations
 - SQLite-backed session chat memory with proactive durable background compaction, untrusted structured summaries, a recent role-correct tail, active-generation transcript search, and TTL expiry
 - Tenant-scoped hybrid durable-memory recall using FTS5 and sqlite-vec
+- Authenticated self-service privacy inspection, export, forgetting, deletion, and account erasure
+- Rebuildable revisioned retrieval indexes, configurable retention, and privacy-safe memory-health telemetry
 - FIFO execution per user/session, with parallel processing across independent conversations
 - Per-user persistent memory in SQLite and a live-editable soul file
 - Fully local runtime with no cloud hosted model dependency
@@ -36,6 +38,40 @@ Long active conversations use an explicitly untrusted generated summary followed
 `AGENTS.md` documents the full runtime and architecture in detail.
 
 Local Go builds and tests must enable SQLite FTS5, for example `go test -tags sqlite_fts5 ./...`.
+
+### Storage and index safety
+
+SQLite canonical rows are the source of truth. FTS5 and sqlite-vec tables are derived, revisioned state maintained from a durable outbox. The index worker builds replacement revisions as shadow tables, applies changes to both live and building revisions, validates exact canonical ownership and coverage, and atomically publishes only a complete revision. A failed build does not displace the old live revision, and lexical and semantic recall degrade independently.
+
+Startup runs ordered schema migrations `v1` through `v11` in one `BEGIN IMMEDIATE` transaction, checks every recorded name and SHA-256 checksum for drift, and runs `PRAGMA foreign_key_check` before commit. Unknown versions, changed names/checksums, required migration failures, or foreign-key violations stop startup. The two FTS5 baselines (`v5` and `v6`) are optional capabilities: an unavailable FTS5 capability is logged as degraded and its frozen migration is still recorded. Exact legacy symbolic checksums for `v1` through `v6` are accepted once, then rebased to checksums of the frozen definitions.
+
+### Privacy and retention
+
+Every `/privacy` operation requires an authenticated principal in a direct conversation. Inspection returns stable IDs and lifecycle metadata, not content. Exact-ID mutations accept only positive decimal IDs. Bulk memory deletion and account erasure issue one-time, actor-bound confirmation codes that expire after 10 minutes.
+
+| Command | Effect |
+| --- | --- |
+| `/privacy inspect [memories\|candidates\|sessions\|all] [page]` | List bounded metadata-only records and stable IDs. |
+| `/privacy export` | Export one consistent `oswald.user-export.v1` JSON snapshot. |
+| `/privacy forget-memory <id>` | Remove a memory from profiles and retrieval immediately, then scrub canonical content after the default 30-day grace period. |
+| `/privacy delete-memory <id>` | Immediately and irreversibly scrub one memory and its linked source exchange. |
+| `/privacy delete-candidate <id>` | Scrub one candidate, any published memory, and linked source exchange. |
+| `/privacy delete-session` | Delete the current session generation, summaries, jobs, turns, and derived transcript rows. |
+| `/privacy delete-all-memories` | After confirmation, scrub all memories and candidates and their source exchanges while retaining the account. |
+| `/privacy delete-account` | After confirmation, erase the canonical user, accounts, memory/session state, user MCP configuration, and derived rows. |
+| `/privacy confirm <code>` | Consume an actor-bound pending bulk-operation code. |
+
+Exports larger than 8 MiB are delivered in ordered `.partNNN` files; concatenate them byte-for-byte in filename order to reconstruct the JSON. The total export cap is 80 MiB. User MCP exports contain metadata only and redact the encrypted endpoint and credentials.
+
+Privacy mutations fence the whole canonical user while committing, enqueue durable runtime invalidation in the same transaction, clear affected gateway/session caches, and close authenticated connections after account erasure. A later message from an erased external identity creates a new blank canonical user; erased data is not restored. Verified account merges preserve both tenants' memories, sessions, profile state, audit metadata, derived-index work, moderation references, admin status, linked accounts, and encrypted user MCP ownership under the challenge initiator's canonical user.
+
+Ordinary group memory remains enabled by explicit product decision: an addressed group turn uses that authenticated sender's private memory and session scope. It never creates shared group memory. All `memory.*` and `transcript.search` handlers require an authenticated principal. The nine model tools listed above are unchanged; `/privacy` operations are gateway commands, not model tools.
+
+Retention defaults are balanced for local operation and configurable with the `MEMORY_*` variables in `.env.example`. Maintenance runs immediately at startup and hourly thereafter in bounded batches, checks foreign keys before mutation, expires sessions, redacts old content-bearing audit/job records, removes due tombstones and orphan index rows, verifies exact index coverage, checkpoints WAL passively, uses incremental vacuum only when configured by SQLite, and runs `PRAGMA optimize` daily. SQLite is opened with `secure_delete=ON`, WAL, `synchronous=NORMAL`, and a 1000-page auto-checkpoint.
+
+The application cannot erase copies already captured by external backups or an external log sink; those systems need their own retention policy. During a vector-model shadow rebuild, the old model must remain accessible through the configured provider because live semantic recall continues to use the old live revision until the replacement validates and publishes.
+
+The privacy-safe Grafana/Loki dashboard is `monitoring/grafana/dashboards/oswald-memory-health.json`.
 
 ## Usage
 
@@ -112,6 +148,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/connect` | `/connect [code\|cancel]` | In a direct chat, create a 10-minute one-time code or confirm a code from another authenticated account. |
 | `/disconnect` | `/disconnect [account_number]` | In a direct chat, disconnect a linked gateway account. The last linked account cannot be removed. |
 | `/reset` | `/reset` | Clear this conversation's session history and load the latest stable tenant profile. |
+| `/privacy` | `/privacy inspect [memories\|candidates\|sessions\|all] [page] \| export \| forget-memory <id> \| delete-memory <id> \| delete-candidate <id> \| delete-session \| delete-all-memories \| delete-account \| confirm <code>` | Inspect, export, forget, or erase your retained data in an authenticated direct conversation. |
 | `/mcp servers` | `/mcp servers` | List your user-scoped MCP servers. |
 | `/mcp add` | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]` | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
 | `/mcp remove` | `/mcp remove <name>` | Remove one of your MCP servers. |

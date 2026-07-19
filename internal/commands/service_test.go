@@ -88,6 +88,43 @@ func TestServiceRejectsDuplicateNamesAndAliases(t *testing.T) {
 	}
 }
 
+func TestServiceDefinitionResolvesAliasesAndExclusivity(t *testing.T) {
+	service, err := NewService(HandlerFunc{DefinitionValue: Definition{Name: "privacy", Aliases: []string{"private"}, UserExclusive: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := service.Definition("/private")
+	if !ok || definition.Name != "privacy" || !definition.UserExclusive {
+		t.Fatalf("definition=%+v found=%v", definition, ok)
+	}
+	if _, ok := service.Definition("missing"); ok {
+		t.Fatal("unknown command returned a definition")
+	}
+}
+
+func TestServiceResolvesFenceTargetsWithParsedRequestBeforeMiddleware(t *testing.T) {
+	service, err := NewServiceWithCommands(Command{
+		Handler: HandlerFunc{
+			DefinitionValue: Definition{Name: "deleteuser", Aliases: []string{"removeuser"}},
+			ExecuteFunc:     func(context.Context, Request) (Result, error) { return Result{}, nil },
+			ResolveFenceTargetsFunc: func(_ context.Context, req Request) ([]string, error) {
+				if req.Name != "deleteuser" || req.ArgsText != "target" || len(req.Args) != 1 {
+					t.Fatalf("resolver received unparsed request: %+v", req)
+				}
+				return []string{req.Args[0]}, nil
+			},
+		},
+		Middleware: []Middleware{RequireAdmin(fakeAuthorizer{admins: map[string]bool{"admin": true}})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := service.ResolveFenceTargets(context.Background(), Request{Principal: testPrincipal("admin"), Raw: "/removeuser target"})
+	if err != nil || len(targets) != 1 || targets[0] != "target" {
+		t.Fatalf("targets=%v err=%v", targets, err)
+	}
+}
+
 type fakeCommand struct {
 	name    string
 	aliases []string

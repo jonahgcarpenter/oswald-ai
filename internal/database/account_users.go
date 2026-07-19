@@ -18,7 +18,19 @@ type AccountUser struct {
 }
 
 func (d *DB) initializeAccountUsers() error {
-	_, err := d.db.Exec(`
+	_, err := d.db.Exec(accountUsersBaselineSQL)
+	if err != nil {
+		return fmt.Errorf("failed to initialize account_users table: %w", err)
+	}
+	for _, column := range accountUserLegacyColumns {
+		if err := d.ensureAccountUserColumn(column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const accountUsersBaselineSQL = `
 CREATE TABLE IF NOT EXISTS account_users (
 	canonical_user_id TEXT PRIMARY KEY,
 	created_at TEXT NOT NULL,
@@ -29,25 +41,17 @@ CREATE TABLE IF NOT EXISTS account_users (
 	banned_by TEXT NOT NULL DEFAULT '',
 	ban_reason TEXT NOT NULL DEFAULT ''
 );
-`)
-	if err != nil {
-		return fmt.Errorf("failed to initialize account_users table: %w", err)
-	}
-	for _, column := range []struct {
-		name       string
-		definition string
-	}{
-		{name: "is_admin", definition: "INTEGER NOT NULL DEFAULT 0"},
-		{name: "is_banned", definition: "INTEGER NOT NULL DEFAULT 0"},
-		{name: "banned_at", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "banned_by", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "ban_reason", definition: "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := d.ensureAccountUserColumn(column.name, column.definition); err != nil {
-			return err
-		}
-	}
-	return nil
+`
+
+var accountUserLegacyColumns = []struct {
+	name       string
+	definition string
+}{
+	{name: "is_admin", definition: "INTEGER NOT NULL DEFAULT 0"},
+	{name: "is_banned", definition: "INTEGER NOT NULL DEFAULT 0"},
+	{name: "banned_at", definition: "TEXT NOT NULL DEFAULT ''"},
+	{name: "banned_by", definition: "TEXT NOT NULL DEFAULT ''"},
+	{name: "ban_reason", definition: "TEXT NOT NULL DEFAULT ''"},
 }
 
 func (d *DB) ensureAccountUserColumn(name, definition string) error {

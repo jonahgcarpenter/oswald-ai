@@ -4,13 +4,31 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 )
+
+// CommandResponse is emitted for command results that include an attachment.
+type CommandResponse struct {
+	Type        string                      `json:"type"`
+	Response    string                      `json:"response,omitempty"`
+	Attachment  *CommandResponseAttachment  `json:"attachment,omitempty"`
+	Attachments []CommandResponseAttachment `json:"attachments,omitempty"`
+}
+
+// CommandResponseAttachment is a base64-encoded command attachment.
+type CommandResponseAttachment struct {
+	Filename string `json:"filename"`
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"`
+}
 
 // Gateway handles local WebSocket connections for testing and client access.
 type Gateway struct {
@@ -19,6 +37,35 @@ type Gateway struct {
 	Links         *accountlinking.Service
 	Runtime       gatewayruntime.Dependencies
 	Log           *config.Logger
+	connectionsMu sync.Mutex
+	connections   map[string]map[*gorilla.Conn]struct{}
+}
+
+// HandlePrivacyInvalidation closes authenticated connections only for deleted accounts.
+func (wg *Gateway) HandlePrivacyInvalidation(event privacyruntime.Event) {
+	if !event.CloseConnections {
+		return
+	}
+	subjects := make(map[string]bool)
+	const prefix = "websocket:"
+	for _, external := range event.ExternalIdentities {
+		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
+			subjects[external[len(prefix):]] = true
+		}
+	}
+	wg.connectionsMu.Lock()
+	var connections []*gorilla.Conn
+	for subject := range subjects {
+		for conn := range wg.connections[subject] {
+			connections = append(connections, conn)
+		}
+		delete(wg.connections, subject)
+	}
+	wg.connectionsMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "account deleted"), time.Now().Add(time.Second))
+		_ = conn.Close()
+	}
 }
 
 func (wg *Gateway) log() *config.Logger {

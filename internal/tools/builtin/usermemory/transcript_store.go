@@ -52,6 +52,11 @@ func (s *Store) SearchTranscript(ctx context.Context, userID, sessionID string, 
 	if terms == "" {
 		return nil, fmt.Errorf("transcript search query is required")
 	}
+	revision, err := s.LiveIndexRevision(ctx, IndexKindTranscriptFTS)
+	if err != nil || validateRevisionTable(revision.TableName) != nil {
+		return nil, ErrTranscriptSearchUnavailable
+	}
+	table := revision.TableName
 	match := fmt.Sprintf(`canonical_user_id : "%s" AND session_id : "%s" AND session_generation : "%d" AND {user_text assistant_text} : (%s)`, quoteTranscriptFTSValue(userID), quoteTranscriptFTSValue(sessionID), generation, terms)
 	if limit <= 0 {
 		limit = defaultTranscriptSearchLimit
@@ -64,15 +69,15 @@ func (s *Store) SearchTranscript(ctx context.Context, userID, sessionID string, 
 	rows, err := s.sql.QueryContext(ctx, `
 SELECT turns.id, turns.session_id, turns.session_generation, turns.user_text,
 	turns.assistant_text, turns.created_at, turns.delivered_at
-FROM session_turns_fts
-JOIN session_turns turns ON turns.id = session_turns_fts.rowid
+FROM `+table+`
+JOIN session_turns turns ON turns.id = `+table+`.rowid
 JOIN tenant_sessions sessions
 	ON sessions.canonical_user_id = turns.canonical_user_id
 	AND sessions.session_id = turns.session_id
-WHERE session_turns_fts MATCH ?
-	AND session_turns_fts.canonical_user_id = ?
-	AND session_turns_fts.session_id = ?
-	AND session_turns_fts.session_generation = ?
+WHERE `+table+` MATCH ?
+	AND `+table+`.canonical_user_id = ?
+	AND `+table+`.session_id = ?
+	AND `+table+`.session_generation = ?
 	AND turns.canonical_user_id = ?
 	AND turns.session_id = ?
 	AND turns.session_generation = ?
@@ -81,7 +86,7 @@ WHERE session_turns_fts MATCH ?
 	AND sessions.generation = ?
 	AND julianday(sessions.expires_at) > julianday(?)
 	AND turns.delivered_at IS NOT NULL
-ORDER BY bm25(session_turns_fts, 0.0, 0.0, 0.0, 1.0, 1.0), turns.created_at DESC, turns.id DESC
+ORDER BY bm25(`+table+`, 0.0, 0.0, 0.0, 1.0, 1.0), turns.created_at DESC, turns.id DESC
 LIMIT ?`, match, userID, sessionID, generation, userID, sessionID, generation,
 		userID, sessionID, generation, now, maxTranscriptCandidateLimit)
 	if err != nil {
@@ -161,6 +166,7 @@ func transcriptFTSUnavailable(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "no such table: session_turns_fts") ||
+		strings.Contains(message, "no such table: derived_index_transcript_fts_") ||
 		strings.Contains(message, "no such module: fts5") ||
 		strings.Contains(message, "unable to use function match")
 }

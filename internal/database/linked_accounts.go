@@ -25,7 +25,14 @@ type AccountLinkData struct {
 }
 
 func (d *DB) initializeLinkedAccounts() error {
-	_, err := d.db.Exec(`
+	_, err := d.db.Exec(linkedAccountsBaselineSQL)
+	if err != nil {
+		return fmt.Errorf("failed to initialize linked_accounts table: %w", err)
+	}
+	return nil
+}
+
+const linkedAccountsBaselineSQL = `
 CREATE TABLE IF NOT EXISTS linked_accounts (
 	gateway TEXT NOT NULL,
 	identifier TEXT NOT NULL,
@@ -37,12 +44,7 @@ CREATE TABLE IF NOT EXISTS linked_accounts (
 	UNIQUE (canonical_user_id, gateway),
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
-`)
-	if err != nil {
-		return fmt.Errorf("failed to initialize linked_accounts table: %w", err)
-	}
-	return nil
-}
+`
 
 // LoadAccountLinks reads all canonical users and linked accounts.
 func (d *DB) LoadAccountLinks() (AccountLinkData, error) {

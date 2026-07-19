@@ -26,7 +26,7 @@ type SessionProfile struct {
 
 // ResetSessionContext clears and refreshes one session using the standard TTL.
 func (s *Store) ResetSessionContext(ctx context.Context, userID, sessionID string) error {
-	_, err := s.ResetSession(ctx, userID, sessionID, 24*time.Hour)
+	_, err := s.ResetSession(ctx, userID, sessionID, s.sessionTTL(24*time.Hour))
 	return err
 }
 
@@ -39,9 +39,7 @@ func (s *Store) ResolveSessionProfile(ctx context.Context, userID, sessionID str
 	if strings.TrimSpace(sessionID) == "" {
 		return SessionProfile{}, fmt.Errorf("tenant profile: session id is required")
 	}
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
-	}
+	ttl = s.sessionTTL(ttl)
 	now := time.Now().UTC()
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -137,9 +135,7 @@ func (s *Store) ResetSession(ctx context.Context, userID, sessionID string, ttl 
 	if strings.TrimSpace(sessionID) == "" {
 		return SessionProfile{}, fmt.Errorf("tenant profile: session id is required")
 	}
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
-	}
+	ttl = s.sessionTTL(ttl)
 	now := time.Now().UTC()
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -171,8 +167,17 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
 		return SessionProfile{}, fmt.Errorf("clear reset session summaries: %w", err)
 	}
+	turnIDs, err := memoryIDsTx(tx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID)
+	if err != nil {
+		return SessionProfile{}, fmt.Errorf("enumerate reset session turns: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
 		return SessionProfile{}, fmt.Errorf("clear reset session turns: %w", err)
+	}
+	for _, id := range turnIDs {
+		if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", id, "delete", "reset:"+formatTime(now)); err != nil {
+			return SessionProfile{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tenant_sessions (canonical_user_id, session_id, generation, profile_version_id, started_at, last_seen_at, expires_at)
@@ -200,6 +205,7 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	if err := tx.Commit(); err != nil {
 		return SessionProfile{}, fmt.Errorf("commit tenant session reset: %w", err)
 	}
+	s.signalDerivedIndex()
 	return current, nil
 }
 

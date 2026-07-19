@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -57,6 +59,95 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	principal := chat.lastPrincipal()
 	if principal.CanonicalUserID == "" || principal.Gateway != "discord" || principal.ExternalID != "123" || principal.Assurance != identity.AssuranceDiscordGateway {
 		t.Fatalf("unexpected principal: %+v", principal)
+	}
+}
+
+func TestPrivacyInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) {
+	dg := &Gateway{replyIndex: map[string]replyContext{
+		"session": {SessionKey: "discord:channel:one", SenderID: "one"},
+		"sender":  {SessionKey: "discord:other:one", SenderID: "one"},
+		"foreign": {SessionKey: "discord:channel:two", SenderID: "two"},
+	}}
+	dg.HandlePrivacyInvalidation(privacyruntime.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
+	if _, ok := dg.replyIndex["session"]; ok {
+		t.Fatal("matching session reply context remained")
+	}
+	if _, ok := dg.replyIndex["sender"]; ok {
+		t.Fatal("matching sender reply context remained")
+	}
+	if _, ok := dg.replyIndex["foreign"]; !ok || len(dg.replyIndex) != 1 {
+		t.Fatalf("foreign reply context was purged: %+v", dg.replyIndex)
+	}
+}
+
+func TestDiscordCommandAttachmentMultipart(t *testing.T) {
+	var payloads []map[string]any
+	var filenames, mimeTypes []string
+	var attachmentData [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/channels/channel-1/messages" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		var payload map[string]any
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Fatalf("parse multipart: %v", err)
+			}
+			if err := json.Unmarshal([]byte(r.FormValue("payload_json")), &payload); err != nil {
+				t.Fatalf("decode payload_json: %v", err)
+			}
+			file, header, err := r.FormFile("files[0]")
+			if err != nil {
+				t.Fatalf("read file part: %v", err)
+			}
+			data, err := io.ReadAll(file)
+			_ = file.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			filenames = append(filenames, header.Filename)
+			mimeTypes = append(mimeTypes, header.Header.Get("Content-Type"))
+			attachmentData = append(attachmentData, data)
+		} else {
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode message payload: %v", err)
+			}
+		}
+		payloads = append(payloads, payload)
+		_, _ = w.Write([]byte(`{"id":"sent-attachment"}`))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError)}
+	responder := runtimeResponder{gateway: dg, channelID: "channel-1", replyToID: "message-1"}
+	err := responder.SendCommandResponse(commands.Result{Text: "export ready", Attachments: []commands.Attachment{
+		{Filename: "export.json.part001", MIMEType: "application/octet-stream", Data: []byte("first")},
+		{Filename: "export.json.part002", MIMEType: "application/octet-stream", Data: []byte("second")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 3 {
+		t.Fatalf("request payload count=%d, want 3", len(payloads))
+	}
+	reference, _ := payloads[0]["message_reference"].(map[string]any)
+	firstMetadata, _ := payloads[0]["attachments"].([]any)
+	secondMetadata, _ := payloads[1]["attachments"].([]any)
+	if reference["message_id"] != "message-1" || len(firstMetadata) != 1 || len(secondMetadata) != 1 || payloads[2]["content"] != "export ready" || len(filenames) != 2 || filenames[0] != "export.json.part001" || filenames[1] != "export.json.part002" || mimeTypes[0] != "application/octet-stream" || string(attachmentData[0]) != "first" || string(attachmentData[1]) != "second" {
+		t.Fatalf("unexpected payloads=%+v filenames=%q mime=%q data=%q", payloads, filenames, mimeTypes, attachmentData)
+	}
+}
+
+func TestDiscordCommandAttachmentProviderFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "private-content", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError)}
+	_, err := dg.sendCommandAttachment("channel-1", commands.Result{Attachment: &commands.Attachment{
+		Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content"),
+	}}, "")
+	if err == nil || strings.Contains(err.Error(), "private-content") {
+		t.Fatalf("unexpected provider error: %v", err)
 	}
 }
 

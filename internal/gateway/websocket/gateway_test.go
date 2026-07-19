@@ -20,6 +20,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -59,6 +60,102 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 	}
 	if len(primaryWSRequests(chat.requests)) != 1 {
 		t.Fatalf("command should not call LLM, got %d calls", len(primaryWSRequests(chat.requests)))
+	}
+}
+
+func TestPrivacyInvalidationClosesOnlyMatchingWebSocketConnections(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { wg.handleConnections(w, r, b) }))
+	defer server.Close()
+	matching := dialWebSocket(t, server.URL, wg.Authenticator, "matching")
+	defer matching.Close()
+	foreign := dialWebSocket(t, server.URL, wg.Authenticator, "foreign")
+	defer foreign.Close()
+
+	wg.HandlePrivacyInvalidation(privacyruntime.Event{ExternalIdentities: []string{"websocket:matching"}, CloseConnections: true})
+	_ = matching.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := matching.ReadMessage(); err == nil {
+		t.Fatal("matching websocket connection remained open")
+	}
+	if err := foreign.WriteMessage(gorilla.TextMessage, []byte("still connected")); err != nil {
+		t.Fatalf("foreign websocket connection was closed: %v", err)
+	}
+	if response := readAgentResponse(t, foreign); response.Response == "" {
+		t.Fatalf("foreign websocket response=%+v", response)
+	}
+}
+
+func TestWebSocketCommandAttachmentResponse(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	service, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "export ready", Attachment: &commands.Attachment{
+				Filename: "export.json", MIMEType: "application/json", Data: []byte(`{"secret":true}`),
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Runtime.Commands = service
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wg.handleConnections(w, r, b)
+	}))
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
+	defer conn.Close()
+	if err := conn.WriteMessage(gorilla.TextMessage, []byte("/export")); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response CommandResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatalf("decode command response %s: %v", payload, err)
+	}
+	if response.Type != "command_response" || response.Response != "export ready" || response.Attachment == nil || response.Attachment.Filename != "export.json" || response.Attachment.MIMEType != "application/json" || response.Attachment.Data != "eyJzZWNyZXQiOnRydWV9" {
+		t.Fatalf("unexpected command attachment response: %+v", response)
+	}
+}
+
+func TestWebSocketCommandAttachmentArrayPreservesOrder(t *testing.T) {
+	wg, b, _ := newWebSocketTestGateway(t)
+	defer b.Shutdown()
+	service, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "join in order", Attachments: []commands.Attachment{
+				{Filename: "export.json.part001", MIMEType: "application/octet-stream", Data: []byte("first")},
+				{Filename: "export.json.part002", MIMEType: "application/octet-stream", Data: []byte("second")},
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg.Runtime.Commands = service
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { wg.handleConnections(w, r, b) }))
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, wg.Authenticator, "alice")
+	defer conn.Close()
+	if err := conn.WriteMessage(gorilla.TextMessage, []byte("/export")); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response CommandResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Attachment != nil || len(response.Attachments) != 2 || response.Attachments[0].Filename != "export.json.part001" || response.Attachments[0].Data != "Zmlyc3Q=" || response.Attachments[1].Filename != "export.json.part002" || response.Attachments[1].Data != "c2Vjb25k" {
+		t.Fatalf("unexpected ordered attachments: %+v", response)
 	}
 }
 

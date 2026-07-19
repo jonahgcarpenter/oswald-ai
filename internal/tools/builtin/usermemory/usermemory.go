@@ -2,11 +2,18 @@ package usermemory
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
@@ -17,21 +24,22 @@ func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	return log.Agent("agent.tool.memory", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 }
 
-func canonicalUserID(ctx context.Context) string {
+func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Principal, error) {
 	principal, _ := requestctx.PrincipalFromContext(ctx)
-	if !principal.Valid() {
-		return ""
+	if !principal.Valid() || !principal.Authenticated() {
+		return identity.Principal{}, fmt.Errorf("%s: authenticated user identity is required", toolName)
 	}
-	return principal.CanonicalUserID
+	return principal, nil
 }
 
 // NewSaveHandler returns a Handler for explicit user-requested memory saves.
 func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := canonicalUserID(ctx)
-		if userID == "" {
-			return "", fmt.Errorf("memory.save: no user identity available in this context")
+		principal, err := authenticatedPrincipal(ctx, "memory.save")
+		if err != nil {
+			return "", err
 		}
+		userID := principal.CanonicalUserID
 		meta := requestctx.MetadataFromContext(ctx)
 		statement := stringArg(args, "statement")
 		if statement == "" {
@@ -99,10 +107,11 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 // NewSearchHandler returns a Handler for memory search.
 func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := canonicalUserID(ctx)
-		if userID == "" {
-			return "", fmt.Errorf("memory.search: no user identity available in this context")
+		principal, err := authenticatedPrincipal(ctx, "memory.search")
+		if err != nil {
+			return "", err
 		}
+		userID := principal.CanonicalUserID
 		limit := intArg(args, "limit", 8)
 		query := stringArg(args, "query")
 		if strings.TrimSpace(query) == "" {
@@ -150,10 +159,11 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 // NewListHandler returns a Handler for listing active memory.
 func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := canonicalUserID(ctx)
-		if userID == "" {
-			return "", fmt.Errorf("memory.list: no user identity available in this context")
+		principal, err := authenticatedPrincipal(ctx, "memory.list")
+		if err != nil {
+			return "", err
 		}
+		userID := principal.CanonicalUserID
 		entries, err := store.ListMemories(userID, stringArg(args, "scope"), stringArg(args, "category"), intArg(args, "limit", 25))
 		if err != nil {
 			return "", err
@@ -167,30 +177,113 @@ func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 	}
 }
 
-// NewForgetHandler returns a Handler for deleting active memories.
-func NewForgetHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+const defaultForgottenContentGrace = 30 * 24 * time.Hour
+
+var (
+	forgetIntentFraming = regexp.MustCompile(`(?i)^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|i\s+(?:want|need|would\s+like)\s+(?:you|oswald)\s+to\s+)?(forget|remove|delete)\s+(.+)$`)
+	forgetIntentNegated = regexp.MustCompile(`(?i)\b(?:do\s+not|don't|dont|never|not\s+asking\s+(?:you\s+)?to)\s+(?:forget|remove|delete)\b`)
+	forgetHypothetical  = regexp.MustCompile(`(?i)\b(?:hypothetically|what\s+if|suppose|imagine|if\s+i\s+(?:asked|said|wanted)|how\s+would\s+i)\b`)
+	thirdPartyMemory    = regexp.MustCompile(`(?i)\b(?:his|her|their|someone(?:\s+else)?['’]s|[a-z][a-z0-9_-]*['’]s)\s+(?:memory|memories|data|information)\b`)
+	bulkForgetObject    = regexp.MustCompile(`(?i)^(?:all\b|everything\b)`)
+	firstPartyObject    = regexp.MustCompile(`(?i)^(?:my\b|me\b|memory\b|memories\b|stored\b|saved\b|that\b|this\b|it\b|#?\d+\b|id\b)`)
+	aboutFirstParty     = regexp.MustCompile(`(?i)\babout\s+(?:me|my)\b`)
+)
+
+// NewForgetHandler returns a Handler for deactivating one exact memory.
+func NewForgetHandler(store *Store, policy config.RetentionPolicy, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+	if policy.ForgottenContentGrace <= 0 {
+		policy.ForgottenContentGrace = defaultForgottenContentGrace
+	}
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		userID := canonicalUserID(ctx)
-		if userID == "" {
-			return "", fmt.Errorf("memory.forget: no user identity available in this context")
-		}
-		target := stringArg(args, "statement")
-		if target == "" {
-			target = stringArg(args, "target")
-		}
-		if target == "" {
-			return "", fmt.Errorf("memory.forget: statement or target is required")
-		}
-		count, err := store.Forget(userID, target, stringArg(args, "scope"))
+		principal, err := authenticatedPrincipal(ctx, "memory.forget")
 		if err != nil {
 			return "", err
 		}
-		requestLog(log, ctx).Debug("agent.tool.memory.forgot", "forgot memory", config.F("tool_name", "memory.forget"), config.F("deleted_count", count))
-		if count == 0 {
-			return "No matching active memories were found.", nil
+		memoryID, ok := positiveInt64Arg(args, "memory_id")
+		if !ok {
+			return "", fmt.Errorf("memory.forget: memory_id must be an exact positive integer")
 		}
-		return fmt.Sprintf("Deleted %d matching memory entry(s).", count), nil
+		meta := requestctx.MetadataFromContext(ctx)
+		if !hasExplicitForgetIntent(meta.CurrentUserText) {
+			return "", fmt.Errorf("memory.forget: current user turn does not contain an explicit first-party forget, remove, or delete request")
+		}
+		now := time.Now().UTC()
+		state, err := store.ForgetMemory(ctx, principal.CanonicalUserID, memoryActorHash(principal), memoryID, meta.RequestID, now, policy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Sprintf("No active memory with ID %d was found for the current user.", memoryID), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		requestLog(log, ctx).Debug("agent.tool.memory.forgot", "deactivated memory", config.F("tool_name", "memory.forget"), config.F("memory_id", memoryID), config.F("status", state))
+		return fmt.Sprintf("Memory ID %d is deactivated immediately and is no longer available to recall, lists, or profiles. Its retained canonical content is scheduled for permanent erasure after the %s grace period.", memoryID, formatGracePeriod(policy.ForgottenContentGrace)), nil
 	}
+}
+
+func hasExplicitForgetIntent(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" || len(text) > 4096 || forgetIntentNegated.MatchString(text) || forgetHypothetical.MatchString(text) || thirdPartyMemory.MatchString(text) {
+		return false
+	}
+	if (strings.HasPrefix(text, `"`) && strings.HasSuffix(text, `"`)) ||
+		(strings.HasPrefix(text, "'") && strings.HasSuffix(text, "'")) ||
+		strings.HasPrefix(text, ">") {
+		return false
+	}
+	match := forgetIntentFraming.FindStringSubmatch(text)
+	if len(match) != 3 {
+		return false
+	}
+	object := strings.TrimSpace(match[2])
+	if len(object) > 512 {
+		object = object[:512]
+	}
+	if bulkForgetObject.MatchString(object) {
+		return false
+	}
+	return firstPartyObject.MatchString(object) || aboutFirstParty.MatchString(object)
+}
+
+func formatGracePeriod(grace time.Duration) string {
+	if grace%(24*time.Hour) == 0 {
+		days := int(grace / (24 * time.Hour))
+		if days == 1 {
+			return "1-day"
+		}
+		return fmt.Sprintf("%d-day", days)
+	}
+	return grace.String()
+}
+
+func positiveInt64Arg(args map[string]interface{}, key string) (int64, bool) {
+	if args == nil {
+		return 0, false
+	}
+	switch value := args[key].(type) {
+	case int:
+		return int64(value), value > 0
+	case int64:
+		return value, value > 0
+	case float64:
+		if value <= 0 || value > math.MaxInt64 || math.Trunc(value) != value {
+			return 0, false
+		}
+		return int64(value), true
+	case float32:
+		converted := float64(value)
+		if converted <= 0 || converted > math.MaxInt64 || math.Trunc(converted) != converted {
+			return 0, false
+		}
+		return int64(converted), true
+	default:
+		return 0, false
+	}
+}
+
+func memoryActorHash(principal identity.Principal) string {
+	value := strings.ToLower(strings.TrimSpace(principal.Gateway)) + "\x00" + strings.ToLower(strings.TrimSpace(principal.ExternalID))
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 // Backward-compatible wrappers for old internal tests/callers.

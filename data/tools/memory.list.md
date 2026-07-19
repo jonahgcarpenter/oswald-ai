@@ -2,7 +2,7 @@
 
 ## Description
 
-List active memories stored about the current user. Use this when the user asks what you remember about them, wants to inspect stored memory, or wants to choose memories to correct or delete.
+List active memories and stable canonical memory IDs stored for the authenticated current user. This remains available in direct and group conversations. Use it when the user asks what you remember about them or needs an exact ID for correction or deletion.
 
 Do not use this for normal memory retrieval during conversation; use memory.search instead. Do not use this for Oswald's own identity/directives, public facts, or web lookup.
 

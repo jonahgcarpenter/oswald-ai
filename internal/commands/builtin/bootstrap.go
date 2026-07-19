@@ -8,9 +8,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
+	privacycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/privacy"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	privacyservice "github.com/jonahgcarpenter/oswald-ai/internal/privacy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -20,13 +23,31 @@ type MCPDeps struct {
 	Manager *mcpmanager.Manager
 }
 
+// PrivacyDeps contains privacy policy and logging dependencies.
+type PrivacyDeps struct {
+	Policy config.RetentionPolicy
+	Logger *config.Logger
+}
+
 // NewService creates the application command service with all built-in commands.
 func NewService(users *accountlinking.Service, memory *usermemory.Store, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	return NewServiceWithPrivacy(users, memory, PrivacyDeps{}, optionalMCP...)
+}
+
+// NewServiceWithPrivacy creates the command service with the privacy policy injected.
+func NewServiceWithPrivacy(users *accountlinking.Service, memory *usermemory.Store, privacyDeps PrivacyDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
 	if memory == nil {
 		return nil, fmt.Errorf("user memory store is required for built-in commands")
 	}
 	help := &helpHandler{auth: users}
 	registrations := []commands.Command{{Handler: help}, {Handler: sessioncommands.New(memory)}}
+	if users != nil {
+		privacyService, err := privacyservice.NewService(users, memory, privacyDeps.Policy, privacyDeps.Logger)
+		if err != nil {
+			return nil, err
+		}
+		registrations = append(registrations, commands.Command{Handler: privacycommands.New(privacyService)})
+	}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
 	}

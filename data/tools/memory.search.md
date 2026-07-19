@@ -2,7 +2,7 @@
 
 ## Description
 
-Run deeper hybrid lexical and semantic search over stored memories for the current user when the bounded automatic recall is insufficient. The user does not need to ask what you remember.
+Run deeper hybrid lexical and semantic search over stored memories for the authenticated current user when bounded automatic recall is insufficient. This remains available in direct and group conversations; the user does not need to ask what you remember.
 
 Use this for the user's preferences, projects, identity details, environment, relationships, prior corrections, and user-specific instructions that may affect the response.
 

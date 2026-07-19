@@ -200,6 +200,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 			Source:              usermemory.FormationSource{RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation, TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.ExtractorVersion},
 			IdempotencyKey:      extractedCandidateKey(turn.ID, job.ExtractorVersion, raw),
 			SupersedesStatement: raw.SupersedesStatement,
+			FormationJob:        &job,
 		})
 		if err != nil {
 			return err

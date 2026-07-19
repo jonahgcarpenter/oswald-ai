@@ -2,7 +2,7 @@
 
 ## Description
 
-Stage a grounded memory only when the current user explicitly asks Oswald to remember it. The server verifies explicit intent and exact evidence against the authenticated current turn, then publishes the candidate after the completed turn is persisted.
+Stage a grounded memory only when the authenticated current user explicitly asks Oswald to remember it in their current turn. The server verifies authenticated identity, explicit first-party intent, and exact evidence, then publishes the candidate after the completed turn is persisted.
 
 Do not call this proactively. A separate post-turn formation process handles conservative automatic proposals. Use this tool for explicit identity, preference, project, relationship, environment, temporary-task, and correction requests.
 

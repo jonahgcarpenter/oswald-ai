@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -21,6 +22,7 @@ type Dependencies struct {
 	Log        *config.Logger
 	Formation  FormationEnqueuer
 	Compaction CompactionEnqueuer
+	PrivacyBus *privacyruntime.Bus
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.
@@ -65,7 +67,7 @@ type Request struct {
 type Responder interface {
 	StartProcessing() (func(), error)
 	SendFallback(text string) error
-	SendCommandResponse(text string) error
+	SendCommandResponse(result commands.Result) error
 	SendAgentResponse(response *agent.AgentResponse) error
 	SendAgentError(text string) error
 }

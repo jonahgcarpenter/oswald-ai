@@ -106,7 +106,7 @@ func TestFormationPublicationRollbackKeepsOldMemoryActive(t *testing.T) {
 	}
 }
 
-func TestApprovedCandidatePublishesAfterEmbeddingRecovery(t *testing.T) {
+func TestApprovedCandidatePublishesWhileEmbeddingUnavailable(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("embedding offline")}, "embed-model", config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
@@ -118,24 +118,17 @@ func TestApprovedCandidatePublishesAfterEmbeddingRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID); err == nil {
-		t.Fatal("expected embedding failure")
-	}
-	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.State != "approved" || loaded.PublishedMemoryID != 0 {
-		t.Fatalf("candidate after outage=%+v err=%v", loaded, err)
-	}
-	if _, err := store.sql.Exec(`UPDATE memory_candidates SET updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), candidate.ID); err != nil {
-		t.Fatal(err)
-	}
-	retryable, err := store.ApprovedUnpublishedCandidates(context.Background(), 10)
-	if err != nil || len(retryable) != 0 {
-		t.Fatalf("undelivered candidate became retryable: %+v err=%v", retryable, err)
-	}
-	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0}}
 	published, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID)
 	if err != nil || published.ID == 0 {
-		t.Fatalf("publish after recovery=%+v err=%v", published, err)
+		t.Fatalf("canonical publication failed during embedding outage: %+v %v", published, err)
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.State != "approved" || loaded.PublishedMemoryID != published.ID {
+		t.Fatalf("candidate after outage=%+v err=%v", loaded, err)
+	}
+	var changes int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM derived_index_changes WHERE entity_kind = 'memory' AND entity_id = ?`, published.ID).Scan(&changes); err != nil || changes != 1 {
+		t.Fatalf("derived changes=%d err=%v", changes, err)
 	}
 }
 
@@ -241,6 +234,38 @@ func TestFormationCanReactivateInactiveExactStatement(t *testing.T) {
 	}
 }
 
+func TestFormationCannotReactivateForgottenExactStatement(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	first, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "first-forgotten"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.PublishCandidate(context.Background(), "user-1", first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ForgetMemory(context.Background(), "user-1", hashText("actor"), memory.ID, "forget-request", time.Now().UTC(), config.RetentionPolicy{ForgottenContentGrace: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "second-forgotten"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCandidate(context.Background(), "user-1", second.ID); err == nil {
+		t.Fatal("forgotten memory was republished")
+	}
+	var status string
+	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "forgotten" {
+		t.Fatalf("forgotten memory status = %q", status)
+	}
+}
+
 func TestExpiredPublishedMemoryErasesCandidateEvidence(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
@@ -332,7 +357,7 @@ func TestDeliveredConfirmationIsAuthorizedInEachPresentedSession(t *testing.T) {
 	}
 }
 
-func TestPendingConfirmationCanRetryAfterPublicationFailure(t *testing.T) {
+func TestPendingConfirmationPublishesDuringEmbeddingFailure(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{err: errors.New("offline")}, "embed-model", config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
@@ -348,17 +373,13 @@ func TestPendingConfirmationCanRetryAfterPublicationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "user"); err == nil {
-		t.Fatal("expected failed publication")
+	memory, err := store.DecidePendingCandidate(context.Background(), "user-1", candidate.ID, true, "user")
+	if err != nil || memory.ID == 0 {
+		t.Fatalf("canonical confirmation publication failed: %+v %v", memory, err)
 	}
 	approved, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || approved.State != "approved" {
+	if err != nil || approved.State != "approved" || approved.PublishedMemoryID != memory.ID {
 		t.Fatalf("durable approval=%+v err=%v", approved, err)
-	}
-	store.embedder = fixedRecallEmbedder{vector: []float64{1, 0}}
-	memory, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || memory.ID == 0 {
-		t.Fatalf("confirmation retry memory=%+v err=%v", memory, err)
 	}
 }
 

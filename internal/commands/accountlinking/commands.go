@@ -28,6 +28,15 @@ func (h *handler) Definition() commands.Definition {
 	return h.definition
 }
 
+// ResolveFenceTargets resolves both current account owners before a connection
+// confirmation enters the broker fence.
+func (h *handler) ResolveFenceTargets(ctx context.Context, req commands.Request) ([]string, error) {
+	if req.Name != "connect" || !req.Principal.Authenticated() || !req.IsDirect || req.IsGroup || len(req.Args) != 1 || strings.EqualFold(req.Args[0], "cancel") {
+		return nil, nil
+	}
+	return h.links.ResolveChallengeFenceTargets(ctx, req.Principal, req.Args[0])
+}
+
 // Execute processes one account-link command.
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if !req.Principal.Authenticated() {

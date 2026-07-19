@@ -109,6 +109,17 @@ func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create challenge: %v", err)
 	}
+	fenceTargets, err := links.ResolveChallengeFenceTargets(context.Background(), websocket, challenge.Code)
+	if err != nil {
+		t.Fatalf("resolve challenge fence targets: %v", err)
+	}
+	targetSet := make(map[string]bool, len(fenceTargets))
+	for _, target := range fenceTargets {
+		targetSet[target] = true
+	}
+	if !targetSet[discordID] || !targetSet[websocketID] {
+		t.Fatalf("challenge fence targets=%v", fenceTargets)
+	}
 	result, err := links.ConfirmChallenge(context.Background(), websocket, challenge.Code, "req")
 	if err != nil || !result.Merged || result.CanonicalUserID != discordID {
 		t.Fatalf("confirm result=%+v err=%v", result, err)
@@ -216,8 +227,24 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	if _, err := memories.SaveMemory(ctx, loserID, usermemory.SaveRequest{Scope: "long_term", Category: "notes", Statement: "Loser fact", Evidence: "test"}); err != nil {
 		t.Fatalf("save loser memory: %v", err)
 	}
+	loserProfile, err := memories.ResolveSessionProfile(ctx, loserID, "linked-session", time.Hour)
+	if err != nil {
+		t.Fatalf("resolve loser session: %v", err)
+	}
+	if err := memories.AppendSessionTurnForGeneration(ctx, "linked-session", loserID, loserProfile.Generation, "before link", "still here", nil, time.Hour); err != nil {
+		t.Fatalf("append loser session: %v", err)
+	}
 	if _, err := mcpStore.Save(ctx, mcp.ServerConfig{Scope: mcp.ScopeUser, OwnerUserID: loserID, Name: "home", Transport: mcp.TransportStreamableHTTP, URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true}); err != nil {
 		t.Fatalf("save loser MCP: %v", err)
+	}
+	if _, err := links.db.SQL().Exec(`
+INSERT INTO privacy_operations(operation_id, idempotency_key, actor_hash, target_user_id, target_hash, operation_type, target_digest, status, created_at, updated_at, started_at, completed_at)
+VALUES ('completed-before-merge', 'completed-before-merge', ?, ?, ?, 'export_user', ?, 'completed', datetime('now'), datetime('now'), datetime('now'), datetime('now'));
+INSERT INTO privacy_operations(operation_id, idempotency_key, actor_hash, target_user_id, target_hash, operation_type, target_digest, challenge_hash, challenge_expires_at, status, created_at, updated_at)
+VALUES ('pending-before-merge', 'pending-before-merge', ?, ?, ?, 'delete_user', ?, ?, datetime('now', '+10 minutes'), 'pending', datetime('now'), datetime('now'))`,
+		strings.Repeat("a", 64), loserID, strings.Repeat("b", 64), strings.Repeat("c", 64),
+		strings.Repeat("d", 64), loserID, strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("1", 64)); err != nil {
+		t.Fatalf("save loser privacy operations: %v", err)
 	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "401", Assurance: identity.AssuranceDiscordGateway}
 	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "ws-401", Assurance: identity.AssuranceWebSocketSignedToken}
@@ -233,6 +260,42 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	}
 	if _, ok, err := mcpStore.Get(ctx, mcp.ScopeUser, loserID, "home"); err != nil || ok {
 		t.Fatalf("loser MCP remains ok=%v err=%v", ok, err)
+	}
+	contextResult, err := memories.BuildContext(ctx, winnerID, "linked-session", "before", usermemory.ContextOptions{Generation: loserProfile.Generation, RecentTurns: 10, ContextBudgetChars: 4000})
+	if err != nil || !strings.Contains(contextResult.Block, "before link") {
+		t.Fatalf("merged linked-session context=%q err=%v", contextResult.Block, err)
+	}
+	rows, err := links.db.SQL().Query(`SELECT target_user_id, status, challenge_hash FROM privacy_operations WHERE operation_id IN ('completed-before-merge', 'pending-before-merge') ORDER BY operation_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var privacyRows int
+	for rows.Next() {
+		var target, status, challengeHash string
+		if err := rows.Scan(&target, &status, &challengeHash); err != nil {
+			t.Fatal(err)
+		}
+		privacyRows++
+		if target != winnerID {
+			t.Fatalf("merged privacy target = %q, want %q", target, winnerID)
+		}
+		if status == "pending" || status == "running" || challengeHash != "" {
+			t.Fatalf("unsafe merged privacy operation status=%q challenge=%q", status, challengeHash)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if privacyRows != 2 {
+		t.Fatalf("merged privacy row count = %d, want 2", privacyRows)
+	}
+	var loserChallengeReferences int
+	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, loserID, loserID, loserID).Scan(&loserChallengeReferences); err != nil {
+		t.Fatal(err)
+	}
+	if loserChallengeReferences != 0 {
+		t.Fatalf("loser account-link audit references = %d", loserChallengeReferences)
 	}
 }
 
@@ -257,6 +320,59 @@ func TestChallengeConfirmationRollsBackConsumptionOnMergeFailure(t *testing.T) {
 	mcpMerger.fail = false
 	if _, err := links.ConfirmChallenge(context.Background(), loser, challenge.Code, "req"); err != nil {
 		t.Fatalf("challenge was consumed by rolled-back merge: %v", err)
+	}
+}
+
+func TestChallengeMergeRollsBackPreservedStateWhenFinalDeleteFails(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "oswald.db")
+	log := config.NewLogger(config.LevelError)
+	memories := usermemory.NewStore(dbPath, log)
+	t.Cleanup(func() { memories.Close() })
+	links := NewService(dbPath, memories, nil, log)
+	t.Cleanup(func() { links.Close() })
+	winnerID, _ := links.EnsureAccount("discord", "591", "Winner")
+	loserID, _ := links.EnsureAccount("websocket", "merge-fail-loser", "Loser")
+	if _, err := memories.SaveMemory(ctx, loserID, usermemory.SaveRequest{Scope: "long_term", Category: "notes", Statement: "rollback fact", Evidence: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := memories.ResolveSessionProfile(ctx, loserID, "rollback-session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := memories.AppendSessionTurnForGeneration(ctx, "rollback-session", loserID, profile.Generation, "rollback turn", "answer", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "591", Assurance: identity.AssuranceDiscordGateway}
+	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "merge-fail-loser", Assurance: identity.AssuranceWebSocketSignedToken}
+	challenge, err := links.CreateChallenge(ctx, winner, "req")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.db.SQL().Exec(`CREATE TRIGGER fail_final_account_merge BEFORE DELETE ON account_users BEGIN SELECT RAISE(ABORT, 'injected final merge failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.ConfirmChallenge(ctx, loser, challenge.Code, "req"); err == nil {
+		t.Fatal("expected final account deletion failure")
+	}
+	var loserMemories, loserTurns, loserActive int
+	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?`, loserID).Scan(&loserMemories); err != nil {
+		t.Fatal(err)
+	}
+	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?`, loserID).Scan(&loserTurns); err != nil {
+		t.Fatal(err)
+	}
+	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ? AND lifecycle_state = 'active'`, loserID).Scan(&loserActive); err != nil {
+		t.Fatal(err)
+	}
+	if loserMemories != 1 || loserTurns != 1 || loserActive != 1 {
+		t.Fatalf("rolled-back loser memories=%d turns=%d active=%d", loserMemories, loserTurns, loserActive)
+	}
+	if _, err := links.db.SQL().Exec(`DROP TRIGGER fail_final_account_merge`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.ConfirmChallenge(ctx, loser, challenge.Code, "req"); err != nil {
+		t.Fatalf("challenge consumed by rolled-back preserved-state merge: %v", err)
 	}
 }
 

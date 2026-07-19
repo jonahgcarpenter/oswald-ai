@@ -3,7 +3,14 @@ package database
 import "fmt"
 
 func (d *DB) initializeAccountLinkChallenges() error {
-	_, err := d.db.Exec(`
+	_, err := d.db.Exec(accountLinkChallengesBaselineSQL)
+	if err != nil {
+		return fmt.Errorf("failed to initialize account_link_challenges table: %w", err)
+	}
+	return nil
+}
+
+const accountLinkChallengesBaselineSQL = `
 CREATE TABLE IF NOT EXISTS account_link_challenges (
 	id TEXT PRIMARY KEY,
 	code_hash TEXT NOT NULL UNIQUE,
@@ -27,9 +34,4 @@ ON account_link_challenges (expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_account_link_challenges_initiator_state
 ON account_link_challenges (initiator_user_id, consumed_at, invalidated_at, expires_at);
-`)
-	if err != nil {
-		return fmt.Errorf("failed to initialize account_link_challenges table: %w", err)
-	}
-	return nil
-}
+`

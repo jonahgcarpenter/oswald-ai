@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +18,7 @@ import (
 	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
@@ -1066,6 +1070,75 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 		return "", err
 	}
 
+	return created.ID, nil
+}
+
+// sendCommandAttachment posts ordered in-memory command attachments to Discord.
+func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Result, replyToID string) (string, error) {
+	if err := result.ValidateAttachments(); err != nil {
+		return "", err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		return dg.sendMessage(channelID, result.Text, replyToID)
+	}
+
+	metadata := make([]map[string]any, 0, len(attachments))
+	for i, attachment := range attachments {
+		metadata = append(metadata, map[string]any{"id": i, "filename": attachment.Filename})
+	}
+	payload := map[string]any{
+		"content":     result.Text,
+		"attachments": metadata,
+	}
+	if replyToID != "" {
+		payload["message_reference"] = map[string]string{"message_id": replyToID}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal Discord attachment payload: %w", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
+		return "", fmt.Errorf("write Discord attachment payload: %w", err)
+	}
+	for i, attachment := range attachments {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": fmt.Sprintf("files[%d]", i), "filename": attachment.Filename}))
+		header.Set("Content-Type", attachment.MIMEType)
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			return "", fmt.Errorf("create Discord attachment part %d: %w", i, err)
+		}
+		if _, err := part.Write(attachment.Data); err != nil {
+			return "", fmt.Errorf("write Discord attachment %d: %w", i, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close Discord attachment payload: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), channelID)
+	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bot "+dg.Token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := dg.httpClient(15 * time.Second).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("Discord attachment send failed with status %d", resp.StatusCode)
+	}
+	var created createMessageResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&created); err != nil {
+		return "", err
+	}
 	return created.ID, nil
 }
 

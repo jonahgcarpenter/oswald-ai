@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 )
 
 const bannedMessage = "You are banned from using Oswald."
@@ -22,7 +23,7 @@ func New(users *accountlinking.Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{users: users, definition: commands.Definition{Name: "admin", Summary: "Grant admin access to a user.", Usage: "/admin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "ban", Summary: "Ban a user from using Oswald.", Usage: "/ban <canonical_id> [reason]", AdminOnly: true}},
-		&handler{users: users, definition: commands.Definition{Name: "deleteuser", Summary: "Delete a canonical user.", Usage: "/deleteuser <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "deleteuser", Summary: "Delete a canonical user.", Usage: "/deleteuser <canonical_id>", AdminOnly: true, UserExclusive: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unadmin", Summary: "Remove admin access from a user.", Usage: "/unadmin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unban", Summary: "Unban a user.", Usage: "/unban <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "user", Summary: "Show one canonical user.", Usage: "/user <canonical_id>", AdminOnly: true}},
@@ -44,6 +45,25 @@ func (h *handler) Definition() commands.Definition {
 	return h.definition
 }
 
+// ResolveFenceTargets fences the deletion target as well as the admin actor.
+func (h *handler) ResolveFenceTargets(_ context.Context, req commands.Request) ([]string, error) {
+	if req.Name != "deleteuser" || len(req.Args) != 1 {
+		return nil, nil
+	}
+	isAdmin, err := h.users.IsAdmin(req.Principal.CanonicalUserID)
+	if err != nil {
+		return nil, err
+	}
+	if !isAdmin {
+		return nil, fmt.Errorf("admin access required")
+	}
+	targetID := strings.TrimSpace(req.Args[0])
+	if targetID == "" {
+		return nil, nil
+	}
+	return []string{targetID}, nil
+}
+
 // Execute processes one admin command.
 func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
 	switch req.Name {
@@ -58,7 +78,7 @@ func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Res
 	case "ban":
 		return h.handleBan(req.Principal, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(req.Principal, req.Args)
+		return h.handleDeleteUser(req.Principal, req.RequestID, req.Args)
 	case "unban":
 		return h.handleUnban(req.Principal, req.Args)
 	default:
@@ -138,15 +158,17 @@ func (h *handler) handleUnban(principal identity.Principal, args []string) (comm
 	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
 }
 
-func (h *handler) handleDeleteUser(principal identity.Principal, args []string) (commands.Result, error) {
+func (h *handler) handleDeleteUser(principal identity.Principal, requestID string, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.DeleteUserAs(principal, targetID); err != nil {
+	invalidation, err := h.users.DeleteUserAsWithDurableInvalidation(principal, targetID, requestID)
+	if err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
 	}
-	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID)}, nil
+	event := privacyruntime.Event{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs, CloseConnections: true}
+	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
 }
 
 func renderAccounts(accounts []accountlinking.LinkedAccount) string {

@@ -72,19 +72,36 @@ func (s *Store) Recall(ctx context.Context, userID, query string, req RecallRequ
 	} else {
 		stats.LexicalAvailable = true
 		stats.LexicalCandidateCount = len(lexical)
+		if degraded, healthErr := s.LiveIndexDegraded(ctx, IndexKindMemoryFTS); healthErr != nil {
+			stats.LexicalError = healthErr
+		} else if degraded {
+			stats.LexicalError = ErrDerivedIndexDegraded
+		}
 	}
 
 	var semantic []RecallCandidate
-	queryVector, embedErr := s.embed(ctx, query)
-	if embedErr != nil {
-		stats.SemanticError = embedErr
-	} else if len(queryVector) > 0 {
-		semantic, err = s.semanticRecallCandidates(ctx, userID, scope, category, queryVector, candidateLimit)
-		if err != nil {
-			stats.SemanticError = err
+	if s.embedModel != "" && s.embedder != nil {
+		vectorRevision, revisionErr := s.LiveIndexRevision(ctx, IndexKindMemoryVector)
+		if revisionErr != nil {
+			stats.SemanticError = revisionErr
 		} else {
-			stats.SemanticAvailable = true
-			stats.SemanticCandidateCount = len(semantic)
+			queryVector, embedErr := s.embedWithModel(ctx, vectorRevision.Model, query)
+			if embedErr != nil {
+				stats.SemanticError = embedErr
+			} else if len(queryVector) > 0 {
+				semantic, err = s.semanticRecallCandidates(ctx, vectorRevision, userID, scope, category, queryVector, candidateLimit)
+				if err != nil {
+					stats.SemanticError = err
+				} else {
+					stats.SemanticAvailable = true
+					stats.SemanticCandidateCount = len(semantic)
+					if degraded, healthErr := s.LiveIndexDegraded(ctx, IndexKindMemoryVector); healthErr != nil {
+						stats.SemanticError = healthErr
+					} else if degraded {
+						stats.SemanticError = ErrDerivedIndexDegraded
+					}
+				}
+			}
 		}
 	}
 
@@ -119,21 +136,29 @@ func (s *Store) Recall(ctx context.Context, userID, query string, req RecallRequ
 }
 
 func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, category, queryText string, limit int) ([]RecallCandidate, error) {
+	revision, err := s.LiveIndexRevision(ctx, IndexKindMemoryFTS)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRevisionTable(revision.TableName); err != nil {
+		return nil, err
+	}
 	terms := ftsRecallTerms(queryText)
 	match := ftsTenantRecallQuery(userID, terms)
 	if match == "" {
 		return nil, nil
 	}
+	table := revision.TableName
 	query := `
 SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
 	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity,
-	bm25(memory_entries_fts, 0.0, 1.0, 0.5)
-FROM memory_entries_fts
-JOIN memory_entries e ON e.id = memory_entries_fts.rowid
-WHERE memory_entries_fts MATCH ?
-	AND memory_entries_fts.canonical_user_id = ?
+	bm25(` + table + `, 0.0, 1.0, 0.5)
+FROM ` + table + `
+JOIN memory_entries e ON e.id = ` + table + `.rowid
+WHERE ` + table + ` MATCH ?
+	AND ` + table + `.canonical_user_id = ?
 	AND e.canonical_user_id = ?
 	AND e.status = 'active'
 	AND e.approval_state = 'approved'
@@ -147,7 +172,7 @@ WHERE memory_entries_fts MATCH ?
 		query += ` AND e.category = ?`
 		args = append(args, category)
 	}
-	query += ` ORDER BY bm25(memory_entries_fts, 0.0, 1.0, 0.5), e.id LIMIT ?`
+	query += ` ORDER BY bm25(` + table + `, 0.0, 1.0, 0.5), e.id LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.sql.QueryContext(ctx, query, args...)
@@ -174,8 +199,11 @@ WHERE memory_entries_fts MATCH ?
 	return candidates, nil
 }
 
-func (s *Store) semanticRecallCandidates(ctx context.Context, userID, scope, category string, queryVector []float64, limit int) ([]RecallCandidate, error) {
-	if err := s.ensureTenantVectorTable(len(queryVector)); err != nil {
+func (s *Store) semanticRecallCandidates(ctx context.Context, revision DerivedIndexRevision, userID, scope, category string, queryVector []float64, limit int) ([]RecallCandidate, error) {
+	if revision.Dimension != len(queryVector) {
+		return nil, fmt.Errorf("%w: index=%d query=%d", errVectorIndexIncompatible, revision.Dimension, len(queryVector))
+	}
+	if err := validateRevisionTable(revision.TableName); err != nil {
 		return nil, err
 	}
 	serialized, err := serializeVector(queryVector)
@@ -187,15 +215,14 @@ SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
 	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity, v.distance
-FROM memory_entry_vectors_v2 v
+FROM ` + revision.TableName + ` v
 JOIN memory_entries e ON e.id = v.rowid
 WHERE v.embedding MATCH ? AND v.k = ?
 	AND v.canonical_user_id = ? AND v.embedding_model = ?
 	AND e.canonical_user_id = ? AND e.status = 'active'
 	AND e.approval_state = 'approved'
-	AND e.embedding_model = ? AND e.embedding_dim = ?
 	AND (e.expires_at IS NULL OR e.expires_at > ?)`
-	args := []any{serialized, limit, userID, s.embedModel, userID, s.embedModel, len(queryVector), formatTime(time.Now().UTC())}
+	args := []any{serialized, limit, userID, revision.Model, userID, formatTime(time.Now().UTC())}
 	if scope != "" {
 		query += ` AND v.scope = ? AND e.scope = ?`
 		args = append(args, scope)
@@ -313,40 +340,8 @@ func (s *Store) RecordRecallUsage(ctx context.Context, userID string, results []
 	metadata := requestctx.MetadataFromContext(ctx)
 	for _, result := range results {
 		_, _ = s.sql.ExecContext(ctx, `UPDATE memory_entries SET last_used_at = ? WHERE id = ? AND canonical_user_id = ?`, now, result.Entry.ID, userID)
-		s.recordEvent(result.Entry.ID, "retrieved", metadata.RequestID, metadata.SessionID, `{"method":"hybrid"}`)
+		s.recordEvent(userID, result.Entry.ID, "retrieved", metadata.RequestID, metadata.SessionID, `{"method":"hybrid"}`)
 	}
-}
-
-func (s *Store) ensureTenantVectorTable(dimension int) error {
-	s.vectorMu.Lock()
-	defer s.vectorMu.Unlock()
-	if dimension <= 0 {
-		return fmt.Errorf("embedding dimension must be positive")
-	}
-	if stored, ok := s.vectorTableDimension(memoryVectorTableV2); ok {
-		if stored != dimension {
-			return fmt.Errorf("%w: index=%d query=%d", errVectorIndexIncompatible, stored, dimension)
-		}
-		return nil
-	}
-	if _, err := s.sql.Exec(fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS %s USING vec0(canonical_user_id text, embedding_model text, scope text, category text, embedding float[%d])`, memoryVectorTableV2, dimension)); err != nil {
-		return fmt.Errorf("create tenant memory vector index: %w", err)
-	}
-	if stored, ok := s.vectorTableDimension(memoryVectorTableV2); !ok || stored != dimension {
-		return fmt.Errorf("%w: index=%d query=%d", errVectorIndexIncompatible, stored, dimension)
-	}
-	if oldDimension, ok := s.vectorTableDimension("memory_entry_vectors"); ok && oldDimension == dimension {
-		if _, err := s.sql.Exec(`
-INSERT OR REPLACE INTO memory_entry_vectors_v2(rowid, canonical_user_id, embedding_model, scope, category, embedding)
-SELECT old.rowid, entries.canonical_user_id, entries.embedding_model, entries.scope, entries.category, old.embedding
-FROM memory_entry_vectors old
-JOIN memory_entries entries ON entries.id = old.rowid
-		WHERE entries.embedding_dim = ? AND entries.status = 'active'`, dimension); err != nil {
-			_, _ = s.sql.Exec(`DROP TABLE memory_entry_vectors_v2`)
-			return fmt.Errorf("migrate tenant memory vector index: %w", err)
-		}
-	}
-	return nil
 }
 
 func recallResultsToEntries(results []RecallResult) []MemoryEntry {

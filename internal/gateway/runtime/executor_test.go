@@ -3,7 +3,10 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
@@ -39,13 +43,13 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 
 	cmdResponder := &fakeResponder{}
 	cmd := Execute(Request{Principal: testPrincipal("user"), Text: "/ping"}, deps, cmdResponder)
-	if cmd.Action != routing.ActionCommand || cmdResponder.command != "pong:user:/ping" {
+	if cmd.Action != routing.ActionCommand || cmdResponder.command.Text != "pong:user:/ping" {
 		t.Fatalf("unexpected command outcome=%+v responder=%+v", cmd, cmdResponder)
 	}
 
 	unknownCmdResponder := &fakeResponder{}
 	unknownCmd := Execute(Request{Principal: testPrincipal("user"), Text: "/unknown arg"}, deps, unknownCmdResponder)
-	if unknownCmd.Action != routing.ActionCommand || unknownCmdResponder.command != "Unknown command: /unknown" || unknownCmdResponder.started || unknownCmdResponder.agent != nil {
+	if unknownCmd.Action != routing.ActionCommand || unknownCmdResponder.command.Text != "Unknown command: /unknown" || unknownCmdResponder.started || unknownCmdResponder.agent != nil {
 		t.Fatalf("unexpected unknown command outcome=%+v responder=%+v", unknownCmd, unknownCmdResponder)
 	}
 
@@ -67,7 +71,7 @@ func TestExecuteRejectsBannedUsersBeforeCommandOrLLM(t *testing.T) {
 
 	cmdResponder := &fakeResponder{}
 	cmd := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/ping"}, deps, cmdResponder)
-	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command != "" {
+	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command.Text != "" {
 		t.Fatalf("unexpected banned command outcome=%+v responder=%+v", cmd, cmdResponder)
 	}
 
@@ -89,6 +93,111 @@ func TestExecuteUsesPrincipalCanonicalUserForAccess(t *testing.T) {
 	Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "/ping"}, deps, &fakeResponder{})
 	if access.userID != "canonical-user" {
 		t.Fatalf("access user ID = %q, want canonical-user", access.userID)
+	}
+}
+
+func TestExecuteValidatesCommandAttachmentBeforeDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	commandService, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "export", Attachment: &commands.Attachment{
+				Filename: "../private.json", MIMEType: "application/json", Data: []byte("private-content"),
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder := &fakeResponder{}
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: log}, responder)
+	if outcome.Action != routing.ActionCommand || responder.command.Attachment != nil {
+		t.Fatalf("invalid attachment reached responder: outcome=%+v result=%+v", outcome, responder.command)
+	}
+	if !strings.Contains(responder.command.Text, "filename must be a base name") {
+		t.Fatalf("unexpected validation response %q", responder.command.Text)
+	}
+}
+
+func TestExecuteRejectsDuplicateCommandAttachmentNames(t *testing.T) {
+	commandService, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Attachments: []commands.Attachment{
+				{Filename: "same.json", MIMEType: "application/json", Data: []byte("one")},
+				{Filename: "same.json", MIMEType: "application/json", Data: []byte("two")},
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder := &fakeResponder{}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: config.NewLogger(config.LevelError)}, responder)
+	if len(responder.command.OrderedAttachments()) != 0 || !strings.Contains(responder.command.Text, "duplicate filename") {
+		t.Fatalf("duplicate attachments reached responder: %+v", responder.command)
+	}
+}
+
+func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() { os.Stderr = oldStderr }()
+	log := config.NewLogger(config.LevelDebug)
+	const privateContent = "attachment-private-marker"
+	commandService, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Attachments: []commands.Attachment{{Filename: "safe.json", MIMEType: "application/json", Data: []byte(privateContent)}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: log}, &fakeResponder{})
+	_ = writer.Close()
+	output, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), privateContent) || !strings.Contains(string(output), "safe.json") || !strings.Contains(string(output), "attachment_bytes") {
+		t.Fatalf("unsafe or incomplete attachment log: %s", output)
+	}
+}
+
+func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
+	event := privacyruntime.Event{ExternalIdentities: []string{"websocket:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+	service, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bus := privacyruntime.NewBus()
+	responder := &fakeResponder{}
+	published := 0
+	bus.Subscribe(func(got privacyruntime.Event) {
+		published++
+		if responder.command.Text != "deleted" || !got.CloseConnections {
+			t.Fatalf("invalidation published before delivery or with wrong event: response=%+v event=%+v", responder.command, got)
+		}
+	})
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), PrivacyBus: bus}, responder)
+	if published != 1 {
+		t.Fatalf("published=%d want 1", published)
+	}
+	responder.sendErr = errors.New("offline")
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), PrivacyBus: bus}, responder)
+	if published != 2 || !errors.Is(outcome.Err, responder.sendErr) {
+		t.Fatalf("failed delivery invalidation count=%d outcome=%+v", published, outcome)
 	}
 }
 
@@ -163,7 +272,7 @@ func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	responder := &fakeResponder{}
 
 	outcome := Execute(Request{RequestID: "req", Text: "/ping"}, deps, responder)
-	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command != "" || access.userID != "" {
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
 		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
 	}
 }
@@ -199,8 +308,92 @@ func TestExecuteSerializesCommandBehindAgentRequest(t *testing.T) {
 	if outcome := <-llmDone; outcome.Err != nil {
 		t.Fatalf("agent outcome: %+v", outcome)
 	}
-	if outcome := <-commandDone; outcome.Err != nil || commandResponder.command != "pong:user:/ping" {
+	if outcome := <-commandDone; outcome.Err != nil || commandResponder.command.Text != "pong:user:/ping" {
 		t.Fatalf("command outcome=%+v responder=%+v", outcome, commandResponder)
+	}
+}
+
+func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(nil, 4, log)
+	b.Start()
+	defer b.Shutdown()
+	target := testPrincipal("target")
+	actor := testPrincipal("actor")
+	activeStarted := make(chan struct{})
+	releaseActive := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), target, "active", func() error {
+			close(activeStarted)
+			<-releaseActive
+			return nil
+		})
+	}()
+	<-activeStarted
+
+	event := privacyruntime.Event{SessionIDs: []string{"target-session"}}
+	commandStarted := make(chan struct{})
+	service, err := commands.NewService(commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
+		ResolveFenceTargetsFunc: func(_ context.Context, req commands.Request) ([]string, error) {
+			return []string{req.Args[0]}, nil
+		},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			close(commandStarted)
+			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterTargetStarted := make(chan struct{})
+	responder := &fenceCheckingResponder{
+		fakeResponder: &fakeResponder{}, broker: b, target: target,
+		laterTargetStarted: laterTargetStarted,
+	}
+	bus := privacyruntime.NewBus()
+	heldAtBus := false
+	bus.Subscribe(func(privacyruntime.Event) {
+		select {
+		case <-laterTargetStarted:
+		case <-time.After(30 * time.Millisecond):
+			heldAtBus = true
+		}
+	})
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- Execute(Request{Principal: actor, SessionKey: "admin-session", Text: "/deleteuser target"}, Dependencies{Broker: b, Commands: service, Log: log, PrivacyBus: bus}, responder)
+	}()
+	select {
+	case <-commandStarted:
+		t.Fatal("target command overlapped active target work")
+	case <-time.After(50 * time.Millisecond):
+	}
+	otherStarted := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), testPrincipal("other"), "other", func() error { close(otherStarted); return nil })
+	}()
+	select {
+	case <-otherStarted:
+	case <-time.After(time.Second):
+		t.Fatal("target fence blocked unrelated user work")
+	}
+	close(releaseActive)
+	select {
+	case outcome := <-done:
+		if outcome.Err != nil {
+			t.Fatal(outcome.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("target command did not complete")
+	}
+	if !responder.heldAtSend || !heldAtBus {
+		t.Fatalf("fence held at send=%t bus=%t", responder.heldAtSend, heldAtBus)
+	}
+	select {
+	case <-laterTargetStarted:
+	case <-time.After(time.Second):
+		t.Fatal("target work did not resume after invalidation")
 	}
 }
 
@@ -208,10 +401,34 @@ type fakeResponder struct {
 	started  bool
 	cleaned  bool
 	fallback string
-	command  string
+	command  commands.Result
 	agent    *agent.AgentResponse
 	agentErr string
 	sendErr  error
+}
+
+type fenceCheckingResponder struct {
+	*fakeResponder
+	broker             *broker.Broker
+	target             identity.Principal
+	laterTargetStarted chan struct{}
+	heldAtSend         bool
+}
+
+func (r *fenceCheckingResponder) SendCommandResponse(result commands.Result) error {
+	r.command = result
+	go func() {
+		_ = r.broker.RunInLane(context.Background(), r.target, "later", func() error {
+			close(r.laterTargetStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-r.laterTargetStarted:
+	case <-time.After(30 * time.Millisecond):
+		r.heldAtSend = true
+	}
+	return r.sendErr
 }
 
 func (r *fakeResponder) StartProcessing() (func(), error) {
@@ -224,9 +441,9 @@ func (r *fakeResponder) SendFallback(text string) error {
 	return nil
 }
 
-func (r *fakeResponder) SendCommandResponse(text string) error {
-	r.command = text
-	return nil
+func (r *fakeResponder) SendCommandResponse(result commands.Result) error {
+	r.command = result
+	return r.sendErr
 }
 
 func (r *fakeResponder) SendAgentResponse(response *agent.AgentResponse) error {

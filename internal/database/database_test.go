@@ -95,6 +95,51 @@ func TestWithTxCommitsAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestOpenEnablesSecureDeleteOnPooledConnections(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() // nolint:errcheck
+	for i := 0; i < 3; i++ {
+		conn, err := db.SQL().Conn(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var enabled int
+		err = conn.QueryRowContext(context.Background(), `PRAGMA secure_delete`).Scan(&enabled)
+		conn.Close() // nolint:errcheck
+		if err != nil || enabled != 1 {
+			t.Fatalf("secure_delete=%d err=%v", enabled, err)
+		}
+	}
+}
+
+func TestOpenConfiguresWALAndAllowsTruncateCheckpoint(t *testing.T) {
+	db := openTestDB(t)
+	var journalMode string
+	var autoCheckpoint, autoVacuum int
+	if err := db.SQL().QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRow(`PRAGMA wal_autocheckpoint`).Scan(&autoCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRow(`PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		t.Fatal(err)
+	}
+	if journalMode != "wal" || autoCheckpoint <= 0 || autoVacuum != 2 {
+		t.Fatalf("journal_mode=%q wal_autocheckpoint=%d auto_vacuum=%d", journalMode, autoCheckpoint, autoVacuum)
+	}
+	var busy, logFrames, checkpointedFrames int
+	if err := db.SQL().QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
+		t.Fatalf("truncate WAL checkpoint: %v", err)
+	}
+	if busy != 0 {
+		t.Fatalf("truncate WAL checkpoint remained busy: log=%d checkpointed=%d", logFrames, checkpointedFrames)
+	}
+}
+
 func TestUserMemoryMigrationAddsProfilesAndDemotesSystemRules(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	raw, err := sql.Open("sqlite3", path)
@@ -200,108 +245,30 @@ FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(
 	}
 }
 
-func TestMemoryFTS5BackfillsExistingEntries(t *testing.T) {
-	db := openTestDB(t)
-
-	if _, err := db.SQL().Exec(`
-DROP TRIGGER memory_entries_fts_insert;
-DROP TRIGGER memory_entries_fts_update;
-DROP TRIGGER memory_entries_fts_delete;
-DROP TABLE memory_entries_fts;
-INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z');
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at)
-VALUES ('user-a', 'long_term', 'notes', 'Collects antique clocks.', 'collects antique clocks.', 'Mentioned the clock workshop.', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z');
-`); err != nil {
-		t.Fatalf("prepare existing memory: %v", err)
-	}
-
-	if err := db.initializeMemoryFTS5(); err != nil {
-		t.Fatalf("initialize FTS5: %v", err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "antique", 1)
-	assertFTSMatchCount(t, db, "user-a", "workshop", 1)
-	assertFTSMatchCount(t, db, "user-b", "antique", 0)
-}
-
-func TestMemoryFTS5SynchronizesWithCanonicalEntries(t *testing.T) {
+func TestMemoryFTS5InitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
 	db := openTestDB(t)
 	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
-	result, err := db.SQL().Exec(`
+	_, err := db.SQL().Exec(`
 INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at)
 VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'grows orchids.', 'Keeps them by the window.', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
 	if err != nil {
 		t.Fatalf("insert memory: %v", err)
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		t.Fatalf("memory id: %v", err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "orchids", 1)
-
-	if _, err := db.SQL().Exec(`UPDATE memory_entries SET statement = 'Grows bonsai trees.', evidence = 'Attends a bonsai club.' WHERE id = ?`, id); err != nil {
-		t.Fatalf("update memory: %v", err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "orchids", 0)
-	assertFTSMatchCount(t, db, "user-a", "bonsai", 1)
-
-	if _, err := db.SQL().Exec(`DELETE FROM memory_entries WHERE id = ?`, id); err != nil {
-		t.Fatalf("delete memory: %v", err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "bonsai", 0)
-}
-
-func TestMemoryFTS5IndexesOnlyApprovedActiveMemories(t *testing.T) {
-	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`); err != nil {
-		t.Fatal(err)
-	}
-	result, err := db.SQL().Exec(`
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, status, approval_state, created_at, updated_at)
-VALUES ('user-a', 'long_term', 'notes', 'Pending nebula fact.', 'pending nebula fact.', 'pending', 'active', 'proposed', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, _ := result.LastInsertId()
-	assertFTSMatchCount(t, db, "user-a", "nebula", 0)
-	if _, err := db.SQL().Exec(`UPDATE memory_entries SET approval_state = 'approved' WHERE id = ?`, id); err != nil {
-		t.Fatal(err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "nebula", 1)
-	if _, err := db.SQL().Exec(`UPDATE memory_entries SET status = 'superseded' WHERE id = ?`, id); err != nil {
-		t.Fatal(err)
-	}
-	assertFTSMatchCount(t, db, "user-a", "nebula", 0)
-}
-
-func TestMemoryFTS5InitializationIsIdempotent(t *testing.T) {
-	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`
-INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z');
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at)
-VALUES ('user-a', 'long_term', 'notes', 'Restores typewriters.', 'restores typewriters.', 'Owns a repair kit.', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z');
-`); err != nil {
-		t.Fatalf("insert memory: %v", err)
-	}
-
 	if err := db.initializeMemoryFTS5(); err != nil {
 		t.Fatalf("second initialization: %v", err)
 	}
-	if err := db.initializeMemoryFTS5(); err != nil {
-		t.Fatalf("third initialization: %v", err)
-	}
-
 	for _, name := range []string{"memory_entries_fts_insert", "memory_entries_fts_update", "memory_entries_fts_delete"} {
 		var count int
 		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&count); err != nil {
 			t.Fatalf("inspect trigger %s: %v", name, err)
 		}
-		if count != 1 {
-			t.Fatalf("trigger %s count = %d, want 1", name, count)
+		if count != 0 {
+			t.Fatalf("trigger %s count = %d, want 0", name, count)
 		}
 	}
-	assertFTSMatchCount(t, db, "user-a", "typewriters", 1)
+	assertFTSMatchCount(t, db, "user-a", "orchids", 0)
 }
 
 func openTestDB(t *testing.T) *DB {

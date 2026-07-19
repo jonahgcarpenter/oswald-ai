@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -70,34 +71,77 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		if commandName == "" {
 			commandName = "unknown"
 		}
-		response := "Unknown command: /"
-		var err error
+		response := commands.Result{Text: "Unknown command: /"}
+		var commandErr error
+		var sendErr error
+		deliveryAttempted := false
 		if deps.Commands != nil {
+			commandReq := commands.Request{
+				RequestID: req.RequestID, Principal: req.Principal, ChatID: req.ChatID,
+				SessionKey: req.SessionKey, DisplayName: req.DisplayName,
+				IsDirect: req.IsDirect, IsGroup: req.IsGroup, Raw: decision.Prompt,
+			}
+			fenceTargets, resolveErr := deps.Commands.ResolveFenceTargets(context.Background(), commandReq)
 			executeCommand := func() error {
-				result, commandErr := deps.Commands.Execute(context.Background(), commands.Request{
-					RequestID: req.RequestID, Principal: req.Principal, ChatID: req.ChatID,
-					SessionKey: req.SessionKey, DisplayName: req.DisplayName,
-					IsDirect: req.IsDirect, IsGroup: req.IsGroup, Raw: decision.Prompt,
-				})
-				response = result.Text
+				if resolveErr != nil {
+					commandErr = resolveErr
+				} else {
+					response, commandErr = deps.Commands.Execute(context.Background(), commandReq)
+				}
+				if commandErr != nil {
+					response.Text = config.SafeErrorText(commandErr)
+					response.Attachment = nil
+					response.Attachments = nil
+				} else if attachments := response.OrderedAttachments(); len(attachments) > 0 {
+					attachmentNames := make([]string, 0, len(attachments))
+					totalBytes := 0
+					for _, attachment := range attachments {
+						attachmentNames = append(attachmentNames, attachment.Filename)
+						totalBytes += len(attachment.Data)
+					}
+					if validateErr := response.ValidateAttachments(); validateErr != nil {
+						commandErr = validateErr
+						log.Error("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("attachment_names", attachmentNames), config.ErrorField(validateErr))
+						response.Text = config.SafeErrorText(validateErr)
+						response.Attachment = nil
+						response.Attachments = nil
+					} else {
+						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("attachment_names", attachmentNames))
+					}
+				}
+				sendErr = responder.SendCommandResponse(response)
+				deliveryAttempted = true
+				if response.Invalidation != nil && deps.PrivacyBus != nil {
+					_ = deps.PrivacyBus.Publish(*response.Invalidation)
+				}
 				return commandErr
 			}
 			if deps.Broker != nil {
-				err = deps.Broker.RunInLane(context.Background(), req.Principal, req.SessionKey, executeCommand)
+				definition, _ := deps.Commands.Definition(commandName)
+				if definition.UserExclusive || len(fenceTargets) > 0 {
+					fenceTargets = append(fenceTargets, userID)
+					commandErr = deps.Broker.RunUsersExclusive(context.Background(), fenceTargets, executeCommand)
+				} else {
+					commandErr = deps.Broker.RunInLane(context.Background(), req.Principal, req.SessionKey, executeCommand)
+				}
 			} else {
-				err = executeCommand()
+				commandErr = executeCommand()
 			}
 		}
-		if err != nil {
-			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(err))
-			response = config.SafeErrorText(err)
+		if commandErr != nil {
+			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(commandErr))
 		}
-		sendErr := responder.SendCommandResponse(response)
+		if !deliveryAttempted {
+			if commandErr != nil {
+				response = commands.Result{Text: config.SafeErrorText(commandErr)}
+			}
+			sendErr = responder.SendCommandResponse(response)
+		}
 		if sendErr != nil {
 			log.Error("gateway.response.failed", "failed to send command response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(sendErr))
 		}
 		status := "ok"
-		if err != nil || sendErr != nil {
+		if commandErr != nil || sendErr != nil {
 			status = "error"
 		}
 		log.Info("gateway.command.completed", "completed gateway command",
@@ -106,7 +150,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("session_id", req.SessionKey),
 			config.F("user_id", userID),
 			config.F("command", commandName),
-			config.F("response_chars", len(response)),
+			config.F("response_chars", len(response.Text)),
 			config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 			config.F("status", status),
 		)
@@ -146,8 +190,23 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		StreamFunc:   req.StreamFunc,
 		ResponseChan: make(chan broker.Result, 1),
 	}
+	if resolver, ok := deps.Access.(interface {
+		ResolvePrincipal(identity.Principal) (string, error)
+	}); ok {
+		brokerReq.RefreshPrincipal = func(principal identity.Principal) (identity.Principal, error) {
+			resolvedUserID, err := resolver.ResolvePrincipal(principal)
+			if err != nil {
+				return identity.Principal{}, err
+			}
+			principal.CanonicalUserID = resolvedUserID
+			return principal, nil
+		}
+	}
 	deps.Broker.Submit(brokerReq)
 	result := <-brokerReq.ResponseChan
+	if result.Principal.Valid() {
+		userID = result.Principal.CanonicalUserID
+	}
 
 	if result.Err != nil {
 		log.Error("gateway.response.failed", "agent processing failed", config.F("request_id", req.RequestID), config.ErrorField(result.Err))

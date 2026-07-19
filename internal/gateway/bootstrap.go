@@ -28,18 +28,25 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, ru
 			Log:           log,
 		},
 	}
+	if runtimeDeps.PrivacyBus != nil {
+		runtimeDeps.PrivacyBus.Subscribe(services[0].(*localws.Gateway).HandlePrivacyInvalidation)
+	}
 
 	if cfg.DiscordToken != "" {
-		services = append(services, &discord.Gateway{
+		discordGateway := &discord.Gateway{
 			Token:   cfg.DiscordToken,
 			Links:   links,
 			Runtime: runtimeDeps,
 			Log:     log,
-		})
+		}
+		services = append(services, discordGateway)
+		if runtimeDeps.PrivacyBus != nil {
+			runtimeDeps.PrivacyBus.Subscribe(discordGateway.HandlePrivacyInvalidation)
+		}
 	}
 
 	if cfg.BlueBubblesURL != "" && cfg.BlueBubblesPassword != "" {
-		services = append(services, &imessage.Gateway{
+		iMessageGateway := &imessage.Gateway{
 			Port:                cfg.IMessagePort,
 			WebhookPath:         cfg.IMessageWebhookPath,
 			BlueBubblesURL:      cfg.BlueBubblesURL,
@@ -47,7 +54,11 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, ru
 			Links:               links,
 			Runtime:             runtimeDeps,
 			Log:                 log,
-		})
+		}
+		services = append(services, iMessageGateway)
+		if runtimeDeps.PrivacyBus != nil {
+			runtimeDeps.PrivacyBus.Subscribe(iMessageGateway.HandlePrivacyInvalidation)
+		}
 	}
 
 	gatewayLog.Info("gateway.bootstrap.enabled", "resolved enabled gateways",

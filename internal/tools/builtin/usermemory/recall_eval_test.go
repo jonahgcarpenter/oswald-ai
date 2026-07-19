@@ -14,12 +14,14 @@ type evaluationEmbedder struct{}
 
 func (evaluationEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {
 	input := strings.ToLower(req.Input)
-	vector := []float64{-1, 0}
+	vector := []float64{-1, -1}
 	switch {
 	case strings.Contains(input, "color"), strings.Contains(input, "shade"):
 		vector = []float64{0, 1}
-	case strings.Contains(input, "atlas"), strings.Contains(input, "codename"):
+	case strings.Contains(input, "atlas"), strings.Contains(input, "codename"), strings.Contains(input, "zxq"):
 		vector = []float64{1, 0}
+	case strings.Contains(input, "ignore previous"):
+		vector = []float64{0.7, 0.7}
 	}
 	return &llm.EmbedResponse{Embeddings: [][]float64{vector}}, nil
 }
@@ -48,6 +50,7 @@ func TestOfflineHybridRecallEvaluationCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rebuildTestIndexes(t, store)
 
 	tests := []struct {
 		name   string

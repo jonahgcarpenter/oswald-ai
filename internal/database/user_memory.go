@@ -3,12 +3,37 @@ package database
 import (
 	"database/sql"
 	"fmt"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 func (d *DB) initializeUserMemory() error {
-	if _, err := d.db.Exec(`
+	if _, err := d.db.Exec(userMemoryBaselineSQL); err != nil {
+		return fmt.Errorf("failed to initialize user memory tables: %w", err)
+	}
+	if err := d.ensureUserMemoryColumn("memory_entries", "profile_approved", "INTEGER NOT NULL DEFAULT 0 CHECK (profile_approved IN (0, 1))"); err != nil {
+		return err
+	}
+	if err := d.ensureUserMemoryColumn("session_turns", "session_generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if _, err := d.db.Exec(userMemoryCleanupIndexesSQL); err != nil {
+		return fmt.Errorf("failed to initialize session cleanup indexes: %w", err)
+	}
+	if err := d.migrateStableTenantProfiles(); err != nil {
+		return err
+	}
+	if err := d.migrateMemoryFormationSchema(); err != nil {
+		return err
+	}
+	if err := d.migrateSessionCompactionSchema(); err != nil {
+		return err
+	}
+	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_profile_candidates ON memory_entries (canonical_user_id, profile_approved, status, scope, category, expires_at)`); err != nil {
+		return fmt.Errorf("failed to initialize profile candidate index: %w", err)
+	}
+	return nil
+}
+
+const userMemoryBaselineSQL = `
 CREATE TABLE IF NOT EXISTS user_memory_profiles (
 	canonical_user_id TEXT PRIMARY KEY,
 	intro TEXT NOT NULL DEFAULT '',
@@ -167,16 +192,9 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	name TEXT PRIMARY KEY,
 	applied_at TEXT NOT NULL
 );
-`); err != nil {
-		return fmt.Errorf("failed to initialize user memory tables: %w", err)
-	}
-	if err := d.ensureUserMemoryColumn("memory_entries", "profile_approved", "INTEGER NOT NULL DEFAULT 0 CHECK (profile_approved IN (0, 1))"); err != nil {
-		return err
-	}
-	if err := d.ensureUserMemoryColumn("session_turns", "session_generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
-		return err
-	}
-	if _, err := d.db.Exec(`
+`
+
+const userMemoryCleanupIndexesSQL = `
 CREATE INDEX IF NOT EXISTS idx_session_turns_context
 ON session_turns (canonical_user_id, session_id, session_generation, created_at DESC, id DESC);
 
@@ -185,33 +203,7 @@ ON session_turns (expires_at) WHERE expires_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_tenant_sessions_expiry
 ON tenant_sessions (expires_at);
-`); err != nil {
-		return fmt.Errorf("failed to initialize session cleanup indexes: %w", err)
-	}
-	if err := d.migrateStableTenantProfiles(); err != nil {
-		return err
-	}
-	if err := d.migrateMemoryFormationSchema(); err != nil {
-		return err
-	}
-	if err := d.migrateSessionCompactionSchema(); err != nil {
-		return err
-	}
-	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_profile_candidates ON memory_entries (canonical_user_id, profile_approved, status, scope, category, expires_at)`); err != nil {
-		return fmt.Errorf("failed to initialize profile candidate index: %w", err)
-	}
-	if err := d.initializeMemoryFTS5(); err != nil {
-		if d.log != nil {
-			d.log.Server("database.memory_fts").Warn("database.memory_fts.unavailable", "durable memory FTS index unavailable", config.F("status", "degraded"), config.ErrorField(err))
-		}
-	}
-	if err := d.initializeSessionTurnsFTS5(); err != nil {
-		if d.log != nil {
-			d.log.Server("database.session_turns_fts").Warn("database.session_turns_fts.unavailable", "session transcript FTS index unavailable", config.F("status", "degraded"), config.ErrorField(err))
-		}
-	}
-	return nil
-}
+`
 
 func (d *DB) migrateStableTenantProfiles() error {
 	tx, err := d.db.Begin()

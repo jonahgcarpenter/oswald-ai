@@ -54,8 +54,8 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 
-	if err := service.process(context.Background(), job); err != nil {
-		t.Fatal(err)
+	if err := service.process(context.Background(), job); err == nil {
+		t.Fatal("completed formation lease replay succeeded")
 	}
 	memories, err = store.ListMemories("user-1", "", "", 10)
 	if err != nil || len(memories) != 1 {

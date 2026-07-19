@@ -24,7 +24,22 @@ func (d *DB) migrateSessionCompactionSchema() error {
 	if applied != 0 {
 		return tx.Commit()
 	}
+	if _, err := tx.Exec(sessionCompactionSchemaSQL); err != nil {
+		return fmt.Errorf("create session compaction schema: %w", err)
+	}
 	if _, err := tx.Exec(`
+INSERT INTO schema_migrations (name, applied_at)
+VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT(name) DO NOTHING`, sessionCompactionMigration); err != nil {
+		return fmt.Errorf("record session compaction migration: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session compaction migration: %w", err)
+	}
+	return nil
+}
+
+const sessionCompactionSchemaSQL = `
 UPDATE session_turns
 SET delivered_at = formation_eligible_at
 WHERE delivered_at IS NULL AND formation_eligible_at IS NOT NULL;
@@ -264,17 +279,4 @@ WHEN NEW.artifact_summary_id IS NOT NULL AND NOT EXISTS (
 BEGIN
 	SELECT RAISE(ABORT, 'invalid session compaction artifact');
 END;
-`); err != nil {
-		return fmt.Errorf("create session compaction schema: %w", err)
-	}
-	if _, err := tx.Exec(`
-INSERT INTO schema_migrations (name, applied_at)
-VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-ON CONFLICT(name) DO NOTHING`, sessionCompactionMigration); err != nil {
-		return fmt.Errorf("record session compaction migration: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit session compaction migration: %w", err)
-	}
-	return nil
-}
+`
