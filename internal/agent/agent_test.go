@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -430,6 +431,50 @@ func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *te
 	}
 	if messages[len(messages)-1].Role != "user" || messages[len(messages)-1].Content != "follow up" {
 		t.Fatalf("current request is not the final user message: %+v", messages)
+	}
+}
+
+func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 10; i++ {
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, fmt.Sprintf("turn %d user", i), fmt.Sprintf("turn %d assistant", i), nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns, err := store.DeliveredSessionTurnsAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, usermemory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteSessionCompactionJob(context.Background(), job, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := processAgent(agent, "req-summary", "websocket", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	messages := primaryRequests(chat.requests)[0].Messages
+	if len(messages) != 20 || !strings.Contains(messages[2].Content, "session_history_summary") || !strings.Contains(messages[2].Content, "first two turns") {
+		t.Fatalf("summary context missing or malformed: %+v", messages)
+	}
+	if messages[3].Content != "turn 3 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
+		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
 	}
 }
 
@@ -868,7 +913,7 @@ func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayN
 	case "imessage":
 		assurance = identity.AssuranceBlueBubblesWebhook
 	}
-	return agent.Process(Request{
+	response, err := agent.Process(Request{
 		RequestID: requestID,
 		Principal: identity.Principal{
 			CanonicalUserID: userID,
@@ -882,6 +927,10 @@ func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayN
 		Images:      images,
 		StreamFunc:  streamFunc,
 	})
+	if err == nil && response != nil && response.SourceTurnID > 0 && agent.userMemory != nil {
+		_ = agent.userMemory.MarkSessionTurnDelivered(context.Background(), userID, response.SourceTurnID)
+	}
+	return response, err
 }
 
 func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.EmbedResponse, error) {

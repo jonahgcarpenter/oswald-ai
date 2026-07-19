@@ -39,8 +39,9 @@ const (
 type FormationMode string
 
 const (
-	ModeAutomaticExtraction FormationMode = "automatic_extraction"
-	ModeExplicitRemember    FormationMode = "explicit_remember"
+	ModeAutomaticExtraction     FormationMode = "automatic_extraction"
+	ModePreCompactionExtraction FormationMode = "pre_compaction_extraction"
+	ModeExplicitRemember        FormationMode = "explicit_remember"
 )
 
 // Approval is the candidate's resulting approval state.

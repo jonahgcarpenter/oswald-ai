@@ -161,6 +161,11 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	err = responder.SendAgentResponse(result.Response)
 	if err != nil {
 		log.Error("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
+		if deps.Compaction != nil && result.Response != nil && result.Response.SourceTurnID > 0 {
+			if markErr := deps.Compaction.MarkDeliveryFailed(context.Background(), userID, result.Response.SourceTurnID); markErr != nil {
+				log.Warn("session.delivery.failure_mark_failed", "failed to mark terminal response delivery failure", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(markErr))
+			}
+		}
 	} else if result.Response != nil {
 		log.Info("gateway.response.sent", "sent gateway response",
 			config.F("request_id", req.RequestID),
@@ -184,6 +189,16 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			}
 			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
 				log.Warn("memory.formation.job.enqueue_failed", "failed to enqueue post-turn memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
+			}
+		}
+		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
+			source := usermemory.FormationSource{
+				RequestID: req.RequestID, SessionID: req.SessionKey,
+				SessionGeneration: result.Response.SessionGeneration,
+				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
+			}
+			if enqueueErr := deps.Compaction.Enqueue(context.Background(), userID, source); enqueueErr != nil {
+				log.Warn("session.compaction.job.enqueue_failed", "failed to enqueue session compaction planning", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
 			}
 		}
 	}

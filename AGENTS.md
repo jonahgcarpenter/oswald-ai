@@ -5,7 +5,7 @@ This file is the internal reference for how Oswald AI works today.
 ## Project Overview
 
 Oswald AI is a pure Go application built around a single LLM gateway-backed agent loop.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with eight builtin model tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with nine builtin model tools:
 
 - `web.search`
 - `time.current`
@@ -13,6 +13,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `memory.search`
 - `memory.list`
 - `memory.forget`
+- `transcript.search`
 - `soul.read`
 - `soul.patch`
 
@@ -39,13 +40,14 @@ Current layers:
 9. `internal/broker/` — request queue and worker pool
 10. `internal/memoryformation/` — pure evidence validation, sensitivity classification, and activation policy
 11. `internal/formationruntime/` — durable serialized post-turn extraction and retry worker
-12. `internal/agent/` — iterative tool-calling agent loop
-13. `internal/promptbudget/` — model context budget and prompt token estimates
-14. `internal/tools/` — tool registry, builtin handlers, and schema loading
-15. `internal/mcp/` — optional MCP client sessions and discovered tools
-16. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-17. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-18. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+12. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
+13. `internal/agent/` — iterative tool-calling agent loop
+14. `internal/promptbudget/` — model context budget and prompt token estimates
+15. `internal/tools/` — tool registry, builtin handlers, and schema loading
+16. `internal/mcp/` — optional MCP client sessions and discovered tools
+17. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+18. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+19. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
 
 ## Startup Flow
 
@@ -65,7 +67,8 @@ Current layers:
 12. Start the broker worker pool
 13. Start each gateway in its own goroutine
 14. Start the serialized durable-memory formation worker
-15. Wait for shutdown signal, drain the broker and formation worker, and close MCP clients
+15. Start the serialized durable session-compaction worker, including startup reconciliation and active-session planning
+16. Wait for shutdown signal, drain the broker and formation worker, stop the compaction worker, and close MCP clients
 
 ## Request Lifecycle
 
@@ -84,7 +87,7 @@ Every request follows the same high-level path:
 11. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 12. The final response is returned to the shared runtime
 13. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
-14. After successful delivery, the runtime marks the persisted turn formation-eligible and durably enqueues optional post-turn extraction
+14. Only after successful delivery, the runtime marks the persisted turn formation-eligible, durably enqueues optional post-turn extraction, marks the turn delivered, and proactively plans any eligible session compaction
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -116,10 +119,10 @@ Per request it does the following:
 5. Resolve the session's frozen, bounded, lower-authority tenant profile
 6. Retrieve tenant-scoped lexical and semantic durable-memory candidates for the cleaned current request
 7. Hybrid-rank, threshold, deduplicate, diversify, and bound recalled memories
-8. Load completed exchanges from recent SQLite-backed turns in the active session generation
+8. Load the latest immutable structured summary and completed exchanges newer than its covered range from the active session generation
 9. Pre-expose successful MCP tools from those recent turns when they remain visible and available to the current user
-10. Select bounded recall and then the newest contiguous suffix of complete exchanges that fits the active model input budget
-11. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, historical `user`/`assistant` pairs in chronological order, and the current request plus explicitly untrusted recall as the final `user` message with any current-turn images
+10. Reserve the explicitly untrusted historical summary and a minimum newest tail of complete exchanges when they fit, then select bounded recall and additional recent complete exchanges within the active model input budget
+11. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, optional generated summary as lower-authority untrusted historical reference data, recent `user`/`assistant` pairs in chronological order, and the current request plus explicitly untrusted recall as the final `user` message with any current-turn images
 12. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
 13. If the model emits tool calls:
    - execute each tool handler
@@ -134,6 +137,7 @@ Multimodal request notes:
 - Images are attached only to the current user turn; they are not replayed into future turns
 - Session memory stays text-only; image-bearing turns are stored with a short attachment marker instead of raw image data
 - Session turns are stored with a `24h` TTL and generation; complete recent exchanges from the active generation are injected automatically when budget permits
+- Proactive compaction runs in the background after successful response delivery; undelivered or failed-delivery turns cannot enter summaries, transcript-search results, or compaction ranges
 - Reply context is sent directly on the current prompt, but stripped from stored session memory and memory query text to avoid reintroducing the same quoted message later
 - Attachments that fail image validation or are not supported image types are not rejected outright; gateways convert them into a short prompt note so the model knows the user attached an unsupported file
 - Gateway/runtime, routing, memory, command, tool, LLM mapping, image normalization, and fake-client agent loop behavior are covered by local Go tests that do not call a live LLM
@@ -219,10 +223,23 @@ Oswald keeps three distinct memory layers.
 - Stored in SQLite table `session_turns`
 - Keyed by gateway-provided `SessionKey` and canonical user ID
 - Stores only completed final user/assistant turn pairs
-- Recent completed exchanges are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
+- Successful gateway delivery is recorded separately; only delivered turns are eligible for compaction and `transcript.search`
+- A proactive background planner creates durable, idempotent fixed-range compaction jobs when delivered history grows past its count or prompt-budget threshold, while always leaving at least eight newest complete exchanges outside the planned range
+- One serialized worker leases and retries compaction jobs, reconciles recoverable work at startup, periodically scans active sessions, and redrives bounded failed work
+- Each compaction publishes a new immutable structured checkpoint containing narrative, open tasks, commitments, entities, decisions, topic tags, covered turn range, generation model/version, source digest, and ordered immutable source-turn links
+- Incremental checkpoints summarize the previous checkpoint plus newly covered role-correct exchanges; published checkpoints and their source links are historical session artifacts, not durable user memories or operator instructions
+- When budget permits, the agent injects the latest checkpoint only as explicitly labeled untrusted historical reference data, followed by a minimum recent verbatim tail and then any additional complete `user`/`assistant` exchanges that fit
+- If the budget cannot hold all optional context, selection preserves whole exchanges, reserves the minimum recent tail before the summary, and then considers durable recall and additional history; required policy, profile, and current turn still take precedence
+- Compaction does not delete covered turns. Delivered transcripts remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable
+- `transcript.search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
+- Transcript search is intentionally current-session and active-generation only; it is separate from `memory.search`, which searches stable durable user facts
+- Before publishing a checkpoint, the same model artifact may identify source-turn-specific durable-memory candidates from exact user evidence. These pre-compaction candidates are staged idempotently through normal validation as proposals only; compaction never directly activates memory or bypasses confirmation policy
+- Recent completed exchanges newer than the latest summary boundary are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
 - Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
-- Each stored turn has an optional `expires_at`; an immediate startup sweep and hourly cleanup remove expired turns independently of reads
-- Cleanup preserves generation counters so reset or expired session generations are never reused, and retains profile versions referenced by active sessions
+- Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources remain retained while their matching session generation is active; startup and hourly cleanup remove them after reset or session inactivity expiry
+- `/reset` advances the generation, deletes that tenant session's turns, summaries, and compaction jobs, and binds the latest tenant profile; the old transcript is no longer searchable
+- Session expiry causes the next request to use a new generation, while cleanup removes inactive summaries, compaction jobs, turns, and the expired session. Generation counters are preserved so reset or expired generations are never reused
+- Cleanup retains profile versions referenced by active sessions
 - Tool messages and intermediate reasoning are intentionally not persisted
 
 Prompt-budget behavior:
@@ -380,9 +397,10 @@ Current builtin tools:
 - `memory.search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts
+- `transcript.search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
 - `soul.read` — read the soul file
 - `soul.patch` — add, replace, or remove one exact line in the soul file
-Recent completed exchanges and bounded query-relevant durable recall are injected automatically. Deeper durable retrieval and all memory mutation remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
+An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `transcript.search`; deeper durable retrieval and all memory mutation remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
@@ -675,6 +693,7 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 | `internal/agent/agent.go`                      | Main agent loop                              |
 | `internal/broker/broker.go`                    | Request queue and worker pool                |
 | `internal/promptbudget/`                       | Context budget and prompt token estimates    |
+| `internal/sessionruntime/`                     | Durable background session compaction worker |
 | `internal/mcp/manager.go`                      | MCP client bootstrap and catalog             |
 | `internal/routing/routing.go`                  | Shared gateway routing policy                |
 | `internal/routing/types.go`                    | Gateway-neutral routing types                |
@@ -737,9 +756,10 @@ Changes apply on the next request because the soul file is read fresh each time.
 
 ## Known Limitations
 
-- Session chat history is stored in SQLite `session_turns` with TTL expiry
+- Session summaries are model-generated continuity aids and may omit or misstate details; they are untrusted, and exact delivered details are available only while the active generation's transcript is retained
+- `transcript.search` is lexical FTS5 search limited to the authenticated current session's active generation; it does not search reset, expired, or other sessions
 - WebSocket HMAC tokens are short-lived but do not yet support individual server-side revocation
-- Only eight builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
+- Only nine builtin model tools ship locally; extra tools require optional MCP integration and request-local exposure through `<server>.tools`
 - MCP servers are configured dynamically in SQLite rather than hard-coded to one provider
 - Runtime model access goes through an OpenAI-compatible model gateway; prompt budgeting uses OpenRouter metadata, optional `MODEL_*` overrides, or package defaults
 

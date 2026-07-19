@@ -154,6 +154,7 @@ INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_t
 	}
 	defer db.Close() // nolint:errcheck
 	var category, provenanceType, sourceAuthority, formationMode, approvalState, approvedAt, validFrom string
+	var deliveredAt, deliveryFailedAt sql.NullString
 	var approved, generation int
 	if err := db.SQL().QueryRow(`
 SELECT category, profile_approved, provenance_type, source_authority, formation_mode,
@@ -167,6 +168,12 @@ FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(
 	if err := db.SQL().QueryRow(`SELECT session_generation FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&generation); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SQL().QueryRow(`SELECT delivered_at FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&deliveredAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRow(`SELECT delivery_failed_at FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&deliveryFailedAt); err != nil {
+		t.Fatal(err)
+	}
 	if category != "communication_preferences" || approved != 1 || generation != 1 {
 		t.Fatalf("category=%q approved=%d generation=%d", category, approved, generation)
 	}
@@ -175,6 +182,12 @@ FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(
 	}
 	if approvedAt != "2026-01-01T00:00:00Z" || validFrom != "2026-01-01T00:00:00Z" {
 		t.Fatalf("legacy lifecycle timestamps approved=%q valid=%q", approvedAt, validFrom)
+	}
+	if deliveredAt.Valid {
+		t.Fatalf("ambiguous legacy turn was marked delivered: %q", deliveredAt.String)
+	}
+	if !deliveryFailedAt.Valid {
+		t.Fatal("ambiguous legacy turn was not marked terminally unavailable")
 	}
 	for _, table := range []string{"tenant_profile_versions", "tenant_profile_version_facts", "tenant_sessions"} {
 		var count int

@@ -131,6 +131,29 @@ func TestExecuteMarksConfirmationOnlyAfterSuccessfulDelivery(t *testing.T) {
 	}
 }
 
+func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := responseRuntimeProcessor{response: &agent.AgentResponse{Model: "model", Response: "answer", SourceTurnID: 77, SessionGeneration: 3}}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	deps := Dependencies{Broker: b, Log: log, Compaction: compaction}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if !compaction.enqueueCalled || !compaction.responseDelivered || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
+		t.Fatalf("compaction enqueue=%+v", compaction)
+	}
+
+	failedResponder := &fakeResponder{sendErr: errors.New("offline")}
+	failed := &fakeCompactionEnqueuer{responder: failedResponder}
+	deps.Compaction = failed
+	Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
+	if failed.enqueueCalled || !failed.failureMarked || failed.source.TurnID != 77 {
+		t.Fatalf("failed delivery bookkeeping = %+v", failed)
+	}
+}
+
 func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
@@ -240,6 +263,31 @@ type fakeFormationEnqueuer struct {
 	source            usermemory.FormationSource
 	presentCalled     bool
 	candidateID       int64
+}
+
+type fakeCompactionEnqueuer struct {
+	responder         *fakeResponder
+	enqueueCalled     bool
+	failureMarked     bool
+	responseDelivered bool
+	userID            string
+	source            usermemory.FormationSource
+}
+
+func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
+	f.enqueueCalled = true
+	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
+	f.userID = userID
+	f.source = source
+	return nil
+}
+
+func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID string, turnID int64) error {
+	f.failureMarked = true
+	f.responseDelivered = false
+	f.userID = userID
+	f.source.TurnID = turnID
+	return nil
 }
 
 func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
