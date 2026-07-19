@@ -10,12 +10,14 @@ import (
 
 // SessionCleanupCounts reports rows removed by one session cleanup transaction.
 type SessionCleanupCounts struct {
-	SessionTurnsDeleted    int64
-	TenantSessionsDeleted  int64
-	ProfileVersionsDeleted int64
-	MemoryEntriesExpired   int64
-	CandidatesErased       int64
-	FormationJobsDeleted   int64
+	SessionTurnsDeleted     int64
+	TenantSessionsDeleted   int64
+	ProfileVersionsDeleted  int64
+	MemoryEntriesExpired    int64
+	CandidatesErased        int64
+	FormationJobsDeleted    int64
+	SessionSummariesDeleted int64
+	CompactionJobsDeleted   int64
 }
 
 // SessionCleaner removes expired session state.
@@ -123,8 +125,43 @@ WHERE (state IN ('succeeded', 'skipped') AND completed_at <= ?)
 	}
 
 	result, err = tx.ExecContext(ctx, `
+DELETE FROM session_compaction_jobs
+WHERE NOT EXISTS (
+	SELECT 1 FROM tenant_sessions active
+	WHERE active.canonical_user_id = session_compaction_jobs.canonical_user_id
+		AND active.session_id = session_compaction_jobs.session_id
+		AND active.generation = session_compaction_jobs.session_generation
+		AND active.expires_at > ?
+)
+`, nowText)
+	if err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("delete inactive session compaction jobs: %w", err)
+	}
+	counts.CompactionJobsDeleted, _ = result.RowsAffected()
+	result, err = tx.ExecContext(ctx, `
+DELETE FROM session_summaries
+WHERE NOT EXISTS (
+	SELECT 1 FROM tenant_sessions active
+	WHERE active.canonical_user_id = session_summaries.canonical_user_id
+		AND active.session_id = session_summaries.session_id
+		AND active.generation = session_summaries.session_generation
+		AND active.expires_at > ?
+)
+`, nowText)
+	if err != nil {
+		return SessionCleanupCounts{}, fmt.Errorf("delete inactive session summaries: %w", err)
+	}
+	counts.SessionSummariesDeleted, _ = result.RowsAffected()
+
+	result, err = tx.ExecContext(ctx, `
 DELETE FROM session_turns
-WHERE (expires_at IS NOT NULL AND expires_at <= ?)
+WHERE ((expires_at IS NOT NULL AND expires_at <= ?) AND NOT EXISTS (
+	SELECT 1 FROM tenant_sessions active
+	WHERE active.canonical_user_id = session_turns.canonical_user_id
+		AND active.session_id = session_turns.session_id
+		AND active.generation = session_turns.session_generation
+		AND active.expires_at > ?
+))
    OR EXISTS (
 	SELECT 1
 	FROM tenant_sessions sessions
@@ -133,7 +170,7 @@ WHERE (expires_at IS NOT NULL AND expires_at <= ?)
 	  AND sessions.generation = session_turns.session_generation
 	  AND sessions.expires_at <= ?
    )
-`, nowText, nowText)
+`, nowText, nowText, nowText)
 	if err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("delete expired session turns: %w", err)
 	}
@@ -202,10 +239,12 @@ func RunSessionCleanup(ctx context.Context, cleaner SessionCleaner, interval tim
 				config.F("memory_expired_count", counts.MemoryEntriesExpired),
 				config.F("candidate_erased_count", counts.CandidatesErased),
 				config.F("formation_job_deleted_count", counts.FormationJobsDeleted),
+				config.F("session_summary_deleted_count", counts.SessionSummariesDeleted),
+				config.F("compaction_job_deleted_count", counts.CompactionJobsDeleted),
 				config.F("duration_ms", time.Since(started).Milliseconds()),
 				config.F("status", "ok"),
 			}
-			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted+counts.MemoryEntriesExpired+counts.CandidatesErased+counts.FormationJobsDeleted == 0 {
+			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted+counts.MemoryEntriesExpired+counts.CandidatesErased+counts.FormationJobsDeleted+counts.SessionSummariesDeleted+counts.CompactionJobsDeleted == 0 {
 				logger.Debug("memory.session_cleanup.complete", "session cleanup completed", fields...)
 			} else {
 				logger.Info("memory.session_cleanup.complete", "session cleanup completed", fields...)

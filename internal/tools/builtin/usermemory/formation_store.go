@@ -42,6 +42,7 @@ type CandidateProposal struct {
 	Source              FormationSource
 	IdempotencyKey      string
 	SupersedesStatement string
+	CompactionJob       *SessionCompactionJob
 }
 
 // FormationCandidate is a persisted memory proposal.
@@ -102,6 +103,11 @@ type StoredSessionTurn struct {
 
 // ProposeCandidate persists a validated decision once per tenant/idempotency key.
 func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal CandidateProposal) (FormationCandidate, bool, error) {
+	if job := proposal.CompactionJob; job != nil {
+		if userID != job.UserID || proposal.Source.SessionID != job.SessionID || proposal.Source.SessionGeneration != job.SessionGeneration || proposal.Source.TurnID < job.CoveredFromTurnID || proposal.Source.TurnID > job.CoveredThroughTurnID {
+			return FormationCandidate{}, false, fmt.Errorf("pre-compaction candidate scope does not match fenced job")
+		}
+	}
 	if err := s.ensureAccountUser(userID); err != nil {
 		return FormationCandidate{}, false, err
 	}
@@ -166,6 +172,37 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 		return FormationCandidate{}, false, fmt.Errorf("begin memory candidate proposal: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
+	if job := proposal.CompactionJob; job != nil {
+		fenced, err := tx.ExecContext(ctx, `
+UPDATE session_compaction_jobs SET updated_at = updated_at
+WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
+	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
+	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)
+	AND EXISTS (
+		SELECT 1 FROM tenant_sessions active
+		WHERE active.canonical_user_id = session_compaction_jobs.canonical_user_id
+			AND active.session_id = session_compaction_jobs.session_id
+			AND active.generation = session_compaction_jobs.session_generation
+			AND julianday(active.expires_at) > julianday(?)
+	)
+	AND ? BETWEEN covered_from_turn_id AND covered_through_turn_id
+	AND EXISTS (
+		SELECT 1 FROM session_turns source
+		WHERE source.id = ? AND source.canonical_user_id = session_compaction_jobs.canonical_user_id
+			AND source.session_id = session_compaction_jobs.session_id
+			AND source.session_generation = session_compaction_jobs.session_generation
+			AND source.delivered_at IS NOT NULL
+	)`,
+			job.ID, job.UserID, job.SessionID, job.SessionGeneration,
+			job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner,
+			formatTime(now), formatTime(now), proposal.Source.TurnID, proposal.Source.TurnID)
+		if err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("fence pre-compaction candidate: %w", err)
+		}
+		if count, _ := fenced.RowsAffected(); count != 1 {
+			return FormationCandidate{}, false, fmt.Errorf("fence pre-compaction candidate: stale job lease or generation")
+		}
+	}
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO memory_candidates (
 	canonical_user_id, idempotency_key, state, scope, category, statement, statement_key,
@@ -627,7 +664,8 @@ ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
 
 // MarkFormationEligible records successful response delivery before enqueue.
 func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID int64) error {
-	result, err := s.sql.ExecContext(ctx, `UPDATE session_turns SET formation_eligible_at = COALESCE(formation_eligible_at, ?) WHERE id = ? AND canonical_user_id = ?`, formatTime(time.Now().UTC()), turnID, userID)
+	now := formatTime(time.Now().UTC())
+	result, err := s.sql.ExecContext(ctx, `UPDATE session_turns SET formation_eligible_at = COALESCE(formation_eligible_at, ?), delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, now, turnID, userID)
 	if err != nil {
 		return fmt.Errorf("mark turn eligible for memory formation: %w", err)
 	}

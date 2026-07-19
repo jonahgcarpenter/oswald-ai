@@ -239,6 +239,12 @@ func MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID, intro stri
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 		return fmt.Errorf("defer memory merge foreign keys: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_compaction_jobs WHERE canonical_user_id IN (?, ?)`, winnerID, loserID); err != nil {
+		return fmt.Errorf("delete merged session compaction jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id IN (?, ?)`, winnerID, loserID); err != nil {
+		return fmt.Errorf("delete merged session summaries: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged session turns: %w", err)
 	}
@@ -916,23 +922,23 @@ func (s *Store) DeleteAll(userID string) error {
 
 // AppendSessionTurn stores a completed session exchange.
 func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false)
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false, true)
 	return err
 }
 
 // AppendSessionTurnForGeneration stores a completed exchange in one frozen session generation.
 func (s *Store) AppendSessionTurnForGeneration(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true)
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, true)
 	return err
 }
 
 // AppendSessionTurnForGenerationResult stores a completed exchange and returns
 // the authoritative inserted turn for post-response formation work.
 func (s *Store) AppendSessionTurnForGenerationResult(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) (StoredSessionTurn, error) {
-	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true)
+	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, false)
 }
 
-func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration bool) (StoredSessionTurn, error) {
+func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration, markDelivered bool) (StoredSessionTurn, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return StoredSessionTurn{}, nil
 	}
@@ -944,20 +950,24 @@ func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string,
 	}
 	now := time.Now().UTC()
 	requestID := requestctx.MetadataFromContext(ctx).RequestID
+	var deliveredAt any
+	if markDelivered {
+		deliveredAt = formatTime(now)
+	}
 	var expires *time.Time
 	if ttl > 0 {
 		exp := now.Add(ttl).UTC()
 		expires = &exp
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id, delivered_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires), requestID}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires), requestID, deliveredAt}
 	if validateGeneration {
 		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id, delivered_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
 	)

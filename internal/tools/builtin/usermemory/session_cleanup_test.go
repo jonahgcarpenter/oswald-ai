@@ -164,6 +164,66 @@ func TestCleanupExpiredSessionsRollsBackOnFailure(t *testing.T) {
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM tenant_sessions WHERE canonical_user_id = 'user'`, 1)
 }
 
+func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	ctx := context.Background()
+	profile, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"one", "two"} {
+		if err := store.AppendSessionTurnForGeneration(ctx, "session", "user", profile.Generation, text, "answer", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns, err := store.DeliveredSessionTurnsAfter(ctx, "user", "session", profile.Generation, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(ctx, "test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionCompactionArtifact(ctx, job, SummaryArtifact{Narrative: "summary", GenerationModel: "model", GeneratorVersion: "v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishSessionSummary(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteSessionCompactionJob(ctx, job, false); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`UPDATE session_turns SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.CleanupExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.SessionTurnsDeleted != 0 || counts.SessionSummariesDeleted != 0 || counts.CompactionJobsDeleted != 0 {
+		t.Fatalf("active session history was removed: %+v", counts)
+	}
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user' AND session_id = 'session'`, 2)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = 'user' AND session_id = 'session'`, 1)
+
+	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	counts, err = store.CleanupExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.SessionTurnsDeleted != 2 || counts.SessionSummariesDeleted != 1 || counts.CompactionJobsDeleted != 1 || counts.TenantSessionsDeleted != 1 {
+		t.Fatalf("inactive session history cleanup counts: %+v", counts)
+	}
+}
+
 func TestRunSessionCleanupImmediateRepeatsAndContinuesAfterError(t *testing.T) {
 	cleaner := &recordingSessionCleaner{failFirst: true, delay: 5 * time.Millisecond, called: make(chan struct{}, 8)}
 	ctx, cancel := context.WithCancel(context.Background())

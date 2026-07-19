@@ -12,10 +12,10 @@ The model receives the user prompt, can call registered tools, and then returns 
 - Iterative tool-calling agent loop on top of an OpenAI-compatible LLM gateway
 - iMessage, Discord, and WebSocket gateway
 - HACS integration for Home Assistant [here](https://github.com/jonahgcarpenter/has-oswald-conversation)
-- Builtin `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `soul.read`, and `soul.patch` tools
+- Nine builtin tools: `web.search`, `time.current`, `memory.save`, `memory.search`, `memory.list`, `memory.forget`, `transcript.search`, `soul.read`, and `soul.patch`
 - Traceable durable-memory formation with grounded candidates, conservative automatic policy, conversational confirmation for sensitive facts, atomic publication, and recoverable post-turn extraction
 - User & Global MCP integrations
-- SQLite-backed session chat memory with role-correct, budget-aware history and TTL expiry
+- SQLite-backed session chat memory with proactive durable background compaction, untrusted structured summaries, a recent role-correct tail, active-generation transcript search, and TTL expiry
 - Tenant-scoped hybrid durable-memory recall using FTS5 and sqlite-vec
 - FIFO execution per user/session, with parallel processing across independent conversations
 - Per-user persistent memory in SQLite and a live-editable soul file
@@ -27,7 +27,11 @@ Oswald uses three memory layers:
 
 - Soul memory: `data/memory/soul/soul.md`, read fresh on every request
 - Persistent user memory: `data/database/oswald.db`, managed by `memory.*` tools
-- Session chat memory: recent completed exchanges in SQLite `session_turns`, replayed as complete `user`/`assistant` pairs that fit the active model budget and expired by an independent cleanup loop
+- Session chat memory: delivered, completed exchanges in SQLite `session_turns`, compacted in the background into immutable structured checkpoints with source-turn links while retaining a minimum recent verbatim tail
+
+Long active conversations use an explicitly untrusted generated summary followed by recent complete `user`/`assistant` exchanges. Compaction runs serially from durable jobs only after a response is successfully delivered, keeps the covered transcript intact, and can stage source-grounded memory candidates through the normal approval policy without directly activating them.
+
+`transcript.search` performs FTS5 search over delivered exchanges retained in the authenticated current session's active generation and returns role-preserving excerpts with session and turn provenance. It is for exact episodic history; `memory.search` remains the tool for durable user facts. `/reset` deletes the session's turns, summaries, and compaction jobs and advances its generation, while expiry cleanup removes inactive session artifacts; reset or expired transcripts are not searchable.
 
 `AGENTS.md` documents the full runtime and architecture in detail.
 

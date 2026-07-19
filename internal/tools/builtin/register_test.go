@@ -32,3 +32,27 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	}
 	t.Fatal("time.current schema was not loaded")
 }
+
+func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatalf("load tool definitions: %v", err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, nil, "", log); err != nil {
+		t.Fatalf("register builtin handlers: %v", err)
+	}
+	if !reg.HasHandler("transcript.search") {
+		t.Fatal("transcript.search handler was not registered")
+	}
+	for _, entry := range reg.BuiltinCatalog() {
+		if entry.Name != "transcript.search" {
+			continue
+		}
+		if len(entry.Parameters) != 2 || entry.Parameters[0].Name != "query" || entry.Parameters[0].Type != "string" || !entry.Parameters[0].Required || entry.Parameters[1].Name != "limit" || entry.Parameters[1].Type != "integer" || entry.Parameters[1].Required {
+			t.Fatalf("unexpected transcript.search parameters: %+v", entry.Parameters)
+		}
+		return
+	}
+	t.Fatal("transcript.search schema was not loaded")
+}

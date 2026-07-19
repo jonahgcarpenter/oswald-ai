@@ -23,10 +23,11 @@ type ToolExposer interface {
 
 // Metadata carries request-scoped fields needed by tools and provider logging.
 type Metadata struct {
-	RequestID       string
-	SessionID       string
-	Model           string
-	CurrentUserText string
+	RequestID         string
+	SessionID         string
+	SessionGeneration int
+	Model             string
+	CurrentUserText   string
 }
 
 // WithPrincipal returns a copy of ctx with the resolved request actor attached.

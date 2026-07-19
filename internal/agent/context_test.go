@@ -143,6 +143,52 @@ func TestAssemblePromptContextOmitsRecallBeforeRequiredContent(t *testing.T) {
 	}
 }
 
+func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
+	summary := usermemory.SessionSummary{ID: 7, CoveredFromTurnID: 1, CoveredThroughTurnID: 10, Narrative: "Atlas was selected.", OpenTasks: []string{"Ship Atlas"}}
+	turns := []usermemory.SessionTurn{{ID: 12, UserText: "new user", AssistantText: "new assistant"}, {ID: 11, UserText: "older user", AssistantText: "older assistant"}}
+	got := AssemblePromptContextWithSummary("policy", "profile", "current", nil, summary, 1, nil, 0, turns, nil, 100000)
+	if !got.SummaryIncluded || got.SummaryChars == 0 || got.MinimumTailCount != 1 || got.SelectedTurnCount != 2 {
+		t.Fatalf("unexpected summary selection: %+v", got)
+	}
+	if roles(got.Messages) != "system,user,user,user,assistant,user,assistant,user" {
+		t.Fatalf("summary/tail roles=%s messages=%+v", roles(got.Messages), got.Messages)
+	}
+	if !strings.Contains(got.Messages[2].Content, "session_history_summary") || !strings.Contains(got.Messages[2].Content, "untrusted_historical_reference") || !strings.Contains(got.Messages[2].Content, "Atlas was selected") {
+		t.Fatalf("summary not safely rendered: %+v", got.Messages[2])
+	}
+	if strings.Contains(got.Messages[0].Content, "Atlas was selected") || strings.Contains(got.Messages[1].Content, "Atlas was selected") {
+		t.Fatalf("summary gained policy/profile authority: %+v", got.Messages)
+	}
+}
+
+func TestAssemblePromptContextReservesSummaryAndMinimumTailBeforeRecall(t *testing.T) {
+	summary := usermemory.SessionSummary{ID: 3, CoveredFromTurnID: 1, CoveredThroughTurnID: 20, Narrative: strings.Repeat("summary ", 30)}
+	turns := make([]usermemory.SessionTurn, 0, 10)
+	for i := 0; i < 8; i++ {
+		turns = append(turns, usermemory.SessionTurn{ID: int64(30 - i), UserText: "recent", AssistantText: "answer"})
+	}
+	turns = append(turns,
+		usermemory.SessionTurn{ID: 22, UserText: strings.Repeat("older ", 2000), AssistantText: "large"},
+		usermemory.SessionTurn{ID: 21, UserText: "oldest", AssistantText: "oldest answer"},
+	)
+	base := AssemblePromptContextWithSummary("policy", "profile", "current", nil, summary, 8, nil, 0, turns[:8], nil, 100000)
+	recall := []usermemory.RecallResult{{Entry: usermemory.MemoryEntry{ID: 1, Scope: "long_term", Category: "projects", Statement: strings.Repeat("memory ", 300), Confidence: 1, Importance: 5}, Score: 1}}
+	got := AssemblePromptContextWithSummary("policy", "profile", "current", nil, summary, 8, recall, 4000, turns, nil, base.EstimatedAfter)
+	if !got.SummaryIncluded || got.MinimumTailCount != 8 || got.SelectedTurnCount != 8 || got.SelectedRecallCount != 0 {
+		t.Fatalf("summary/tail reservation failed: %+v", got)
+	}
+}
+
+func TestAssemblePromptContextNeverLetsSummaryDisplaceMinimumTail(t *testing.T) {
+	turns := []usermemory.SessionTurn{{ID: 2, UserText: "recent user", AssistantText: "recent assistant"}, {ID: 1, UserText: "older user", AssistantText: "older assistant"}}
+	withoutSummary := AssemblePromptContextWithSummary("policy", "profile", "current", nil, usermemory.SessionSummary{}, 2, nil, 0, turns, nil, 100000)
+	hugeSummary := usermemory.SessionSummary{ID: 1, CoveredFromTurnID: 1, CoveredThroughTurnID: 20, Narrative: strings.Repeat("large summary ", 200)}
+	got := AssemblePromptContextWithSummary("policy", "profile", "current", nil, hugeSummary, 2, nil, 0, turns, nil, withoutSummary.EstimatedAfter)
+	if got.SummaryIncluded || got.MinimumTailCount != 2 || got.SelectedTurnCount != 2 {
+		t.Fatalf("summary displaced required tail: %+v", got)
+	}
+}
+
 func roles(messages []llm.ChatMessage) string {
 	values := make([]string, len(messages))
 	for i, message := range messages {

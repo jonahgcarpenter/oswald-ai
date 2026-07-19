@@ -25,6 +25,7 @@ import (
 
 const (
 	sessionHistoryCandidateLimit = 100
+	sessionSummaryMinimumTail    = 8
 	recentToolExposureTurns      = 4
 	automaticRecallTopK          = 4
 	automaticRecallCharLimit     = 2000
@@ -544,6 +545,9 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
+	meta := requestctx.MetadataFromContext(ctx)
+	meta.SessionGeneration = sessionGeneration
+	ctx = requestctx.WithMetadata(ctx, meta)
 	modelUserPrompt := userPrompt
 	var confirmationToPresent *usermemory.FormationCandidate
 	if a.userMemory != nil && request.IsDirect && request.Principal.Authenticated() {
@@ -618,9 +622,15 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 
 	var recentTurns []usermemory.SessionTurn
 	var recentToolNames []string
+	var sessionSummary usermemory.SessionSummary
 	if a.userMemory != nil && sessionGeneration > 0 {
 		var err error
-		recentTurns, err = a.userMemory.RecentCompletedExchanges(ctx, senderID, sessionKey, sessionGeneration, sessionHistoryCandidateLimit)
+		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
+		if err != nil && err != sql.ErrNoRows {
+			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
+			sessionSummary = usermemory.SessionSummary{}
+		}
+		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
 			recentTurns = nil
@@ -649,7 +659,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
-	promptContext := AssemblePromptContextWithRecall(dynamicSystemPrompt, profileContent, modelUserPrompt, userImages, recalledMemories, automaticRecallCharLimit, recentTurns, initialTools, a.budget.UsableInputLimit())
+	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, modelUserPrompt, userImages, sessionSummary, sessionSummaryMinimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialTools, a.budget.UsableInputLimit())
 	if a.userMemory != nil {
 		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
 	}
@@ -666,6 +676,9 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		config.F("selected_memory_count", promptContext.SelectedRecallCount),
 		config.F("omitted_memory_count", promptContext.OmittedRecallCount),
 		config.F("recall_chars", promptContext.RecallChars),
+		config.F("is_summary_included", promptContext.SummaryIncluded),
+		config.F("summary_chars", promptContext.SummaryChars),
+		config.F("minimum_tail_count", promptContext.MinimumTailCount),
 		config.F("estimated_before", promptContext.EstimatedBefore),
 		config.F("estimated_after", promptContext.EstimatedAfter),
 	)

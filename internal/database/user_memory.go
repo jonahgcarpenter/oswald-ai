@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS session_turns (
 	created_at TEXT NOT NULL,
 	expires_at TEXT,
 	session_generation INTEGER NOT NULL DEFAULT 1,
+	delivered_at TEXT,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
 
@@ -193,12 +194,20 @@ ON tenant_sessions (expires_at);
 	if err := d.migrateMemoryFormationSchema(); err != nil {
 		return err
 	}
+	if err := d.migrateSessionCompactionSchema(); err != nil {
+		return err
+	}
 	if _, err := d.db.Exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_profile_candidates ON memory_entries (canonical_user_id, profile_approved, status, scope, category, expires_at)`); err != nil {
 		return fmt.Errorf("failed to initialize profile candidate index: %w", err)
 	}
 	if err := d.initializeMemoryFTS5(); err != nil {
 		if d.log != nil {
 			d.log.Server("database.memory_fts").Warn("database.memory_fts.unavailable", "durable memory FTS index unavailable", config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}
+	if err := d.initializeSessionTurnsFTS5(); err != nil {
+		if d.log != nil {
+			d.log.Server("database.session_turns_fts").Warn("database.session_turns_fts.unavailable", "session transcript FTS index unavailable", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
 	return nil

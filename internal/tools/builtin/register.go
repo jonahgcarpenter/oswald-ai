@@ -47,6 +47,11 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultAccountLinkPath))
 
+	if err := reg.RegisterHandler("transcript.search", registry.Handler(usermemory.NewTranscriptSearchHandler(userMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize transcript.search tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured transcript tool", config.F("tool_name", "transcript.search"))
+
 	if err := reg.RegisterHandler("soul.read", registry.Handler(soul.NewReadHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.read tool: %w", err)
 	}

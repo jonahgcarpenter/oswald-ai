@@ -19,6 +19,9 @@ type PromptContext struct {
 	SelectedRecallCount int
 	OmittedRecallCount  int
 	RecallChars         int
+	SummaryIncluded     bool
+	SummaryChars        int
+	MinimumTailCount    int
 	SelectedRecall      []usermemory.RecallResult
 	RequiredEstimate    int
 	EstimatedBefore     int
@@ -39,7 +42,7 @@ func AssemblePromptContext(
 	tools []llm.Tool,
 	inputLimit int,
 ) PromptContext {
-	return AssemblePromptContextWithRecall(deploymentPolicy, tenantProfile, currentPrompt, currentImages, nil, 0, recentTurns, tools, inputLimit)
+	return AssemblePromptContextWithSummary(deploymentPolicy, tenantProfile, currentPrompt, currentImages, usermemory.SessionSummary{}, 0, nil, 0, recentTurns, tools, inputLimit)
 }
 
 // AssemblePromptContextWithRecall adds bounded durable recall to the current
@@ -49,6 +52,24 @@ func AssemblePromptContextWithRecall(
 	tenantProfile string,
 	currentPrompt string,
 	currentImages []llm.InputImage,
+	recallResults []usermemory.RecallResult,
+	recallCharLimit int,
+	recentTurns []usermemory.SessionTurn,
+	tools []llm.Tool,
+	inputLimit int,
+) PromptContext {
+	return AssemblePromptContextWithSummary(deploymentPolicy, tenantProfile, currentPrompt, currentImages, usermemory.SessionSummary{}, 0, recallResults, recallCharLimit, recentTurns, tools, inputLimit)
+}
+
+// AssemblePromptContextWithSummary reserves a bounded historical summary and a
+// minimum newest verbatim tail before recall and additional history.
+func AssemblePromptContextWithSummary(
+	deploymentPolicy string,
+	tenantProfile string,
+	currentPrompt string,
+	currentImages []llm.InputImage,
+	summary usermemory.SessionSummary,
+	minimumTail int,
 	recallResults []usermemory.RecallResult,
 	recallCharLimit int,
 	recentTurns []usermemory.SessionTurn,
@@ -72,10 +93,36 @@ func AssemblePromptContextWithRecall(
 		RequiredEstimate:   promptbudget.EstimateRequest(required, tools),
 		OmittedRecallCount: len(recallResults),
 	}
+	summaryBlock := usermemory.RenderSessionSummary(summary)
 	allRequired := withRecall(required, usermemory.RenderDurableMemoryRecall(recallResults, recallCharLimit))
-	allMessages := messagesWithTurns(allRequired, recentTurns)
+	allMessages := messagesWithSummaryAndTurns(allRequired, summaryBlock, recentTurns)
 	result.EstimatedBefore = promptbudget.EstimateRequest(allMessages, tools)
 	result.RequiredOverBudget = result.RequiredEstimate > inputLimit
+
+	selectedNewestFirst := make([]usermemory.SessionTurn, 0, len(recentTurns))
+	selectedSummary := ""
+	if !result.RequiredOverBudget {
+		if minimumTail < 0 {
+			minimumTail = 0
+		}
+		if minimumTail > len(recentTurns) {
+			minimumTail = len(recentTurns)
+		}
+		for _, turn := range recentTurns[:minimumTail] {
+			candidate := append(selectedNewestFirst, turn)
+			candidateMessages := messagesWithSummaryAndTurns(required, "", candidate)
+			if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
+				break
+			}
+			selectedNewestFirst = candidate
+		}
+		if summaryBlock != "" && promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, summaryBlock, selectedNewestFirst), tools) <= inputLimit {
+			selectedSummary = summaryBlock
+		}
+	}
+	result.MinimumTailCount = len(selectedNewestFirst)
+	result.SummaryIncluded = selectedSummary != ""
+	result.SummaryChars = len([]rune(selectedSummary))
 
 	selectedRecall := make([]usermemory.RecallResult, 0, len(recallResults))
 	if !result.RequiredOverBudget {
@@ -85,7 +132,8 @@ func AssemblePromptContextWithRecall(
 			if block == "" || len(block) == len(usermemory.RenderDurableMemoryRecall(selectedRecall, recallCharLimit)) {
 				continue
 			}
-			if promptbudget.EstimateRequest(withRecall(required, block), tools) > inputLimit {
+			candidateRequired := withRecall(required, block)
+			if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(candidateRequired, selectedSummary, selectedNewestFirst), tools) > inputLimit {
 				continue
 			}
 			selectedRecall = candidate
@@ -98,12 +146,10 @@ func AssemblePromptContextWithRecall(
 	result.OmittedRecallCount = len(recallResults) - len(selectedRecall)
 	result.RecallChars = len([]rune(recallBlock))
 
-	selectedNewestFirst := make([]usermemory.SessionTurn, 0, len(recentTurns))
 	if !result.RequiredOverBudget {
-		for _, turn := range recentTurns {
+		for _, turn := range recentTurns[len(selectedNewestFirst):] {
 			candidate := append(selectedNewestFirst, turn)
-			candidateMessages := messagesWithTurns(required, candidate)
-			if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
+			if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
 				break
 			}
 			selectedNewestFirst = candidate
@@ -111,12 +157,33 @@ func AssemblePromptContextWithRecall(
 	}
 
 	result.SelectedTurns = reverseTurns(selectedNewestFirst)
-	result.Messages = messagesWithChronologicalTurns(required, result.SelectedTurns)
+	result.Messages = messagesWithSummaryAndChronologicalTurns(required, selectedSummary, result.SelectedTurns)
 	result.SelectedToolNames = selectedToolNames(result.SelectedTurns)
 	result.SelectedTurnCount = len(result.SelectedTurns)
 	result.OmittedTurnCount = len(recentTurns) - result.SelectedTurnCount
 	result.EstimatedAfter = promptbudget.EstimateRequest(result.Messages, tools)
 	return result
+}
+
+func messagesWithSummaryAndTurns(required []llm.ChatMessage, summary string, newestFirst []usermemory.SessionTurn) []llm.ChatMessage {
+	return messagesWithSummaryAndChronologicalTurns(required, summary, reverseTurns(newestFirst))
+}
+
+func messagesWithSummaryAndChronologicalTurns(required []llm.ChatMessage, summary string, chronological []usermemory.SessionTurn) []llm.ChatMessage {
+	messages := make([]llm.ChatMessage, 0, len(required)+len(chronological)*2+1)
+	last := len(required) - 1
+	messages = append(messages, required[:last]...)
+	if summary != "" {
+		messages = append(messages, llm.ChatMessage{Role: "user", Content: summary})
+	}
+	for _, turn := range chronological {
+		messages = append(messages,
+			llm.ChatMessage{Role: "user", Content: turn.UserText},
+			llm.ChatMessage{Role: "assistant", Content: assistantTurnContent(turn)},
+		)
+	}
+	messages = append(messages, required[last])
+	return messages
 }
 
 func withRecall(required []llm.ChatMessage, recallBlock string) []llm.ChatMessage {

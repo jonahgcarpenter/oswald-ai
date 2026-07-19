@@ -55,7 +55,7 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	if in.Context == ContextHypothetical || in.Context == ContextQuotation {
 		return disallow(out, "hypothetical and quoted content is not user memory"), nil
 	}
-	if in.Mode == ModeAutomaticExtraction && isNonAssertiveSource(source) {
+	if isAutomaticExtractionMode(in.Mode) && isNonAssertiveSource(source) {
 		return disallow(out, "automatic source is hypothetical or indirect"), nil
 	}
 	if containsPromptInjection(source) || containsPromptInjection(out.Statement) || containsPromptInjection(out.Evidence) {
@@ -68,10 +68,10 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		out.Reason = "model inferences remain proposed"
 		return out, nil
 	}
-	if in.Provenance == ProvenanceUserStatement && in.Mode == ModeAutomaticExtraction && !hasDirectUserMarker(out.Evidence) {
+	if in.Provenance == ProvenanceUserStatement && isAutomaticExtractionMode(in.Mode) && !hasDirectUserMarker(out.Evidence) {
 		return disallow(out, "automatic user-statement evidence lacks a direct first-person marker"), nil
 	}
-	if in.Provenance == ProvenanceUserStatement && in.Mode == ModeAutomaticExtraction && containsThirdPartySubject(out.Evidence) {
+	if in.Provenance == ProvenanceUserStatement && isAutomaticExtractionMode(in.Mode) && containsThirdPartySubject(out.Evidence) {
 		return disallow(out, "automatic evidence describes a third party"), nil
 	}
 	if in.Provenance == ProvenanceUserStatement {
@@ -82,8 +82,12 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		}
 		out.Sensitivity = maxSensitivity(out.Sensitivity, ClassifySensitivity(out.Statement+" "+out.Evidence, out.Category))
 	}
-	if in.Mode == ModeAutomaticExtraction && source != out.Evidence {
+	if isAutomaticExtractionMode(in.Mode) && source != out.Evidence {
 		out.Reason = "partial-turn extraction remains proposed"
+		return out, nil
+	}
+	if in.Mode == ModePreCompactionExtraction {
+		out.Reason = "pre-compaction extraction remains proposed"
 		return out, nil
 	}
 
@@ -405,7 +409,11 @@ func validSensitivity(v Sensitivity) bool {
 }
 
 func validMode(v FormationMode) bool {
-	return v == ModeAutomaticExtraction || v == ModeExplicitRemember
+	return v == ModeAutomaticExtraction || v == ModePreCompactionExtraction || v == ModeExplicitRemember
+}
+
+func isAutomaticExtractionMode(v FormationMode) bool {
+	return v == ModeAutomaticExtraction || v == ModePreCompactionExtraction
 }
 
 func validScope(v Scope) bool { return v == ScopeShortTerm || v == ScopeLongTerm }

@@ -14,11 +14,11 @@ func (e *testExposer) ExposeTools(names []string) { e.names = append(e.names, na
 func TestPrincipalAndMetadataRoundTrip(t *testing.T) {
 	principal := identity.Principal{CanonicalUserID: "sender-1", Gateway: "websocket", ExternalID: "external-1", Assurance: identity.AssuranceSelfAsserted}
 	ctx := WithPrincipal(context.Background(), principal)
-	ctx = WithMetadata(ctx, Metadata{RequestID: "req-1", SessionID: "session-1"})
+	ctx = WithMetadata(ctx, Metadata{RequestID: "req-1", SessionID: "session-1", SessionGeneration: 3})
 
 	meta := MetadataFromContext(ctx)
 	gotPrincipal, ok := PrincipalFromContext(ctx)
-	if !ok || gotPrincipal != principal || meta.RequestID != "req-1" || meta.SessionID != "session-1" {
+	if !ok || gotPrincipal != principal || meta.RequestID != "req-1" || meta.SessionID != "session-1" || meta.SessionGeneration != 3 {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 }

@@ -165,6 +165,12 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 	if generation <= 0 {
 		generation = 1
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_compaction_jobs WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
+		return SessionProfile{}, fmt.Errorf("clear reset session compaction jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
+		return SessionProfile{}, fmt.Errorf("clear reset session summaries: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
 		return SessionProfile{}, fmt.Errorf("clear reset session turns: %w", err)
 	}
