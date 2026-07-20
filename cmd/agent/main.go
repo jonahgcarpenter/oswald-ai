@@ -25,8 +25,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
@@ -78,10 +78,9 @@ func main() {
 		config.F("source", budget.Source),
 	)
 
-	// The soul store is shared between the tool registry (so the agent can edit
-	// its soul via the soul.* tools) and the agent itself (so it can read
-	// the current soul on every request as its system prompt).
-	soulStore := soul.NewStore(config.DefaultSoulPath, rootLog.Server("memory.soul"))
+	// The operator-managed soul file is read fresh for every request and used as
+	// the agent's system prompt.
+	soulStore := soul.NewStore(config.DefaultSoulPath)
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
 	// The user memory store shares the account-link database and migrates legacy
@@ -144,7 +143,7 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, soulStore, userMemStore, accountLinkService, llmClient, cfg.LLMGatewayModel, mcpManager, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, accountLinkService, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}

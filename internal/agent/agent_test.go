@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -564,6 +565,33 @@ func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
 	}
 }
 
+func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "first"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "second"}},
+	}}
+	agent, _, soulPath := newTestAgentWithSoulPath(t, chat, nil, nil)
+
+	if _, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "first question", nil, nil); err != nil {
+		t.Fatalf("first process: %v", err)
+	}
+	firstSystem := primaryRequests(chat.requests)[0].Messages[0]
+	if firstSystem.Role != "system" || !strings.HasPrefix(firstSystem.Content, "You are Oswald.\n\n# Gateway Instructions") {
+		t.Fatalf("soul and gateway instructions have incorrect authority or order: %+v", firstSystem)
+	}
+
+	if err := os.WriteFile(soulPath, []byte("You are Oswald after a manual edit."), 0o600); err != nil {
+		t.Fatalf("manually edit soul fixture: %v", err)
+	}
+	if _, err := processAgent(agent, "req-2", "websocket", "session-2", "user-1", "Display", "second question", nil, nil); err != nil {
+		t.Fatalf("second process: %v", err)
+	}
+	secondSystem := primaryRequests(chat.requests)[1].Messages[0]
+	if secondSystem.Role != "system" || secondSystem.Content != "You are Oswald after a manual edit." {
+		t.Fatalf("manual soul edit was not reloaded as the system prompt: %+v", secondSystem)
+	}
+}
+
 func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
@@ -959,16 +987,22 @@ func (f *fakeEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm.Embe
 }
 
 func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *usermemory.Store) {
+	agent, store, _ := newTestAgentWithSoulPath(t, chat, embedder, reg)
+	return agent, store
+}
+
+func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *registry.Registry) (*Agent, *usermemory.Store, string) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	if reg == nil {
 		reg = registry.New(log)
 	}
 	dir := t.TempDir()
-	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
-	if err := soulStore.Write("You are Oswald."); err != nil {
-		t.Fatalf("write soul: %v", err)
+	soulPath := filepath.Join(dir, "soul.md")
+	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
+		t.Fatalf("write soul fixture: %v", err)
 	}
+	soulStore := soul.NewStore(soulPath)
 	dbPath := filepath.Join(dir, "oswald.db")
 	db, err := database.Open(dbPath, log)
 	if err != nil {
@@ -991,7 +1025,7 @@ func newTestAgent(t *testing.T, chat llm.Chatter, embedder llm.Embedder, reg *re
 		t.Fatalf("user store: %v", err)
 	}
 	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
-	return agent, userStore
+	return agent, userStore, soulPath
 }
 
 func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {

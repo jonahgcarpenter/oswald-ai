@@ -20,7 +20,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -573,10 +573,11 @@ func (p *blockingRuntimeProcessor) Process(agent.Request) (*agent.AgentResponse,
 func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	t.Helper()
 	dir := t.TempDir()
-	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
-	if err := soulStore.Write("You are Oswald."); err != nil {
-		t.Fatalf("write soul: %v", err)
+	soulPath := filepath.Join(dir, "soul.md")
+	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
+		t.Fatalf("write soul fixture: %v", err)
 	}
+	soulStore := soul.NewStore(soulPath)
 	dbPath := filepath.Join(dir, "users")
 	db, err := database.Open(dbPath, log)
 	if err != nil {

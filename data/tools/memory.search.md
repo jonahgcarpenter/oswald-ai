@@ -8,7 +8,7 @@ Results expose confidence, formation provenance, source authority, epistemic sta
 
 Use this for the user's preferences, projects, identity details, environment, relationships, prior corrections, and user-specific instructions that may affect the response.
 
-Do not use this as web search, public knowledge lookup, general conversation history, or a way to inspect Oswald's own identity/directives. Use web.search for current public facts and soul.read for Oswald's own identity.
+Do not use this as web search, public knowledge lookup, general conversation history, or a way to inspect Oswald's own identity/directives. Use web.search for current public facts; Oswald's operator-controlled identity is not available through model tools.
 
 ## Parameters
 

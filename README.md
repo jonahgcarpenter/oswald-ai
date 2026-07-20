@@ -21,7 +21,7 @@ It combines tools, private long-term memory, conversation continuity, image unde
 
 Oswald’s memory keeps useful context without treating every conversation detail as permanent.
 
-- Soul memory defines Oswald’s shared personality and behavior.
+- The operator-managed soul file defines Oswald’s shared personality, behavior, and standing policy. It is used as the system prompt and can only be changed by manually editing `data/memory/soul/soul.md` outside Oswald.
 - Deployment memory stores evidence-backed facts Oswald learns about its own implementation, version, architecture, and capabilities from globally configured MCP tools. These facts are shared with every tenant but cannot override policy or authorization.
 - Personal memory stores private details such as your preferences, projects, relationships, and environment. Relevant memories are recalled automatically and follow you across linked accounts.
 - Conversation memory preserves recent exchanges and summarizes longer conversations. Oswald can search earlier details from the current conversation when needed.

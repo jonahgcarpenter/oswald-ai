@@ -16,7 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -80,7 +80,6 @@ type ToolStreamPayload struct {
 	IsError    bool                     `json:"is_error,omitempty"`
 	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
 	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
-	Soul       *ToolStreamSoulPayload   `json:"soul,omitempty"`
 }
 
 // ToolStreamMemoryPayload contains structured memory tool details.
@@ -90,16 +89,6 @@ type ToolStreamMemoryPayload struct {
 	Statement string                    `json:"statement,omitempty"`
 	Evidence  string                    `json:"evidence,omitempty"`
 	Content   *usermemory.ParsedContent `json:"content,omitempty"`
-}
-
-// ToolStreamSoulPayload contains structured soul tool details.
-type ToolStreamSoulPayload struct {
-	Action    string `json:"action,omitempty"`
-	Operation string `json:"operation,omitempty"`
-	Target    string `json:"target,omitempty"`
-	Anchor    string `json:"anchor,omitempty"`
-	Position  string `json:"position,omitempty"`
-	Content   string `json:"content,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -123,8 +112,6 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		switch toolName {
 		case "memory.save", "memory.search", "memory.list", "memory.forget":
 			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
-		case "soul.read", "soul.patch":
-			payload.Soul = soulStreamPayload(toolName, args, result, isError)
 		}
 		return payload
 	}
@@ -174,37 +161,6 @@ func memoryStreamPayload(toolName string, args map[string]interface{}, result st
 
 func memoryToolAction(toolName string) string {
 	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "memory."); ok {
-		return suffix
-	}
-	return ""
-}
-
-func soulStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamSoulPayload {
-	payload := &ToolStreamSoulPayload{}
-	payload.Action = soulToolAction(toolName)
-	if operation, ok := args["operation"].(string); ok {
-		payload.Operation = strings.TrimSpace(strings.ToLower(operation))
-	}
-	if target, ok := args["target"].(string); ok {
-		payload.Target = target
-	}
-	if anchor, ok := args["anchor"].(string); ok {
-		payload.Anchor = anchor
-	}
-	if position, ok := args["position"].(string); ok {
-		payload.Position = strings.TrimSpace(strings.ToLower(position))
-	}
-	if content, ok := args["content"].(string); ok && content != "" {
-		payload.Content = content
-	}
-	if payload.Action == "read" && !isError {
-		payload.Content = result
-	}
-	return payload
-}
-
-func soulToolAction(toolName string) string {
-	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "soul."); ok {
 		return suffix
 	}
 	return ""
@@ -492,8 +448,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	toolExposure := toolruntime.NewExposure()
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 
-	// Read the soul file fresh on every request so that any edits the agent
-	// made via the soul.* tools take effect immediately.
+	// Read the operator-managed soul file fresh on every request.
 	soulContent, soulErr := a.soul.Read()
 	if soulErr != nil {
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))

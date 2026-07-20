@@ -6,7 +6,7 @@ Stage a grounded memory only when the authenticated current user explicitly asks
 
 Do not call this proactively. A separate post-turn formation process handles confidence-scored direct and inferred memories. Use this tool for explicit identity, preference, project, relationship, environment, temporary-task, and correction requests.
 
-Do not save trivial one-off conversation details, temporary wording, public facts, web search results, facts about unrelated people/groups, or Oswald's own identity/personality/directives. Use soul tools for Oswald's own identity and standing behavior.
+Do not save trivial one-off conversation details, temporary wording, public facts, web search results, facts about unrelated people/groups, or Oswald's own identity/personality/directives. The operator controls Oswald's identity and standing behavior outside model tools.
 
 ## Parameters
 

@@ -5,7 +5,7 @@ This file is the internal technical reference for how Oswald AI works today. `RE
 ## Project Overview
 
 Oswald AI is a Go application built around a single LLM gateway-backed agent loop. SQLite and sqlite-vec use CGO-backed libraries, and Discord GIFV extraction optionally invokes external `ffmpeg` and `ffprobe` executables.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with ten builtin model tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with eight builtin model tools:
 
 - `web.search`
 - `time.current`
@@ -14,8 +14,6 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `memory.list`
 - `memory.forget`
 - `transcript.search`
-- `soul.read`
-- `soul.patch`
 - `deployment_memory.propose`
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Remote MCP tools are not filtered for read-only behavior.
@@ -43,15 +41,16 @@ Current layers:
 11. `internal/formationruntime/` — durable serialized post-turn extraction and retry worker
 12. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
 13. `internal/agent/` — iterative tool-calling agent loop
-14. `internal/promptbudget/` — model context budget and prompt token estimates
-15. `internal/tools/` — tool registry, builtin handlers, and schema loading
-16. `internal/mcp/` — MCP client sessions and discovered tools
-17. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-18. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-19. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
-20. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
-21. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
-22. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
+14. `internal/soul/` — read-only operator-managed system-prompt loader
+15. `internal/promptbudget/` — model context budget and prompt token estimates
+16. `internal/tools/` — tool registry, builtin handlers, and schema loading
+17. `internal/mcp/` — MCP client sessions and discovered tools
+18. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+19. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+20. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+21. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
+22. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
+23. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
 
 ## Startup Flow
 
@@ -68,7 +67,7 @@ Current layers:
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
 11. Create the command service, including `/privacy`, `/client`, and `/bootstrap`, and start durable formation and session-compaction workers
-12. Load builtin tool schemas from `data/tools/*.md` and register the ten builtin handlers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+12. Load builtin tool schemas from `data/tools/*.md` and register the eight builtin handlers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
 14. Create the agent and start the broker worker pool
 15. Start each gateway in its own goroutine
@@ -199,7 +198,7 @@ Oswald keeps four distinct memory layers.
 
 | Layer                  | Storage                    | Purpose                                     | Mutable by agent |
 | ---------------------- | -------------------------- | ------------------------------------------- | ---------------- |
-| Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | Yes              |
+| Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | No               |
 | Deployment memory      | SQLite `deployment_memory_entries` | Evidence-backed facts about Oswald shared across tenants | Yes |
 | Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart     | Yes              |
 | Session chat memory    | SQLite `session_turns`     | Conversation history for the active session | Implicitly       |
@@ -208,9 +207,9 @@ Oswald keeps four distinct memory layers.
 
 - Stored in `data/memory/soul/soul.md`
 - Read fresh on every request
-- Edited through the `soul.*` tools
-- Changes take effect on the next request without restart
-- Soul state is deployment-global rather than tenant-scoped. `soul.patch` requires an authenticated administrator and a patch affects subsequent requests for every user
+- Used as the base system prompt, followed only by trusted gateway runtime instructions at the same authority
+- Changed only through operator filesystem or deployment access; model tools cannot read or mutate it
+- Manual changes take effect on the next request without restart and affect every user
 
 ### Deployment Memory
 
@@ -515,8 +514,6 @@ Current builtin tools:
 - `memory.list` — inspect active stored user facts
 - `memory.forget` — remove stored user facts
 - `transcript.search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
-- `soul.read` — read the soul file
-- `soul.patch` — add, replace, or remove one exact line in the soul file
 - `deployment_memory.propose` — stage an exact evidence-backed global fact from a successful global MCP result, or from the current authenticated administrator's direct statement
 An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `transcript.search`; deeper durable retrieval and all memory mutation remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
@@ -545,7 +542,7 @@ The registry:
 - Server URLs must use HTTPS and pass public-address validation. Although `sse` exists as a stored transport value, only `streamable_http` is implemented; SSE-only configurations fail when connection is attempted
 - Authentication is supplied through encrypted configured headers, including optional bearer headers
 - Every valid remotely listed tool except the reserved remote name `tools` may be exposed and executed; there is no read-only mutation filter, so configured servers and their catalogs must be trusted
-- MCP tools use namespaced names like `<server>.<tool>` and are surfaced through request-local discovery or eligible recent-tool pre-exposure
+- MCP tools use namespaced names like `<server>.<tool>` and are surfaced through request-local discovery or eligible recent-tool pre-exposure; the `soul` server namespace is reserved and never model-visible
 
 ### Tool Failure Handling
 
@@ -648,7 +645,7 @@ Use `info` for production monitoring and audit events that should be visible dur
 - application startup, shutdown, selected model, context budget, enabled gateways, enabled tools, and enabled integrations
 - accepted agent requests, completed gateway commands, successful response delivery, provider completion summaries, and final agent response completion
 - aggregate usage signals useful for dashboards, such as prompt counts, attachment processing counts, tool starts, token counts, latency, response sizes, and finish reasons
-- durable state or security mutations, such as account linking, canonical user creation, admin changes, bans, unbans, and soul patches
+- durable state or security mutations, such as account linking, canonical user creation, admin changes, bans, and unbans
 
 Use `debug` for diagnostic details that are useful during investigation but too noisy for production monitoring:
 
@@ -754,6 +751,7 @@ Do not log:
 
 - full prompt text
 - full response text
+- provider response bodies or provider-supplied error messages, which may reflect prompt content
 - raw image bytes or base64 payloads
 - full tool results
 - secrets, tokens, or passwords
@@ -839,7 +837,7 @@ Current startup requirements:
 | `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
 | `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |
 | `internal/tools/builtin/usermemory/store.go`   | Persistent per-user memory store             |
-| `internal/tools/builtin/soul/store.go`         | Soul file store                              |
+| `internal/soul/store.go`                       | Read-only soul system-prompt loader          |
 | `internal/commands/service.go`                 | Shared command service                       |
 | `internal/commands/parser.go`                  | Slash-command parser                         |
 | `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
@@ -894,8 +892,8 @@ Current startup requirements:
 
 ### Changing Personality
 
-- Edit `data/memory/soul/soul.md` directly, or
-- let the agent update it through the `soul.*` tools
+- Edit `data/memory/soul/soul.md` directly through operator filesystem or deployment access.
+- Soul content is not exposed through model tools and cannot be changed by the agent.
 
 Changes apply on the next request because the soul file is read fresh each time.
 
@@ -906,7 +904,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - The gateway interface has no graceful stop method; gateway listeners remain active until process exit after worker shutdown begins
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Only ten builtin model tools ship locally; `deployment_memory.propose` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Only eight builtin model tools ship locally; `deployment_memory.propose` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
 - Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication

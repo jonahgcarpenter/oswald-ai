@@ -29,7 +29,19 @@ func validateServerName(name string) error {
 			return fmt.Errorf("server name may contain only lowercase letters, numbers, and underscores")
 		}
 	}
+	if isReservedServerName(name) {
+		return fmt.Errorf("server name %q is reserved", name)
+	}
 	return nil
+}
+
+func isReservedServerName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "soul")
+}
+
+func isReservedToolName(name string) bool {
+	server, _, ok := splitToolName(name)
+	return ok && isReservedServerName(server)
 }
 
 func validateScope(scope, ownerUserID string) error {

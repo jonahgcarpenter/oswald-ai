@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
+
+const reflectedSoulCanary = "SOUL_CANARY_DO_NOT_LOG_OR_RETURN"
 
 func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +84,7 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"message":"XML syntax error on line 7: unexpected EOF"}}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":"XML syntax error on line 7: unexpected EOF %s"}}`, reflectedSoulCanary)))
 	}))
 	defer server.Close()
 
@@ -89,12 +94,118 @@ func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 	if !errors.As(err, &httpErr) {
 		t.Fatalf("Chat error = %T %v, want *ChatHTTPError", err, err)
 	}
-	if httpErr.StatusCode != http.StatusInternalServerError || !strings.Contains(httpErr.Body, "XML syntax error") {
+	if httpErr.StatusCode != http.StatusInternalServerError || !strings.Contains(httpErr.Body, "XML syntax error") || !strings.Contains(httpErr.Body, reflectedSoulCanary) {
 		t.Fatalf("unexpected typed error: %+v", httpErr)
+	}
+	for label, text := range map[string]string{
+		"error":      err.Error(),
+		"safe error": config.SafeErrorText(err),
+		"wrapped":    fmt.Errorf("model failed: %w", err).Error(),
+	} {
+		if strings.Contains(text, reflectedSoulCanary) {
+			t.Fatalf("%s exposed reflected provider content: %q", label, text)
+		}
 	}
 	if !IsTemporaryOllamaToolParserError(err) {
 		t.Fatalf("expected temporary parser error classification: %v", err)
 	}
+}
+
+func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		call    func(*GatewayClient) error
+	}{
+		{
+			name: "chat response error",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":"%s"}}`, reflectedSoulCanary)))
+			},
+			call: func(client *GatewayClient) error {
+				_, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
+				return err
+			},
+		},
+		{
+			name: "chat stream response error",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(fmt.Sprintf("data: {\"error\":{\"message\":%q}}\n\n", reflectedSoulCanary)))
+			},
+			call: func(client *GatewayClient) error {
+				_, err := client.Chat(context.Background(), ChatRequest{Model: "m", Stream: true}, func(ChatMessage) {})
+				return err
+			},
+		},
+		{
+			name: "embed HTTP error",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(reflectedSoulCanary))
+			},
+			call: func(client *GatewayClient) error {
+				_, err := client.Embed(context.Background(), EmbedRequest{Model: "m", Input: "input"})
+				return err
+			},
+		},
+		{
+			name: "embed response error",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(fmt.Sprintf(`{"error":{"message":"%s"}}`, reflectedSoulCanary)))
+			},
+			call: func(client *GatewayClient) error {
+				_, err := client.Embed(context.Background(), EmbedRequest{Model: "m", Input: "input"})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(tt.handler)
+			defer server.Close()
+			var err error
+			logs := captureLogs(t, func(log *config.Logger) {
+				client := NewGatewayClient(server.URL, "", "", time.Second, log)
+				err = tt.call(client)
+			})
+			if err == nil {
+				t.Fatal("expected provider error")
+			}
+			if strings.Contains(err.Error(), reflectedSoulCanary) || strings.Contains(config.SafeErrorText(err), reflectedSoulCanary) {
+				t.Fatalf("provider error exposed reflected content: %q", err)
+			}
+			if strings.Contains(logs, reflectedSoulCanary) {
+				t.Fatalf("provider logs exposed reflected content: %s", logs)
+			}
+		})
+	}
+}
+
+func captureLogs(t *testing.T, run func(*config.Logger)) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create log pipe: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	log := config.NewLogger(config.LevelError)
+	os.Stderr = oldStderr
+
+	run(log)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close log writer: %v", err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read logs: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close log reader: %v", err)
+	}
+	return string(output)
 }
 
 func TestTemporaryOllamaToolParserErrorClassification(t *testing.T) {

@@ -2,11 +2,33 @@ package builtin
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
+
+func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatalf("load tool definitions: %v", err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+		t.Fatalf("register builtin handlers: %v", err)
+	}
+	for _, name := range reg.Names() {
+		if strings.HasPrefix(name, "soul.") {
+			t.Fatalf("soul tool exposed in registry: %q", name)
+		}
+	}
+	for _, tool := range reg.LLMTools() {
+		if strings.HasPrefix(tool.Function.Name, "soul.") {
+			t.Fatalf("soul tool advertised to model: %q", tool.Function.Name)
+		}
+	}
+}
 
 func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
@@ -14,7 +36,7 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, nil, nil, "", log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler("time.current") {
@@ -39,7 +61,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, nil, nil, "", log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler("transcript.search") {
@@ -63,7 +85,7 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, nil, nil, "", log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range reg.BuiltinCatalog() {
@@ -84,7 +106,7 @@ func TestRegisterDeploymentMemoryIsDefaultVisibleWithOptionalToolCallID(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, nil, nil, "", log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	foundVisible := false

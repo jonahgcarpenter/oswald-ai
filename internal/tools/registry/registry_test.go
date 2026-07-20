@@ -100,11 +100,11 @@ func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 	registerTestTool(t, reg, "memory.save")
 	registerTestTool(t, reg, "web.search")
 
-	_, err := reg.Execute(context.Background(), "soul.write", nil)
+	_, err := reg.Execute(context.Background(), "missing.write", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "soul.write"; available tools in prefix "soul": none`
+	want := `no handler registered for tool "missing.write"; available tools in prefix "missing": none`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}

@@ -58,6 +58,32 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	}
 }
 
+func TestProviderDoesNotAdvertisePersistedReservedSoulServer(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	addTestUsers(t, store, "user_1")
+	ctx := context.Background()
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	if err != nil {
+		t.Fatalf("save legacy server: %v", err)
+	}
+	if _, err := store.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET name = 'soul' WHERE id = ?`, cfg.ID); err != nil {
+		t.Fatalf("seed legacy reserved server: %v", err)
+	}
+
+	provider := NewProvider(NewManagerFromStore(store, config.NewLogger(config.LevelError)))
+	if tools := provider.DiscoveryTools(ctx, testPrincipal("user_1")); len(tools) != 0 {
+		t.Fatalf("reserved soul server was advertised: %+v", tools)
+	}
+	if resolved := provider.ResolveTools(ctx, testPrincipal("user_1"), []string{"soul.read"}); len(resolved) != 0 {
+		t.Fatalf("reserved soul tool was resolved: %+v", resolved)
+	}
+}
+
 func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
 	if err != nil {

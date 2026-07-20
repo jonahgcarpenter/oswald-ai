@@ -19,13 +19,13 @@ import (
 // ChatHTTPError describes a non-success response from the chat completion endpoint.
 type ChatHTTPError struct {
 	StatusCode int
-	Body       string
+	// Body is bounded request-local provider text used only for narrow retry
+	// classification. Error intentionally excludes it because providers may
+	// reflect prompt content in error responses.
+	Body string
 }
 
 func (e *ChatHTTPError) Error() string {
-	if e.Body != "" {
-		return fmt.Sprintf("LLM gateway chat returned HTTP %d: %s", e.StatusCode, e.Body)
-	}
 	return fmt.Sprintf("LLM gateway chat returned HTTP %d", e.StatusCode)
 }
 
@@ -255,11 +255,7 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (*EmbedResp
 
 	requestLog := c.requestLog(ctx, req.Model)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		snippet := bodySnippet(rawBody)
-		requestLog.Error("provider.gateway.embed.http_error", "LLM gateway embed returned non-2xx", config.F("operation", "embed"), config.F("http_status", resp.StatusCode), config.F("error_body", snippet))
-		if snippet != "" {
-			return nil, fmt.Errorf("LLM gateway embed returned HTTP %d: %s", resp.StatusCode, snippet)
-		}
+		requestLog.Error("provider.gateway.embed.http_error", "LLM gateway embed returned non-2xx", config.F("operation", "embed"), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(rawBody)), config.F("status", "error"))
 		return nil, fmt.Errorf("LLM gateway embed returned HTTP %d", resp.StatusCode)
 	}
 
@@ -268,8 +264,9 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (*EmbedResp
 		requestLog.Error("provider.gateway.embed.decode_error", "failed to decode LLM gateway embed response", config.F("operation", "embed"), config.ErrorField(err))
 		return nil, fmt.Errorf("failed to decode embedding response: %w", err)
 	}
-	if gatewayResp.Error != nil && gatewayResp.Error.Message != "" {
-		return nil, fmt.Errorf("LLM gateway embed error: %s", gatewayResp.Error.Message)
+	if gatewayResp.Error != nil {
+		requestLog.Error("provider.gateway.embed.response_error", "LLM gateway embed response reported an error", config.F("operation", "embed"), config.F("status", "error"))
+		return nil, fmt.Errorf("LLM gateway embed response reported an error")
 	}
 	if len(gatewayResp.Data) == 0 || len(gatewayResp.Data[0].Embedding) == 0 {
 		return nil, fmt.Errorf("LLM gateway embed response contained no embeddings")
@@ -330,7 +327,7 @@ func (c *GatewayClient) readChatResponse(ctx context.Context, resp *http.Respons
 	requestLog := c.requestLog(ctx, model)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet := bodySnippet(rawBody)
-		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat returned non-2xx", config.F("operation", "chat"), config.F("http_status", resp.StatusCode), config.F("error_body", snippet))
+		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat returned non-2xx", config.F("operation", "chat"), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(rawBody)), config.F("status", "error"))
 		return nil, &ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
 	}
 
@@ -339,8 +336,9 @@ func (c *GatewayClient) readChatResponse(ctx context.Context, resp *http.Respons
 		requestLog.Error("provider.gateway.chat.decode_error", "failed to decode LLM gateway chat response", config.F("operation", "chat"), config.ErrorField(err))
 		return nil, fmt.Errorf("failed to decode chat response: %w", err)
 	}
-	if gatewayResp.Error != nil && gatewayResp.Error.Message != "" {
-		return nil, fmt.Errorf("LLM gateway chat error: %s", gatewayResp.Error.Message)
+	if gatewayResp.Error != nil {
+		requestLog.Error("provider.gateway.chat.response_error", "LLM gateway chat response reported an error", config.F("operation", "chat"), config.F("status", "error"))
+		return nil, fmt.Errorf("LLM gateway chat response reported an error")
 	}
 	choice, ok := firstChoice(gatewayResp)
 	if !ok {
@@ -382,7 +380,7 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 			return nil, fmt.Errorf("failed to read chat stream response body: %w", readErr)
 		}
 		snippet := bodySnippet(rawBody)
-		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat stream returned non-2xx", config.F("operation", "chat_stream"), config.F("http_status", resp.StatusCode), config.F("error_body", snippet))
+		requestLog.Error("provider.gateway.chat.http_error", "LLM gateway chat stream returned non-2xx", config.F("operation", "chat_stream"), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(rawBody)), config.F("status", "error"))
 		return nil, &ChatHTTPError{StatusCode: resp.StatusCode, Body: snippet}
 	}
 
@@ -407,6 +405,10 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			requestLog.Warn("provider.gateway.chat.stream.parse_failed", "failed to parse LLM gateway chat stream chunk", config.F("operation", "chat_stream"), config.F("status", "degraded"), config.ErrorField(err))
 			continue
+		}
+		if chunk.Error != nil {
+			requestLog.Error("provider.gateway.chat.response_error", "LLM gateway chat stream reported an error", config.F("operation", "chat_stream"), config.F("status", "error"))
+			return nil, fmt.Errorf("LLM gateway chat stream reported an error")
 		}
 		if chunk.Model != "" {
 			final.Model = chunk.Model

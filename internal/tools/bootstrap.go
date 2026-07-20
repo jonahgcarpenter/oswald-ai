@@ -4,28 +4,21 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
 // NewRegistryFromConfig creates a Registry, loads tool definitions, and wires builtin tools.
-// The soul store and user memory store are created externally and passed in so the agent
-// can share the same instances with the tool handlers.
-// chatClient and model are retained in the signature because the agent and tools
-// share bootstrap wiring, but fresh memory storage has no legacy migration path.
-func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, soulAuthorizer soul.Authorizer, chatClient llm.Chatter, model string, mcpManager *mcp.Manager, log *config.Logger) (*registry.Registry, error) {
+// The user memory store is created externally and shared with the tool handlers.
+func NewRegistryFromConfig(cfg *config.Config, userMemStore *usermemory.Store, deploymentMemoryAuthorizer usermemory.DeploymentMemoryAuthorizer, log *config.Logger) (*registry.Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	reg, err := registry.NewFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
 		return nil, err
 	}
 
-	_ = mcpManager
-	if err := builtin.Register(reg, cfg, soulStore, userMemStore, soulAuthorizer, chatClient, model, log); err != nil {
+	if err := builtin.Register(reg, cfg, userMemStore, deploymentMemoryAuthorizer, log); err != nil {
 		return nil, err
 	}
 

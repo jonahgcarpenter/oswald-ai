@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -26,7 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -949,10 +950,11 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	dbPath := filepath.Join(dir, "oswald.db")
 	memories := usermemory.NewStore(dbPath, log)
 	links := accountlinking.NewService(dbPath, memories, nil, log)
-	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
-	if err := soulStore.Write("You are Oswald."); err != nil {
-		t.Fatalf("write soul: %v", err)
+	soulPath := filepath.Join(dir, "soul.md")
+	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
+		t.Fatalf("write soul fixture: %v", err)
 	}
+	soulStore := soul.NewStore(soulPath)
 	chat := &imFakeChatter{}
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)

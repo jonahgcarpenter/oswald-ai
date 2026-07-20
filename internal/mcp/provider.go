@@ -32,7 +32,7 @@ func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Princi
 	}
 	tools := make([]llm.Tool, 0, len(configs))
 	for _, cfg := range configs {
-		if !cfg.Enabled {
+		if !cfg.Enabled || isReservedServerName(cfg.Name) {
 			continue
 		}
 		tools = append(tools, discoveryTool(cfg.Name))
@@ -53,7 +53,7 @@ func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principa
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		server, remote, ok := splitToolName(name)
-		if !ok || strings.EqualFold(remote, "tools") || seenCandidates[name] {
+		if !ok || isReservedServerName(server) || strings.EqualFold(remote, "tools") || seenCandidates[name] {
 			continue
 		}
 		seenCandidates[name] = true
@@ -91,7 +91,7 @@ func (p *Provider) LLMTools(ctx context.Context, principal identity.Principal, e
 	specs := p.manager.ToolSpecs(ctx, principal.CanonicalUserID)
 	tools := make([]llm.Tool, 0, len(specs))
 	for _, spec := range specs {
-		if !exposed[spec.Name] {
+		if isReservedServerName(spec.Server) || isReservedToolName(spec.Name) || !exposed[spec.Name] {
 			continue
 		}
 		tools = append(tools, llmTool(spec))
@@ -104,7 +104,7 @@ func (p *Provider) Execute(ctx context.Context, principal identity.Principal, na
 		return ExecutionResult{}, false, nil
 	}
 	server, remote, ok := strings.Cut(name, ".")
-	if !ok {
+	if !ok || isReservedServerName(server) {
 		return ExecutionResult{}, false, nil
 	}
 	if remote == "tools" {
@@ -135,6 +135,9 @@ func discoveryTool(server string) llm.Tool {
 }
 
 func (p *Provider) discover(ctx context.Context, principal identity.Principal, server string, args map[string]interface{}) (string, error) {
+	if isReservedServerName(server) {
+		return fmt.Sprintf("No configured MCP server named %q.", server), nil
+	}
 	query := strings.TrimSpace(stringArg(args, "query"))
 	entries, info, err := p.Catalog(ctx, principal.CanonicalUserID, server)
 	if err != nil {
@@ -170,6 +173,9 @@ func (p *Provider) discover(ctx context.Context, principal identity.Principal, s
 }
 
 func (p *Provider) Catalog(ctx context.Context, userID string, server string) ([]registry.CatalogEntry, ServerInfo, error) {
+	if isReservedServerName(server) {
+		return nil, ServerInfo{}, fmt.Errorf("MCP server name %q is reserved", server)
+	}
 	specs, info, err := p.manager.ServerToolSpecs(ctx, userID, server)
 	if err != nil {
 		return nil, info, err

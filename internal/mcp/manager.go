@@ -156,7 +156,7 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 	}
 	var specs []ToolSpec
 	for _, cfg := range configs {
-		if !cfg.Enabled {
+		if !cfg.Enabled || isReservedServerName(cfg.Name) {
 			continue
 		}
 		srv, err := m.ensureConnected(ctx, cfg)
@@ -171,6 +171,9 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 
 // ServerToolSpecs returns tools for a single visible server, connecting lazily.
 func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]ToolSpec, ServerInfo, error) {
+	if isReservedServerName(name) {
+		return nil, ServerInfo{}, fmt.Errorf("MCP server name %q is reserved", name)
+	}
 	cfg, ok, err := m.resolveConfig(ctx, userID, name)
 	if err != nil {
 		return nil, ServerInfo{}, err
