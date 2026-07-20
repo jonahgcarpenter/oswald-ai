@@ -312,10 +312,11 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 
 func (c *GatewayClient) requestLog(ctx context.Context, model string) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
+	principal, _ := requestctx.PrincipalFromContext(ctx)
 	return c.log.Server("provider.gateway",
 		config.F("request_id", meta.RequestID),
-		config.F("gateway", meta.Gateway),
-		config.F("user_id", meta.SenderID),
+		config.F("gateway", principal.Gateway),
+		config.F("user_id", principal.CanonicalUserID),
 		config.F("session_id", meta.SessionID),
 		config.F("model", model),
 	)

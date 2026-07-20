@@ -2,13 +2,17 @@ package agent
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
@@ -20,16 +24,18 @@ import (
 )
 
 const (
-	memoryRecentTurns        = 4
-	memoryRetrievalLimit     = 12
-	memoryContextBudgetRatio = 0.15
-	sessionTurnTTL           = 24 * time.Hour
-	emptyResponseRetryPrompt = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
-	emptyResponseFallback    = "I blanked on the actual answer. Try again and I'll take another shot."
-	imageSizeFallback        = "Your image is too big. Crop it and try again."
-	maxImageModelAttempts    = 5
-	imageRetryScale          = 0.75
-	imageInitialScaleMaxEdge = 1920
+	sessionHistoryCandidateLimit = 100
+	sessionSummaryMinimumTail    = 8
+	recentToolExposureTurns      = 4
+	automaticRecallTopK          = 4
+	automaticRecallCharLimit     = 2000
+	sessionTurnTTL               = 24 * time.Hour
+	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
+	imageSizeFallback            = "Your image is too big. Crop it and try again."
+	maxImageModelAttempts        = 5
+	imageRetryScale              = 0.75
+	imageInitialScaleMaxEdge     = 1920
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -221,6 +227,21 @@ type AgentResponse struct {
 	Thinking string        `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	Error    string        `json:"error,omitempty"`
 	Metrics  *ModelMetrics `json:"metrics,omitempty"`
+
+	SourceTurnID      int64 `json:"-"`
+	SessionGeneration int   `json:"-"`
+}
+
+// Request contains one fully resolved request submitted to the agent.
+type Request struct {
+	RequestID   string
+	Principal   identity.Principal
+	DisplayName string
+	SessionKey  string
+	IsDirect    bool
+	Prompt      string
+	Images      []llm.InputImage
+	StreamFunc  func(StreamChunk)
 }
 
 // Agent handles LLM orchestration: a single agentic loop where the model
@@ -240,10 +261,10 @@ type Agent struct {
 
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
 type MCPProvider interface {
-	DiscoveryTools(ctx context.Context, userID string) []llm.Tool
-	ResolveTools(ctx context.Context, userID string, names []string) []string
-	LLMTools(ctx context.Context, userID string, exposed map[string]bool) []llm.Tool
-	Execute(ctx context.Context, userID, name string, args map[string]interface{}, exposed map[string]bool) (string, bool, error)
+	DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool
+	ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string
+	LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool
+	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
@@ -355,23 +376,24 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	}
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, senderID string, exposure *toolruntime.Exposure) []llm.Tool {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *toolruntime.Exposure) []llm.Tool {
 	tools := a.registry.LLMToolsForVisibility(exposure.Visibility())
 	if a.mcpProvider == nil {
 		return tools
 	}
-	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, senderID)...)
-	tools = append(tools, a.mcpProvider.LLMTools(ctx, senderID, exposure.ExposedMCPTools())...)
+	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, principal)...)
+	tools = append(tools, a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools())...)
 	return tools
 }
 
-func (a *Agent) executeTool(ctx context.Context, senderID string, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (string, error) {
+func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (mcp.ExecutionResult, error) {
 	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, senderID, name, args, exposure.ExposedMCPTools()); handled {
+		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
 			return result, err
 		}
 	}
-	return a.registry.Execute(ctx, name, args)
+	content, err := a.registry.Execute(ctx, name, args)
+	return mcp.ExecutionResult{Content: content}, err
 }
 
 func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
@@ -431,23 +453,21 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 // before generating its final response. Thinking tokens, content tokens, and
 // agent status messages are streamed via streamCallback if provided.
 //
-// sessionKey identifies the conversation session for memory retrieval and
-// persistence. Passing an empty sessionKey disables memory for this request
-// (stateless one-shot behaviour).
-//
-// senderID is the stable internal user identifier for the current request. It is
-// injected into the request context so that tools such as memory.* can
-// identify the user without needing the session key. An empty senderID disables
-// user-scoped tool behaviour.
-//
-// displayName is the human-readable name supplied by the active gateway.
-// The agent prefers the persistent-memory intro and canonical account links for
-// speaker identity, but keeps this argument for request logging.
-//
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(requestID string, gateway string, sessionKey string, senderID string, displayName string, userPrompt string, userImages []llm.InputImage, streamCallback func(chunk StreamChunk)) (*AgentResponse, error) {
+func (a *Agent) Process(request Request) (*AgentResponse, error) {
+	if !request.Principal.Valid() {
+		return nil, fmt.Errorf("agent request has no valid principal")
+	}
+	requestID := request.RequestID
+	gateway := request.Principal.Gateway
+	sessionKey := request.SessionKey
+	senderID := request.Principal.CanonicalUserID
+	displayName := request.DisplayName
+	userPrompt := request.Prompt
+	userImages := request.Images
+	streamCallback := request.StreamFunc
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
 	reqLog.Debug("agent.request.start", "agent request started",
@@ -459,15 +479,15 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	ctx, cancel := context.WithTimeout(context.Background(), a.requestTimeout)
 	defer cancel()
 
-	// Inject the sender ID into the context so tool handlers can identify
-	// which user this request belongs to without coupling to the session key.
-	ctx = requestctx.WithSenderID(ctx, senderID)
+	// Inject the resolved actor so tool handlers derive ownership from the same
+	// principal used by gateways, commands, and the broker.
+	ctx = requestctx.WithPrincipal(ctx, request.Principal)
+	formationSourceText, _ := stripReplyContext(userPrompt)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
-		RequestID: requestID,
-		SessionID: sessionKey,
-		SenderID:  senderID,
-		Gateway:   gateway,
-		Model:     a.model,
+		RequestID:       requestID,
+		SessionID:       sessionKey,
+		Model:           a.model,
+		CurrentUserText: formationSourceText,
 	})
 	toolExposure := toolruntime.NewExposure()
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
@@ -479,41 +499,112 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
-	// Build the dynamic system prompt from soul and speaker identity.
-	// Only system_rules memory is injected automatically here; relevant user and
-	// session memories are added below as a structured retrieved-memory block.
+	// Keep deployment policy separate from the frozen lower-authority tenant profile.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
-
-	speakerLine := a.currentSpeakerLine(reqLog, senderID)
-	if speakerLine != "" {
-		promptParts = append(promptParts, "# Current Speaker\n"+speakerLine)
-	}
 	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
 		promptParts = append(promptParts, gatewayPrompt)
 	}
-	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
-	promptParts = append(promptParts, a.userMemoryPromptSections(reqLog, senderID)...)
-
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
-
-	semanticQueryText, _ := stripReplyContext(userPrompt)
-	if semanticQueryText == "" {
-		semanticQueryText = userPrompt
-	}
-	var recentToolNames []string
+	speakerLine := ""
+	profileContent := ""
+	sessionGeneration := 0
 	if a.userMemory != nil {
-		memoryContext, err := a.userMemory.BuildContext(ctx, senderID, sessionKey, semanticQueryText, usermemory.ContextOptions{
-			RecentTurns:        memoryRecentTurns,
-			ContextBudgetChars: int(float64(a.budget.PromptBudget()*4) * memoryContextBudgetRatio),
-		})
+		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
+		if err != nil {
+			reqLog.Error("agent.profile.load_failed", "failed to load tenant profile", config.F("status", "error"), config.ErrorField(err))
+			return nil, fmt.Errorf("resolve tenant profile: %w", err)
+		} else {
+			speakerLine = profile.SpeakerIntro
+			sessionGeneration = profile.Generation
+			profileContent = profile.Content
+			reqLog.Debug("agent.profile.loaded", "loaded frozen tenant profile",
+				config.F("profile_version", profile.Version),
+				config.F("latest_profile_version", profile.LatestVersion),
+				config.F("profile_fact_count", profile.FactCount),
+				config.F("profile_bytes", profile.Bytes),
+				config.F("session_generation", profile.Generation),
+				config.F("is_profile_new", profile.IsNewVersion),
+				config.F("is_session_new", profile.IsNewSession),
+			)
+			if profile.IsNewVersion {
+				reqLog.Info("agent.profile.version_advanced", "advanced tenant profile version",
+					config.F("profile_version", profile.LatestVersion),
+					config.F("profile_fact_count", profile.LatestFactCount),
+					config.F("profile_bytes", profile.LatestBytes),
+					config.F("status", "ok"),
+				)
+			}
+			if profile.IsNewSession {
+				reqLog.Info("agent.profile.session_bound", "bound tenant profile to session",
+					config.F("profile_version", profile.Version),
+					config.F("session_generation", profile.Generation),
+					config.F("status", "ok"),
+				)
+			}
+		}
+		deploymentMemory, err := a.userMemory.DeploymentMemoryPrompt(ctx)
+		if err != nil {
+			reqLog.Warn("agent.deployment_memory.load_failed", "failed to load deployment memory", config.F("status", "degraded"), config.ErrorField(err))
+		} else if deploymentMemory != "" {
+			profileContent = strings.TrimSpace(deploymentMemory + "\n\n" + profileContent)
+		}
+	}
+	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
+	meta := requestctx.MetadataFromContext(ctx)
+	meta.SessionGeneration = sessionGeneration
+	ctx = requestctx.WithMetadata(ctx, meta)
+	var recalledMemories []usermemory.RecallResult
+	if a.userMemory != nil {
+		recallQuery, _ := stripReplyContext(userPrompt)
+		recallStarted := time.Now()
+		var recallStats usermemory.RecallStats
+		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, usermemory.RecallRequest{TopK: automaticRecallTopK})
+		if recallStats.LexicalError != nil {
+			reqLog.Warn("agent.memory.recall.lexical_degraded", "durable memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
+		}
+		if recallStats.SemanticError != nil {
+			reqLog.Warn("agent.memory.recall.semantic_degraded", "durable memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
+		}
+		reqLog.Debug("agent.memory.recall.complete", "completed durable memory recall",
+			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
+			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
+			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
+			config.F("below_threshold_count", recallStats.BelowThresholdCount),
+			config.F("selected_memory_count", recallStats.SelectedCount),
+			config.F("min_selected_score", recallStats.MinSelectedScore),
+			config.F("max_selected_score", recallStats.MaxSelectedScore),
+			config.F("is_lexical_available", recallStats.LexicalAvailable),
+			config.F("is_vector_available", recallStats.SemanticAvailable),
+			config.F("duration_ms", time.Since(recallStarted).Milliseconds()),
+		)
+	}
+
+	var recentTurns []usermemory.SessionTurn
+	var recentToolNames []string
+	var sessionSummary usermemory.SessionSummary
+	if a.userMemory != nil && sessionGeneration > 0 {
+		var err error
+		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
+		if err != nil && err != sql.ErrNoRows {
+			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
+			sessionSummary = usermemory.SessionSummary{}
+		}
+		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
 			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
-		} else if strings.TrimSpace(memoryContext.Block) != "" {
-			dynamicSystemPrompt += "\n\n" + memoryContext.Block
-			recentToolNames = memoryContext.RecentToolNames
+			recentTurns = nil
+		} else {
+			toolTurnCount := len(recentTurns)
+			if toolTurnCount > recentToolExposureTurns {
+				toolTurnCount = recentToolExposureTurns
+			}
+			for _, turn := range recentTurns[:toolTurnCount] {
+				recentToolNames = append(recentToolNames, turn.ToolNames...)
+			}
+			recentToolNames = uniqueToolNames(recentToolNames)
 			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
-				config.F("recent_turn_count", memoryContext.RecentTurnCount),
+				config.F("candidate_turn_count", len(recentTurns)),
 			)
 		}
 	}
@@ -524,25 +615,33 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				mcpCandidates = append(mcpCandidates, name)
 			}
 		}
-		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, senderID, mcpCandidates))
+		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 
-	initialTools := a.toolsForRequest(ctx, senderID, toolExposure)
-	prune := promptbudget.Result{
-		EstimatedBefore: promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
-		EstimatedAfter:  promptbudget.EstimateTokens(dynamicSystemPrompt, nil, userPrompt, len(userImages), initialTools),
+	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
+	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, sessionSummaryMinimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialTools, a.budget.UsableInputLimit())
+	if a.userMemory != nil {
+		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
 	}
-
-	messages := make([]llm.ChatMessage, 0, 2)
-	messages = append(messages, llm.ChatMessage{Role: "system", Content: dynamicSystemPrompt})
-	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: userImages})
-
-	if prune.EstimatedAfter > a.budget.PromptBudget() {
+	messages := promptContext.Messages
+	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
-			config.F("estimated_after", prune.EstimatedAfter),
-			config.F("prompt_budget", a.budget.PromptBudget()),
+			config.F("estimated_after", promptContext.EstimatedAfter),
+			config.F("prompt_budget", promptContext.InputLimit),
 		)
 	}
+	reqLog.Debug("agent.context.selected", "selected complete session exchanges",
+		config.F("selected_turn_count", promptContext.SelectedTurnCount),
+		config.F("omitted_turn_count", promptContext.OmittedTurnCount),
+		config.F("selected_memory_count", promptContext.SelectedRecallCount),
+		config.F("omitted_memory_count", promptContext.OmittedRecallCount),
+		config.F("recall_chars", promptContext.RecallChars),
+		config.F("is_summary_included", promptContext.SummaryIncluded),
+		config.F("summary_chars", promptContext.SummaryChars),
+		config.F("minimum_tail_count", promptContext.MinimumTailCount),
+		config.F("estimated_before", promptContext.EstimatedBefore),
+		config.F("estimated_after", promptContext.EstimatedAfter),
+	)
 
 	req := llm.ChatRequest{
 		Model:  a.model,
@@ -597,7 +696,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		accumulatedContent.Reset()
 
 		req.Messages = messages
-		req.Tools = a.toolsForRequest(ctx, senderID, toolExposure)
+		req.Tools = a.toolsForRequest(ctx, request.Principal, toolExposure)
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),
@@ -657,7 +756,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 		lastResp = resp
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
-				config.F("estimated_after", prune.EstimatedAfter),
+				config.F("estimated_after", promptContext.EstimatedAfter),
 				config.F("actual_prompt_tokens", resp.PromptTokens),
 			)
 		}
@@ -701,7 +800,7 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 
 			var toolContent string
 
-			result, execErr := a.executeTool(ctx, senderID, toolName, tc.Function.Arguments, toolExposure)
+			result, execErr := a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				consecutiveToolFailures++
@@ -717,7 +816,15 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 				toolContent = fmt.Sprintf("Error: %v", execErr)
 			} else {
 				consecutiveToolFailures = 0
-				toolContent = result
+				toolContent = result.Content
+				if result.Scope == mcp.ScopeGlobal && !result.IsDiscovery {
+					arguments, _ := json.Marshal(tc.Function.Arguments)
+					toolExposure.RecordGlobalToolEvidence(requestctx.GlobalToolEvidence{
+						ToolCallID: toolCallID, ServerID: result.ServerID, ServerName: result.ServerName,
+						ToolName: result.ToolName, RemoteToolName: result.RemoteToolName,
+						ArgumentsJSON: string(arguments), Result: result.Content,
+					})
+				}
 				reqLog.Debug("agent.tool.success", "tool execution succeeded",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),
@@ -845,10 +952,12 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)
 	}
-
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
-	if finalContent != "" && a.userMemory != nil {
-		if err := a.userMemory.AppendSessionTurn(ctx, sessionKey, senderID, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL); err != nil {
+	var storedTurn usermemory.StoredSessionTurn
+	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+		var err error
+		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResult(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL)
+		if err != nil {
 			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
@@ -868,67 +977,11 @@ func (a *Agent) Process(requestID string, gateway string, sessionKey string, sen
 	)
 
 	return &AgentResponse{
-		Model:    a.model,
-		Response: finalContent,
-		Thinking: finalThinking,
-		Metrics:  mapMetrics(lastResp),
+		Model:             a.model,
+		Response:          finalContent,
+		Thinking:          finalThinking,
+		Metrics:           mapMetrics(lastResp),
+		SourceTurnID:      storedTurn.ID,
+		SessionGeneration: storedTurn.Generation,
 	}, nil
-}
-
-func (a *Agent) currentSpeakerLine(log *config.Logger, senderID string) string {
-	if senderID == "" {
-		return ""
-	}
-
-	if a.userMemory != nil {
-		intro, err := a.userMemory.ReadIntro(senderID)
-		if err != nil {
-			log.Warn("agent.user_memory_intro.read_failed", "failed to read user memory intro", config.F("user_id", senderID), config.ErrorField(err))
-		} else if strings.TrimSpace(intro) != "" {
-			return strings.TrimSpace(intro)
-		}
-	}
-
-	return ""
-}
-
-func (a *Agent) userMemoryPromptSections(log *config.Logger, senderID string) []string {
-	if senderID == "" || a.userMemory == nil {
-		return nil
-	}
-
-	sections := make([]string, 0, 1)
-	if systemRules := a.userMemoryPromptSection(log, senderID, "system_rules", "## User System Rules"); systemRules != "" {
-		sections = append(sections, systemRules)
-	}
-	return sections
-}
-
-func (a *Agent) userMemoryPromptSection(log *config.Logger, senderID, category, heading string) string {
-	content, err := a.userMemory.ReadCategory(senderID, category)
-	if err != nil {
-		log.Warn("agent.user_memory_category.read_failed", "failed to read user memory category", config.F("category", category), config.F("user_id", senderID), config.ErrorField(err))
-		return ""
-	}
-	body := stripMarkdownHeading(content)
-	if body == "" {
-		return ""
-	}
-	return heading + "\n" + body
-}
-
-func stripMarkdownHeading(content string) string {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return ""
-	}
-
-	lines := strings.Split(content, "\n")
-	if len(lines) == 0 {
-		return ""
-	}
-	if strings.HasPrefix(lines[0], "## ") {
-		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
-	}
-	return content
 }

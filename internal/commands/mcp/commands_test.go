@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 )
 
@@ -16,7 +17,7 @@ func (a fakeAuth) IsAdmin(canonicalUserID string) (bool, error) {
 
 func TestGlobalCommandsRequireAdmin(t *testing.T) {
 	h := New(nil, nil, fakeAuth{admin: false})
-	result, err := h.Execute(context.Background(), commands.Request{UserID: "user_1", Args: []string{"global", "servers"}})
+	result, err := h.Execute(context.Background(), commands.Request{Principal: identity.Principal{CanonicalUserID: "user_1"}, Args: []string{"global", "servers"}})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

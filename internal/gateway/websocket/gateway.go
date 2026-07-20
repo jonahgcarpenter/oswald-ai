@@ -3,17 +3,24 @@ package websocket
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
 // Name returns the human-readable gateway name.
@@ -24,26 +31,74 @@ func (wg *Gateway) Name() string {
 // Start initializes the HTTP server and registers the WebSocket handler.
 func (wg *Gateway) Start(b *broker.Broker) error {
 	log := wg.log()
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		wg.handleConnections(w, r, b)
 	})
+	mux.HandleFunc("/auth/device", wg.handleDeviceAuthorization)
+	mux.HandleFunc("/auth/token", wg.handleToken)
+	mux.HandleFunc("/auth/revoke", wg.handleRevoke)
 
 	log.Info("gateway.listen", "websocket gateway listening", config.F("port", wg.Port))
-	return http.ListenAndServe(":"+wg.Port, nil)
+	return http.ListenAndServe(":"+wg.Port, mux)
 }
 
 // handleConnections accepts WebSocket connections and routes prompts to the broker.
 func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *broker.Broker) {
 	log := wg.log()
+	if wg.Auth == nil {
+		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	authenticated, err := wg.Auth.Authenticate(r)
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.Warn("gateway.authentication.failed", "websocket authentication failed", config.F("status", "rejected"))
+		return
+	}
+	if !originAllowed(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		log.Warn("gateway.origin.rejected", "websocket origin rejected", config.F("status", "rejected"))
+		return
+	}
+	normalizedUserID, err := accountlinking.NormalizeIdentifier("websocket", authenticated.Subject)
+	if err != nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.Warn("gateway.authentication.subject_invalid", "websocket token subject is invalid", config.F("status", "rejected"))
+		return
+	}
+	owner, ok, err := wg.Links.ResolveAccount("websocket", normalizedUserID)
+	if err != nil || !ok || owner != authenticated.UserID {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		log.Warn("gateway.authentication.owner_invalid", "websocket client owner is unavailable", config.F("status", "rejected"))
+		return
+	}
+	sessionKey := "websocket:" + normalizedUserID + ":" + authenticated.ClientID
+	token := bearerToken(r)
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Warn("gateway.connection.upgrade_failed", "websocket upgrade failed", config.ErrorField(err))
 		return
 	}
 	defer conn.Close()
+	tracked := &trackedConnection{conn: conn}
+	wg.trackConnection(normalizedUserID, authenticated.ClientID, tracked)
+	defer wg.untrackConnection(normalizedUserID, authenticated.ClientID, tracked)
+	expiryTimer := time.AfterFunc(time.Until(authenticated.ExpiresAt), func() {
+		log.Debug("gateway.authentication.expired", "websocket authentication expired", config.F("session_id", sessionKey))
+		tracked.closeWithReason("authentication expired")
+	})
+	defer expiryTimer.Stop()
 
-	// remoteAddr is used as the fallback identity for clients that send plain text.
 	remoteAddr := conn.RemoteAddr().String()
+	principal := identity.Principal{CanonicalUserID: owner, Gateway: "websocket", ExternalID: normalizedUserID, Assurance: identity.AssuranceWebSocketSignedToken}
+	if completion, completeErr := wg.Auth.CompleteBootstrapOnAdminConnection(r.Context(), owner); completeErr != nil {
+		log.Warn("gateway.bootstrap.complete_failed", "failed to complete websocket bootstrap", config.ErrorField(completeErr), config.F("status", "degraded"))
+	} else if completion != nil {
+		wg.closeClient(completion.ClientID, "bootstrap completed")
+	}
 
 	for {
 		requestID := config.NewRequestID()
@@ -52,18 +107,35 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			log.Debug("gateway.connection.closed", "websocket connection closed", config.F("chat_id", remoteAddr), config.ErrorField(err))
 			break
 		}
+		fresh, authErr := wg.Auth.VerifyAccess(r.Context(), token)
+		currentOwner, ownerOK, resolveErr := wg.Links.ResolveAccount("websocket", normalizedUserID)
+		if authErr != nil || resolveErr != nil || !ownerOK || fresh.ClientID != authenticated.ClientID || fresh.Subject != normalizedUserID || fresh.UserID != currentOwner {
+			log.Warn("gateway.authentication.revalidation_failed", "websocket client authorization is no longer valid", config.F("request_id", requestID), config.F("session_id", sessionKey), config.F("status", "rejected"))
+			tracked.closeWithReason("authorization revoked")
+			return
+		}
+		principal.CanonicalUserID = currentOwner
 
-		// Attempt to decode a structured IncomingMessage. Fall back to treating
-		// the raw bytes as a plain-text prompt (legacy behaviour) so existing
-		// clients keep working without modification.
-		var userPrompt, userID, displayName string
+		// Attempt to decode a structured IncomingMessage. Plain-text prompts keep
+		// working, but identity is always bound by the handshake token.
+		var userPrompt string
+		displayName := fresh.DisplayName
 		var userImages []llm.InputImage
 		var userUnsupported []string
 		var incoming IncomingMessage
 		if jsonErr := json.Unmarshal(message, &incoming); jsonErr == nil && (incoming.Prompt != "" || len(incoming.Images) > 0 || incoming.UserID != "" || incoming.DisplayName != "") {
 			userPrompt = incoming.Prompt
-			userID = incoming.UserID
-			displayName = incoming.DisplayName
+			if incoming.UserID != "" {
+				claimedUserID, claimErr := accountlinking.NormalizeIdentifier("websocket", incoming.UserID)
+				if claimErr != nil || claimedUserID != normalizedUserID {
+					log.Warn("gateway.authentication.identity_mismatch", "websocket message attempted to change authenticated identity", config.F("request_id", requestID), config.F("status", "rejected"))
+					_ = conn.WriteControl(gorilla.CloseMessage, gorilla.FormatCloseMessage(gorilla.ClosePolicyViolation, "message identity does not match authenticated subject"), time.Now().Add(time.Second))
+					return
+				}
+			}
+			if displayName == "" {
+				displayName = incoming.DisplayName
+			}
 			images, unsupported := wg.decodeIncomingImages(incoming.Images)
 			userImages = images
 			userUnsupported = unsupported
@@ -78,39 +150,7 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 			}
 		} else {
 			userPrompt = string(message)
-			userID = remoteAddr
 		}
-
-		// Build the session key from the gateway identity while keeping
-		// persistent memory keyed separately by canonical user ID.
-		sessionIdentity := userID
-		if sessionIdentity == "" {
-			sessionIdentity = remoteAddr
-			userID = remoteAddr
-		}
-		normalizedUserID, normErr := accountlinking.NormalizeIdentifier("websocket", userID)
-		if normErr != nil {
-			errorPayload := agent.AgentResponse{Error: normErr.Error()}
-			errBytes, _ := json.Marshal(errorPayload)
-			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-			continue
-		}
-		sessionKey := "websocket:" + sessionIdentity
-
-		canonicalUserID, err := wg.Links.EnsureAccount("websocket", normalizedUserID, displayName)
-		if err != nil {
-			log.Error("gateway.account.resolve_failed", "failed to resolve websocket account",
-				config.F("request_id", requestID),
-				config.F("session_id", sessionKey),
-				config.F("user_id", normalizedUserID),
-				config.ErrorField(err),
-			)
-			errorPayload := agent.AgentResponse{Error: "Failed to resolve account identity"}
-			errBytes, _ := json.Marshal(errorPayload)
-			conn.WriteMessage(messageType, errBytes) // nolint: errcheck
-			continue
-		}
-
 		firstChunk := true
 		streamFunc := func(chunk agent.StreamChunk) {
 			if firstChunk {
@@ -122,24 +162,202 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 				log.Warn("gateway.stream.marshal_failed", "failed to marshal websocket stream chunk", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
 				return
 			}
-			conn.WriteMessage(messageType, chunkBytes) // nolint: errcheck
+			tracked.writeMessage(messageType, chunkBytes) // nolint: errcheck
 		}
 
 		gatewayruntime.Execute(gatewayruntime.Request{
 			RequestID:   requestID,
-			Gateway:     "websocket",
 			ChatID:      sessionKey,
-			SenderID:    canonicalUserID,
+			Principal:   principal,
 			DisplayName: displayName,
 			SessionKey:  sessionKey,
+			ClientID:    authenticated.ClientID,
 			IsDirect:    true,
 			IsMention:   true,
 			Text:        userPrompt,
 			Images:      userImages,
 			Unsupported: userUnsupported,
 			StreamFunc:  streamFunc,
-		}, wg.runtimeDependencies(b), &runtimeResponder{conn: conn, messageType: messageType})
+		}, wg.runtimeDependencies(b), &runtimeResponder{conn: tracked, messageType: messageType})
 	}
+}
+
+func (wg *Gateway) trackConnection(subject, clientID string, conn *trackedConnection) {
+	wg.connectionsMu.Lock()
+	if wg.connections == nil {
+		wg.connections = make(map[string]map[*trackedConnection]struct{})
+	}
+	if wg.clients == nil {
+		wg.clients = make(map[string]map[*trackedConnection]struct{})
+	}
+	if wg.connections[subject] == nil {
+		wg.connections[subject] = make(map[*trackedConnection]struct{})
+	}
+	if wg.clients[clientID] == nil {
+		wg.clients[clientID] = make(map[*trackedConnection]struct{})
+	}
+	wg.connections[subject][conn] = struct{}{}
+	wg.clients[clientID][conn] = struct{}{}
+	wg.connectionsMu.Unlock()
+}
+
+func (wg *Gateway) untrackConnection(subject, clientID string, conn *trackedConnection) {
+	wg.connectionsMu.Lock()
+	delete(wg.connections[subject], conn)
+	delete(wg.clients[clientID], conn)
+	if len(wg.connections[subject]) == 0 {
+		delete(wg.connections, subject)
+	}
+	if len(wg.clients[clientID]) == 0 {
+		delete(wg.clients, clientID)
+	}
+	wg.connectionsMu.Unlock()
+}
+
+func (wg *Gateway) closeClient(clientID, reason string) {
+	wg.connectionsMu.Lock()
+	connections := make([]*trackedConnection, 0, len(wg.clients[clientID]))
+	for conn := range wg.clients[clientID] {
+		connections = append(connections, conn)
+	}
+	delete(wg.clients, clientID)
+	wg.connectionsMu.Unlock()
+	for _, conn := range connections {
+		conn.closeWithReason(reason)
+	}
+}
+
+func (wg *Gateway) handleDeviceAuthorization(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAuthError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	var request struct {
+		ClientName string `json:"client_name"`
+	}
+	if err := decodeAuthJSON(r, &request); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	device, err := wg.Auth.RequestDevice(r.Context(), request.ClientName)
+	if err != nil {
+		writeAuthError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	writeAuthJSON(w, http.StatusOK, map[string]any{
+		"device_code": device.DeviceCode,
+		"user_code":   device.UserCode,
+		"expires_in":  int(time.Until(device.ExpiresAt).Seconds()),
+		"interval":    int(device.PollInterval.Seconds()),
+	})
+}
+
+func (wg *Gateway) handleToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAuthError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	var request struct {
+		GrantType    string `json:"grant_type"`
+		DeviceCode   string `json:"device_code"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := decodeAuthJSON(r, &request); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	var pair websocketauth.TokenPair
+	var err error
+	switch request.GrantType {
+	case "urn:ietf:params:oauth:grant-type:device_code", "device_code":
+		pair, err = wg.Auth.PollDevice(r.Context(), request.DeviceCode)
+	case "refresh_token":
+		pair, err = wg.Auth.Refresh(r.Context(), request.RefreshToken)
+	default:
+		writeAuthError(w, http.StatusBadRequest, "unsupported_grant_type")
+		return
+	}
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "invalid_grant"
+		switch {
+		case errors.Is(err, websocketauth.ErrAuthorizationPending):
+			code = "authorization_pending"
+		case errors.Is(err, websocketauth.ErrSlowDown):
+			code = "slow_down"
+		case errors.Is(err, websocketauth.ErrExpired):
+			code = "expired_token"
+		case !errors.Is(err, websocketauth.ErrInvalidGrant):
+			status = http.StatusInternalServerError
+			code = "server_error"
+		}
+		writeAuthError(w, status, code)
+		return
+	}
+	writeAuthJSON(w, http.StatusOK, map[string]any{
+		"access_token":  pair.AccessToken,
+		"token_type":    "Bearer",
+		"expires_in":    int(time.Until(pair.ExpiresAt).Seconds()),
+		"refresh_token": pair.RefreshToken,
+		"client_id":     pair.ClientID,
+	})
+}
+
+func (wg *Gateway) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAuthError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	var request struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := decodeAuthJSON(r, &request); err != nil {
+		writeAuthError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	clientID, err := wg.Auth.RevokeRefreshClient(r.Context(), request.RefreshToken)
+	if err != nil && !errors.Is(err, websocketauth.ErrInvalidGrant) {
+		writeAuthError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	if err == nil {
+		wg.closeClient(clientID, "client revoked")
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func decodeAuthJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain one JSON object")
+	}
+	return nil
+}
+
+func writeAuthError(w http.ResponseWriter, status int, code string) {
+	writeAuthJSON(w, status, map[string]string{"error": code})
+}
+
+func writeAuthJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func bearerToken(r *http.Request) string {
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return parts[1]
+	}
+	return ""
 }
 
 func (wg *Gateway) runtimeDependencies(b *broker.Broker) gatewayruntime.Dependencies {

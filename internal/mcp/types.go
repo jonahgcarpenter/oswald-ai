@@ -25,6 +25,18 @@ const (
 // Handler executes an MCP-backed tool call.
 type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
 
+// ExecutionResult preserves provenance for the exact MCP handler that ran.
+type ExecutionResult struct {
+	Content        string
+	ServerID       string
+	ServerName     string
+	Scope          string
+	OwnerUserID    string
+	ToolName       string
+	RemoteToolName string
+	IsDiscovery    bool
+}
+
 // ParamSpec describes a single MCP tool parameter after schema normalization.
 type ParamSpec struct {
 	Name        string
@@ -38,6 +50,7 @@ type ParamSpec struct {
 type ToolSpec struct {
 	Name        string
 	Description string
+	ServerID    string
 	Server      string
 	Scope       string
 	OwnerUserID string

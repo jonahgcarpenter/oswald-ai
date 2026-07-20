@@ -3,18 +3,26 @@ package requestctx
 import (
 	"context"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 type testExposer struct{ names []string }
 
-func (e *testExposer) ExposeTools(names []string) { e.names = append(e.names, names...) }
+func (e *testExposer) ExposeTools(names []string)                  { e.names = append(e.names, names...) }
+func (e *testExposer) RecordGlobalToolEvidence(GlobalToolEvidence) {}
+func (e *testExposer) GlobalToolEvidence(string) (GlobalToolEvidence, bool) {
+	return GlobalToolEvidence{}, false
+}
 
-func TestMetadataFallsBackToSenderID(t *testing.T) {
-	ctx := WithSenderID(context.Background(), "sender-1")
-	ctx = WithMetadata(ctx, Metadata{RequestID: "req-1", SessionID: "session-1"})
+func TestPrincipalAndMetadataRoundTrip(t *testing.T) {
+	principal := identity.Principal{CanonicalUserID: "sender-1", Gateway: "websocket", ExternalID: "external-1", Assurance: identity.AssuranceSelfAsserted}
+	ctx := WithPrincipal(context.Background(), principal)
+	ctx = WithMetadata(ctx, Metadata{RequestID: "req-1", SessionID: "session-1", SessionGeneration: 3})
 
 	meta := MetadataFromContext(ctx)
-	if meta.SenderID != "sender-1" || meta.RequestID != "req-1" || meta.SessionID != "session-1" {
+	gotPrincipal, ok := PrincipalFromContext(ctx)
+	if !ok || gotPrincipal != principal || meta.RequestID != "req-1" || meta.SessionID != "session-1" || meta.SessionGeneration != 3 {
 		t.Fatalf("unexpected metadata: %+v", meta)
 	}
 }

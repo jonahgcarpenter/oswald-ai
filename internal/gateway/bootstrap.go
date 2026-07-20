@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
@@ -9,31 +10,43 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	localws "github.com/jonahgcarpenter/oswald-ai/internal/gateway/websocket"
+	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, auth *websocketauth.Store, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
+	if auth == nil {
+		return nil, fmt.Errorf("configure websocket authentication: durable authorization store is required")
+	}
 	services := []Service{
 		&localws.Gateway{
 			Port:    cfg.Port,
+			Auth:    auth,
 			Links:   links,
 			Runtime: runtimeDeps,
 			Log:     log,
 		},
 	}
+	if runtimeDeps.PrivacyBus != nil {
+		runtimeDeps.PrivacyBus.Subscribe(services[0].(*localws.Gateway).HandlePrivacyInvalidation)
+	}
 
 	if cfg.DiscordToken != "" {
-		services = append(services, &discord.Gateway{
+		discordGateway := &discord.Gateway{
 			Token:   cfg.DiscordToken,
 			Links:   links,
 			Runtime: runtimeDeps,
 			Log:     log,
-		})
+		}
+		services = append(services, discordGateway)
+		if runtimeDeps.PrivacyBus != nil {
+			runtimeDeps.PrivacyBus.Subscribe(discordGateway.HandlePrivacyInvalidation)
+		}
 	}
 
 	if cfg.BlueBubblesURL != "" && cfg.BlueBubblesPassword != "" {
-		services = append(services, &imessage.Gateway{
+		iMessageGateway := &imessage.Gateway{
 			Port:                cfg.IMessagePort,
 			WebhookPath:         cfg.IMessageWebhookPath,
 			BlueBubblesURL:      cfg.BlueBubblesURL,
@@ -41,7 +54,11 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, ru
 			Links:               links,
 			Runtime:             runtimeDeps,
 			Log:                 log,
-		})
+		}
+		services = append(services, iMessageGateway)
+		if runtimeDeps.PrivacyBus != nil {
+			runtimeDeps.PrivacyBus.Subscribe(iMessageGateway.HandlePrivacyInvalidation)
+		}
 	}
 
 	gatewayLog.Info("gateway.bootstrap.enabled", "resolved enabled gateways",

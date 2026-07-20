@@ -17,7 +17,7 @@ import (
 // can share the same instances with the tool handlers.
 // chatClient and model are retained in the signature because the agent and tools
 // share bootstrap wiring, but fresh memory storage has no legacy migration path.
-func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, chatClient llm.Chatter, model string, mcpManager *mcp.Manager, log *config.Logger) (*registry.Registry, error) {
+func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, soulAuthorizer soul.Authorizer, chatClient llm.Chatter, model string, mcpManager *mcp.Manager, log *config.Logger) (*registry.Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	reg, err := registry.NewFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
 	if err != nil {
@@ -25,7 +25,7 @@ func NewRegistryFromConfig(cfg *config.Config, soulStore *soul.Store, userMemSto
 	}
 
 	_ = mcpManager
-	if err := builtin.Register(reg, cfg, soulStore, userMemStore, chatClient, model, log); err != nil {
+	if err := builtin.Register(reg, cfg, soulStore, userMemStore, soulAuthorizer, chatClient, model, log); err != nil {
 		return nil, err
 	}
 

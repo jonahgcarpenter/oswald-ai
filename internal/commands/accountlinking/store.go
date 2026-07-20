@@ -1,9 +1,12 @@
 package accountlinking
 
 import (
+	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -22,18 +26,21 @@ type Service struct {
 	memories   *usermemory.Store
 	log        *config.Logger
 	db         *database.DB
+	mcp        MCPUserMerger
+	now        func() time.Time
+	random     io.Reader
 	mu         sync.Mutex
 	initOnce   sync.Once
 	initErr    error
 }
 
 // NewService creates a new account-link service backed by a SQLite database on disk.
-func NewService(path string, memories *usermemory.Store, log *config.Logger) *Service {
+func NewService(path string, memories *usermemory.Store, mcp MCPUserMerger, log *config.Logger) *Service {
 	legacyPath := filepath.Join(filepath.Dir(path), "links.json")
 	if path == config.DefaultAccountLinkPath {
 		legacyPath = config.DefaultLegacyAccountLinkPath
 	}
-	return &Service{path: path, legacyPath: legacyPath, memories: memories, log: log}
+	return &Service{path: path, legacyPath: legacyPath, memories: memories, mcp: mcp, log: log, now: time.Now, random: rand.Reader}
 }
 
 // Initialize prepares the account-link database and migrates the legacy JSON store when present.
@@ -42,6 +49,14 @@ func (s *Service) Initialize() error {
 		s.initErr = s.initialize()
 	})
 	return s.initErr
+}
+
+// Close releases the account-link service's database handle.
+func (s *Service) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
 }
 
 // EnsureAccount resolves an external account to a canonical user ID, creating one when needed.
@@ -112,6 +127,76 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 
 	s.log.Info("account_link.canonical_user.created", "created canonical user", config.F("target_user_id", canonicalID), config.F("account", key))
 	return canonicalID, nil
+}
+
+// ResolveAccount returns the current canonical owner without creating an account.
+func (s *Service) ResolveAccount(gateway, identifier string) (string, bool, error) {
+	identifier, err := NormalizeIdentifier(gateway, identifier)
+	if err != nil {
+		return "", false, err
+	}
+	gateway = strings.ToLower(strings.TrimSpace(gateway))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureInitializedLocked(); err != nil {
+		return "", false, err
+	}
+	var owner string
+	err = s.db.SQL().QueryRow(`SELECT canonical_user_id FROM linked_accounts WHERE gateway = ? AND identifier = ?`, gateway, identifier).Scan(&owner)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve linked account: %w", err)
+	}
+	return owner, true, nil
+}
+
+// ResolvePrincipal re-resolves an authenticated external identity to its current
+// canonical owner. The canonical ID carried by principal is intentionally ignored.
+func (s *Service) ResolvePrincipal(principal identity.Principal) (string, error) {
+	if !principal.Valid() || !principal.Authenticated() {
+		return "", fmt.Errorf("privacy operation requires an authenticated identity")
+	}
+	owner, found, err := s.ResolveAccount(principal.Gateway, principal.ExternalID)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", ErrPrincipalMismatch
+	}
+	return owner, nil
+}
+
+// RunAuthenticatedUserMutation serializes a privacy mutation with account
+// creation, linking, merging, and display-name updates while re-resolving the
+// external identity under the same account graph lock.
+func (s *Service) RunAuthenticatedUserMutation(principal identity.Principal, fn func(string) error) error {
+	if !principal.Valid() || !principal.Authenticated() {
+		return fmt.Errorf("privacy operation requires an authenticated identity")
+	}
+	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	owner, ok := data.AccountIndex[accountKey(principal.Gateway, identifier)]
+	if !ok {
+		return ErrPrincipalMismatch
+	}
+	return fn(owner)
+}
+
+// UserErasureCommitted invalidates runtime state after a committed self-erasure.
+func (s *Service) UserErasureCommitted(canonicalUserID string) {
+	if s.mcp != nil {
+		s.mcp.UserDeleteCommitted(canonicalUserID)
+	}
 }
 
 // AccountsForUser returns the linked accounts for a canonical user.
@@ -222,16 +307,33 @@ func (s *Service) BanStatus(canonicalUserID string) (bool, string, error) {
 
 // SetAdmin updates a canonical user's admin flag.
 func (s *Service) SetAdmin(actorID, targetID string, isAdmin bool) error {
-	if actorID == targetID && !isAdmin {
-		return fmt.Errorf("cannot remove admin from yourself")
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	data, err := s.loadLocked()
 	if err != nil {
 		return err
+	}
+	return s.setAdminLocked(data, actorID, targetID, isAdmin)
+}
+
+// SetAdminAs updates admin state after atomically re-resolving the authenticated actor.
+func (s *Service) SetAdminAs(principal identity.Principal, targetID string, isAdmin bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	actorID, err := authenticatedAdminActor(data, principal)
+	if err != nil {
+		return err
+	}
+	return s.setAdminLocked(data, actorID, targetID, isAdmin)
+}
+
+func (s *Service) setAdminLocked(data fileData, actorID, targetID string, isAdmin bool) error {
+	if actorID == targetID && !isAdmin {
+		return fmt.Errorf("cannot remove admin from yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
@@ -256,16 +358,33 @@ func (s *Service) SetAdmin(actorID, targetID string, isAdmin bool) error {
 
 // BanUser marks a canonical user as banned.
 func (s *Service) BanUser(actorID, targetID, reason string) error {
-	if actorID == targetID {
-		return fmt.Errorf("cannot ban yourself")
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	data, err := s.loadLocked()
 	if err != nil {
 		return err
+	}
+	return s.banUserLocked(data, actorID, targetID, reason)
+}
+
+// BanUserAs bans a user after atomically re-resolving the authenticated actor.
+func (s *Service) BanUserAs(principal identity.Principal, targetID, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	actorID, err := authenticatedAdminActor(data, principal)
+	if err != nil {
+		return err
+	}
+	return s.banUserLocked(data, actorID, targetID, reason)
+}
+
+func (s *Service) banUserLocked(data fileData, actorID, targetID, reason string) error {
+	if actorID == targetID {
+		return fmt.Errorf("cannot ban yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
@@ -289,11 +408,29 @@ func (s *Service) BanUser(actorID, targetID, reason string) error {
 func (s *Service) UnbanUser(actorID, targetID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	data, err := s.loadLocked()
 	if err != nil {
 		return err
 	}
+	return s.unbanUserLocked(data, actorID, targetID)
+}
+
+// UnbanUserAs unbans a user after atomically re-resolving the authenticated actor.
+func (s *Service) UnbanUserAs(principal identity.Principal, targetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return err
+	}
+	actorID, err := authenticatedAdminActor(data, principal)
+	if err != nil {
+		return err
+	}
+	return s.unbanUserLocked(data, actorID, targetID)
+}
+
+func (s *Service) unbanUserLocked(data fileData, actorID, targetID string) error {
 	user, ok := data.Users[targetID]
 	if !ok {
 		return fmt.Errorf("canonical user %q not found", targetID)
@@ -317,42 +454,103 @@ func (s *Service) UnbanUser(actorID, targetID string) error {
 // DeleteUser removes a canonical user and all data owned by that user.
 func (s *Service) DeleteUser(actorID, targetID string) error {
 	targetID = strings.TrimSpace(targetID)
-	if targetID == "" {
-		return fmt.Errorf("canonical user ID cannot be empty")
-	}
-	if actorID == targetID {
-		return fmt.Errorf("cannot delete yourself")
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	data, err := s.loadLocked()
 	if err != nil {
 		return err
 	}
+	return s.deleteUserLocked(data, actorID, targetID)
+}
+
+// DeleteUserAs deletes a user after atomically re-resolving the authenticated actor.
+func (s *Service) DeleteUserAs(principal identity.Principal, targetID string) error {
+	_, err := s.DeleteUserAsWithInvalidation(principal, targetID)
+	return err
+}
+
+// DeleteUserAsWithInvalidation deletes a user and returns its pre-erasure runtime scope.
+func (s *Service) DeleteUserAsWithInvalidation(principal identity.Principal, targetID string) (ErasureDescriptor, error) {
+	return s.DeleteUserAsWithDurableInvalidation(principal, targetID, "admin-delete:"+targetID+":"+time.Now().UTC().Format(time.RFC3339Nano))
+}
+
+// DeleteUserAsWithDurableInvalidation deletes a user and durably queues its runtime scope.
+func (s *Service) DeleteUserAsWithDurableInvalidation(principal identity.Principal, targetID, operationID string) (ErasureDescriptor, error) {
+	if strings.TrimSpace(operationID) == "" {
+		operationID = "admin-delete:" + strings.TrimSpace(targetID) + ":" + time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return ErasureDescriptor{}, err
+	}
+	actorID, err := authenticatedAdminActor(data, principal)
+	if err != nil {
+		return ErasureDescriptor{}, err
+	}
+	return s.deleteUserLockedWithInvalidation(data, actorID, strings.TrimSpace(targetID), operationID)
+}
+
+func (s *Service) deleteUserLocked(data fileData, actorID, targetID string) error {
+	_, err := s.deleteUserLockedWithInvalidation(data, actorID, targetID, "admin-delete:"+targetID+":"+time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targetID, operationID string) (ErasureDescriptor, error) {
+	if targetID == "" {
+		return ErasureDescriptor{}, fmt.Errorf("canonical user ID cannot be empty")
+	}
+	if actorID == targetID {
+		return ErasureDescriptor{}, fmt.Errorf("cannot delete yourself")
+	}
 	user, ok := data.Users[targetID]
 	if !ok {
-		return fmt.Errorf("canonical user %q not found", targetID)
+		return ErasureDescriptor{}, fmt.Errorf("canonical user %q not found", targetID)
 	}
 
-	delete(data.Users, targetID)
-	for accountKey, owner := range data.AccountIndex {
-		if owner == targetID {
-			delete(data.AccountIndex, accountKey)
+	ctx := context.Background()
+	var invalidation usermemory.UserErasureInvalidation
+	if err := s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		if s.mcp != nil {
+			if err := s.mcp.DeleteUserTx(ctx, tx, targetID); err != nil {
+				return err
+			}
 		}
-	}
-	if err := s.saveLocked(data); err != nil {
+		var err error
+		invalidation, err = s.memories.EraseUserWithInvalidationTx(ctx, tx, targetID, operationID, time.Now().UTC())
 		return err
+	}); err != nil {
+		return ErasureDescriptor{}, err
 	}
-	if s.db != nil && s.db.SQL() != nil {
-		if _, err := s.db.SQL().Exec(`DELETE FROM mcp_servers WHERE owner_user_id = ?`, targetID); err != nil {
-			return fmt.Errorf("failed to delete user MCP servers: %w", err)
-		}
+	if s.mcp != nil {
+		s.mcp.UserDeleteCommitted(targetID)
 	}
 
 	s.log.Info("account_link.user.deleted", "deleted user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("account_count", len(user.Accounts)), config.F("status", "ok"))
-	return nil
+	return ErasureDescriptor{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs}, nil
+}
+
+func authenticatedAdminActor(data fileData, principal identity.Principal) (string, error) {
+	if !principal.Valid() || !principal.Authenticated() {
+		return "", fmt.Errorf("admin command requires an authenticated identity")
+	}
+	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
+	if err != nil {
+		return "", err
+	}
+	actorID, ok := data.AccountIndex[accountKey(principal.Gateway, identifier)]
+	if !ok {
+		return "", ErrPrincipalMismatch
+	}
+	actor, ok := data.Users[actorID]
+	if !ok {
+		return "", ErrPrincipalMismatch
+	}
+	if !actor.IsAdmin {
+		return "", fmt.Errorf("canonical user %q is not an admin", actorID)
+	}
+	return actorID, nil
 }
 
 // SpeakerLine returns a deterministic speaker line for the canonical user.
@@ -362,148 +560,6 @@ func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
 		return "", err
 	}
 	return FormatSpeakerLine(accounts), nil
-}
-
-// LinkAccount links a new external account to a canonical user, merging users when needed.
-func (s *Service) LinkAccount(canonicalUserID, gateway, identifier, displayName string) (LinkResult, error) {
-	identifier, err := NormalizeIdentifier(gateway, identifier)
-	if err != nil {
-		return LinkResult{}, err
-	}
-
-	gateway = strings.ToLower(strings.TrimSpace(gateway))
-	key := accountKey(gateway, identifier)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadLocked()
-	if err != nil {
-		return LinkResult{}, err
-	}
-
-	current, ok := data.Users[canonicalUserID]
-	if !ok {
-		return LinkResult{}, fmt.Errorf("canonical user %q not found", canonicalUserID)
-	}
-
-	for _, account := range current.Accounts {
-		if account.Gateway == gateway {
-			if account.Identifier == identifier {
-				return LinkResult{
-					CanonicalUserID: canonicalUserID,
-					AlreadyLinked:   true,
-					LinkedAccount:   account,
-				}, nil
-			}
-			return LinkResult{}, fmt.Errorf("%s is already linked on this user as %s", gateway, account.Identifier)
-		}
-	}
-
-	if existingOwner, ok := data.AccountIndex[key]; ok {
-		if existingOwner == canonicalUserID {
-			for _, account := range current.Accounts {
-				if account.Gateway == gateway && account.Identifier == identifier {
-					return LinkResult{CanonicalUserID: canonicalUserID, AlreadyLinked: true, LinkedAccount: account}, nil
-				}
-			}
-		}
-
-		other := data.Users[existingOwner]
-		for _, account := range other.Accounts {
-			if account.Gateway == gateway && account.Identifier == identifier {
-				break
-			}
-		}
-		for _, account := range current.Accounts {
-			if account.Gateway == gateway {
-				return LinkResult{}, fmt.Errorf("cannot merge because this user already has a %s account linked", gateway)
-			}
-		}
-
-		currentGateways := make(map[string]string, len(current.Accounts))
-		for _, account := range current.Accounts {
-			currentGateways[account.Gateway] = account.Identifier
-		}
-		for _, account := range other.Accounts {
-			if identifier, ok := currentGateways[account.Gateway]; ok && identifier != account.Identifier {
-				return LinkResult{}, fmt.Errorf("cannot merge because both users already have %s accounts linked", account.Gateway)
-			}
-		}
-
-		if err := s.memories.MergeUsers(canonicalUserID, existingOwner); err != nil {
-			return LinkResult{}, err
-		}
-		s.log.Info("account_link.users.merged", "merged linked users", config.F("source_user_id", existingOwner), config.F("target_user_id", canonicalUserID), config.F("account", key))
-
-		mergedUser := current
-		mergedUser.IsAdmin = current.IsAdmin || other.IsAdmin
-		if !current.IsBanned && other.IsBanned {
-			mergedUser.IsBanned = true
-			mergedUser.BannedAt = other.BannedAt
-			mergedUser.BannedBy = other.BannedBy
-			mergedUser.BanReason = other.BanReason
-		} else if current.IsBanned {
-			mergedUser.IsBanned = true
-		}
-		seen := make(map[string]struct{}, len(mergedUser.Accounts))
-		for _, account := range mergedUser.Accounts {
-			seen[accountKey(account.Gateway, account.Identifier)] = struct{}{}
-		}
-		for _, account := range other.Accounts {
-			account.DisplayName = chooseDisplayName(account.DisplayName, displayName)
-			acctKey := accountKey(account.Gateway, account.Identifier)
-			if _, ok := seen[acctKey]; ok {
-				continue
-			}
-			mergedUser.Accounts = append(mergedUser.Accounts, account)
-			seen[acctKey] = struct{}{}
-		}
-		mergedUser.UpdatedAt = time.Now().UTC()
-		data.Users[canonicalUserID] = mergedUser
-		delete(data.Users, existingOwner)
-		for acctKey, owner := range data.AccountIndex {
-			if owner == existingOwner {
-				data.AccountIndex[acctKey] = canonicalUserID
-			}
-		}
-
-		if err := s.saveLocked(data); err != nil {
-			return LinkResult{}, err
-		}
-		if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(mergedUser.Accounts)); err != nil {
-			return LinkResult{}, err
-		}
-
-		linkedAccount, _ := findAccount(mergedUser.Accounts, gateway, identifier)
-		return LinkResult{
-			CanonicalUserID: canonicalUserID,
-			Merged:          true,
-			LinkedAccount:   linkedAccount,
-		}, nil
-	}
-
-	linked := LinkedAccount{
-		Gateway:     gateway,
-		Identifier:  identifier,
-		DisplayName: displayName,
-		LinkedAt:    time.Now().UTC(),
-		Verified:    false,
-	}
-	current.Accounts = append(current.Accounts, linked)
-	current.UpdatedAt = time.Now().UTC()
-	data.Users[canonicalUserID] = current
-	data.AccountIndex[key] = canonicalUserID
-
-	if err := s.saveLocked(data); err != nil {
-		return LinkResult{}, err
-	}
-	if err := s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(current.Accounts)); err != nil {
-		return LinkResult{}, err
-	}
-	s.log.Info("account_link.account.linked", "linked account", config.F("account", key), config.F("target_user_id", canonicalUserID))
-
-	return LinkResult{CanonicalUserID: canonicalUserID, LinkedAccount: linked}, nil
 }
 
 // DisconnectAccount removes a linked external account from a canonical user.
@@ -589,15 +645,6 @@ func newCanonicalUserID() (string, error) {
 	return "usr_" + hex.EncodeToString(b), nil
 }
 
-func findAccount(accounts []LinkedAccount, gateway, identifier string) (LinkedAccount, bool) {
-	for _, account := range accounts {
-		if account.Gateway == gateway && account.Identifier == identifier {
-			return account, true
-		}
-	}
-	return LinkedAccount{}, false
-}
-
 func summarizeUser(canonicalID string, user UserRecord) UserSummary {
 	accounts := append([]LinkedAccount(nil), user.Accounts...)
 	sort.Slice(accounts, func(i, j int) bool {
@@ -618,13 +665,6 @@ func summarizeUser(canonicalID string, user UserRecord) UserSummary {
 		BannedBy:        user.BannedBy,
 		BanReason:       user.BanReason,
 	}
-}
-
-func chooseDisplayName(existing, requested string) string {
-	if existing != "" {
-		return existing
-	}
-	return requested
 }
 
 // FormatSpeakerLine formats a stable speaker line from linked gateway accounts.

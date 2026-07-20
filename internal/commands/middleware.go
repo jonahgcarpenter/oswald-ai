@@ -13,7 +13,7 @@ func RequireAdmin(auth Authorizer) Middleware {
 				if auth == nil {
 					return Result{Text: adminDeniedMessage}, nil
 				}
-				isAdmin, err := auth.IsAdmin(req.UserID)
+				isAdmin, err := auth.IsAdmin(req.Principal.CanonicalUserID)
 				if err != nil {
 					return Result{}, err
 				}

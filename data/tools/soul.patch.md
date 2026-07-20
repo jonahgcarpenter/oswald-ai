@@ -2,6 +2,8 @@
 
 ## Description
 
+Administrator-only. Add, replace, or remove one exact line in Oswald's deployment-global soul file.
+
 Patch the soul file that defines the live identity, personality, and standing directives that define you, Oswald, by adding, replacing, or removing exactly one line. Use this only when the user explicitly asks to change Oswald's identity, behavior, persona, or standing instructions. Line matching is by exact full-line text only; if the target or anchor is missing or matches multiple lines, the tool must fail instead of guessing.
 
 ## Parameters

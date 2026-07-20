@@ -9,9 +9,15 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
+// Authorizer checks deployment-global soul mutation privileges.
+type Authorizer interface {
+	IsAdmin(canonicalUserID string) (bool, error)
+}
+
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
 	meta := requestctx.MetadataFromContext(ctx)
-	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+	principal, _ := requestctx.PrincipalFromContext(ctx)
+	return log.Agent("agent.tool.soul", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 }
 
 // NewReadHandler returns a tool handler for the soul.read tool.
@@ -29,8 +35,19 @@ func NewReadHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 }
 
 // NewPatchHandler returns a tool handler for the soul.patch tool.
-func NewPatchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewPatchHandler(store *Store, authorizer Authorizer, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+		principal, ok := requestctx.PrincipalFromContext(ctx)
+		if !ok || !principal.Authenticated() || authorizer == nil {
+			return "", fmt.Errorf("soul.patch: authenticated administrator identity is required")
+		}
+		isAdmin, err := authorizer.IsAdmin(principal.CanonicalUserID)
+		if err != nil {
+			return "", fmt.Errorf("soul.patch: check administrator authorization: %w", err)
+		}
+		if !isAdmin {
+			return "", fmt.Errorf("soul.patch: administrator access is required")
+		}
 		operation := strings.TrimSpace(strings.ToLower(stringArg(args, "operation")))
 		if operation == "" {
 			return "", fmt.Errorf("soul.patch: operation is required")
@@ -48,16 +65,13 @@ func NewPatchHandler(store *Store, log *config.Logger) func(ctx context.Context,
 			return "", err
 		}
 
-		reqLog := requestLog(log, ctx)
-		reqLog.Info("agent.tool.soul.patched", "patched soul memory",
-			config.F("tool_name", "soul.patch"),
-			config.F("action", "patch"),
-			config.F("operation", operation),
-			config.F("position", position),
-		)
 		if err := store.Patch(operation, target, content, position, anchor); err != nil {
 			return "", fmt.Errorf("failed to patch soul file: %w", err)
 		}
+		reqLog := requestLog(log, ctx)
+		reqLog.Info("agent.tool.soul.patched", "patched soul memory",
+			config.F("tool_name", "soul.patch"), config.F("action", "patch"),
+			config.F("operation", operation), config.F("position", position))
 
 		switch operation {
 		case "replace":

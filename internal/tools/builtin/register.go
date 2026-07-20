@@ -14,7 +14,7 @@ import (
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, chatClient llm.Chatter, model string, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, soulAuthorizer soul.Authorizer, chatClient llm.Chatter, model string, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := reg.RegisterHandler("web.search", registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
@@ -42,17 +42,26 @@ func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store,
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.list"), config.F("path", config.DefaultAccountLinkPath))
 
-	if err := reg.RegisterHandler("memory.forget", registry.Handler(usermemory.NewForgetHandler(userMemStore, log))); err != nil {
+	if err := reg.RegisterHandler("memory.forget", registry.Handler(usermemory.NewForgetHandler(userMemStore, cfg.RetentionPolicy, log))); err != nil {
 		return fmt.Errorf("failed to initialize memory.forget tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultAccountLinkPath))
+
+	if err := reg.RegisterHandler("transcript.search", registry.Handler(usermemory.NewTranscriptSearchHandler(userMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize transcript.search tool: %w", err)
+	}
+
+	if err := reg.RegisterHandler("deployment_memory.propose", registry.Handler(usermemory.NewDeploymentMemoryProposeHandler(userMemStore, soulAuthorizer, log))); err != nil {
+		return fmt.Errorf("failed to initialize deployment_memory.propose tool: %w", err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured transcript tool", config.F("tool_name", "transcript.search"))
 
 	if err := reg.RegisterHandler("soul.read", registry.Handler(soul.NewReadHandler(soulStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.read tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.read"), config.F("path", config.DefaultSoulPath))
 
-	if err := reg.RegisterHandler("soul.patch", registry.Handler(soul.NewPatchHandler(soulStore, log))); err != nil {
+	if err := reg.RegisterHandler("soul.patch", registry.Handler(soul.NewPatchHandler(soulStore, soulAuthorizer, log))); err != nil {
 		return fmt.Errorf("failed to initialize soul.patch tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.patch"), config.F("path", config.DefaultSoulPath))

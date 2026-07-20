@@ -27,17 +27,35 @@ type ContextBudget struct {
 	Source          string
 }
 
-// PromptBudget returns the portion of the context window available for input
-// messages after reserving room for generation, tools, and a safety buffer.
+// UsableInputLimit returns the model input capacity after output and safety
+// reserves. An explicit prompt limit can further constrain that capacity.
+func (b ContextBudget) UsableInputLimit() int {
+	limit := b.PromptLimit
+	if b.ContextWindow > 0 {
+		contextLimit := b.ContextWindow - b.ResponseReserve
+		if contextLimit < 0 {
+			contextLimit = 0
+		}
+		if limit <= 0 || contextLimit < limit {
+			limit = contextLimit
+		}
+	}
+	limit -= b.SafetyMargin
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+// PromptBudget returns the legacy input budget, including its fixed tool
+// reserve. New request assembly should estimate the actual tool schemas with
+// EstimateRequest and use UsableInputLimit.
 func (b ContextBudget) PromptBudget() int {
-	if b.PromptLimit > 0 {
-		return b.PromptLimit
+	limit := b.UsableInputLimit() - b.ToolReserve
+	if limit < 0 {
+		return 0
 	}
-	promptBudget := b.ContextWindow - b.ResponseReserve - b.ToolReserve - b.SafetyMargin
-	if promptBudget < 256 {
-		return 256
-	}
-	return promptBudget
+	return limit
 }
 
 // FromModelDetails derives prompt-budget settings from discovered model metadata.
@@ -72,24 +90,32 @@ type Result struct {
 
 // EstimateTokens provides the shared token estimate used by the agent.
 func EstimateTokens(systemPrompt string, history []llm.ChatMessage, userPrompt string, userImageCount int, tools []llm.Tool) int {
-	total := estimateMessageTokens(llm.ChatMessage{Role: "system", Content: systemPrompt})
-	for _, msg := range history {
+	messages := make([]llm.ChatMessage, 0, len(history)+2)
+	messages = append(messages, llm.ChatMessage{Role: "system", Content: systemPrompt})
+	messages = append(messages, history...)
+	messages = append(messages, llm.ChatMessage{Role: "user", Content: userPrompt, Images: make([]llm.InputImage, userImageCount)})
+	return EstimateRequest(messages, tools)
+}
+
+// EstimateRequest estimates the input tokens consumed by messages and tool
+// schemas in one model request.
+func EstimateRequest(messages []llm.ChatMessage, tools []llm.Tool) int {
+	total := estimateToolTokens(tools)
+	for _, msg := range messages {
 		total += estimateMessageTokens(msg)
 	}
-	total += estimateMessageTokens(llm.ChatMessage{Role: "user", Content: userPrompt, Images: make([]llm.InputImage, userImageCount)})
-	total += estimateToolTokens(tools)
 	return total
 }
 
 func estimateMessageTokens(msg llm.ChatMessage) int {
-	contentLen := len(msg.Role) + len(msg.Content) + len(msg.Thinking) + len(msg.ToolName)
+	tokens := estimateTextTokens(msg.Role, msg.Content, msg.Thinking, msg.ToolName)
 	for _, tc := range msg.ToolCalls {
-		contentLen += len(tc.Function.Name)
+		tokens += estimateTextTokens(tc.Function.Name)
 		if encoded, err := json.Marshal(tc.Function.Arguments); err == nil {
-			contentLen += len(encoded)
+			tokens += estimateTextTokens(string(encoded))
 		}
 	}
-	return contentLen/4 + messageTokenOverhead + len(msg.Images)*imageTokenEstimate
+	return tokens + messageTokenOverhead + len(msg.Images)*imageTokenEstimate
 }
 
 func estimateToolTokens(tools []llm.Tool) int {
@@ -100,5 +126,20 @@ func estimateToolTokens(tools []llm.Tool) int {
 	if err != nil {
 		return len(tools) * 64
 	}
-	return len(encoded)/4 + 32
+	return estimateTextTokens(string(encoded)) + 32
+}
+
+func estimateTextTokens(values ...string) int {
+	asciiCount := 0
+	nonASCIIcount := 0
+	for _, value := range values {
+		for _, r := range value {
+			if r <= 0x7f {
+				asciiCount++
+			} else {
+				nonASCIIcount++
+			}
+		}
+	}
+	return (asciiCount+3)/4 + nonASCIIcount
 }

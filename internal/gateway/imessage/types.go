@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 )
 
 const (
@@ -103,6 +104,19 @@ type sendTextResponse struct {
 	} `json:"error,omitempty"`
 }
 
+type uploadAttachmentResponse struct {
+	Data struct {
+		Path string `json:"path"`
+	} `json:"data"`
+}
+
+type sendAttachmentRequest struct {
+	ChatGUID       string `json:"chatGuid"`
+	AttachmentGUID string `json:"attachmentGuid"`
+	Name           string `json:"name"`
+	TempGUID       string `json:"tempGuid"`
+}
+
 type messageLookupResponse struct {
 	Data  messageLookupData `json:"data"`
 	Error *struct {
@@ -181,4 +195,31 @@ func (g *Gateway) httpClient() *http.Client {
 		return g.HTTPClient
 	}
 	return &http.Client{Timeout: 15 * time.Second}
+}
+
+// HandlePrivacyInvalidation purges message and contact context owned by the invalidated tenant.
+func (g *Gateway) HandlePrivacyInvalidation(event privacyruntime.Event) {
+	sessions := make(map[string]bool, len(event.SessionIDs))
+	for _, sessionID := range event.SessionIDs {
+		sessions[sessionID] = true
+	}
+	senders := make(map[string]bool)
+	const prefix = "imessage:"
+	for _, external := range event.ExternalIdentities {
+		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
+			senders[external[len(prefix):]] = true
+		}
+	}
+	g.messageMu.Lock()
+	for id, ctx := range g.messageIndex {
+		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
+			delete(g.messageIndex, id)
+		}
+	}
+	g.messageMu.Unlock()
+	g.contactMu.Lock()
+	for senderID := range senders {
+		delete(g.contactNames, senderID)
+	}
+	g.contactMu.Unlock()
 }

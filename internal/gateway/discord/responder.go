@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
@@ -40,9 +41,30 @@ func (r *runtimeResponder) SendFallback(text string) error {
 	return err
 }
 
-func (r *runtimeResponder) SendCommandResponse(text string) error {
-	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID)
-	return err
+func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
+	if err := result.ValidateAttachments(); err != nil {
+		return err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID)
+		return err
+	}
+	for i := range attachments {
+		replyToID := ""
+		if i == 0 {
+			replyToID = r.replyToID
+		}
+		attachmentResult := commands.Result{Attachment: &attachments[i]}
+		if _, err := r.gateway.sendCommandAttachment(r.channelID, attachmentResult, replyToID); err != nil {
+			return err
+		}
+	}
+	if result.Text != "" {
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, "")
+		return err
+	}
+	return nil
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {

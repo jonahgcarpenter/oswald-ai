@@ -1,20 +1,46 @@
 package runtime
 
 import (
+	"context"
+
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
-	Broker   *broker.Broker
-	Commands *commands.Service
-	Access   AccessChecker
-	Log      *config.Logger
+	Broker           *broker.Broker
+	Commands         *commands.Service
+	Access           AccessChecker
+	Log              *config.Logger
+	Formation        FormationEnqueuer
+	Compaction       CompactionEnqueuer
+	DeploymentMemory DeploymentMemoryPublisher
+	PrivacyBus       *privacyruntime.Bus
+}
+
+// DeploymentMemoryPublisher activates request-staged global facts after delivery.
+type DeploymentMemoryPublisher interface {
+	PublishDeploymentMemories(context.Context, string, string, int64) (int, error)
+	DiscardDeploymentMemories(context.Context, string, string) error
+}
+
+// CompactionEnqueuer durably plans optional session compaction after delivery.
+type CompactionEnqueuer interface {
+	Enqueue(context.Context, string, usermemory.FormationSource) error
+	MarkDeliveryFailed(context.Context, string, int64) error
+}
+
+// FormationEnqueuer durably queues optional work after response delivery.
+type FormationEnqueuer interface {
+	Enqueue(context.Context, string, usermemory.FormationSource) error
 }
 
 // AccessChecker exposes gateway-neutral user moderation checks.
@@ -25,11 +51,11 @@ type AccessChecker interface {
 // Request is the gateway-neutral representation executed by the shared runtime.
 type Request struct {
 	RequestID   string
-	Gateway     string
 	ChatID      string
-	SenderID    string
+	Principal   identity.Principal
 	DisplayName string
 	SessionKey  string
+	ClientID    string
 
 	IsDirect     bool
 	IsGroup      bool
@@ -48,7 +74,7 @@ type Request struct {
 type Responder interface {
 	StartProcessing() (func(), error)
 	SendFallback(text string) error
-	SendCommandResponse(text string) error
+	SendCommandResponse(result commands.Result) error
 	SendAgentResponse(response *agent.AgentResponse) error
 	SendAgentError(text string) error
 }

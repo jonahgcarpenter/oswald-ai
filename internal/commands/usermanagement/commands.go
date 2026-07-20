@@ -7,6 +7,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 )
 
 const bannedMessage = "You are banned from using Oswald."
@@ -21,7 +23,7 @@ func New(users *accountlinking.Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{users: users, definition: commands.Definition{Name: "admin", Summary: "Grant admin access to a user.", Usage: "/admin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "ban", Summary: "Ban a user from using Oswald.", Usage: "/ban <canonical_id> [reason]", AdminOnly: true}},
-		&handler{users: users, definition: commands.Definition{Name: "deleteuser", Summary: "Delete a canonical user.", Usage: "/deleteuser <canonical_id>", AdminOnly: true}},
+		&handler{users: users, definition: commands.Definition{Name: "deleteuser", Summary: "Delete a canonical user.", Usage: "/deleteuser <canonical_id>", AdminOnly: true, UserExclusive: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unadmin", Summary: "Remove admin access from a user.", Usage: "/unadmin <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "unban", Summary: "Unban a user.", Usage: "/unban <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "user", Summary: "Show one canonical user.", Usage: "/user <canonical_id>", AdminOnly: true}},
@@ -43,6 +45,25 @@ func (h *handler) Definition() commands.Definition {
 	return h.definition
 }
 
+// ResolveFenceTargets fences the deletion target as well as the admin actor.
+func (h *handler) ResolveFenceTargets(_ context.Context, req commands.Request) ([]string, error) {
+	if req.Name != "deleteuser" || len(req.Args) != 1 {
+		return nil, nil
+	}
+	isAdmin, err := h.users.IsAdmin(req.Principal.CanonicalUserID)
+	if err != nil {
+		return nil, err
+	}
+	if !isAdmin {
+		return nil, fmt.Errorf("admin access required")
+	}
+	targetID := strings.TrimSpace(req.Args[0])
+	if targetID == "" {
+		return nil, nil
+	}
+	return []string{targetID}, nil
+}
+
 // Execute processes one admin command.
 func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
 	switch req.Name {
@@ -51,15 +72,15 @@ func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Res
 	case "user":
 		return h.handleUser(req.Args)
 	case "admin":
-		return h.handleSetAdmin(req.UserID, req.Args, true)
+		return h.handleSetAdmin(req.Principal, req.Args, true)
 	case "unadmin":
-		return h.handleSetAdmin(req.UserID, req.Args, false)
+		return h.handleSetAdmin(req.Principal, req.Args, false)
 	case "ban":
-		return h.handleBan(req.UserID, req.Args)
+		return h.handleBan(req.Principal, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(req.UserID, req.Args)
+		return h.handleDeleteUser(req.Principal, req.RequestID, req.Args)
 	case "unban":
-		return h.handleUnban(req.UserID, req.Args)
+		return h.handleUnban(req.Principal, req.Args)
 	default:
 		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}
@@ -97,12 +118,12 @@ func (h *handler) handleUser(args []string) (commands.Result, error) {
 	return commands.Result{Text: renderUser(user)}, nil
 }
 
-func (h *handler) handleSetAdmin(actorID string, args []string, isAdmin bool) (commands.Result, error) {
+func (h *handler) handleSetAdmin(principal identity.Principal, args []string, isAdmin bool) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.SetAdmin(actorID, targetID, isAdmin); err != nil {
+	if err := h.users.SetAdminAs(principal, targetID, isAdmin); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not update admin status: %v", err)}, nil
 	}
 	if isAdmin {
@@ -111,7 +132,7 @@ func (h *handler) handleSetAdmin(actorID string, args []string, isAdmin bool) (c
 	return commands.Result{Text: fmt.Sprintf("Removed admin from %s.", targetID)}, nil
 }
 
-func (h *handler) handleBan(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleBan(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) < 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
@@ -120,32 +141,34 @@ func (h *handler) handleBan(actorID string, args []string) (commands.Result, err
 	if len(args) > 1 {
 		reason = strings.Join(args[1:], " ")
 	}
-	if err := h.users.BanUser(actorID, targetID, reason); err != nil {
+	if err := h.users.BanUserAs(principal, targetID, reason); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not ban user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Banned %s.", targetID)}, nil
 }
 
-func (h *handler) handleUnban(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleUnban(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.UnbanUser(actorID, targetID); err != nil {
+	if err := h.users.UnbanUserAs(principal, targetID); err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not unban user: %v", err)}, nil
 	}
 	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
 }
 
-func (h *handler) handleDeleteUser(actorID string, args []string) (commands.Result, error) {
+func (h *handler) handleDeleteUser(principal identity.Principal, requestID string, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	if err := h.users.DeleteUser(actorID, targetID); err != nil {
+	invalidation, err := h.users.DeleteUserAsWithDurableInvalidation(principal, targetID, requestID)
+	if err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
 	}
-	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID)}, nil
+	event := privacyruntime.Event{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs, CloseConnections: true}
+	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
 }
 
 func renderAccounts(accounts []accountlinking.LinkedAccount) string {

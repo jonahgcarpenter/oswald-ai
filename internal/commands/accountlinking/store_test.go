@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -30,13 +32,13 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("expected same canonical user, got %q then %q", userID, again)
 	}
 
-	linked, err := links.LinkAccount(userID, "websocket", "alice-local", "")
+	localID, err := links.EnsureAccount("websocket", "alice-local", "")
 	if err != nil {
-		t.Fatalf("link websocket: %v", err)
+		t.Fatalf("ensure websocket: %v", err)
 	}
-	if linked.CanonicalUserID != userID || linked.LinkedAccount.Identifier != "alice-local" {
-		t.Fatalf("unexpected link result: %+v", linked)
-	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken})
 
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil {
@@ -68,28 +70,36 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
+	otherID, err := links.EnsureAccount("websocket", "alice-local", "Alice Local")
+	if err != nil {
+		t.Fatalf("ensure other account: %v", err)
+	}
 	service, err := commands.NewService(New(links)...)
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
 
-	response, err := executeAccountCommand(service, userID, "/connect")
+	initiator := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
+	confirmer := identity.Principal{CanonicalUserID: otherID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken}
+	response, err := executeAccountCommand(service, initiator, "/connect")
 	if err != nil {
 		t.Fatalf("start connect err=%v", err)
 	}
-	if !strings.Contains(response, "Connect an account.") || !strings.Contains(response, "Discord (connected)") {
+	code := regexp.MustCompile(`OSW-(?:[A-Z0-9]{4}-){4}[A-Z0-9]{4}`).FindString(response)
+	if code == "" {
 		t.Fatalf("unexpected connect menu: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/connect 2 alice-local")
+	response, err = executeAccountCommand(service, confirmer, "/connect "+code)
 	if err != nil {
 		t.Fatalf("connect err=%v", err)
 	}
-	if !strings.Contains(response, "Linked WebSocket as alice-local.") {
+	if !strings.Contains(response, "Accounts connected successfully") {
 		t.Fatalf("unexpected connect response: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/disconnect")
+	confirmer.CanonicalUserID = userID
+	response, err = executeAccountCommand(service, confirmer, "/disconnect")
 	if err != nil {
 		t.Fatalf("start disconnect err=%v", err)
 	}
@@ -97,7 +107,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 		t.Fatalf("unexpected disconnect menu: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/disconnect 2")
+	response, err = executeAccountCommand(service, confirmer, "/disconnect 2")
 	if err != nil {
 		t.Fatalf("disconnect err=%v", err)
 	}
@@ -106,29 +116,33 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	}
 }
 
-func executeAccountCommand(service *commands.Service, userID, raw string) (string, error) {
-	result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: raw})
+func executeAccountCommand(service *commands.Service, principal identity.Principal, raw string) (string, error) {
+	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, IsDirect: true, Raw: raw, RequestID: "req_test"})
 	return result.Text, err
 }
 
 func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
 	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
 	legacyPath := filepath.Join(dir, "links.json")
 
-	links := NewService(dbPath, memories, log)
+	links := NewService(dbPath, memories, nil, log)
 	links.legacyPath = legacyPath
 	userID, err := links.EnsureAccount("discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	if _, err := links.LinkAccount(userID, "websocket", "alice-local", ""); err != nil {
-		t.Fatalf("link websocket: %v", err)
+	localID, err := links.EnsureAccount("websocket", "alice-local", "")
+	if err != nil {
+		t.Fatalf("ensure websocket: %v", err)
 	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken})
 
-	reopened := NewService(dbPath, memories, log)
+	reopened := NewService(dbPath, memories, nil, log)
 	reopened.legacyPath = legacyPath
 	accounts, err := reopened.AccountsForUser(userID)
 	if err != nil {
@@ -142,8 +156,8 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 func TestServiceMigratesLegacyJSON(t *testing.T) {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
 	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
 	legacyPath := filepath.Join(dir, "links.json")
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -172,7 +186,7 @@ func TestServiceMigratesLegacyJSON(t *testing.T) {
 		t.Fatalf("write legacy: %v", err)
 	}
 
-	links := NewService(dbPath, memories, log)
+	links := NewService(dbPath, memories, nil, log)
 	links.legacyPath = legacyPath
 	if err := links.Initialize(); err != nil {
 		t.Fatalf("initialize: %v", err)
@@ -275,7 +289,7 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 	}
 }
 
-func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
+func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	links := newTestService(t)
 	targetID, err := links.EnsureAccount("discord", "300", "Target")
 	if err != nil {
@@ -288,31 +302,15 @@ func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
 	if err := links.SetAdmin(sourceID, sourceID, true); err != nil {
 		t.Fatalf("set source admin: %v", err)
 	}
-	if err := links.BanUser(targetID, sourceID, "merged ban"); err != nil {
-		t.Fatalf("ban source: %v", err)
-	}
-
-	result, err := links.LinkAccount(targetID, "websocket", "source", "")
-	if err != nil {
-		t.Fatalf("merge link: %v", err)
-	}
+	result := connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "300", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: sourceID, Gateway: "websocket", ExternalID: "source", Assurance: identity.AssuranceWebSocketSignedToken})
 	if !result.Merged {
 		t.Fatalf("expected merge result: %+v", result)
 	}
 	isAdmin, err := links.IsAdmin(targetID)
 	if err != nil || !isAdmin {
 		t.Fatalf("expected merged admin true, got %v err=%v", isAdmin, err)
-	}
-	isBanned, err := links.IsBanned(targetID)
-	if err != nil || !isBanned {
-		t.Fatalf("expected merged banned true, got %v err=%v", isBanned, err)
-	}
-	user, ok, err := links.User(targetID)
-	if err != nil || !ok {
-		t.Fatalf("merged user lookup ok=%v err=%v", ok, err)
-	}
-	if user.BanReason != "merged ban" {
-		t.Fatalf("expected ban metadata preserved, got %+v", user)
 	}
 }
 
@@ -326,9 +324,13 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	if _, err := links.LinkAccount(targetID, "websocket", "target-local", "Target Local"); err != nil {
-		t.Fatalf("link websocket: %v", err)
+	localID, err := links.EnsureAccount("websocket", "target-local", "Target Local")
+	if err != nil {
+		t.Fatalf("ensure websocket: %v", err)
 	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "500", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "target-local", Assurance: identity.AssuranceWebSocketSignedToken})
 	if err := links.SetAdmin(adminID, adminID, true); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}
@@ -399,8 +401,24 @@ func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	t.Cleanup(func() { memories.Close() })
+	links := NewService(dbPath, memories, nil, log)
+	t.Cleanup(func() { links.Close() })
 	links.legacyPath = filepath.Join(dir, "links.json")
 	return links
+}
+
+func connectTestAccounts(t *testing.T, links *Service, initiator, confirmer identity.Principal) ConfirmResult {
+	t.Helper()
+	challenge, err := links.CreateChallenge(context.Background(), initiator, "req_create")
+	if err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	result, err := links.ConfirmChallenge(context.Background(), confirmer, challenge.Code, "req_confirm")
+	if err != nil {
+		t.Fatalf("confirm challenge: %v", err)
+	}
+	return result
 }

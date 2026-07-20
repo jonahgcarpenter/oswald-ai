@@ -3,20 +3,35 @@ package gateway
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
+
+const testWebSocketSigningKey = "0123456789abcdef0123456789abcdef"
 
 func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), usermemory.NewStore(filepath.Join(dir, "users"), log), log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+	authDB, err := database.Open(dbPath, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer authDB.Close() // nolint:errcheck
+	auth, err := websocketauth.New(authDB.SQL(), testWebSocketSigningKey, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
-	services, err := NewServicesFromConfig(&config.Config{Port: "8000"}, links, runtimeDeps, log)
+	services, err := NewServicesFromConfig(&config.Config{Port: "8000", WebSocketAuthSigningKey: testWebSocketSigningKey, WebSocketAuthMaxTokenTTL: 15 * time.Minute}, links, auth, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("default services: %v", err)
 	}
@@ -24,11 +39,22 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 		t.Fatalf("unexpected default services %q", serviceNames(services))
 	}
 
-	services, err = NewServicesFromConfig(&config.Config{Port: "8000", DiscordToken: "token", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}, links, runtimeDeps, log)
+	services, err = NewServicesFromConfig(&config.Config{Port: "8000", WebSocketAuthSigningKey: testWebSocketSigningKey, WebSocketAuthMaxTokenTTL: 15 * time.Minute, DiscordToken: "token", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}, links, auth, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("configured services: %v", err)
 	}
 	if serviceNames(services) != "Websocket, Discord, iMessage" {
 		t.Fatalf("unexpected configured services %q", serviceNames(services))
+	}
+}
+
+func TestNewServicesFromConfigRequiresWebSocketAuthentication(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "oswald.db")
+	links := accountlinking.NewService(dbPath, usermemory.NewStore(dbPath, log), nil, log)
+
+	if _, err := NewServicesFromConfig(&config.Config{Port: "8000", WebSocketAuthMaxTokenTTL: 15 * time.Minute}, links, nil, gatewayruntime.Dependencies{Log: log}, log); err == nil {
+		t.Fatal("expected missing websocket signing key error")
 	}
 }

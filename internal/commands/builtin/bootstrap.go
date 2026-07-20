@@ -2,13 +2,20 @@ package builtin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	clientauthcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/clientauth"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
+	privacycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/privacy"
+	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	privacyservice "github.com/jonahgcarpenter/oswald-ai/internal/privacy"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // MCPDeps contains optional dependencies for MCP management commands.
@@ -17,12 +24,50 @@ type MCPDeps struct {
 	Manager *mcpmanager.Manager
 }
 
+// PrivacyDeps contains privacy policy and logging dependencies.
+type PrivacyDeps struct {
+	Policy config.RetentionPolicy
+	Logger *config.Logger
+}
+
+// ClientAuthDeps contains dependencies for WebSocket client authorization commands.
+type ClientAuthDeps struct {
+	Service    clientauthcommands.Service
+	Authorizer clientauthcommands.Authorizer
+}
+
 // NewService creates the application command service with all built-in commands.
-func NewService(users *accountlinking.Service, optionalMCP ...MCPDeps) (*commands.Service, error) {
+func NewService(users *accountlinking.Service, memory *usermemory.Store, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	return NewServiceWithPrivacy(users, memory, PrivacyDeps{}, optionalMCP...)
+}
+
+// NewServiceWithPrivacy creates the command service with the privacy policy injected.
+func NewServiceWithPrivacy(users *accountlinking.Service, memory *usermemory.Store, privacyDeps PrivacyDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	return NewServiceWithPrivacyAndClientAuth(users, memory, privacyDeps, ClientAuthDeps{}, optionalMCP...)
+}
+
+// NewServiceWithPrivacyAndClientAuth creates the full command service.
+func NewServiceWithPrivacyAndClientAuth(users *accountlinking.Service, memory *usermemory.Store, privacyDeps PrivacyDeps, clientAuth ClientAuthDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	if memory == nil {
+		return nil, fmt.Errorf("user memory store is required for built-in commands")
+	}
 	help := &helpHandler{auth: users}
-	registrations := []commands.Command{{Handler: help}}
+	registrations := []commands.Command{{Handler: help}, {Handler: sessioncommands.New(memory)}}
+	if users != nil {
+		privacyService, err := privacyservice.NewService(users, memory, privacyDeps.Policy, privacyDeps.Logger)
+		if err != nil {
+			return nil, err
+		}
+		registrations = append(registrations, commands.Command{Handler: privacycommands.New(privacyService)})
+	}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
+	}
+	if clientAuth.Service != nil {
+		registrations = append(registrations,
+			commands.Command{Handler: clientauthcommands.New(clientAuth.Service, clientAuth.Authorizer)},
+			commands.Command{Handler: clientauthcommands.NewBootstrap(clientAuth.Service)},
+		)
 	}
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})
@@ -48,7 +93,7 @@ func (h helpHandler) Definition() commands.Definition {
 }
 
 func (h helpHandler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
-	definitions, err := h.visibleDefinitions(ctx, req.UserID)
+	definitions, err := h.visibleDefinitions(ctx, req.Principal.CanonicalUserID)
 	if err != nil {
 		return commands.Result{}, err
 	}

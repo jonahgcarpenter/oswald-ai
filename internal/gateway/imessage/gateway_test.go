@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,12 +21,45 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
+
+func TestPrivacyInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
+	g := &Gateway{
+		messageIndex: map[string]messageContext{
+			"session": {SessionKey: "imessage:chat:one", SenderID: "+15550000001"},
+			"sender":  {SessionKey: "imessage:other:one", SenderID: "+15550000001"},
+			"foreign": {SessionKey: "imessage:chat:two", SenderID: "+15550000002"},
+		},
+		contactNames: map[string]contactNameCacheEntry{
+			"+15550000001": {DisplayName: "One"},
+			"+15550000002": {DisplayName: "Two"},
+		},
+	}
+	g.HandlePrivacyInvalidation(privacyruntime.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
+	if _, ok := g.messageIndex["session"]; ok {
+		t.Fatal("matching session message context remained")
+	}
+	if _, ok := g.messageIndex["sender"]; ok {
+		t.Fatal("matching sender message context remained")
+	}
+	if _, ok := g.messageIndex["foreign"]; !ok || len(g.messageIndex) != 1 {
+		t.Fatalf("foreign message context was purged: %+v", g.messageIndex)
+	}
+	if _, ok := g.contactNames["+15550000001"]; ok {
+		t.Fatal("matching contact cache entry remained")
+	}
+	if _, ok := g.contactNames["+15550000002"]; !ok || len(g.contactNames) != 1 {
+		t.Fatalf("foreign contact cache entry was purged: %+v", g.contactNames)
+	}
+}
 
 func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
@@ -44,7 +79,7 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello imessage" {
+	if last.Content != "hello imessage" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if bb.sentMessage() != "imessage response" {
@@ -55,6 +90,141 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	}
 	if _, ok := g.lookupMessage("sent-1"); !ok {
 		t.Fatal("expected sent bot message remembered")
+	}
+	principal := chat.lastPrincipal()
+	if principal.CanonicalUserID == "" || principal.Gateway != "imessage" || principal.ExternalID != "+15551234567" || principal.Assurance != identity.AssuranceBlueBubblesWebhook {
+		t.Fatalf("unexpected principal: %+v", principal)
+	}
+}
+
+func TestIMessageCommandAttachmentUploadAndSend(t *testing.T) {
+	var uploadFilename, uploadMIME string
+	var uploadData []byte
+	var sent sendAttachmentRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("password") != "pw" {
+			t.Fatalf("missing BlueBubbles password")
+		}
+		switch r.URL.Path {
+		case "/api/v1/attachment/upload":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+				t.Fatalf("parse upload: %v", err)
+			}
+			file, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatalf("read attachment: %v", err)
+			}
+			defer file.Close()
+			uploadFilename = header.Filename
+			uploadMIME = header.Header.Get("Content-Type")
+			uploadData, err = io.ReadAll(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{"data":{"path":"upload-id/export.json"}}`))
+		case "/api/v1/message/attachment":
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("unexpected send content type %q", r.Header.Get("Content-Type"))
+			}
+			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+				t.Fatalf("decode attachment send: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadFilename != "export.json" || uploadMIME != "application/json" || string(uploadData) != "private-content" {
+		t.Fatalf("unexpected upload filename=%q mime=%q data=%q", uploadFilename, uploadMIME, uploadData)
+	}
+	if sent.ChatGUID != "chat-1" || sent.AttachmentGUID != "upload-id/export.json" || sent.Name != "export.json" || sent.TempGUID == "" {
+		t.Fatalf("unexpected attachment send: %+v", sent)
+	}
+}
+
+func TestIMessageCommandAttachmentProviderFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		failPath  string
+		wantCalls int
+	}{
+		{name: "upload", failPath: "/api/v1/attachment/upload", wantCalls: 1},
+		{name: "send", failPath: "/api/v1/message/attachment", wantCalls: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path == tt.failPath {
+					http.Error(w, "private-content", http.StatusBadGateway)
+					return
+				}
+				_, _ = w.Write([]byte(`{"data":{"path":"upload-id/export.json"}}`))
+			}))
+			defer server.Close()
+			g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+			err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+			if err == nil || strings.Contains(err.Error(), "private-content") || calls != tt.wantCalls {
+				t.Fatalf("error=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/message/text":
+			calls = append(calls, "text")
+			_, _ = w.Write([]byte(`{"data":{"guid":"text-1"}}`))
+		case "/api/v1/attachment/upload":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+				t.Fatal(err)
+			}
+			file, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = file.Close()
+			calls = append(calls, "upload:"+header.Filename)
+			if header.Filename == "part002" {
+				http.Error(w, "failed", http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"path":"uploaded/` + header.Filename + `"}}`))
+		case "/api/v1/message/attachment":
+			var sent sendAttachmentRequest
+			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, "send:"+sent.Name)
+			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-1"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1"}
+	err := responder.SendCommandResponse(commands.Result{Text: "join in order", Attachments: []commands.Attachment{
+		{Filename: "part001", MIMEType: "application/octet-stream", Data: []byte("first")},
+		{Filename: "part002", MIMEType: "application/octet-stream", Data: []byte("second")},
+		{Filename: "part003", MIMEType: "application/octet-stream", Data: []byte("third")},
+	}})
+	if err == nil {
+		t.Fatal("second-part failure was ignored")
+	}
+	want := []string{"upload:part001", "send:part001", "upload:part002"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want %v", calls, want)
 	}
 }
 
@@ -162,7 +332,7 @@ func TestIMessageWebhookDirectMessageRoutesAndReplies(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello from webhook" {
+	if last.Content != "hello from webhook" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if !bb.waitForSentCount(1) {
@@ -186,7 +356,7 @@ func TestIMessageWebhookGroupMentionRoutesCleanedText(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello" {
+	if last.Content != "hello" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 }
@@ -586,18 +756,26 @@ func TestChooseContactDisplayNameFallbackOrder(t *testing.T) {
 }
 
 type imFakeChatter struct {
-	mu       sync.Mutex
-	requests []llm.ChatRequest
+	mu        sync.Mutex
+	requests  []llm.ChatRequest
+	principal identity.Principal
 }
 
-func (f *imFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *imFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
+	f.principal, _ = requestctx.PrincipalFromContext(ctx)
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "imessage response"}}, nil
+}
+
+func (f *imFakeChatter) lastPrincipal() identity.Principal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.principal
 }
 
 func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
@@ -768,8 +946,9 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	links := accountlinking.NewService(dbPath, memories, nil, log)
 	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
 	if err := soulStore.Write("You are Oswald."); err != nil {
 		t.Fatalf("write soul: %v", err)
