@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
 
@@ -101,7 +102,7 @@ func TestDeploymentMemoryHandlerAcceptsAdministratorStatement(t *testing.T) {
 	if sourceKind != deploymentSourceAdministrator || callID != "" || serverID != "" {
 		t.Fatalf("source kind=%q call=%q server=%q", sourceKind, callID, serverID)
 	}
-	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "admin", profile.Generation, "Oswald is deployed as version v2.4.0.", "Noted.", []string{"deployment_memory.propose"}, time.Hour)
+	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "admin", profile.Generation, "Oswald is deployed as version v2.4.0.", "Noted.", []string{toolnames.GlobalMemorySave}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

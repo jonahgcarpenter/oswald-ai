@@ -9,12 +9,12 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 - `web.search`
 - `time.current`
-- `memory.save`
-- `memory.search`
-- `memory.list`
-- `memory.forget`
-- `transcript.search`
-- `deployment_memory.propose`
+- `user_memory_save`
+- `user_memory_search`
+- `user_memory_list`
+- `user_memory_forget`
+- `session_transcript_search`
+- `global_memory_save`
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Remote MCP tools are not filtered for read-only behavior.
 
@@ -93,6 +93,8 @@ Database startup serializes schema initialization and applies this exact registr
 | `v12` | `websocket_device_authorization` | Add durable device approvals, revocable rotating client credentials, and fresh-install administrator bootstrap state. |
 | `v13` | `confidence_evidence_memory` | Add stable memory claims, evidence contributions, confidence reinforcement, and retire conversational memory approval. |
 | `v14` | `deployment_memory` | Add evidence-backed global deployment candidates, canonical facts, and exact MCP provenance. |
+
+`v14` exists only on the unreleased `v4-development` branch and is intentionally being replaced before v4 ships. Databases that recorded an earlier development checksum for v14 must be reset; do not bypass checksum validation or edit the migration ledger manually.
 
 The registry must be contiguous and have unique non-empty names and definitions. The database stores each version, name, SHA-256 checksum of the frozen definition, and application time in `schema_migration_versions`. Startup rejects unknown versions and any name/checksum drift. Exact symbolic checksums emitted by the first ordered framework for `v1` through `v6` are accepted only as known legacy values; after all rows pass validation they are removed and those frozen idempotent migrations are reapplied and recorded with definition checksums.
 
@@ -215,7 +217,7 @@ Oswald keeps four distinct memory layers.
 
 - Deployment memory is factual lower-authority reference data, separate from soul policy and personality
 - A successful non-discovery tool call from any globally configured MCP server may become same-request evidence regardless of which tenant triggered it; user-scoped MCP results never qualify
-- `deployment_memory.propose` is default-visible so authenticated administrators can cite direct statements; server-side checks otherwise require qualifying same-request global MCP evidence
+- `global_memory_save` is default-visible so authenticated administrators can cite direct statements; server-side checks otherwise require qualifying same-request global MCP evidence
 - A proposal must cite an exact normalized excerpt from either the identified same-request global MCP result or the current authenticated administrator's direct statement; the model judges whether the source concerns Oswald
 - Raw MCP results remain request-local. Canonical storage retains only selected evidence, SHA-256 argument/result digests, server/tool identity, confidence, claim identity, and publication provenance
 - Proposals remain staged until successful gateway delivery. Failed delivery deletes the staged candidate and evidence
@@ -230,7 +232,7 @@ Oswald keeps four distinct memory layers.
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Eligible approved long-term identity, communication preference, durable preference, and environment facts are compiled into a deterministic profile capped at 2000 bytes
-- Canonical memory publication occurs only from policy-approved candidates. Formation paths create proposed, approved, or rejected runtime candidates; `pending_confirmation` remains only as legacy schema compatibility normalized by `v13`. `memory.save` stages an explicitly requested approved candidate for publication after its source turn is persisted
+- Canonical memory publication occurs only from policy-approved candidates. Formation paths create proposed, approved, or rejected runtime candidates; `pending_confirmation` remains only as legacy schema compatibility normalized by `v13`. `user_memory_save` stages an explicitly requested approved candidate for publication after its source turn is persisted
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
@@ -243,15 +245,15 @@ Oswald keeps four distinct memory layers.
 - Model inference uses exact whole-turn evidence but may express a cautious implication not lexically present in the turn. Third-party, public, tool-derived, quoted, hypothetical, and instruction-like content remains disallowed
 - Stable claim slot/value identity consolidates supporting turns into one memory. Independent evidence combines confidence using bounded noisy-OR; correlated same-session inferred evidence is discounted, retries are idempotent, and stronger direct evidence upgrades authority without losing prior evidence
 - Inferred memories are active only for confidence-tiered query-relevant recall and are explicitly labeled `uncertain_inference`; they cannot enter a tenant profile until direct evidence upgrades source authority
-- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Explicit `memory.save` remains source-turn-fenced and resolved corrections supersede atomically
+- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Explicit `user_memory_save` remains source-turn-fenced and resolved corrections supersede atomically
 - Conflicting claim values use monotonic authority and confidence: stronger evidence may supersede a weaker active claim, while weak inference cannot replace a stronger direct fact
 - Canonical publication, supersession, evidence, audit history, profile advancement, and a durable derived-index outbox entry commit in one SQLite transaction; FTS/vector tables are derived asynchronously rather than part of canonical publication
-- `memory.forget` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
+- `user_memory_forget` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
-- `memory.search` uses the same hybrid engine with a larger output cap for deeper investigation; `memory.list`, `memory.save`, and `memory.forget` remain explicit tools
-- Every `memory.*` handler and `transcript.search` requires a valid authenticated request principal and derives ownership from its canonical user
+- `user_memory_search` uses the same hybrid engine with a larger output cap for deeper investigation; `user_memory_list`, `user_memory_save`, and `user_memory_forget` remain explicit tools
+- Every `user_memory_*` handler and `session_transcript_search` requires a valid authenticated request principal and derives ownership from its canonical user
 - Addressed ordinary group turns continue to use the authenticated sender's private memory by explicit product decision; group chats do not create a shared memory tenant
 
 ### Canonical and Derived State
@@ -264,7 +266,7 @@ Oswald keeps four distinct memory layers.
 - Before publication, validation checks the physical vector dimension when applicable, exact canonical expected count, physical indexed count, canonical-user ownership joins, active/approved/unexpired memory eligibility, delivered active-generation transcript eligibility, and vector model identity
 - Publication retires the old live pointer and promotes the validated shadow revision atomically. Failed validation marks only the shadow failed, so the old live revision remains available
 - Maintenance removes orphan/non-canonical rows, marks missing/corrupt/coverage-mismatched live revisions unhealthy, and drops only internally generated retired or failed tables after the configured retention period
-- Lexical and semantic channels fail independently. Automatic recall and `memory.search` continue with the available channel and log the unavailable channel as degraded
+- Lexical and semantic channels fail independently. Automatic recall and `user_memory_search` continue with the available channel and log the unavailable channel as degraded
 - During an embedding-model rebuild, semantic queries continue to embed with the old live revision's model until replacement publication; that old model must remain accessible from the provider
 - The derived-index worker probes the configured embedding dimension until its first success, caches it for the process lifetime, and requires an Oswald restart to recognize gateway-side embedding route changes
 
@@ -333,7 +335,7 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - Stored in SQLite table `session_turns`
 - Keyed by gateway-provided `SessionKey` and canonical user ID
 - Stores only completed final user/assistant turn pairs
-- Successful gateway delivery is recorded separately; only delivered turns are eligible for compaction and `transcript.search`
+- Successful gateway delivery is recorded separately; only delivered turns are eligible for compaction and `session_transcript_search`
 - A proactive background planner creates durable, idempotent fixed-range compaction jobs when delivered history grows past its count or prompt-budget threshold, while always leaving at least eight newest complete exchanges outside the planned range
 - One serialized worker leases and retries compaction jobs, reconciles recoverable work at startup, periodically scans active sessions, and redrives bounded failed work. Unlike formation, malformed compaction output is not classified as terminal and follows the ordinary bounded retry/dead-job redrive path
 - Each compaction publishes a new immutable structured checkpoint containing narrative, open tasks, commitments, entities, decisions, topic tags, covered turn range, generation model/version, source digest, and ordered immutable source-turn links
@@ -341,8 +343,8 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - When budget permits, the agent injects the latest checkpoint only as explicitly labeled untrusted historical reference data, followed by a minimum recent verbatim tail and then any additional complete `user`/`assistant` exchanges that fit
 - If the budget cannot hold all optional context, selection preserves whole exchanges, reserves the minimum recent tail before the summary, and then considers durable recall and additional history; required policy, profile, and current turn still take precedence
 - Compaction does not delete covered turns. Delivered transcripts normally remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable, except when privacy operations or forgotten-memory grace expiry scrub linked source exchanges
-- `transcript.search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
-- Transcript search is intentionally current-session and active-generation only; it is separate from `memory.search`, which searches stable durable user facts
+- `session_transcript_search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
+- Transcript search is intentionally current-session and active-generation only; it is separate from `user_memory_search`, which searches stable durable user facts
 - Before publishing a checkpoint, the same model artifact may identify source-turn-specific durable-memory candidates from exact user evidence. These pre-compaction candidates are staged idempotently as proposals only and never directly activate memory
 - Recent completed exchanges newer than the latest summary boundary are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
 - Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
@@ -509,13 +511,13 @@ Current builtin tools:
 
 - `web.search` — SearXNG-backed search
 - `time.current` — authoritative current date and time in a requested IANA timezone
-- `memory.save` — stage facts only when the current authenticated user explicitly asks Oswald to remember or correct them
-- `memory.search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
-- `memory.list` — inspect active stored user facts
-- `memory.forget` — remove stored user facts
-- `transcript.search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
-- `deployment_memory.propose` — stage an exact evidence-backed global fact from a successful global MCP result, or from the current authenticated administrator's direct statement
-An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `transcript.search`; deeper durable retrieval and all memory mutation remain model-directed through `memory.search`, `memory.list`, `memory.save`, and `memory.forget`.
+- `user_memory_save` — stage facts only when the current authenticated user explicitly asks Oswald to remember or correct them
+- `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
+- `user_memory_list` — inspect active stored user facts
+- `user_memory_forget` — remove stored user facts
+- `session_transcript_search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
+- `global_memory_save` — stage an exact evidence-backed global fact from a successful global MCP result, or from the current authenticated administrator's direct statement
+An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `session_transcript_search`; deeper durable retrieval and all user-memory mutation remain model-directed through `user_memory_search`, `user_memory_list`, `user_memory_save`, and `user_memory_forget`.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
@@ -524,7 +526,8 @@ Optional external tools:
 - MCP server configuration is optional, but the subsystem is initialized unconditionally and `MCP_CONFIG_ENCRYPTION_KEY` is required at startup
 - MCP-discovered tools are not included in the default LLM tool list; `<server>.tools` exposes returned matches for the current request, and eligible successful recent tools may be pre-exposed for continuity
 - Global MCP servers are visible to all users; user MCP servers are visible only to their owning canonical user
-- `deployment_memory.propose` is default-visible. Successful global MCP results are eligible evidence for every authenticated user; an omitted tool-call ID is accepted only for exact current-message evidence from an authenticated administrator. Discovery results, user MCP results, and ordinary user text are ineligible
+- `global_memory_save` is default-visible. Successful global MCP results are eligible evidence for every authenticated user; an omitted tool-call ID is accepted only for exact current-message evidence from an authenticated administrator. Discovery results, user MCP results, and ordinary user text are ineligible
+- The final global-memory family reserves `global_memory_search`, `global_memory_list`, and `global_memory_forget`; they are not advertised until #84 supplies handlers and schemas
 
 ### Tool Registry
 
@@ -900,11 +903,11 @@ Changes apply on the next request because the soul file is read fresh each time.
 ## Known Limitations
 
 - Session summaries are model-generated continuity aids and may omit or misstate details; they are untrusted, and exact delivered details are available only while the active generation's transcript is retained
-- `transcript.search` is lexical FTS5 search limited to the authenticated current session's active generation; it does not search reset, expired, or other sessions
+- `session_transcript_search` is lexical FTS5 search limited to the authenticated current session's active generation; it does not search reset, expired, or other sessions
 - The gateway interface has no graceful stop method; gateway listeners remain active until process exit after worker shutdown begins
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Only eight builtin model tools ship locally; `deployment_memory.propose` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Only eight builtin model tools ship locally; `global_memory_save` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
 - Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication

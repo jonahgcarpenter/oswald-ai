@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -26,6 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -60,6 +62,27 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	wantUser := "new prompt\n\n[Attached 1 image(s)]"
 	if turns[0].UserText != wantUser || turns[0].AssistantText != "final answer" {
 		t.Fatalf("unexpected stored turn: %+v", turns[0])
+	}
+}
+
+func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
+	userPayload := toolStreamPayload(toolnames.UserMemorySave, map[string]interface{}{"statement": "The user prefers concise replies.", "evidence": "I prefer concise replies"}, "accepted", time.Millisecond, false)
+	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "save" || userPayload.GlobalMemory != nil {
+		t.Fatalf("unexpected user memory payload: %+v", userPayload)
+	}
+	globalPayload := toolStreamPayload(toolnames.GlobalMemorySave, map[string]interface{}{"statement": "Oswald is written in Go.", "evidence": "language: Go"}, "accepted", time.Millisecond, false)
+	if globalPayload.GlobalMemory == nil || globalPayload.GlobalMemory.Action != "save" || globalPayload.UserMemory != nil {
+		t.Fatalf("unexpected global memory payload: %+v", globalPayload)
+	}
+
+	for _, payload := range []*ToolStreamPayload{userPayload, globalPayload} {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), `"memory":`) {
+			t.Fatalf("legacy memory stream key was emitted: %s", encoded)
+		}
 	}
 }
 
@@ -832,7 +855,7 @@ func TestAgentKeepsDefaultVisibleDeploymentMemoryAfterGlobalMCPResult(t *testing
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterSpec(registry.Spec{Name: "deployment_memory.propose", Source: registry.ToolSourceBuiltin}); err != nil {
+	if err := reg.RegisterSpec(registry.Spec{Name: toolnames.GlobalMemorySave, Source: registry.ToolSourceBuiltin}); err != nil {
 		t.Fatal(err)
 	}
 	agent, store := newTestAgent(t, chat, nil, reg)
@@ -846,7 +869,7 @@ func TestAgentKeepsDefaultVisibleDeploymentMemoryAfterGlobalMCPResult(t *testing
 		t.Fatalf("request count=%d", len(requests))
 	}
 	for i, request := range requests {
-		if !requestHasTool(request, "deployment_memory.propose") {
+		if !requestHasTool(request, toolnames.GlobalMemorySave) {
 			t.Fatalf("deployment proposal missing from request %d: %+v", i, toolNames(request))
 		}
 	}

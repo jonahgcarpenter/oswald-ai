@@ -1,8 +1,8 @@
-# deployment_memory.propose
+# global_memory_save
 
 ## Description
 
-Propose an evidence-backed global fact about Oswald. Any user may cite a successful tool call from a globally configured MCP server in this request and an exact excerpt from its result. An authenticated administrator may instead omit source_tool_call_id and cite an exact excerpt from their current message. Use this for implementation, deployment, version, architecture, and capability facts that should be available to every tenant. Never use ordinary user text, user-owned MCP output, instructions, credentials, secrets, or unrelated facts. Publication occurs only after the response is delivered.
+Stage an evidence-backed global fact about Oswald. Any user may cite a successful tool call from a globally configured MCP server in this request and an exact excerpt from its result. An authenticated administrator may instead omit source_tool_call_id and cite an exact excerpt from their current message. Use this for implementation, deployment, version, architecture, and capability facts that should be available to every tenant. Never use ordinary user text, user-owned MCP output, instructions, credentials, secrets, or unrelated facts. Publication occurs only after the response is delivered.
 
 ## Parameters
 

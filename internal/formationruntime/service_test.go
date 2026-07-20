@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -169,7 +170,7 @@ func TestServicePublishesExplicitToolCandidateAfterTurnPersistence(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "explicit", Source: usermemory.FormationSource{RequestID: "req", SessionID: "session", ToolName: "memory.save"}})
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "explicit", Source: usermemory.FormationSource{RequestID: "req", SessionID: "session", ToolName: toolnames.UserMemorySave}})
 	if err != nil {
 		t.Fatal(err)
 	}

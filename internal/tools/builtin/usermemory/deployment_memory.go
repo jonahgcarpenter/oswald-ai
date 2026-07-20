@@ -14,6 +14,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 )
 
 const deploymentMemoryPromptLimit = 6000
@@ -54,7 +55,7 @@ type DeploymentMemoryProposal struct {
 // statement evidence for publication after successful response delivery.
 func NewDeploymentMemoryProposeHandler(store *Store, authorizer DeploymentMemoryAuthorizer, log *config.Logger) func(context.Context, map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		principal, err := authenticatedPrincipal(ctx, "deployment_memory.propose")
+		principal, err := authenticatedPrincipal(ctx, toolnames.GlobalMemorySave)
 		if err != nil {
 			return "", err
 		}
@@ -66,24 +67,24 @@ func NewDeploymentMemoryProposeHandler(store *Store, authorizer DeploymentMemory
 		if callID != "" {
 			runtime := requestctx.ToolExposerFromContext(ctx)
 			if runtime == nil {
-				return "", fmt.Errorf("deployment_memory.propose: request-local tool evidence is unavailable")
+				return "", fmt.Errorf("%s: request-local tool evidence is unavailable", toolnames.GlobalMemorySave)
 			}
 			var ok bool
 			evidenceSource, ok = runtime.GlobalToolEvidence(callID)
 			if !ok {
-				return "", fmt.Errorf("deployment_memory.propose: source tool call is not a successful global MCP result from this request")
+				return "", fmt.Errorf("%s: source tool call is not a successful global MCP result from this request", toolnames.GlobalMemorySave)
 			}
 			sourceText = evidenceSource.Result
 		} else {
 			if authorizer == nil {
-				return "", fmt.Errorf("deployment_memory.propose: source_tool_call_id is required unless the current user is an administrator")
+				return "", fmt.Errorf("%s: source_tool_call_id is required unless the current user is an administrator", toolnames.GlobalMemorySave)
 			}
 			isAdmin, authErr := authorizer.IsAdmin(principal.CanonicalUserID)
 			if authErr != nil {
-				return "", fmt.Errorf("deployment_memory.propose: check administrator authorization: %w", authErr)
+				return "", fmt.Errorf("%s: check administrator authorization: %w", toolnames.GlobalMemorySave, authErr)
 			}
 			if !isAdmin {
-				return "", fmt.Errorf("deployment_memory.propose: source_tool_call_id is required unless the current user is an administrator")
+				return "", fmt.Errorf("%s: source_tool_call_id is required unless the current user is an administrator", toolnames.GlobalMemorySave)
 			}
 			sourceKind = deploymentSourceAdministrator
 			sourceText = meta.CurrentUserText
@@ -114,30 +115,30 @@ func NewDeploymentMemoryProposeHandler(store *Store, authorizer DeploymentMemory
 		if _, err := store.StageDeploymentMemory(ctx, proposal); err != nil {
 			return "", err
 		}
-		requestLog(log, ctx).Info("agent.tool.deployment_memory.staged", "staged deployment memory proposal",
-			config.F("tool_name", "deployment_memory.propose"), config.F("source_kind", sourceKind), config.F("source_tool_name", evidenceSource.ToolName), config.F("status", "ok"))
+		requestLog(log, ctx).Info("agent.tool.global_memory.staged", "staged global memory proposal",
+			config.F("tool_name", toolnames.GlobalMemorySave), config.F("source_kind", sourceKind), config.F("source_tool_name", evidenceSource.ToolName), config.F("status", "ok"))
 		return "Accepted evidence-backed deployment memory. It will become global after this response is delivered.", nil
 	}
 }
 
 func validateDeploymentProposal(statement, evidence, result, claimSlot, claimValue string, confidence float64, importance int) error {
 	if statement == "" || utf8.RuneCountInString(statement) > 1000 {
-		return fmt.Errorf("deployment_memory.propose: statement must contain 1..1000 characters")
+		return fmt.Errorf("%s: statement must contain 1..1000 characters", toolnames.GlobalMemorySave)
 	}
 	if evidence == "" || utf8.RuneCountInString(evidence) > 2000 || !strings.Contains(normalizeProfileText(result), evidence) {
-		return fmt.Errorf("deployment_memory.propose: evidence must be an exact normalized excerpt of the cited source")
+		return fmt.Errorf("%s: evidence must be an exact normalized excerpt of the cited source", toolnames.GlobalMemorySave)
 	}
 	if claimSlot == "" || claimValue == "" || utf8.RuneCountInString(claimSlot) > 128 || utf8.RuneCountInString(claimValue) > 256 {
-		return fmt.Errorf("deployment_memory.propose: claim_slot and claim_value are required and bounded")
+		return fmt.Errorf("%s: claim_slot and claim_value are required and bounded", toolnames.GlobalMemorySave)
 	}
 	if math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0.35 || confidence > 1 {
-		return fmt.Errorf("deployment_memory.propose: confidence must be between 0.35 and 1")
+		return fmt.Errorf("%s: confidence must be between 0.35 and 1", toolnames.GlobalMemorySave)
 	}
 	if importance < 1 || importance > 5 {
-		return fmt.Errorf("deployment_memory.propose: importance must be between 1 and 5")
+		return fmt.Errorf("%s: importance must be between 1 and 5", toolnames.GlobalMemorySave)
 	}
 	if unsafeDeploymentMemory(statement + " " + evidence) {
-		return fmt.Errorf("deployment_memory.propose: instructions or sensitive credentials cannot become deployment memory")
+		return fmt.Errorf("%s: instructions or sensitive credentials cannot become global memory", toolnames.GlobalMemorySave)
 	}
 	return nil
 }

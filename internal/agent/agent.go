@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -73,22 +74,30 @@ type ToolStreamSearchPayload struct {
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name       string                   `json:"name"`
-	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
-	ResultText string                   `json:"result_text,omitempty"`
-	DurationMS int64                    `json:"duration_ms,omitempty"`
-	IsError    bool                     `json:"is_error,omitempty"`
-	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
-	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
+	Name         string                         `json:"name"`
+	Arguments    map[string]interface{}         `json:"arguments,omitempty"`
+	ResultText   string                         `json:"result_text,omitempty"`
+	DurationMS   int64                          `json:"duration_ms,omitempty"`
+	IsError      bool                           `json:"is_error,omitempty"`
+	WebSearch    *ToolStreamSearchPayload       `json:"web.search,omitempty"`
+	UserMemory   *ToolStreamUserMemoryPayload   `json:"user_memory,omitempty"`
+	GlobalMemory *ToolStreamGlobalMemoryPayload `json:"global_memory,omitempty"`
 }
 
-// ToolStreamMemoryPayload contains structured memory tool details.
-type ToolStreamMemoryPayload struct {
+// ToolStreamUserMemoryPayload contains structured user-memory tool details.
+type ToolStreamUserMemoryPayload struct {
 	Action    string                    `json:"action,omitempty"`
 	Category  string                    `json:"category,omitempty"`
 	Statement string                    `json:"statement,omitempty"`
 	Evidence  string                    `json:"evidence,omitempty"`
 	Content   *usermemory.ParsedContent `json:"content,omitempty"`
+}
+
+// ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
+type ToolStreamGlobalMemoryPayload struct {
+	Action    string `json:"action,omitempty"`
+	Statement string `json:"statement,omitempty"`
+	Evidence  string `json:"evidence,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -110,8 +119,10 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web.search" {
 		switch toolName {
-		case "memory.save", "memory.search", "memory.list", "memory.forget":
-			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
+		case toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.UserMemoryForget:
+			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
+		case toolnames.GlobalMemorySave:
+			payload.GlobalMemory = globalMemoryStreamPayload(args)
 		}
 		return payload
 	}
@@ -135,9 +146,8 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 	return payload
 }
 
-func memoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamMemoryPayload {
-	payload := &ToolStreamMemoryPayload{}
-	payload.Action = memoryToolAction(toolName)
+func userMemoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamUserMemoryPayload {
+	payload := &ToolStreamUserMemoryPayload{Action: userMemoryToolAction(toolName)}
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
 	}
@@ -159,11 +169,29 @@ func memoryStreamPayload(toolName string, args map[string]interface{}, result st
 	return payload
 }
 
-func memoryToolAction(toolName string) string {
-	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "memory."); ok {
-		return suffix
+func userMemoryToolAction(toolName string) string {
+	switch toolName {
+	case toolnames.UserMemorySave:
+		return "save"
+	case toolnames.UserMemorySearch:
+		return "search"
+	case toolnames.UserMemoryList:
+		return "list"
+	case toolnames.UserMemoryForget:
+		return "forget"
 	}
 	return ""
+}
+
+func globalMemoryStreamPayload(args map[string]interface{}) *ToolStreamGlobalMemoryPayload {
+	payload := &ToolStreamGlobalMemoryPayload{Action: "save"}
+	if statement, ok := args["statement"].(string); ok {
+		payload.Statement = strings.TrimSpace(statement)
+	}
+	if evidence, ok := args["evidence"].(string); ok {
+		payload.Evidence = strings.TrimSpace(evidence)
+	}
+	return payload
 }
 
 // ModelMetrics holds performance data from a single LLM call.

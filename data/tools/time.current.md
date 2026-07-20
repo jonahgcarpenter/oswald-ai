@@ -8,7 +8,7 @@ Use this tool whenever an answer depends on the current date, time, weekday, yea
 or a conversion of the current time. Resolve the timezone in this order:
 
 1. Use a timezone or location explicitly supplied in the current request.
-2. Otherwise call memory.search for the user's timezone or location.
+2. Otherwise call user_memory_search for the user's timezone or location.
 3. A remembered location may be mapped to an IANA timezone only when the
    mapping is unambiguous.
 4. If the timezone remains unknown or ambiguous, ask the user for their

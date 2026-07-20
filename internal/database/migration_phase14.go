@@ -94,11 +94,41 @@ CREATE TABLE deployment_memory_evidence (
 );
 `
 
-const phase14MigrationDefinition = phase14DeploymentMemorySQL
+const phase14ToolNameNormalizationSQL = `
+UPDATE session_turns
+SET tool_names = trim(
+	replace(
+		replace(
+			replace(
+				replace(
+					replace(
+						replace(',' || tool_names || ',', ',memory.save,', ',user_memory_save,'),
+						',memory.search,', ',user_memory_search,'),
+					',memory.list,', ',user_memory_list,'),
+				',memory.forget,', ',user_memory_forget,'),
+			',deployment_memory.propose,', ',global_memory_save,'),
+		',transcript.search,', ',session_transcript_search,'),
+	',')
+WHERE instr(',' || tool_names || ',', ',memory.save,') > 0
+	OR instr(',' || tool_names || ',', ',memory.search,') > 0
+	OR instr(',' || tool_names || ',', ',memory.list,') > 0
+	OR instr(',' || tool_names || ',', ',memory.forget,') > 0
+	OR instr(',' || tool_names || ',', ',deployment_memory.propose,') > 0
+	OR instr(',' || tool_names || ',', ',transcript.search,') > 0;
+
+UPDATE memory_candidates
+SET explicit_tool_source = 'user_memory_save'
+WHERE explicit_tool_source = 'memory.save';
+`
+
+const phase14MigrationDefinition = phase14DeploymentMemorySQL + phase14ToolNameNormalizationSQL
 
 func applyPhase14Migration(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, phase14DeploymentMemorySQL); err != nil {
 		return fmt.Errorf("add deployment memory schema: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, phase14ToolNameNormalizationSQL); err != nil {
+		return fmt.Errorf("normalize model tool names: %w", err)
 	}
 	return nil
 }

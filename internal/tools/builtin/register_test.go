@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -64,19 +65,19 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
-	if !reg.HasHandler("transcript.search") {
-		t.Fatal("transcript.search handler was not registered")
+	if !reg.HasHandler(toolnames.SessionTranscriptSearch) {
+		t.Fatalf("%s handler was not registered", toolnames.SessionTranscriptSearch)
 	}
 	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != "transcript.search" {
+		if entry.Name != toolnames.SessionTranscriptSearch {
 			continue
 		}
 		if len(entry.Parameters) != 2 || entry.Parameters[0].Name != "query" || entry.Parameters[0].Type != "string" || !entry.Parameters[0].Required || entry.Parameters[1].Name != "limit" || entry.Parameters[1].Type != "integer" || entry.Parameters[1].Required {
-			t.Fatalf("unexpected transcript.search parameters: %+v", entry.Parameters)
+			t.Fatalf("unexpected %s parameters: %+v", toolnames.SessionTranscriptSearch, entry.Parameters)
 		}
 		return
 	}
-	t.Fatal("transcript.search schema was not loaded")
+	t.Fatalf("%s schema was not loaded", toolnames.SessionTranscriptSearch)
 }
 
 func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
@@ -89,18 +90,18 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != "memory.forget" {
+		if entry.Name != toolnames.UserMemoryForget {
 			continue
 		}
 		if len(entry.Parameters) != 1 || entry.Parameters[0].Name != "memory_id" || entry.Parameters[0].Type != "integer" || !entry.Parameters[0].Required {
-			t.Fatalf("unexpected memory.forget parameters: %+v", entry.Parameters)
+			t.Fatalf("unexpected %s parameters: %+v", toolnames.UserMemoryForget, entry.Parameters)
 		}
 		return
 	}
-	t.Fatal("memory.forget schema was not loaded")
+	t.Fatalf("%s schema was not loaded", toolnames.UserMemoryForget)
 }
 
-func TestRegisterDeploymentMemoryIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {
+func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -111,15 +112,15 @@ func TestRegisterDeploymentMemoryIsDefaultVisibleWithOptionalToolCallID(t *testi
 	}
 	foundVisible := false
 	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name == "deployment_memory.propose" {
+		if tool.Function.Name == toolnames.GlobalMemorySave {
 			foundVisible = true
 		}
 	}
 	if !foundVisible {
-		t.Fatal("deployment_memory.propose is not default-visible")
+		t.Fatalf("%s is not default-visible", toolnames.GlobalMemorySave)
 	}
 	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != "deployment_memory.propose" {
+		if entry.Name != toolnames.GlobalMemorySave {
 			continue
 		}
 		for _, parameter := range entry.Parameters {
@@ -129,5 +130,58 @@ func TestRegisterDeploymentMemoryIsDefaultVisibleWithOptionalToolCallID(t *testi
 		}
 		return
 	}
-	t.Fatal("deployment_memory.propose schema was not loaded")
+	t.Fatalf("%s schema was not loaded", toolnames.GlobalMemorySave)
+}
+
+func TestRegisterDoesNotAdvertiseUnimplementedGlobalMemoryTools(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	advertised := map[string]bool{}
+	for _, tool := range reg.LLMTools() {
+		advertised[tool.Function.Name] = true
+	}
+	for _, name := range []string{toolnames.GlobalMemorySearch, toolnames.GlobalMemoryList, toolnames.GlobalMemoryForget} {
+		if advertised[name] || reg.HasHandler(name) {
+			t.Fatalf("unimplemented global memory tool is available: %s", name)
+		}
+	}
+}
+
+func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"web.search":                      true,
+		"time.current":                    true,
+		toolnames.UserMemorySave:          true,
+		toolnames.UserMemorySearch:        true,
+		toolnames.UserMemoryList:          true,
+		toolnames.UserMemoryForget:        true,
+		toolnames.GlobalMemorySave:        true,
+		toolnames.SessionTranscriptSearch: true,
+	}
+	got := map[string]bool{}
+	for _, tool := range reg.LLMTools() {
+		got[tool.Function.Name] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("advertised tools = %#v, want %#v", got, want)
+	}
+	for name := range want {
+		if !got[name] || !reg.HasHandler(name) {
+			t.Fatalf("final builtin tool is unavailable: %s", name)
+		}
+	}
 }

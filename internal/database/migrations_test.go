@@ -150,6 +150,7 @@ func TestMigrationChecksumCoversEverySQLDefinition(t *testing.T) {
 		{name: "v12 websocket device authorization", index: 11, operation: phase12WebSocketDeviceAuthorizationSQL},
 		{name: "v13 confidence evidence memory", index: 12, operation: phase13ConfidenceEvidenceMemorySQL},
 		{name: "v14 deployment memory", index: 13, operation: phase14DeploymentMemorySQL},
+		{name: "v14 model tool names", index: 13, operation: phase14ToolNameNormalizationSQL},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -236,11 +237,21 @@ INSERT INTO memory_confirmation_presentations (
 		t.Fatalf("seed v12 fixture: %v", err)
 	}
 
-	if err := fixture.runSchemaMigrations(context.Background(), registry); err != nil {
+	if err := fixture.runSchemaMigrations(context.Background(), registry[:13]); err != nil {
 		t.Fatalf("apply v13: %v", err)
 	}
+	if _, err := handle.Exec(`
+UPDATE memory_candidates SET explicit_tool_source = 'memory.save' WHERE idempotency_key = 'explicit';
+INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, tool_names, created_at, session_generation)
+VALUES ('tool-rename', 'phase13-user', 'question', 'answer', 'memory.save,server.memory.save,memory.search,memory.list,memory.forget,deployment_memory.propose,transcript.search', '2026-07-20T12:09:00Z', 1);
+`); err != nil {
+		t.Fatalf("seed legacy model tool names: %v", err)
+	}
 	if err := fixture.runSchemaMigrations(context.Background(), registry); err != nil {
-		t.Fatalf("repeat v13: %v", err)
+		t.Fatalf("apply v14: %v", err)
+	}
+	if err := fixture.runSchemaMigrations(context.Background(), registry); err != nil {
+		t.Fatalf("repeat v14: %v", err)
 	}
 
 	var entryClaimKey, entryClaimSlot, entryClaimValue string
@@ -303,6 +314,20 @@ INSERT INTO memory_confirmation_presentations (
 	}
 	if err := handle.QueryRow(`SELECT COUNT(*) FROM memory_confirmation_presentations`).Scan(&presentations); err != nil || presentations != 0 {
 		t.Fatalf("confirmation presentations = %d, err %v", presentations, err)
+	}
+	var explicitToolSource, toolNames string
+	if err := handle.QueryRow(`SELECT explicit_tool_source FROM memory_candidates WHERE idempotency_key = 'explicit'`).Scan(&explicitToolSource); err != nil {
+		t.Fatal(err)
+	}
+	if explicitToolSource != "user_memory_save" {
+		t.Fatalf("explicit tool source = %q", explicitToolSource)
+	}
+	if err := handle.QueryRow(`SELECT tool_names FROM session_turns WHERE session_id = 'tool-rename'`).Scan(&toolNames); err != nil {
+		t.Fatal(err)
+	}
+	wantToolNames := "user_memory_save,server.memory.save,user_memory_search,user_memory_list,user_memory_forget,global_memory_save,session_transcript_search"
+	if toolNames != wantToolNames {
+		t.Fatalf("normalized tool names = %q, want %q", toolNames, wantToolNames)
 	}
 	var foreignKeyViolations int
 	if err := handle.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignKeyViolations); err != nil || foreignKeyViolations != 0 {
