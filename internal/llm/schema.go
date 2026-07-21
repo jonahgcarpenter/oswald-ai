@@ -36,16 +36,23 @@ type ChatMessage struct {
 
 // ToolParameterProperty describes a single property within a tool's parameter schema.
 type ToolParameterProperty struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description,omitempty"`
-	Enum        []string `json:"enum,omitempty"`
+	Type                 string                           `json:"type"`
+	Description          string                           `json:"description,omitempty"`
+	Enum                 []string                         `json:"enum,omitempty"`
+	Properties           map[string]ToolParameterProperty `json:"properties,omitempty"`
+	Required             []string                         `json:"required,omitempty"`
+	Items                *ToolParameterProperty           `json:"items,omitempty"`
+	MinItems             *int                             `json:"minItems,omitempty"`
+	MaxItems             *int                             `json:"maxItems,omitempty"`
+	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 
 // ToolParameters is the JSON Schema object describing a tool's input parameters.
 type ToolParameters struct {
-	Type       string                           `json:"type"`
-	Properties map[string]ToolParameterProperty `json:"properties"`
-	Required   []string                         `json:"required,omitempty"`
+	Type                 string                           `json:"type"`
+	Properties           map[string]ToolParameterProperty `json:"properties"`
+	Required             []string                         `json:"required,omitempty"`
+	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 
 // ToolDefinition holds the schema for a single function tool.
@@ -61,14 +68,26 @@ type Tool struct {
 	Function ToolDefinition `json:"function"`
 }
 
+// ToolChoice forces the provider to call one named function tool.
+type ToolChoice struct {
+	Type     string             `json:"type"`
+	Function ToolChoiceFunction `json:"function"`
+}
+
+// ToolChoiceFunction identifies the forced function tool.
+type ToolChoiceFunction struct {
+	Name string `json:"name"`
+}
+
 // ChatRequest is the provider-neutral payload for a chat-style LLM request.
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	User     string        `json:"user,omitempty"`
-	Messages []ChatMessage `json:"messages"`
-	Tools    []Tool        `json:"tools,omitempty"`
-	Format   string        `json:"format,omitempty"`
-	Stream   bool          `json:"stream"`
+	Model      string        `json:"model"`
+	User       string        `json:"user,omitempty"`
+	Messages   []ChatMessage `json:"messages"`
+	Tools      []Tool        `json:"tools,omitempty"`
+	ToolChoice *ToolChoice   `json:"tool_choice,omitempty"`
+	Format     string        `json:"format,omitempty"`
+	Stream     bool          `json:"stream"`
 }
 
 // ChatResponse is the standardized reply from a chat LLM call.

@@ -11,28 +11,29 @@ import (
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	Port                     string          // HTTP port for the WebSocket gateway (default: "8000")
-	WebSocketAuthSigningKey  string          // Raw or base64-encoded HMAC key used to sign WebSocket access tokens
-	WebSocketAuthMaxTokenTTL time.Duration   // WebSocket access-token lifetime, capped at 15 minutes (default: 15m)
-	IMessagePort             string          // HTTP port for the BlueBubbles webhook listener (default: "8090")
-	IMessageWebhookPath      string          // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
-	BlueBubblesURL           string          // BlueBubbles server base URL; iMessage gateway disabled if empty
-	BlueBubblesPassword      string          // BlueBubbles server password/token for REST API auth
-	MCPConfigEncryptionKey   string          // Key used to encrypt MCP server URLs and headers at rest
-	LLMGatewayURL            string          // LLM gateway API base URL (default: "http://localhost:8080")
-	LLMGatewayModel          string          // LLM gateway model name; required, startup fails if empty
-	LLMGatewayEmbeddingModel string          // Optional LLM gateway embedding model used for semantic durable-memory retrieval
-	LLMGatewayAPIKey         string          // Optional bearer token for LLM gateway requests
-	LLMGatewayVirtualKey     string          // Optional gateway routing key for LLM gateway requests
-	LLMGatewayTimeout        time.Duration   // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
-	ModelContextWindow       int             // Optional model context-window override for prompt budgeting
-	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
-	DiscordToken             string          // Discord bot token; Discord gateway disabled if empty
-	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8888")
-	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
-	WorkerPoolSize           int             // Number of concurrent broker workers (default: 1)
-	LogLevel                 Level           // Logging verbosity (default: LevelInfo)
-	RetentionPolicy          RetentionPolicy // Memory retention and maintenance policy
+	Port                              string          // HTTP port for the WebSocket gateway (default: "8000")
+	WebSocketAuthSigningKey           string          // Raw or base64-encoded HMAC key used to sign WebSocket access tokens
+	WebSocketAuthMaxTokenTTL          time.Duration   // WebSocket access-token lifetime, capped at 15 minutes (default: 15m)
+	IMessagePort                      string          // HTTP port for the BlueBubbles webhook listener (default: "8090")
+	IMessageWebhookPath               string          // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
+	BlueBubblesURL                    string          // BlueBubbles server base URL; iMessage gateway disabled if empty
+	BlueBubblesPassword               string          // BlueBubbles server password/token for REST API auth
+	MCPConfigEncryptionKey            string          // Key used to encrypt MCP server URLs and headers at rest
+	LLMGatewayURL                     string          // LLM gateway API base URL (default: "http://localhost:8080")
+	LLMGatewayModel                   string          // LLM gateway model name; required, startup fails if empty
+	LLMGatewayEmbeddingModel          string          // Optional LLM gateway embedding model used for semantic durable-memory retrieval
+	LLMGatewayAPIKey                  string          // Optional bearer token for LLM gateway requests
+	LLMGatewayVirtualKey              string          // Optional gateway routing key for LLM gateway requests
+	LLMGatewayTimeout                 time.Duration   // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
+	ModelContextWindow                int             // Optional model context-window override for prompt budgeting
+	ModelMaxOutputTokens              int             // Optional model output-token reserve override for prompt budgeting
+	DiscordToken                      string          // Discord bot token; Discord gateway disabled if empty
+	SearxngURL                        string          // SearXNG base URL for web search (default: "http://localhost:8888")
+	MaxToolFailureRetries             int             // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
+	WorkerPoolSize                    int             // Number of concurrent broker workers (default: 1)
+	BackgroundMemoryExtractionEnabled bool            // Enables automatic post-delivery memory extraction (default: true)
+	LogLevel                          Level           // Logging verbosity (default: LevelInfo)
+	RetentionPolicy                   RetentionPolicy // Memory retention and maintenance policy
 }
 
 // RetentionPolicy controls content expiry and periodic memory maintenance.
@@ -71,31 +72,48 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	backgroundMemoryExtractionEnabled, err := getEnvBoolStrict("MEMORY_BACKGROUND_EXTRACTION_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
-		Port:                     getEnv("PORT", "8000"),
-		WebSocketAuthSigningKey:  getEnv("WEBSOCKET_AUTH_SIGNING_KEY", ""),
-		WebSocketAuthMaxTokenTTL: webSocketMaxTTL,
-		IMessagePort:             getEnv("IMESSAGE_PORT", "8090"),
-		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
-		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
-		BlueBubblesPassword:      getEnv("BLUEBUBBLES_PASSWORD", ""),
-		MCPConfigEncryptionKey:   getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
-		LLMGatewayURL:            getEnv("LLM_GATEWAY_URL", "http://localhost:8080"),
-		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
-		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
-		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
-		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
-		LLMGatewayTimeout:        getEnvDuration("LLM_GATEWAY_TIMEOUT", 180*time.Second),
-		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
-		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
-		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
-		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8080"),
-		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
-		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
-		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
-		RetentionPolicy:          retentionPolicy,
+		Port:                              getEnv("PORT", "8000"),
+		WebSocketAuthSigningKey:           getEnv("WEBSOCKET_AUTH_SIGNING_KEY", ""),
+		WebSocketAuthMaxTokenTTL:          webSocketMaxTTL,
+		IMessagePort:                      getEnv("IMESSAGE_PORT", "8090"),
+		IMessageWebhookPath:               getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
+		BlueBubblesURL:                    getEnv("BLUEBUBBLES_URL", ""),
+		BlueBubblesPassword:               getEnv("BLUEBUBBLES_PASSWORD", ""),
+		MCPConfigEncryptionKey:            getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
+		LLMGatewayURL:                     getEnv("LLM_GATEWAY_URL", "http://localhost:8080"),
+		LLMGatewayModel:                   getEnv("LLM_GATEWAY_MODEL", ""),
+		LLMGatewayEmbeddingModel:          getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
+		LLMGatewayAPIKey:                  getEnv("LLM_GATEWAY_API_KEY", ""),
+		LLMGatewayVirtualKey:              getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
+		LLMGatewayTimeout:                 getEnvDuration("LLM_GATEWAY_TIMEOUT", 180*time.Second),
+		ModelContextWindow:                getEnvInt("MODEL_CONTEXT_WINDOW", 0),
+		ModelMaxOutputTokens:              getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
+		DiscordToken:                      getEnv("DISCORD_TOKEN", ""),
+		SearxngURL:                        getEnv("SEARXNG_URL", "http://localhost:8080"),
+		MaxToolFailureRetries:             getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
+		WorkerPoolSize:                    getEnvInt("WORKER_POOL_SIZE", 1),
+		BackgroundMemoryExtractionEnabled: backgroundMemoryExtractionEnabled,
+		LogLevel:                          ParseLevel(getEnv("LOG_LEVEL", "info")),
+		RetentionPolicy:                   retentionPolicy,
 	}, nil
+}
+
+func getEnvBoolStrict(key string, defaultValue bool) (bool, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return parsed, nil
 }
 
 func loadRetentionPolicy() (RetentionPolicy, error) {

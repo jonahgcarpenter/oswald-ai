@@ -143,6 +143,61 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}
 }
 
+func TestProcessForcesOneCorrectiveMemorySaveRetry(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("save-1", toolnames.UserMemorySave, map[string]interface{}{"memories": []interface{}{map[string]interface{}{"claim_slot": "name"}}}),
+		toolCallResponse("save-2", toolnames.UserMemorySave, map[string]interface{}{"memories": []interface{}{map[string]interface{}{"claim_slot": "identity.name"}}}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I saved the corrected memory."}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	calls := 0
+	if err := reg.RegisterTool(registry.Spec{Name: toolnames.UserMemorySave, Description: "Save memories"}, func(context.Context, map[string]interface{}) (string, error) {
+		calls++
+		if calls == 1 {
+			return `{"accepted_count":0,"rejected_count":1,"results":[{"index":0,"status":"rejected","reason":"semantic claim slot is incompatible","retryable":true}],"required_action":"retry"}`, nil
+		}
+		return `{"accepted_count":1,"rejected_count":0,"results":[{"index":0,"status":"accepted","reason":"accepted","retryable":false}]}`, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	response, err := processAgent(agent, "retry-memory", "websocket", "session", "user-1", "Display", "My name is Jonah.", nil, nil)
+	if err != nil || response.Response != "I saved the corrected memory." || calls != 2 {
+		t.Fatalf("response=%+v calls=%d err=%v", response, calls, err)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != 3 {
+		t.Fatalf("request count=%d", len(requests))
+	}
+	forced := requests[1]
+	if len(forced.Tools) != 1 || forced.Tools[0].Function.Name != toolnames.UserMemorySave || forced.ToolChoice == nil || forced.ToolChoice.Function.Name != toolnames.UserMemorySave {
+		t.Fatalf("corrective request was not forced to user_memory_save: %+v", forced)
+	}
+}
+
+func TestProcessGuardsFinalAnswerAfterMemoryRetryExhaustion(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("save-1", toolnames.UserMemorySave, map[string]interface{}{"memories": []interface{}{map[string]interface{}{"evidence": "joined quote"}}}),
+		toolCallResponse("save-2", toolnames.UserMemorySave, map[string]interface{}{"memories": []interface{}{map[string]interface{}{"evidence": "still wrong"}}}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I could not save that memory."}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterTool(registry.Spec{Name: toolnames.UserMemorySave, Description: "Save memories"}, func(context.Context, map[string]interface{}) (string, error) {
+		return `{"accepted_count":0,"rejected_count":1,"results":[{"index":0,"status":"rejected","reason":"evidence is not an exact quote","retryable":true}],"required_action":"retry"}`, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	response, err := processAgent(agent, "failed-memory", "websocket", "session", "user-1", "Display", "I work for UAM.", nil, nil)
+	if err != nil || response.Response != "I could not save that memory." {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != 3 || !messagesContain(requests[2].Messages, memorySaveFailureGuard) {
+		t.Fatalf("final request did not contain memory failure guard: %+v", requests)
+	}
+}
+
 func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "test.fail"}}}}},

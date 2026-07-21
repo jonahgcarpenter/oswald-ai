@@ -101,6 +101,32 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	t.Fatalf("%s schema was not loaded", toolnames.UserMemoryForget)
 }
 
+func TestRegisterMemorySaveRequiresClaimIdentity(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := reg.LLMTool(toolnames.UserMemorySave)
+	if !ok {
+		t.Fatalf("%s schema was not loaded", toolnames.UserMemorySave)
+	}
+	memories := tool.Function.Parameters.Properties["memories"]
+	if memories.Type != "array" || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 {
+		t.Fatalf("unexpected memories schema: %+v", memories)
+	}
+	required := map[string]bool{}
+	for _, name := range memories.Items.Required {
+		required[name] = true
+	}
+	if !required["claim_slot"] || !required["claim_value"] {
+		t.Fatalf("missing nested claim identity requirements: %+v", memories.Items.Required)
+	}
+}
+
 func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)

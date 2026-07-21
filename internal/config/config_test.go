@@ -91,6 +91,33 @@ func TestLoadRejectsInvalidWebSocketTokenTTL(t *testing.T) {
 	}
 }
 
+func TestLoadBackgroundMemoryExtractionConfig(t *testing.T) {
+	previous, existed := os.LookupEnv("MEMORY_BACKGROUND_EXTRACTION_ENABLED")
+	if err := os.Unsetenv("MEMORY_BACKGROUND_EXTRACTION_ENABLED"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv("MEMORY_BACKGROUND_EXTRACTION_ENABLED", previous)
+		} else {
+			_ = os.Unsetenv("MEMORY_BACKGROUND_EXTRACTION_ENABLED")
+		}
+	})
+	cfg, err := Load()
+	if err != nil || !cfg.BackgroundMemoryExtractionEnabled {
+		t.Fatalf("default enabled=%v err=%v", cfg != nil && cfg.BackgroundMemoryExtractionEnabled, err)
+	}
+	t.Setenv("MEMORY_BACKGROUND_EXTRACTION_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil || cfg.BackgroundMemoryExtractionEnabled {
+		t.Fatalf("configured enabled=%v err=%v", cfg != nil && cfg.BackgroundMemoryExtractionEnabled, err)
+	}
+	t.Setenv("MEMORY_BACKGROUND_EXTRACTION_ENABLED", "sometimes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MEMORY_BACKGROUND_EXTRACTION_ENABLED") {
+		t.Fatalf("invalid boolean error=%v", err)
+	}
+}
+
 func TestLoadRetentionPolicyDefaults(t *testing.T) {
 	unsetRetentionEnv(t)
 

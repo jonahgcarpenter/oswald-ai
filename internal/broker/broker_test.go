@@ -71,6 +71,52 @@ func TestNewBrokerUsesAtLeastOneWorker(t *testing.T) {
 	}
 }
 
+func TestLowPriorityPermitYieldsToAcceptedForegroundWork(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	if _, _, ok := b.TryAcquireLowPriority(context.Background()); ok {
+		t.Fatal("low-priority permit acquired before broker start")
+	}
+	b.Start()
+	defer b.Shutdown()
+
+	permitCtx, release, ok := b.TryAcquireLowPriority(context.Background())
+	if !ok {
+		t.Fatal("low-priority permit was not acquired while idle")
+	}
+	defer release()
+	if _, _, ok := b.TryAcquireLowPriority(context.Background()); ok {
+		t.Fatal("second low-priority permit acquired concurrently")
+	}
+
+	req := &Request{
+		RequestID: "foreground", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted},
+		SessionKey: "session", ResponseChan: make(chan Result, 1),
+	}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-permitCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("accepted foreground work did not preempt low-priority permit")
+	}
+	if _, _, ok := b.TryAcquireLowPriority(context.Background()); ok {
+		t.Fatal("low-priority permit acquired while foreground work or canceled permit remained active")
+	}
+	release()
+	select {
+	case <-req.ResponseChan:
+	case <-time.After(time.Second):
+		t.Fatal("foreground request did not complete")
+	}
+	if ctx, nextRelease, ok := b.TryAcquireLowPriority(context.Background()); !ok || ctx.Err() != nil {
+		t.Fatal("low-priority permit did not recover after foreground completion")
+	} else {
+		nextRelease()
+	}
+}
+
 func TestDeliverResultDoesNotBlockOrPanic(t *testing.T) {
 	full := make(chan Result, 1)
 	full <- Result{}

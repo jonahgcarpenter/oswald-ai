@@ -38,7 +38,7 @@ Current layers:
 8. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
 9. `internal/broker/` — request queue and worker pool
 10. `internal/memoryformation/` — pure evidence validation, sensitivity classification, and activation policy
-11. `internal/formationruntime/` — durable serialized post-turn extraction and retry worker
+11. `internal/formationruntime/` — durable serialized fallback extraction and retry worker
 12. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
 13. `internal/agent/` — iterative tool-calling agent loop
 14. `internal/soul/` — read-only operator-managed system-prompt loader
@@ -66,10 +66,10 @@ Current layers:
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Create the command service, including `/privacy`, `/client`, and `/bootstrap`, and start durable formation and session-compaction workers
-12. Load builtin tool schemas from `data/tools/*.md` and register the eight builtin handlers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+11. Create the command service, including `/privacy`, `/client`, and `/bootstrap`
+12. Load builtin tool schemas from `data/tools/*.md`, register the eight builtin handlers, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
-14. Create the agent and start the broker worker pool
+14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
 15. Start each gateway in its own goroutine
 16. Wait for shutdown signal, stop maintenance and privacy dispatch, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
 
@@ -98,7 +98,7 @@ Every request follows the same high-level path:
 11. The agent builds the prompt, includes any current-turn images on the final user message, offers visible tools, runs LLM gateway chat completions, executes tool calls if requested, and loops until the model stops calling tools
 12. The final response is returned to the shared runtime
 13. The gateway-specific responder sends the response back to the client, Discord channel, or iMessage chat
-14. Only after successful delivery, the runtime marks the persisted turn formation-eligible, durably enqueues optional post-turn extraction, marks the turn delivered, and proactively plans any eligible session compaction
+14. Only after successful delivery, the runtime marks the persisted turn formation-eligible, durably enqueues optional fallback extraction, marks the turn delivered, and proactively plans any eligible session compaction
 
 The loop is iterative, not single-pass. The model may call tools zero or more times before producing a final answer.
 
@@ -214,27 +214,28 @@ Oswald keeps four distinct memory layers.
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Eligible approved long-term identity, communication preference, durable preference, and environment facts are compiled into a deterministic profile capped at 2000 bytes
-- Canonical memory publication occurs only from policy-approved candidates. Formation paths create proposed, approved, or rejected runtime candidates; `pending_confirmation` remains only as legacy schema compatibility normalized by `v13`. `user_memory_save` stages an explicitly requested approved candidate for publication after its source turn is persisted
+- Canonical memory publication occurs only from policy-approved candidates. Formation paths create proposed, approved, or rejected runtime candidates; `pending_confirmation` remains only as legacy schema compatibility normalized by `v13`. `user_memory_save` accepts one batch of at most five direct or inferred candidates from the primary agent and stages each valid item independently for publication after delivery; explicit intent only supplies a deterministic confidence floor and never bypasses grounding, threshold, authority, temporary-state, or supersession policy
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
 - New durable facts pass through candidate states (`proposed`, `approved`, or `rejected`) before approved publication into the memory lifecycle (`active`, `superseded`, `expired`, or `deleted`); supersession fields and audit events replace a general relation graph
 - While retained as content-bearing canonical state, every published memory records exact evidence, source request/session/turn, provenance, source authority, formation mode, sensitivity, and approval metadata. Privacy deletion, forget-grace expiry, and retention may later scrub or remove content and linked source exchanges
-- The serialized post-delivery worker requests one JSON-object artifact containing at most five candidates. Malformed outer JSON, trailing JSON, unknown outer fields, excessive candidate count, and non-retryable provider 4xx responses are terminally skipped. Malformed individual entries and candidates rejected by deterministic policy are dropped individually
-- Formation jobs use leases and idempotency keys, receive up to five immediate attempts, and may receive at most three delayed redrives only when the stored error code is explicitly transient. Startup reconciliation backfills missing jobs only for formation-eligible turns created during the previous 24 hours
-- Exact first-person evidence spans from longer turns and whole-turn direct statements become active when confidence is at least `0.35`; direct identity facts receive deterministic minimum importance `3`. Model inference remains whole-turn-only, and pre-compaction extraction remains proposal-only
+- The serialized post-delivery fallback exposes only the same `user_memory_save` batch schema and forces one tool call containing at most five candidates. It independently extracts all eligible facts and relies on same-turn reconciliation to discard or reinforce candidates already submitted by the primary agent. Invalid outer arguments, unknown fields, excessive candidate count, and non-retryable provider 4xx responses are terminally skipped; malformed individual entries and candidates rejected by deterministic policy are dropped independently
+- Foreground `user_memory_save` returns indexed JSON outcomes with exact policy reasons. When any rejected item is correctable, the primary loop permits one forced corrective call with only `user_memory_save` exposed; unresolved items add a trusted runtime status instruction that forbids claiming they were saved. Corrected retries use evidence- and claim-aware idempotency, rejected attempts do not consume the five-approved-candidate limit, and a separate ten-attempt ceiling bounds retry amplification
+- Formation jobs use exact-token leases of at least five minutes, extended to the provider timeout plus 30 seconds when longer, and idempotency keys. They receive up to five immediate attempts and at most three delayed redrives only when the stored error code is explicitly transient. Foreground preemption durably defers work without consuming this retry budget. Attach, save, proposal, publication, and completion require a transactionally checked live lease; retry and terminal skip may release a naturally expired lease only while its exact token remains stored. Startup reconciliation backfills missing jobs only for formation-eligible turns created during the previous 24 hours
+- Unambiguous exact first-person evidence spans from longer turns and whole-turn direct statements become active when confidence is at least `0.35`; evidence must begin with a first-person marker and express a positive, current, non-modal fact. Meaningful canonical statement tokens must match the ordered factual tokens of the smallest exact evidence span, and every claim-value token must be grounded in statement/evidence. Rune-safe deterministic checks include quote state and the evidence's containing sentence context without splitting common abbreviations or decimals. Direct identity facts receive deterministic minimum importance `3`. Quoted/reported, interrogative, negative, obsolete, hypothetical/conditional, third-party-centered, publicly attributed, and instruction/policy/capability-like text fails closed in every mode. User-centered relationship identity is eligible only with explicit `is named`/`name is` grammar and a compatible relationship name/identity slot. Model inference remains whole-turn-only, must use a positive declarative source, begin with a governing cautious qualification, retain bounded statement-to-source lexical relevance, and pre-compaction extraction remains proposal-only
 - Model inference uses exact whole-turn evidence but may express a cautious implication not lexically present in the turn. Third-party, public, tool-derived, quoted, hypothetical, and instruction-like content remains disallowed
-- Stable claim slot/value identity consolidates supporting turns into one memory. Independent evidence combines confidence using bounded noisy-OR; correlated same-session inferred evidence is discounted, retries are idempotent, and stronger direct evidence upgrades authority without losing prior evidence
+- Stable category-compatible claim slot/value identity consolidates supporting turns into one memory. Equivalent explicit-tool and automatic candidates from the same source turn and exact evidence reconcile only through equal claim or statement identity and never double-count; independent facts remain distinct. Independent evidence combines confidence using bounded noisy-OR; correlated same-session inferred evidence is discounted, retries are idempotent, and stronger direct evidence upgrades authority without losing prior evidence
 - Inferred memories are active only for confidence-tiered query-relevant recall and are explicitly labeled `uncertain_inference`; they cannot enter a tenant profile until direct evidence upgrades source authority
-- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Explicit `user_memory_save` remains source-turn-fenced and resolved corrections supersede atomically
+- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Every `user_memory_save` item remains source-turn-fenced, requires stable `claim_slot`/`claim_value`, and corrections supersede atomically only when ordinary authority and confidence comparison permits
 - Conflicting claim values use monotonic authority and confidence: stronger evidence may supersede a weaker active claim, while weak inference cannot replace a stronger direct fact
 - Canonical publication, supersession, evidence, audit history, profile advancement, and a durable derived-index outbox entry commit in one SQLite transaction; FTS/vector tables are derived asynchronously rather than part of canonical publication
 - `user_memory_forget` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
-- `user_memory_search` uses the same hybrid engine with a larger output cap for deeper investigation; `user_memory_list`, `user_memory_save`, and `user_memory_forget` remain explicit tools
+- `user_memory_search` uses the same hybrid engine with a larger output cap for deeper investigation; `user_memory_list`, `user_memory_save`, and `user_memory_forget` remain model-directed tools
 - Every `user_memory_*` handler and `session_transcript_search` requires a valid authenticated request principal and derives ownership from its canonical user
 - Addressed ordinary group turns continue to use the authenticated sender's private memory by explicit product decision; group chats do not create a shared memory tenant
 
@@ -306,6 +307,8 @@ Retention configuration uses positive Go durations and a positive batch size:
 | `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h` | Minimum interval between `PRAGMA optimize` runs. |
 | `MEMORY_MAINTENANCE_BATCH_SIZE` | `100` | Per-category row bound for one sweep. |
 
+`MEMORY_BACKGROUND_EXTRACTION_ENABLED` defaults to `true`. When enabled, fallback memory extraction and session-compaction model calls share one broker-owned low-priority permit: they run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget. Disabling fallback extraction does not disable primary-agent `user_memory_save` calls or delivery-gated publication.
+
 Startup rejects non-positive values. Tombstone retention must be at least content-bearing retention, dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
 
 Maintenance is serialized and runs immediately, then at `MEMORY_MAINTENANCE_INTERVAL`. It checks foreign keys before any mutation, expires inactive sessions and short-term memory, performs bounded content redaction and dependency-safe tombstone deletion, hard-deletes due forgotten content/source exchanges, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades.
@@ -319,7 +322,7 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - Stores only completed final user/assistant turn pairs
 - Successful gateway delivery is recorded separately; only delivered turns are eligible for compaction and `session_transcript_search`
 - A proactive background planner creates durable, idempotent fixed-range compaction jobs when delivered history grows past its count or prompt-budget threshold, while always leaving at least eight newest complete exchanges outside the planned range
-- One serialized worker leases and retries compaction jobs, reconciles recoverable work at startup, periodically scans active sessions, and redrives bounded failed work. Unlike formation, malformed compaction output is not classified as terminal and follows the ordinary bounded retry/dead-job redrive path
+- One serialized worker leases and retries compaction jobs, reconciles recoverable work at startup, periodically scans active sessions, and redrives bounded failed work. Its model calls share the broker's foreground-preemptible low-priority permit. Unlike formation, malformed compaction output is not classified as terminal and follows the ordinary bounded retry/dead-job redrive path
 - Each compaction publishes a new immutable structured checkpoint containing narrative, open tasks, commitments, entities, decisions, topic tags, covered turn range, generation model/version, source digest, and ordered source-turn IDs stored as JSON on the checkpoint
 - Incremental checkpoints summarize the previous checkpoint plus newly covered role-correct exchanges; published checkpoints and their source links are historical session artifacts, not durable user memories or operator instructions
 - When budget permits, the agent injects the latest checkpoint only as explicitly labeled untrusted historical reference data, followed by a minimum recent verbatim tail and then any additional complete `user`/`assistant` exchanges that fit
@@ -495,7 +498,7 @@ Current builtin tools:
 
 - `web.search` — SearXNG-backed search
 - `time.current` — authoritative current date and time in a requested IANA timezone
-- `user_memory_save` — stage facts only when the current authenticated user explicitly asks Oswald to remember or correct them
+- `user_memory_save` — stage a bounded batch of grounded direct or inferred facts about the authenticated current user; explicit requests receive the deterministic explicit-confidence floor
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
 - `user_memory_forget` — remove stored user facts

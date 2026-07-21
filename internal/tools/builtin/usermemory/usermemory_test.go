@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
@@ -29,18 +30,25 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 	list := NewListHandler(store, log)
 	forget := NewForgetHandler(store, config.RetentionPolicy{}, log)
 
-	if _, err := save(userOne, map[string]interface{}{
-		"scope":      "long_term",
-		"category":   "durable_preferences",
-		"statement":  "The user likes purple.",
-		"confidence": 1.0,
-		"importance": 3,
-	}); err != nil {
+	if _, err := save(userOne, saveBatch(map[string]interface{}{
+		"scope":       "long_term",
+		"category":    "durable_preferences",
+		"statement":   "The user likes purple.",
+		"evidence":    "I like purple.",
+		"confidence":  1.0,
+		"importance":  3,
+		"claim_slot":  "preference.color",
+		"claim_value": "purple",
+	})); err != nil {
 		t.Fatalf("save memory: %v", err)
 	}
 	var candidateID int64
 	if err := store.sql.QueryRow(`SELECT id FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'req'`).Scan(&candidateID); err != nil {
 		t.Fatal(err)
+	}
+	var claimKey string
+	if err := store.sql.QueryRow(`SELECT claim_key FROM memory_candidates WHERE id = ? AND canonical_user_id = 'usr_1'`, candidateID).Scan(&claimKey); err != nil || claimKey != "preference.color=purple" {
+		t.Fatalf("claim key=%q err=%v", claimKey, err)
 	}
 	if _, err := store.PublishCandidate(context.Background(), "usr_1", candidateID); err != nil {
 		t.Fatal(err)
@@ -93,6 +101,149 @@ func TestMemoryHandlersRequireAuthenticatedPrincipal(t *testing.T) {
 			if _, err := handler(ctx, map[string]interface{}{}); err == nil || !strings.Contains(err.Error(), "authenticated user identity") {
 				t.Fatalf("%s/%s principal error = %v", principalName, handlerName, err)
 			}
+		}
+	}
+}
+
+func TestSaveHandlerRequiresStableClaimIdentity(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{CurrentUserText: "Remember that I prefer tea."})
+	base := map[string]interface{}{"statement": "The user prefers tea.", "evidence": "I prefer tea.", "scope": "long_term", "category": "durable_preferences"}
+	if result, err := NewSaveHandler(store, log)(ctx, saveBatch(base)); err != nil || !strings.Contains(result, `"rejected_count":1`) {
+		t.Fatalf("missing slot result=%q error=%v", result, err)
+	}
+	base["claim_slot"] = "preference.drink"
+	if result, err := NewSaveHandler(store, log)(ctx, saveBatch(base)); err != nil || !strings.Contains(result, `"rejected_count":1`) {
+		t.Fatalf("missing value result=%q error=%v", result, err)
+	}
+}
+
+func TestSaveHandlerReportsProposedCorrectionAsReview(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	oldOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "I live in Boston.", Statement: "The user lives in Boston.", Evidence: "I live in Boston.", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 4, ClaimSlot: "environment.home_city", ClaimValue: "Boston"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "usr_1", CandidateProposal{Output: oldOutput, IdempotencyKey: "old-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.PublishCandidate(context.Background(), "usr_1", oldCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "correction", SessionID: "session", CurrentUserText: "Correct my memory: I live in Porto."})
+	result, err := NewSaveHandler(store, log)(ctx, saveBatch(map[string]interface{}{
+		"statement": "The user lives in Porto.", "evidence": "I live in Porto.", "scope": "long_term", "category": "environment", "confidence": 0.9, "importance": 4, "supersedes": old.Statement, "claim_slot": "environment.home_city", "claim_value": "Porto",
+	}))
+	if err != nil || !strings.Contains(result, `"rejected_count":1`) {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestSaveHandlerDefaultConfidenceApprovesEqualDirectCorrection(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	oldOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "I live in Boston.", Statement: "The user lives in Boston.", Evidence: "I live in Boston.", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4, ClaimSlot: "environment.home_city", ClaimValue: "Boston"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "usr_1", CandidateProposal{Output: oldOutput, IdempotencyKey: "old-equal-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.PublishCandidate(context.Background(), "usr_1", oldCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "equal-correction", SessionID: "session", CurrentUserText: "Correct my memory: I live in Porto."})
+	result, err := NewSaveHandler(store, log)(ctx, saveBatch(map[string]interface{}{
+		"statement": "The user lives in Porto.", "evidence": "I live in Porto.", "scope": "long_term", "category": "environment", "importance": 4, "supersedes": old.Statement, "claim_slot": "environment.home_city", "claim_value": "Porto",
+	}))
+	if err != nil || !strings.Contains(result, `"accepted_count":1`) {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	var state string
+	var supersedesID int64
+	if err := store.sql.QueryRow(`SELECT state, COALESCE(supersedes_memory_id, 0) FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'equal-correction'`).Scan(&state, &supersedesID); err != nil || state != "approved" || supersedesID != old.ID {
+		t.Fatalf("state=%q supersedes=%d err=%v", state, supersedesID, err)
+	}
+}
+
+func TestSaveHandlerStagesMultipleIndependentMemories(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	text := "I use Fedora. I prefer concise replies."
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "batch", SessionID: "session", Model: "test", CurrentUserText: text})
+	args := map[string]interface{}{"memories": []interface{}{
+		saveItem(map[string]interface{}{"statement": "The user uses Fedora.", "evidence": "I use Fedora.", "category": "environment", "claim_slot": "environment.linux_distribution", "claim_value": "Fedora"}),
+		saveItem(map[string]interface{}{"statement": "The user prefers concise replies.", "evidence": "I prefer concise replies.", "category": "communication_preferences", "claim_slot": "communication.reply_style", "claim_value": "concise"}),
+	}}
+	result, err := NewSaveHandler(store, log)(ctx, args)
+	if err != nil || !strings.Contains(result, `"accepted_count":2`) {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	var count int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'batch'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("candidate count=%d err=%v", count, err)
+	}
+}
+
+func TestSaveHandlerExplainsAndAcceptsCorrectedRetry(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "retry", SessionID: "session", Model: "test", CurrentUserText: "My name is Jonah Carpenter."})
+	handler := NewSaveHandler(store, log)
+	base := map[string]interface{}{
+		"statement": "The user's name is Jonah Carpenter.", "evidence": "My name is Jonah Carpenter.",
+		"category": "identity", "claim_slot": "name", "claim_value": "Jonah Carpenter", "confidence": 1.0, "importance": 4,
+	}
+	result, err := handler(ctx, saveBatch(base))
+	if err != nil || !strings.Contains(result, `"index":0`) || !strings.Contains(result, `"status":"rejected"`) || !strings.Contains(result, "semantic claim slot is incompatible") || !strings.Contains(result, "Retry only rejected items") {
+		t.Fatalf("rejected result=%q err=%v", result, err)
+	}
+	base["claim_slot"] = "identity.name"
+	result, err = handler(ctx, saveBatch(base))
+	if err != nil || !strings.Contains(result, `"accepted_count":1`) || !strings.Contains(result, `"status":"accepted"`) {
+		t.Fatalf("retry result=%q err=%v", result, err)
+	}
+	var rejected, approved int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FILTER (WHERE state = 'rejected'), COUNT(*) FILTER (WHERE state = 'approved') FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'retry'`).Scan(&rejected, &approved); err != nil || rejected != 1 || approved != 1 {
+		t.Fatalf("rejected=%d approved=%d err=%v", rejected, approved, err)
+	}
+}
+
+func TestSaveHandlerCapsDistinctCandidatesAcrossRepeatedCalls(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	colors := []string{"red", "blue", "green", "orange", "purple", "yellow"}
+	text := "I like red. I like blue. I like green. I like orange. I like purple. I like yellow."
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "bounded", SessionID: "session", Model: "test", CurrentUserText: text})
+	handler := NewSaveHandler(store, log)
+	for index, color := range colors {
+		_, err := handler(ctx, saveBatch(map[string]interface{}{
+			"statement": fmt.Sprintf("The user likes %s.", color), "evidence": fmt.Sprintf("I like %s.", color),
+			"category": "durable_preferences", "claim_slot": fmt.Sprintf("preference.color_%d", index+1), "claim_value": color,
+		}))
+		if index < MaxMemorySaveBatch && err != nil {
+			t.Fatalf("candidate %d error=%v", index+1, err)
+		}
+		if index == MaxMemorySaveBatch && (err == nil || !strings.Contains(err.Error(), "at most 5")) {
+			t.Fatalf("sixth candidate error=%v", err)
 		}
 	}
 }
@@ -280,4 +431,21 @@ func withUserText(ctx context.Context, text string) context.Context {
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.CurrentUserText = text
 	return requestctx.WithMetadata(ctx, meta)
+}
+
+func saveBatch(item map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"memories": []interface{}{saveItem(item)}}
+}
+
+func saveItem(item map[string]interface{}) map[string]interface{} {
+	copy := map[string]interface{}{
+		"statement": "", "evidence": "", "scope": "long_term", "category": "notes",
+		"context": "direct_assertion", "provenance": "user_statement", "sensitivity": "low",
+		"confidence": 0.9, "importance": 3, "ttl_days": 0, "supersedes": "",
+		"claim_slot": "", "claim_value": "",
+	}
+	for key, value := range item {
+		copy[key] = value
+	}
+	return copy
 }
