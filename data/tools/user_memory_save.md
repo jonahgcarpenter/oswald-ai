@@ -19,4 +19,6 @@ Do not save trivial one-off conversation details, temporary wording, public fact
 | importance | integer | no       | Importance from 1 to 5; defaults to 3.                                                                                                                     |
 | confidence | number  | no       | Confidence from 0.0 to 1.0; defaults to 0.9 for explicit saves.                                                                                            |
 | ttl_days   | integer | no       | Expiration in days for `short_term` memories. Use 0 for default TTL or long-term memories.                                                                 |
-| supersedes | string  | no       | Exact older statement this memory replaces. A resolved explicit correction supersedes the older memory atomically after the source turn is persisted.       |
+| supersedes | string  | no       | Exact older statement this memory proposes to replace. Replacement occurs atomically only when ordinary authority and confidence comparison permits it.     |
+| claim_slot | string  | yes      | Stable category-compatible dotted semantic property shared with equivalent automatic facts, such as `communication.reply_style`.                            |
+| claim_value | string | yes      | Concise normalized value shared with equivalent automatic facts, such as `concise`; every meaningful value token must be grounded in statement or evidence. |

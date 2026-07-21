@@ -46,6 +46,14 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 		if statement == "" {
 			return "", fmt.Errorf("%s: statement is required", toolnames.UserMemorySave)
 		}
+		claimSlot := stringArg(args, "claim_slot")
+		if claimSlot == "" {
+			return "", fmt.Errorf("%s: claim_slot is required", toolnames.UserMemorySave)
+		}
+		claimValue := stringArg(args, "claim_value")
+		if claimValue == "" {
+			return "", fmt.Errorf("%s: claim_value is required", toolnames.UserMemorySave)
+		}
 		evidence := stringArg(args, "evidence")
 		if evidence == "" {
 			remembered, ok := memoryformation.ParseExplicitRemember(meta.CurrentUserText)
@@ -85,6 +93,8 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 			Confidence:       floatArg(args, "confidence", 0.9),
 			Importance:       intArg(args, "importance", 3),
 			TTL:              ttl,
+			ClaimSlot:        claimSlot,
+			ClaimValue:       claimValue,
 		})
 		if err != nil {
 			return "", err
@@ -101,7 +111,10 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 			return "", err
 		}
 		requestLog(log, ctx).Debug("agent.tool.user_memory.candidate_staged", "staged explicit user memory candidate", config.F("tool_name", toolnames.UserMemorySave), config.F("scope", candidate.Scope), config.F("category", candidate.Category), config.F("candidate_id", candidate.ID))
-		return fmt.Sprintf("Accepted explicit %s memory candidate (%s). It will be published after this turn is persisted.", candidate.Scope, candidate.Category), nil
+		if candidate.State == "approved" {
+			return fmt.Sprintf("Accepted explicit %s memory candidate (%s). It will be published after this turn is persisted.", candidate.Scope, candidate.Category), nil
+		}
+		return fmt.Sprintf("The explicit %s memory candidate (%s) was not eligible for automatic publication: %s", candidate.Scope, candidate.Category, candidate.DecisionReason), nil
 	}
 }
 

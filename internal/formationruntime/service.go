@@ -20,7 +20,7 @@ import (
 
 const (
 	formationPollInterval = time.Second
-	formationJobLease     = 2 * time.Minute
+	formationJobLease     = 5 * time.Minute
 	formationMaxAttempts  = 5
 )
 
@@ -30,14 +30,19 @@ type Service struct {
 	extractor Extractor
 	log       *config.Logger
 	model     string
+	jobLease  time.Duration
 	notify    chan struct{}
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 }
 
 // NewService creates a serialized formation worker.
-func NewService(store *usermemory.Store, extractor Extractor, model string, log *config.Logger) *Service {
-	return &Service{store: store, extractor: extractor, model: model, log: log, notify: make(chan struct{}, 1)}
+func NewService(store *usermemory.Store, extractor Extractor, model string, log *config.Logger, providerTimeout ...time.Duration) *Service {
+	jobLease := formationJobLease
+	if len(providerTimeout) > 0 && providerTimeout[0] > 0 && providerTimeout[0]+30*time.Second > jobLease {
+		jobLease = providerTimeout[0] + 30*time.Second
+	}
+	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, log: log, notify: make(chan struct{}, 1)}
 }
 
 // Start begins startup recovery and polling.
@@ -117,7 +122,7 @@ func (s *Service) publishApproved(ctx context.Context) {
 
 func (s *Service) drain(ctx context.Context) {
 	for ctx.Err() == nil {
-		job, err := s.store.ClaimFormationJob(ctx, formationJobLease)
+		job, err := s.store.ClaimFormationJob(ctx, s.jobLease)
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
@@ -134,7 +139,10 @@ func (s *Service) drain(ctx context.Context) {
 				}
 				continue
 			}
-			_ = s.store.RetryFormationJob(context.Background(), job, errorCode(err), formationMaxAttempts)
+			if retryErr := s.store.RetryFormationJob(context.Background(), job, errorCode(err), formationMaxAttempts); retryErr != nil {
+				s.warn("user_memory.formation.job.retry_failed", "failed to release user-memory formation job lease", retryErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+				continue
+			}
 			state, _ := s.store.FormationJobState(context.Background(), job.UserID, job.ID)
 			event, message, status := "user_memory.formation.job.retry", "user-memory formation job will retry", "retry"
 			if state == "dead" {
@@ -152,21 +160,22 @@ func (s *Service) drain(ctx context.Context) {
 
 func (s *Service) process(ctx context.Context, job usermemory.FormationJob) error {
 	started := time.Now()
+	if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
+		return err
+	}
 	turn, err := s.store.SessionTurnByID(ctx, job.UserID, job.TurnID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return s.store.CompleteFormationJob(context.Background(), job, true)
+			return errors.Join(errPermanentExtraction, fmt.Errorf("memory formation source turn is unavailable"))
 		}
 		return err
 	}
-	explicitIDs, err := s.store.AttachRequestCandidates(ctx, job.UserID, job.RequestID, turn.ID)
+	if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
+		return err
+	}
+	explicitIDs, err := s.store.AttachRequestCandidatesForFormation(ctx, job, turn.ID)
 	if err != nil {
 		return err
-	}
-	for _, candidateID := range explicitIDs {
-		if _, err := s.store.PublishCandidate(ctx, job.UserID, candidateID); err != nil {
-			return err
-		}
 	}
 	var extracted []ExtractedCandidate
 	artifact, err := s.store.FormationJobArtifact(ctx, job)
@@ -194,6 +203,12 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	}
 	createdCount := 0
 	publishedCount := 0
+	candidateIDs := make([]int64, 0, len(explicitIDs)+len(extracted))
+	seenCandidate := make(map[int64]bool, cap(candidateIDs))
+	for _, id := range explicitIDs {
+		candidateIDs = append(candidateIDs, id)
+		seenCandidate[id] = true
+	}
 	for _, raw := range extracted {
 		output, err := evaluateExtracted(turn, raw)
 		if err != nil {
@@ -212,8 +227,21 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if created {
 			createdCount++
 		}
+		if !seenCandidate[candidate.ID] {
+			candidateIDs = append(candidateIDs, candidate.ID)
+			seenCandidate[candidate.ID] = true
+		}
+	}
+	for _, candidateID := range candidateIDs {
+		if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
+			return err
+		}
+		candidate, err := s.store.LoadCandidate(ctx, job.UserID, candidateID)
+		if err != nil {
+			return err
+		}
 		if candidate.State == "approved" && candidate.PublishedMemoryID == 0 {
-			if _, err := s.store.PublishCandidate(ctx, job.UserID, candidate.ID); err != nil {
+			if _, err := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); err != nil {
 				return err
 			}
 			publishedCount++

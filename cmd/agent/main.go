@@ -137,7 +137,7 @@ func main() {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
-	formationService := formationruntime.NewService(userMemStore, formationruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, rootLog)
+	formationService := formationruntime.NewService(userMemStore, formationruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, rootLog, cfg.LLMGatewayTimeout)
 	formationService.Start(context.Background())
 	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, budget, cfg.LLMGatewayTimeout, rootLog)
 	compactionService.Start(context.Background())

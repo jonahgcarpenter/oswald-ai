@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
@@ -30,17 +31,23 @@ func TestMemoryHandlersUsePrincipalCanonicalUser(t *testing.T) {
 	forget := NewForgetHandler(store, config.RetentionPolicy{}, log)
 
 	if _, err := save(userOne, map[string]interface{}{
-		"scope":      "long_term",
-		"category":   "durable_preferences",
-		"statement":  "The user likes purple.",
-		"confidence": 1.0,
-		"importance": 3,
+		"scope":       "long_term",
+		"category":    "durable_preferences",
+		"statement":   "The user likes purple.",
+		"confidence":  1.0,
+		"importance":  3,
+		"claim_slot":  "preference.color",
+		"claim_value": "purple",
 	}); err != nil {
 		t.Fatalf("save memory: %v", err)
 	}
 	var candidateID int64
 	if err := store.sql.QueryRow(`SELECT id FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'req'`).Scan(&candidateID); err != nil {
 		t.Fatal(err)
+	}
+	var claimKey string
+	if err := store.sql.QueryRow(`SELECT claim_key FROM memory_candidates WHERE id = ? AND canonical_user_id = 'usr_1'`, candidateID).Scan(&claimKey); err != nil || claimKey != "preference.color=purple" {
+		t.Fatalf("claim key=%q err=%v", claimKey, err)
 	}
 	if _, err := store.PublishCandidate(context.Background(), "usr_1", candidateID); err != nil {
 		t.Fatal(err)
@@ -94,6 +101,79 @@ func TestMemoryHandlersRequireAuthenticatedPrincipal(t *testing.T) {
 				t.Fatalf("%s/%s principal error = %v", principalName, handlerName, err)
 			}
 		}
+	}
+}
+
+func TestSaveHandlerRequiresStableClaimIdentity(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{CurrentUserText: "Remember that I prefer tea."})
+	base := map[string]interface{}{"statement": "The user prefers tea.", "evidence": "I prefer tea.", "scope": "long_term", "category": "durable_preferences"}
+	if _, err := NewSaveHandler(store, log)(ctx, base); err == nil || !strings.Contains(err.Error(), "claim_slot is required") {
+		t.Fatalf("missing slot error=%v", err)
+	}
+	base["claim_slot"] = "preference.drink"
+	if _, err := NewSaveHandler(store, log)(ctx, base); err == nil || !strings.Contains(err.Error(), "claim_value is required") {
+		t.Fatalf("missing value error=%v", err)
+	}
+}
+
+func TestSaveHandlerReportsProposedCorrectionAsReview(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	oldOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "I live in Boston.", Statement: "The user lives in Boston.", Evidence: "I live in Boston.", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 4, ClaimSlot: "environment.home_city", ClaimValue: "Boston"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "usr_1", CandidateProposal{Output: oldOutput, IdempotencyKey: "old-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.PublishCandidate(context.Background(), "usr_1", oldCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "correction", SessionID: "session", CurrentUserText: "Correct my memory: I live in Porto."})
+	result, err := NewSaveHandler(store, log)(ctx, map[string]interface{}{
+		"statement": "The user lives in Porto.", "evidence": "I live in Porto.", "scope": "long_term", "category": "environment", "confidence": 0.9, "importance": 4, "supersedes": old.Statement, "claim_slot": "environment.home_city", "claim_value": "Porto",
+	})
+	if err != nil || !strings.Contains(result, "not eligible for automatic publication") || strings.Contains(result, "review") || strings.Contains(result, "will be published") {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+}
+
+func TestSaveHandlerDefaultConfidenceApprovesEqualDirectCorrection(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), log)
+	t.Cleanup(func() { store.Close() })
+	seedAccountUsers(t, store, "usr_1")
+	oldOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "I live in Boston.", Statement: "The user lives in Boston.", Evidence: "I live in Boston.", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4, ClaimSlot: "environment.home_city", ClaimValue: "Boston"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "usr_1", CandidateProposal{Output: oldOutput, IdempotencyKey: "old-equal-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.PublishCandidate(context.Background(), "usr_1", oldCandidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestctx.WithMetadata(principalContext("usr_1", "alice"), requestctx.Metadata{RequestID: "equal-correction", SessionID: "session", CurrentUserText: "Correct my memory: I live in Porto."})
+	result, err := NewSaveHandler(store, log)(ctx, map[string]interface{}{
+		"statement": "The user lives in Porto.", "evidence": "I live in Porto.", "scope": "long_term", "category": "environment", "importance": 4, "supersedes": old.Statement, "claim_slot": "environment.home_city", "claim_value": "Porto",
+	})
+	if err != nil || !strings.Contains(result, "will be published") {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	var state string
+	var supersedesID int64
+	if err := store.sql.QueryRow(`SELECT state, COALESCE(supersedes_memory_id, 0) FROM memory_candidates WHERE canonical_user_id = 'usr_1' AND source_request_id = 'equal-correction'`).Scan(&state, &supersedesID); err != nil || state != "approved" || supersedesID != old.ID {
+		t.Fatalf("state=%q supersedes=%d err=%v", state, supersedesID, err)
 	}
 }
 

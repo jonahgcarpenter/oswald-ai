@@ -101,6 +101,36 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	t.Fatalf("%s schema was not loaded", toolnames.UserMemoryForget)
 }
 
+func TestRegisterMemorySaveRequiresClaimIdentity(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range reg.BuiltinCatalog() {
+		if entry.Name != toolnames.UserMemorySave {
+			continue
+		}
+		found := map[string]bool{}
+		for _, parameter := range entry.Parameters {
+			if parameter.Name == "claim_slot" || parameter.Name == "claim_value" {
+				if !parameter.Required || parameter.Type != "string" {
+					t.Fatalf("unexpected claim identity parameter: %+v", parameter)
+				}
+				found[parameter.Name] = true
+			}
+		}
+		if !found["claim_slot"] || !found["claim_value"] {
+			t.Fatalf("missing claim identity parameters: %+v", entry.Parameters)
+		}
+		return
+	}
+	t.Fatalf("%s schema was not loaded", toolnames.UserMemorySave)
+}
+
 func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
