@@ -2,6 +2,7 @@ package sessionruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,20 @@ type fakeSummaryExtractor struct {
 	calls    int
 	previous *usermemory.SessionSummary
 	turns    []usermemory.SessionTurn
+}
+
+type unavailableLowPriorityGate struct{}
+
+func (unavailableLowPriorityGate) TryAcquireLowPriority(context.Context) (context.Context, func(), bool) {
+	return nil, nil, false
+}
+
+type canceledLowPriorityGate struct{}
+
+func (canceledLowPriorityGate) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
+	ctx, cancel := context.WithCancel(parent)
+	cancel()
+	return ctx, func() {}, true
 }
 
 func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn) (usermemory.SummaryArtifact, error) {
@@ -113,6 +128,64 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	active, err := store.ListMemories("user-1", "", "", 10)
 	if err != nil || len(active) != 0 {
 		t.Fatalf("pre-compaction candidate became active: %+v err=%v", active, err)
+	}
+}
+
+func TestServiceCompactionYieldsWhenForegroundWorkIsBusy(t *testing.T) {
+	store := newSessionRuntimeStore(t)
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 25; i++ {
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, fmt.Sprintf("I am working on Atlas item %d.", i), "Progress recorded.", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extractor := &fakeSummaryExtractor{}
+	service := NewService(store, extractor, "summary-model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(unavailableLowPriorityGate{})
+	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), job); !errors.Is(err, errBackgroundPreempted) || extractor.calls != 0 {
+		t.Fatalf("process error=%v extractor calls=%d", err, extractor.calls)
+	}
+	if err := store.DeferSessionCompactionJob(context.Background(), job, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing.T) {
+	store := newSessionRuntimeStore(t)
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 25; i++ {
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, fmt.Sprintf("I am working on Atlas item %d.", i), "Progress recorded.", nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	extractor := &fakeSummaryExtractor{}
+	service := NewService(store, extractor, "summary-model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(canceledLowPriorityGate{})
+	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), job); !errors.Is(err, errBackgroundPreempted) {
+		t.Fatalf("process error=%v", err)
+	}
+	if _, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation); err == nil {
+		t.Fatal("preempted compaction published a summary")
 	}
 }
 

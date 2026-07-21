@@ -282,7 +282,7 @@ func (c *GatewayClient) Embed(ctx context.Context, req EmbedRequest) (*EmbedResp
 // Chat sends a multi-turn conversation to the LLM gateway's /v1/chat/completions endpoint.
 func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCallback func(chunk ChatMessage)) (*ChatResponse, error) {
 	endpoint := fmt.Sprintf("%s/v1/chat/completions", c.BaseURL)
-	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
+	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ToolChoice: req.ToolChoice, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
 	payloadBytes, err := json.Marshal(gatewayReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal chat request: %w", err)

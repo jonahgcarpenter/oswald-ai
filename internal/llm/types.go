@@ -41,6 +41,7 @@ type gatewayChatRequest struct {
 	User           string                 `json:"user,omitempty"`
 	Messages       []gatewayMessage       `json:"messages"`
 	Tools          []Tool                 `json:"tools,omitempty"`
+	ToolChoice     *ToolChoice            `json:"tool_choice,omitempty"`
 	ResponseFormat *gatewayResponseFormat `json:"response_format,omitempty"`
 	Stream         bool                   `json:"stream"`
 }

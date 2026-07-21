@@ -5,16 +5,17 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 )
@@ -33,7 +34,7 @@ func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Prin
 	return principal, nil
 }
 
-// NewSaveHandler returns a Handler for explicit user-requested memory saves.
+// NewSaveHandler returns a Handler for batched grounded user-memory saves.
 func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
 		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemorySave)
@@ -42,80 +43,76 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 		}
 		userID := principal.CanonicalUserID
 		meta := requestctx.MetadataFromContext(ctx)
-		statement := stringArg(args, "statement")
-		if statement == "" {
-			return "", fmt.Errorf("%s: statement is required", toolnames.UserMemorySave)
+		batch, decodeErrors, err := DecodeMemorySaveBatch(args)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", toolnames.UserMemorySave, err)
 		}
-		claimSlot := stringArg(args, "claim_slot")
-		if claimSlot == "" {
-			return "", fmt.Errorf("%s: claim_slot is required", toolnames.UserMemorySave)
+		outcomes := store.SubmitMemorySaveBatch(ctx, userID, meta.CurrentUserText, FormationSource{
+			RequestID: meta.RequestID, SessionID: meta.SessionID, Model: meta.Model,
+			ExtractorVersion: FormationExtractorVersion, ToolName: toolnames.UserMemorySave,
+		}, batch, nil)
+		accepted, rejected := 0, len(decodeErrors)
+		results := make([]memorySaveToolItemResult, 0, len(decodeErrors)+len(outcomes))
+		for _, decodeErr := range decodeErrors {
+			results = append(results, memorySaveToolItemResult{Index: decodeErr.InputIndex, Status: "rejected", Reason: decodeErr.Error(), Retryable: true})
 		}
-		claimValue := stringArg(args, "claim_value")
-		if claimValue == "" {
-			return "", fmt.Errorf("%s: claim_value is required", toolnames.UserMemorySave)
-		}
-		evidence := stringArg(args, "evidence")
-		if evidence == "" {
-			remembered, ok := memoryformation.ParseExplicitRemember(meta.CurrentUserText)
-			if !ok {
-				return "", fmt.Errorf("%s: current user turn is not an explicit remember request", toolnames.UserMemorySave)
+		for _, outcome := range outcomes {
+			if outcome.Operational {
+				return "", outcome.Err
 			}
-			evidence = remembered
+			if outcome.Err != nil || outcome.State != "approved" {
+				rejected++
+				reason := outcome.Reason
+				if outcome.Err != nil {
+					reason = outcome.Err.Error()
+				}
+				retryable := outcome.Err != nil || outcome.State == "rejected"
+				status := "rejected"
+				if outcome.State == "proposed" {
+					status = "not_approved"
+				}
+				results = append(results, memorySaveToolItemResult{Index: outcome.InputIndex, Status: status, CandidateID: outcome.CandidateID, Reason: reason, Retryable: retryable})
+				continue
+			}
+			accepted++
+			results = append(results, memorySaveToolItemResult{Index: outcome.InputIndex, Status: "accepted", CandidateID: outcome.CandidateID, Reason: outcome.Reason})
 		}
-		ttlDays := intArg(args, "ttl_days", 0)
-		ttl := time.Duration(0)
-		if ttlDays > 0 {
-			ttl = time.Duration(ttlDays) * 24 * time.Hour
+		requestLog(log, ctx).Debug("agent.tool.user_memory.candidates_staged", "staged user memory candidates", config.F("tool_name", toolnames.UserMemorySave), config.F("submitted_count", len(batch.Memories)+len(decodeErrors)), config.F("accepted_count", accepted), config.F("rejected_count", rejected))
+		sort.Slice(results, func(i, j int) bool { return results[i].Index < results[j].Index })
+		response := memorySaveToolResult{AcceptedCount: accepted, RejectedCount: rejected, Results: results}
+		for _, result := range results {
+			if result.Retryable {
+				response.RetryGuidance = "Retry only rejected items whose arguments can be corrected using the same exact source evidence. Do not invent evidence or resubmit accepted items. Category-compatible claim_slot prefixes are identity., communication., preference./durable., project., relationship., environment., and notes."
+				response.RequiredAction = "Correct and retry the retryable rejected items before producing the final answer."
+				break
+			}
 		}
-		scope := memoryformation.Scope(stringArg(args, "scope"))
-		if scope == "" {
-			scope = memoryformation.ScopeShortTerm
+		if rejected > 0 && response.RequiredAction == "" {
+			response.RetryGuidance = "Retry only rejected items whose arguments can be corrected using the same exact source evidence. Do not invent evidence or resubmit accepted items. Category-compatible claim_slot prefixes are identity., communication., preference./durable., project., relationship., environment., and notes."
+			response.RequiredAction = "Do not claim rejected or not-approved items were saved."
 		}
-		contentContext := memoryformation.ContextDirectAssertion
-		if scope == memoryformation.ScopeShortTerm {
-			contentContext = memoryformation.ContextTemporaryState
-		}
-		category := memoryformation.Category(stringArg(args, "category"))
-		if category == "" {
-			category = memoryformation.CategoryNotes
-		}
-		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
-			SourceUserText:   meta.CurrentUserText,
-			Statement:        statement,
-			Evidence:         evidence,
-			Provenance:       memoryformation.ProvenanceUserStatement,
-			ClaimedAuthority: memoryformation.AuthorityUserDirect,
-			Sensitivity:      memoryformation.SensitivityLow,
-			Mode:             memoryformation.ModeExplicitRemember,
-			Scope:            scope,
-			Category:         category,
-			Context:          contentContext,
-			Confidence:       floatArg(args, "confidence", 0.9),
-			Importance:       intArg(args, "importance", 3),
-			TTL:              ttl,
-			ClaimSlot:        claimSlot,
-			ClaimValue:       claimValue,
-		})
+		encoded, err := json.Marshal(response)
 		if err != nil {
 			return "", err
 		}
-		if output.Decision == memoryformation.DecisionDisallowed {
-			return "", fmt.Errorf("%s: %s", toolnames.UserMemorySave, output.Reason)
-		}
-		candidate, _, err := store.ProposeCandidate(ctx, userID, CandidateProposal{
-			Output:              output,
-			Source:              FormationSource{RequestID: meta.RequestID, SessionID: meta.SessionID, Model: meta.Model, ExtractorVersion: FormationExtractorVersion, ToolName: toolnames.UserMemorySave},
-			SupersedesStatement: stringArg(args, "supersedes"),
-		})
-		if err != nil {
-			return "", err
-		}
-		requestLog(log, ctx).Debug("agent.tool.user_memory.candidate_staged", "staged explicit user memory candidate", config.F("tool_name", toolnames.UserMemorySave), config.F("scope", candidate.Scope), config.F("category", candidate.Category), config.F("candidate_id", candidate.ID))
-		if candidate.State == "approved" {
-			return fmt.Sprintf("Accepted explicit %s memory candidate (%s). It will be published after this turn is persisted.", candidate.Scope, candidate.Category), nil
-		}
-		return fmt.Sprintf("The explicit %s memory candidate (%s) was not eligible for automatic publication: %s", candidate.Scope, candidate.Category, candidate.DecisionReason), nil
+		return string(encoded), nil
 	}
+}
+
+type memorySaveToolResult struct {
+	AcceptedCount  int                        `json:"accepted_count"`
+	RejectedCount  int                        `json:"rejected_count"`
+	Results        []memorySaveToolItemResult `json:"results"`
+	RetryGuidance  string                     `json:"retry_guidance,omitempty"`
+	RequiredAction string                     `json:"required_action,omitempty"`
+}
+
+type memorySaveToolItemResult struct {
+	Index       int    `json:"index"`
+	Status      string `json:"status"`
+	CandidateID int64  `json:"candidate_id,omitempty"`
+	Reason      string `json:"reason"`
+	Retryable   bool   `json:"retryable"`
 }
 
 // NewSearchHandler returns a Handler for memory search.

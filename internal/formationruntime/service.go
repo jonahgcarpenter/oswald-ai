@@ -2,9 +2,7 @@ package formationruntime
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,16 +22,25 @@ const (
 	formationMaxAttempts  = 5
 )
 
+var errBackgroundPreempted = errors.New("background model work preempted by foreground traffic")
+
+// LowPriorityGate grants model capacity only while foreground work is idle.
+type LowPriorityGate interface {
+	TryAcquireLowPriority(context.Context) (context.Context, func(), bool)
+}
+
 // Service owns the durable post-turn formation worker.
 type Service struct {
-	store     *usermemory.Store
-	extractor Extractor
-	log       *config.Logger
-	model     string
-	jobLease  time.Duration
-	notify    chan struct{}
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	store             *usermemory.Store
+	extractor         Extractor
+	log               *config.Logger
+	model             string
+	jobLease          time.Duration
+	extractionEnabled bool
+	gate              LowPriorityGate
+	notify            chan struct{}
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
 }
 
 // NewService creates a serialized formation worker.
@@ -42,7 +49,17 @@ func NewService(store *usermemory.Store, extractor Extractor, model string, log 
 	if len(providerTimeout) > 0 && providerTimeout[0] > 0 && providerTimeout[0]+30*time.Second > jobLease {
 		jobLease = providerTimeout[0] + 30*time.Second
 	}
-	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, log: log, notify: make(chan struct{}, 1)}
+	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, extractionEnabled: true, log: log, notify: make(chan struct{}, 1)}
+}
+
+// SetBackgroundExtractionEnabled controls only the secondary model call.
+func (s *Service) SetBackgroundExtractionEnabled(enabled bool) {
+	s.extractionEnabled = enabled
+}
+
+// SetLowPriorityGate makes extraction yield to foreground model work.
+func (s *Service) SetLowPriorityGate(gate LowPriorityGate) {
+	s.gate = gate
 }
 
 // Start begins startup recovery and polling.
@@ -131,6 +148,12 @@ func (s *Service) drain(ctx context.Context) {
 			return
 		}
 		if err := s.process(ctx, job); err != nil {
+			if errors.Is(err, errBackgroundPreempted) {
+				if deferErr := s.store.DeferFormationJob(context.Background(), job, time.Second); deferErr != nil {
+					s.warn("user_memory.formation.job.defer_failed", "failed to defer preempted user-memory formation job", deferErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+				}
+				return
+			}
 			if errors.Is(err, errPermanentExtraction) {
 				if skipErr := s.store.SkipFormationJob(context.Background(), job, errorCode(err)); skipErr != nil {
 					s.warn("user_memory.formation.job.complete_failed", "failed to terminally skip user-memory formation job", skipErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
@@ -177,59 +200,80 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	if err != nil {
 		return err
 	}
-	var extracted []ExtractedCandidate
-	artifact, err := s.store.FormationJobArtifact(ctx, job)
-	if err != nil {
-		return err
-	}
-	if artifact != "" {
-		if err := json.Unmarshal([]byte(artifact), &extracted); err != nil {
-			return fmt.Errorf("decode persisted memory formation artifact: %w", err)
-		}
-	} else if s.extractor != nil {
-		extractCtx := requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
-		extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
-		extracted, err = s.extractor.Extract(extractCtx, turn)
-		if err != nil {
-			return err
-		}
-		payload, err := json.Marshal(extracted)
-		if err != nil {
-			return err
-		}
-		if err := s.store.SaveFormationJobArtifact(ctx, job, string(payload)); err != nil {
-			return err
-		}
-	}
-	createdCount := 0
 	publishedCount := 0
-	candidateIDs := make([]int64, 0, len(explicitIDs)+len(extracted))
+	for _, candidateID := range explicitIDs {
+		candidate, loadErr := s.store.LoadCandidate(ctx, job.UserID, candidateID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if candidate.State == "approved" && candidate.PublishedMemoryID == 0 {
+			if _, publishErr := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); publishErr != nil {
+				return publishErr
+			}
+			publishedCount++
+		}
+	}
+	extracted := usermemory.MemorySaveBatch{}
+	if s.extractionEnabled {
+		artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
+		if artifactErr != nil {
+			return artifactErr
+		}
+		if artifact != "" {
+			if err := json.Unmarshal([]byte(artifact), &extracted); err != nil {
+				return fmt.Errorf("decode persisted memory formation artifact: %w", err)
+			}
+		} else if s.extractor != nil {
+			extractParent := ctx
+			release := func() {}
+			if s.gate != nil {
+				var acquired bool
+				extractParent, release, acquired = s.gate.TryAcquireLowPriority(ctx)
+				if !acquired {
+					return errBackgroundPreempted
+				}
+			}
+			defer release()
+			extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
+			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+			extracted, err = s.extractor.Extract(extractCtx, turn)
+			wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
+			release()
+			release = func() {}
+			if wasPreempted {
+				return errBackgroundPreempted
+			}
+			if err != nil {
+				return err
+			}
+			payload, err := json.Marshal(extracted)
+			if err != nil {
+				return err
+			}
+			if err := s.store.SaveFormationJobArtifact(ctx, job, string(payload)); err != nil {
+				return err
+			}
+		}
+	}
+	candidateIDs := make([]int64, 0, len(explicitIDs)+len(extracted.Memories))
 	seenCandidate := make(map[int64]bool, cap(candidateIDs))
 	for _, id := range explicitIDs {
-		candidateIDs = append(candidateIDs, id)
 		seenCandidate[id] = true
 	}
-	for _, raw := range extracted {
-		output, err := evaluateExtracted(turn, raw)
-		if err != nil {
+	outcomes := s.store.SubmitMemorySaveBatch(ctx, job.UserID, turn.UserText, usermemory.FormationSource{
+		RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation,
+		TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.ExtractorVersion,
+	}, extracted, &job)
+	for _, outcome := range outcomes {
+		if outcome.Operational {
+			return outcome.Err
+		}
+		if outcome.Err != nil {
 			continue
 		}
-		candidate, created, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
-			Output:              output,
-			Source:              usermemory.FormationSource{RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation, TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.ExtractorVersion},
-			IdempotencyKey:      extractedCandidateKey(turn.ID, job.ExtractorVersion, raw),
-			SupersedesStatement: raw.SupersedesStatement,
-			FormationJob:        &job,
-		})
-		if err != nil {
-			return err
-		}
-		if created {
-			createdCount++
-		}
-		if !seenCandidate[candidate.ID] {
-			candidateIDs = append(candidateIDs, candidate.ID)
-			seenCandidate[candidate.ID] = true
+		if !seenCandidate[outcome.CandidateID] {
+			candidateIDs = append(candidateIDs, outcome.CandidateID)
+			seenCandidate[outcome.CandidateID] = true
 		}
 	}
 	for _, candidateID := range candidateIDs {
@@ -249,18 +293,11 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	}
 	if s.log != nil {
 		s.log.Server("user_memory.formation").Info("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
-			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("candidate_count", len(extracted)),
-			config.F("created_count", createdCount), config.F("approved_count", publishedCount),
+			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("candidate_count", len(extracted.Memories)),
+			config.F("approved_count", publishedCount),
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
 	}
 	return nil
-}
-
-func extractedCandidateKey(turnID int64, version string, candidate ExtractedCandidate) string {
-	payload, _ := json.Marshal(candidate)
-	canonical := fmt.Sprintf("%d\x00%s\x00%s", turnID, version, payload)
-	sum := sha256.Sum256([]byte(canonical))
-	return "extract:" + hex.EncodeToString(sum[:])
 }
 
 func (s *Service) warn(event, message string, err error, fields ...config.Field) {

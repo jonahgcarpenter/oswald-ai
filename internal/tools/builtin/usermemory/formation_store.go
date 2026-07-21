@@ -12,9 +12,10 @@ import (
 	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 )
 
-const FormationExtractorVersion = "formation-v2"
+const FormationExtractorVersion = "formation-v3"
 
 // ErrStaleFormationJobLease indicates that the exact claimed lease is no longer live.
 var ErrStaleFormationJobLease = errors.New("stale memory formation job lease")
@@ -113,7 +114,12 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 	}
 	key := strings.TrimSpace(proposal.IdempotencyKey)
 	if key == "" {
-		key = formationKey(proposal.Source.RequestID, proposal.Source.TurnID, proposal.Output.Statement, string(proposal.Output.Mode), proposal.Source.ExtractorVersion)
+		key = formationKey(
+			proposal.Source.RequestID, proposal.Source.TurnID, proposal.Output.Statement, proposal.Output.Evidence,
+			proposal.Output.ClaimKey, proposal.Output.Scope, proposal.Output.Category, proposal.Output.Provenance,
+			proposal.Output.Context, proposal.Output.Confidence, proposal.Output.TTL, proposal.SupersedesStatement,
+			proposal.Output.Mode, proposal.Source.ExtractorVersion,
+		)
 	}
 	state := "proposed"
 	decisionReason := proposal.Output.Reason
@@ -232,6 +238,18 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 		}
 		if count, _ := fenced.RowsAffected(); count != 1 {
 			return FormationCandidate{}, false, fmt.Errorf("fence pre-compaction candidate: stale job lease or generation")
+		}
+	}
+	if proposal.Source.ToolName == toolnames.UserMemorySave && proposal.Source.RequestID != "" {
+		var existing, approvedCount, totalCount int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM memory_candidates WHERE canonical_user_id = ? AND idempotency_key = ?), COUNT(*) FILTER (WHERE state = 'approved'), COUNT(*) FROM memory_candidates WHERE canonical_user_id = ? AND source_request_id = ? AND explicit_tool_source = ?`, userID, key, userID, proposal.Source.RequestID, toolnames.UserMemorySave).Scan(&existing, &approvedCount, &totalCount); err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("count request memory candidates: %w", err)
+		}
+		if existing == 0 && approvedCount >= MaxMemorySaveBatch {
+			return FormationCandidate{}, false, fmt.Errorf("user_memory_save accepts at most %d distinct candidates per request", MaxMemorySaveBatch)
+		}
+		if existing == 0 && totalCount >= 2*MaxMemorySaveBatch {
+			return FormationCandidate{}, false, fmt.Errorf("user_memory_save retry limit reached for this request")
 		}
 	}
 	if proposal.Source.TurnID > 0 {
@@ -994,6 +1012,17 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
 	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	return requireFormationLeaseMutation(result, err)
+}
+
+// DeferFormationJob releases a lease preempted by foreground work without
+// consuming the job's provider retry budget.
+func (s *Store) DeferFormationJob(ctx context.Context, job FormationJob, delay time.Duration) error {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?, lease_until = NULL, last_error_code = 'foreground_preempted', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
 	return requireFormationLeaseMutation(result, err)
 }
 

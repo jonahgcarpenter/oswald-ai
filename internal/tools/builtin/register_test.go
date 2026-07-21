@@ -110,25 +110,21 @@ func TestRegisterMemorySaveRequiresClaimIdentity(t *testing.T) {
 	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != toolnames.UserMemorySave {
-			continue
-		}
-		found := map[string]bool{}
-		for _, parameter := range entry.Parameters {
-			if parameter.Name == "claim_slot" || parameter.Name == "claim_value" {
-				if !parameter.Required || parameter.Type != "string" {
-					t.Fatalf("unexpected claim identity parameter: %+v", parameter)
-				}
-				found[parameter.Name] = true
-			}
-		}
-		if !found["claim_slot"] || !found["claim_value"] {
-			t.Fatalf("missing claim identity parameters: %+v", entry.Parameters)
-		}
-		return
+	tool, ok := reg.LLMTool(toolnames.UserMemorySave)
+	if !ok {
+		t.Fatalf("%s schema was not loaded", toolnames.UserMemorySave)
 	}
-	t.Fatalf("%s schema was not loaded", toolnames.UserMemorySave)
+	memories := tool.Function.Parameters.Properties["memories"]
+	if memories.Type != "array" || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 {
+		t.Fatalf("unexpected memories schema: %+v", memories)
+	}
+	required := map[string]bool{}
+	for _, name := range memories.Items.Required {
+		required[name] = true
+	}
+	if !required["claim_slot"] || !required["claim_value"] {
+		t.Fatalf("missing nested claim identity requirements: %+v", memories.Items.Required)
+	}
 }
 
 func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {

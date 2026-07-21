@@ -718,6 +718,30 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 	return nil
 }
 
+// DeferSessionCompactionJob releases a lease preempted by foreground work
+// without consuming the provider retry budget.
+func (s *Store) DeferSessionCompactionJob(ctx context.Context, job SessionCompactionJob, delay time.Duration) error {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `
+UPDATE durable_jobs
+SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?,
+	lease_owner = '', lease_until = NULL, last_error_code = 'foreground_preempted',
+	last_error_message = '', updated_at = ?
+WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?
+	AND state = 'running' AND lease_owner = ? AND lease_until = ?`,
+		formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
+	if err != nil {
+		return fmt.Errorf("defer session compaction job: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // RedriveDeadSessionCompactionJobs retries dead jobs on a bounded schedule.
 func (s *Store) RedriveDeadSessionCompactionJobs(ctx context.Context, delay time.Duration) (int64, error) {
 	if delay <= 0 {

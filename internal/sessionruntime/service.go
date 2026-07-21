@@ -27,6 +27,13 @@ const (
 	compactionBudgetPercent = 45
 )
 
+var errBackgroundPreempted = errors.New("background model work preempted by foreground traffic")
+
+// LowPriorityGate grants model capacity only while foreground work is idle.
+type LowPriorityGate interface {
+	TryAcquireLowPriority(context.Context) (context.Context, func(), bool)
+}
+
 // Service plans and serially executes durable session compaction jobs.
 type Service struct {
 	store        *usermemory.Store
@@ -36,9 +43,15 @@ type Service struct {
 	log          *config.Logger
 	owner        string
 	lease        time.Duration
+	gate         LowPriorityGate
 	planRequests chan usermemory.ActiveSessionScope
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
+}
+
+// SetLowPriorityGate makes compaction model calls yield to foreground work.
+func (s *Service) SetLowPriorityGate(gate LowPriorityGate) {
+	s.gate = gate
 }
 
 // NewService constructs the post-delivery compaction service.
@@ -206,6 +219,12 @@ func (s *Service) drain(ctx context.Context) {
 			return
 		}
 		if err := s.process(ctx, job); err != nil {
+			if errors.Is(err, errBackgroundPreempted) {
+				if deferErr := s.store.DeferSessionCompactionJob(context.Background(), job, time.Second); deferErr != nil {
+					s.warn("session.compaction.job.defer_failed", "failed to defer preempted session compaction job", deferErr, config.F("job_id", job.ID))
+				}
+				return
+			}
 			_ = s.store.RetrySessionCompactionJob(context.Background(), job, fmt.Sprintf("%T", err), err.Error())
 			s.warn("session.compaction.job.retry", "session compaction job will retry", err, config.F("job_id", job.ID), config.F("attempt_count", job.AttemptCount), config.F("status", "retry"))
 			continue
@@ -251,9 +270,25 @@ func (s *Service) generateArtifact(ctx context.Context, job usermemory.SessionCo
 	if err != nil {
 		return usermemory.SummaryArtifact{}, err
 	}
-	extractCtx := requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: s.model})
+	extractParent := ctx
+	release := func() {}
+	if s.gate != nil {
+		var acquired bool
+		extractParent, release, acquired = s.gate.TryAcquireLowPriority(ctx)
+		if !acquired {
+			return usermemory.SummaryArtifact{}, errBackgroundPreempted
+		}
+	}
+	defer release()
+	extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: s.model})
 	extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "session_compaction", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
 	artifact, err := s.extractor.Compact(extractCtx, previous, turns)
+	wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
+	release()
+	release = func() {}
+	if wasPreempted {
+		return usermemory.SummaryArtifact{}, errBackgroundPreempted
+	}
 	if err != nil {
 		return usermemory.SummaryArtifact{}, err
 	}
