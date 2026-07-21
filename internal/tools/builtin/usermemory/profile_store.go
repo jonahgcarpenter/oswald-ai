@@ -3,6 +3,7 @@ package usermemory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ type SessionProfile struct {
 	Bytes           int
 	IsNewVersion    bool
 	IsNewSession    bool
+	sourceDigest    string
 }
 
 // ResetSessionContext clears and refreshes one session using the standard TTL.
@@ -47,70 +49,47 @@ func (s *Store) ResolveSessionProfile(ctx context.Context, userID, sessionID str
 	}
 	defer tx.Rollback() // nolint:errcheck
 
-	current, err := refreshProfileTx(ctx, tx, userID, now)
+	current, sourceIDs, err := refreshProfileTx(ctx, tx, userID, now)
 	if err != nil {
 		return SessionProfile{}, err
 	}
-	var generation int
-	var boundVersionID int64
+	var generation, isActive int
 	var expiresRaw string
-	err = tx.QueryRowContext(ctx, `SELECT generation, profile_version_id, expires_at FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&generation, &boundVersionID, &expiresRaw)
+	err = tx.QueryRowContext(ctx, `SELECT generation, is_active, expires_at FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&generation, &isActive, &expiresRaw)
 	if err != nil && err != sql.ErrNoRows {
 		return SessionProfile{}, fmt.Errorf("read tenant session profile: %w", err)
 	}
-	isNewSession := err == sql.ErrNoRows
-	if err == nil {
+	if err == nil && isActive != 0 {
 		expiresAt, parseErr := time.Parse(time.RFC3339Nano, expiresRaw)
 		if parseErr == nil && expiresAt.After(now) {
-			profile, loadErr := loadProfileVersionTx(ctx, tx, userID, boundVersionID)
+			profile, loadErr := loadSessionProfileTx(ctx, tx, userID, sessionID)
 			if loadErr != nil {
 				return SessionProfile{}, loadErr
 			}
-			if _, updateErr := tx.ExecContext(ctx, `UPDATE tenant_sessions SET last_seen_at = ?, expires_at = ? WHERE canonical_user_id = ? AND session_id = ?`, formatTime(now), formatTime(now.Add(ttl)), userID, sessionID); updateErr != nil {
+			if _, updateErr := tx.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE canonical_user_id = ? AND session_id = ?`, formatTime(now), formatTime(now.Add(ttl)), userID, sessionID); updateErr != nil {
 				return SessionProfile{}, fmt.Errorf("refresh tenant session expiry: %w", updateErr)
-			}
-			if err := upsertSessionGenerationTx(ctx, tx, userID, sessionID, generation); err != nil {
-				return SessionProfile{}, err
 			}
 			profile.Generation = generation
 			profile.IsNewVersion = current.IsNewVersion
 			profile.LatestVersion = current.Version
 			profile.LatestFactCount = current.FactCount
 			profile.LatestBytes = current.Bytes
-			if err := pruneProfileVersionsTx(ctx, tx, userID, current.VersionID, now); err != nil {
-				return SessionProfile{}, err
-			}
-			if commitErr := tx.Commit(); commitErr != nil {
-				return SessionProfile{}, fmt.Errorf("commit tenant profile resolution: %w", commitErr)
+			if err := tx.Commit(); err != nil {
+				return SessionProfile{}, fmt.Errorf("commit tenant profile resolution: %w", err)
 			}
 			return profile, nil
 		}
+	}
+	isNewSession := true
+	if err == nil {
 		generation++
-		isNewSession = true
 	} else {
-		err := tx.QueryRowContext(ctx, `SELECT generation + 1 FROM tenant_session_generations WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&generation)
-		if err == sql.ErrNoRows {
-			if err := tx.QueryRowContext(ctx, `SELECT MAX(COALESCE((SELECT MAX(session_generation) FROM session_turns WHERE canonical_user_id = ? AND session_id = ?), 0), 1)`, userID, sessionID).Scan(&generation); err != nil {
-				return SessionProfile{}, fmt.Errorf("resolve tenant session generation: %w", err)
-			}
-		} else if err != nil {
-			return SessionProfile{}, fmt.Errorf("read tenant session generation: %w", err)
+		generation = 1
+		if scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(session_generation), 0) + 1 FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&generation); scanErr != nil {
+			return SessionProfile{}, fmt.Errorf("resolve tenant session generation: %w", scanErr)
 		}
 	}
-
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_sessions (canonical_user_id, session_id, generation, profile_version_id, started_at, last_seen_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
-	generation = excluded.generation,
-	profile_version_id = excluded.profile_version_id,
-	started_at = excluded.started_at,
-	last_seen_at = excluded.last_seen_at,
-	expires_at = excluded.expires_at
-	`, userID, sessionID, generation, current.VersionID, formatTime(now), formatTime(now), formatTime(now.Add(ttl))); err != nil {
-		return SessionProfile{}, fmt.Errorf("bind tenant session profile: %w", err)
-	}
-	if err := upsertSessionGenerationTx(ctx, tx, userID, sessionID, generation); err != nil {
+	if err := bindSessionProfileTx(ctx, tx, userID, sessionID, generation, current, sourceIDs, now, ttl); err != nil {
 		return SessionProfile{}, err
 	}
 	current.Generation = generation
@@ -118,9 +97,6 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	current.LatestFactCount = current.FactCount
 	current.LatestBytes = current.Bytes
 	current.IsNewSession = isNewSession
-	if err := pruneProfileVersionsTx(ctx, tx, userID, current.VersionID, now); err != nil {
-		return SessionProfile{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return SessionProfile{}, fmt.Errorf("commit tenant profile binding: %w", err)
 	}
@@ -142,26 +118,22 @@ func (s *Store) ResetSession(ctx context.Context, userID, sessionID string, ttl 
 		return SessionProfile{}, fmt.Errorf("begin tenant session reset: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
-	current, err := refreshProfileTx(ctx, tx, userID, now)
+	current, sourceIDs, err := refreshProfileTx(ctx, tx, userID, now)
 	if err != nil {
 		return SessionProfile{}, err
 	}
 	var generation int
 	if err := tx.QueryRowContext(ctx, `
 SELECT COALESCE(MAX(generation), 0) + 1 FROM (
-	SELECT generation FROM tenant_session_generations WHERE canonical_user_id = ? AND session_id = ?
-	UNION ALL
-	SELECT generation FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ?
-	UNION ALL
-	SELECT session_generation FROM session_turns WHERE canonical_user_id = ? AND session_id = ?
-)
-`, userID, sessionID, userID, sessionID, userID, sessionID).Scan(&generation); err != nil {
+	SELECT generation FROM sessions WHERE canonical_user_id = ? AND session_id = ?
+	UNION ALL SELECT session_generation FROM session_turns WHERE canonical_user_id = ? AND session_id = ?
+)`, userID, sessionID, userID, sessionID).Scan(&generation); err != nil {
 		return SessionProfile{}, fmt.Errorf("resolve reset session generation: %w", err)
 	}
 	if generation <= 0 {
 		generation = 1
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_compaction_jobs WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
 		return SessionProfile{}, fmt.Errorf("clear reset session compaction jobs: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
@@ -179,19 +151,7 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 			return SessionProfile{}, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_sessions (canonical_user_id, session_id, generation, profile_version_id, started_at, last_seen_at, expires_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
-	generation = excluded.generation,
-	profile_version_id = excluded.profile_version_id,
-	started_at = excluded.started_at,
-	last_seen_at = excluded.last_seen_at,
-	expires_at = excluded.expires_at
-	`, userID, sessionID, generation, current.VersionID, formatTime(now), formatTime(now), formatTime(now.Add(ttl))); err != nil {
-		return SessionProfile{}, fmt.Errorf("bind reset tenant profile: %w", err)
-	}
-	if err := upsertSessionGenerationTx(ctx, tx, userID, sessionID, generation); err != nil {
+	if err := bindSessionProfileTx(ctx, tx, userID, sessionID, generation, current, sourceIDs, now, ttl); err != nil {
 		return SessionProfile{}, err
 	}
 	current.Generation = generation
@@ -199,9 +159,6 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	current.LatestFactCount = current.FactCount
 	current.LatestBytes = current.Bytes
 	current.IsNewSession = true
-	if err := pruneProfileVersionsTx(ctx, tx, userID, current.VersionID, now); err != nil {
-		return SessionProfile{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return SessionProfile{}, fmt.Errorf("commit tenant session reset: %w", err)
 	}
@@ -209,124 +166,124 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	return current, nil
 }
 
-func upsertSessionGenerationTx(ctx context.Context, tx *sql.Tx, userID, sessionID string, generation int) error {
+func bindSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID string, generation int, profile SessionProfile, sourceIDs []int64, now time.Time, ttl time.Duration) error {
+	encoded, err := json.Marshal(sourceIDs)
+	if err != nil {
+		return fmt.Errorf("encode tenant profile sources: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_session_generations (canonical_user_id, session_id, generation)
-VALUES (?, ?, ?)
-ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET generation = MAX(generation, excluded.generation)
-`, userID, sessionID, generation); err != nil {
-		return fmt.Errorf("persist tenant session generation: %w", err)
+INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
+	fact_count, profile_bytes, source_memory_ids, profile_created_at)
+VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
+	generation = excluded.generation, is_active = 1, started_at = excluded.started_at,
+	last_seen_at = excluded.last_seen_at, expires_at = excluded.expires_at,
+	profile_version = excluded.profile_version,
+	profile_version_high_water = MAX(sessions.profile_version_high_water, excluded.profile_version_high_water),
+	renderer_version = excluded.renderer_version, source_digest = excluded.source_digest,
+	speaker_intro = excluded.speaker_intro, rendered_content = excluded.rendered_content,
+	fact_count = excluded.fact_count, profile_bytes = excluded.profile_bytes,
+	source_memory_ids = excluded.source_memory_ids, profile_created_at = excluded.profile_created_at
+`, userID, sessionID, generation, formatTime(now), formatTime(now), formatTime(now.Add(ttl)),
+		profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro,
+		profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now)); err != nil {
+		return fmt.Errorf("bind tenant session profile: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET profile_version_high_water = MAX(profile_version_high_water, ?) WHERE canonical_user_id = ?`, profile.Version, userID); err != nil {
+		return fmt.Errorf("advance tenant profile high-water: %w", err)
 	}
 	return nil
 }
 
-func pruneProfileVersionsTx(ctx context.Context, tx *sql.Tx, userID string, keepVersionID int64, now time.Time) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_sessions WHERE canonical_user_id = ? AND julianday(expires_at) <= julianday(?)`, userID, formatTime(now)); err != nil {
-		return fmt.Errorf("prune expired tenant sessions: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-DELETE FROM tenant_profile_versions
-WHERE canonical_user_id = ? AND id != ? AND NOT EXISTS (
-	SELECT 1 FROM tenant_sessions sessions WHERE sessions.profile_version_id = tenant_profile_versions.id
-)
-`, userID, keepVersionID); err != nil {
-		return fmt.Errorf("prune unreferenced tenant profiles: %w", err)
-	}
-	return nil
-}
-
-func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (SessionProfile, error) {
+func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (SessionProfile, []int64, error) {
 	var intro string
-	err := tx.QueryRowContext(ctx, `SELECT intro FROM user_memory_profiles WHERE canonical_user_id = ?`, userID).Scan(&intro)
+	err := tx.QueryRowContext(ctx, `SELECT speaker_intro FROM account_users WHERE canonical_user_id = ?`, userID).Scan(&intro)
 	if err != nil && err != sql.ErrNoRows {
-		return SessionProfile{}, fmt.Errorf("read tenant profile intro: %w", err)
+		return SessionProfile{}, nil, fmt.Errorf("read tenant profile intro: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT id, category, statement, scope, status, profile_approved != 0, confidence, importance, expires_at, provenance_type, source_authority
-FROM memory_entries
-WHERE canonical_user_id = ? AND approval_state = 'approved'
-`, userID)
+FROM memory_entries WHERE canonical_user_id = ? AND approval_state = 'approved'`, userID)
 	if err != nil {
-		return SessionProfile{}, fmt.Errorf("read tenant profile candidates: %w", err)
+		return SessionProfile{}, nil, fmt.Errorf("read tenant profile candidates: %w", err)
 	}
 	var candidates []ProfileCandidate
 	for rows.Next() {
 		var candidate ProfileCandidate
 		var expires sql.NullString
 		if err := rows.Scan(&candidate.MemoryID, &candidate.Category, &candidate.Statement, &candidate.Scope, &candidate.Status, &candidate.Approved, &candidate.Confidence, &candidate.Importance, &expires, &candidate.FormationProvenance, &candidate.SourceAuthority); err != nil {
-			rows.Close() // nolint:errcheck
-			return SessionProfile{}, fmt.Errorf("scan tenant profile candidate: %w", err)
+			rows.Close()
+			return SessionProfile{}, nil, fmt.Errorf("scan tenant profile candidate: %w", err)
 		}
 		if expires.Valid {
-			parsed, err := time.Parse(time.RFC3339Nano, expires.String)
-			if err != nil {
-				candidate.ExpiresAt = now
-			} else {
-				candidate.ExpiresAt = parsed
-			}
+			candidate.ExpiresAt = parseTime(expires.String)
 		}
 		candidates = append(candidates, candidate)
 	}
 	if err := rows.Close(); err != nil {
-		return SessionProfile{}, fmt.Errorf("close tenant profile candidates: %w", err)
+		return SessionProfile{}, nil, fmt.Errorf("close tenant profile candidates: %w", err)
 	}
 	compiled := CompileTenantProfile(intro, candidates, now)
-	var profile SessionProfile
+	sourceIDs := make([]int64, 0, len(compiled.SelectedFacts))
+	for _, fact := range compiled.SelectedFacts {
+		sourceIDs = append(sourceIDs, fact.MemoryID)
+	}
+	profile := SessionProfile{SpeakerIntro: normalizeProfileText(intro), Content: compiled.Content, FactCount: compiled.SelectedCount, Bytes: compiled.Bytes, sourceDigest: compiled.SourceDigest}
+	var latestVersion int
 	var latestDigest, latestRenderer string
-	err = tx.QueryRowContext(ctx, `
-SELECT id, version, speaker_intro, rendered_content, fact_count, profile_bytes, source_digest, renderer_version
-FROM tenant_profile_versions
-WHERE canonical_user_id = ? ORDER BY version DESC LIMIT 1
-`, userID).Scan(&profile.VersionID, &profile.Version, &profile.SpeakerIntro, &profile.Content, &profile.FactCount, &profile.Bytes, &latestDigest, &latestRenderer)
-	if err == nil {
-		if latestDigest == compiled.SourceDigest && latestRenderer == ProfileRendererVersion {
-			return profile, nil
-		}
-		profile = SessionProfile{}
-	}
+	err = tx.QueryRowContext(ctx, `SELECT profile_version, source_digest, renderer_version FROM sessions WHERE canonical_user_id = ? ORDER BY profile_version DESC LIMIT 1`, userID).Scan(&latestVersion, &latestDigest, &latestRenderer)
 	if err != nil && err != sql.ErrNoRows {
-		return SessionProfile{}, fmt.Errorf("read current tenant profile version: %w", err)
+		return SessionProfile{}, nil, fmt.Errorf("read current tenant profile version: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `
-INSERT INTO tenant_profile_version_counters (canonical_user_id, version)
-VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM tenant_profile_versions WHERE canonical_user_id = ?))
-ON CONFLICT(canonical_user_id) DO UPDATE SET version = version + 1
-RETURNING version
-`, userID, userID).Scan(&profile.Version); err != nil {
-		return SessionProfile{}, fmt.Errorf("allocate tenant profile version: %w", err)
+	if err == nil && latestDigest == compiled.SourceDigest && latestRenderer == ProfileRendererVersion {
+		profile.Version = latestVersion
+		profile.VersionID = int64(latestVersion)
+		return profile, sourceIDs, nil
 	}
-	profile.SpeakerIntro = normalizeProfileText(intro)
-	profile.Content = compiled.Content
-	profile.FactCount = compiled.SelectedCount
-	profile.Bytes = compiled.Bytes
-	result, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_profile_versions (canonical_user_id, version, renderer_version, source_digest, speaker_intro, rendered_content, fact_count, profile_bytes, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, userID, profile.Version, ProfileRendererVersion, compiled.SourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, formatTime(now))
-	if err != nil {
-		return SessionProfile{}, fmt.Errorf("create tenant profile version: %w", err)
+	var highWater int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(profile_version_high_water), 0) FROM sessions WHERE canonical_user_id = ?`, userID).Scan(&highWater); err != nil {
+		return SessionProfile{}, nil, fmt.Errorf("allocate tenant profile version: %w", err)
 	}
-	profile.VersionID, err = result.LastInsertId()
-	if err != nil {
-		return SessionProfile{}, fmt.Errorf("read tenant profile version id: %w", err)
-	}
-	for ordinal, fact := range compiled.SelectedFacts {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_profile_version_facts (profile_version_id, ordinal, source_memory_id, category, statement) VALUES (?, ?, ?, ?, ?)`, profile.VersionID, ordinal, fact.MemoryID, fact.Category, fact.Statement); err != nil {
-			return SessionProfile{}, fmt.Errorf("snapshot tenant profile fact: %w", err)
-		}
-	}
+	profile.Version = highWater + 1
+	profile.VersionID = int64(profile.Version)
 	profile.IsNewVersion = true
+	return profile, sourceIDs, nil
+}
+
+func loadSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID string) (SessionProfile, error) {
+	var profile SessionProfile
+	err := tx.QueryRowContext(ctx, `SELECT profile_version, profile_version, speaker_intro, rendered_content, fact_count, profile_bytes FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&profile.VersionID, &profile.Version, &profile.SpeakerIntro, &profile.Content, &profile.FactCount, &profile.Bytes)
+	if err != nil {
+		return SessionProfile{}, fmt.Errorf("load tenant session profile: %w", err)
+	}
 	return profile, nil
 }
 
-func loadProfileVersionTx(ctx context.Context, tx *sql.Tx, userID string, versionID int64) (SessionProfile, error) {
-	var profile SessionProfile
-	err := tx.QueryRowContext(ctx, `
-SELECT id, version, speaker_intro, rendered_content, fact_count, profile_bytes
-FROM tenant_profile_versions WHERE canonical_user_id = ? AND id = ?
-`, userID, versionID).Scan(&profile.VersionID, &profile.Version, &profile.SpeakerIntro, &profile.Content, &profile.FactCount, &profile.Bytes)
+func rebindProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64, now time.Time) error {
+	profile, sourceIDs, err := refreshProfileTx(ctx, tx, userID, now)
 	if err != nil {
-		return SessionProfile{}, fmt.Errorf("load tenant profile version: %w", err)
+		return err
 	}
-	return profile, nil
+	encoded, err := json.Marshal(sourceIDs)
+	if err != nil {
+		return fmt.Errorf("encode rebound profile sources: %w", err)
+	}
+	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status IN ('deleted','expired','forgotten'))`
+	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now), userID, userID}
+	if memoryID > 0 {
+		condition = `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?)`
+		args = []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now), userID, memoryID}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
+	profile_version = ?, profile_version_high_water = MAX(profile_version_high_water, ?), renderer_version = ?,
+	source_digest = ?, speaker_intro = ?, rendered_content = ?, fact_count = ?, profile_bytes = ?,
+	source_memory_ids = ?, profile_created_at = ?
+WHERE canonical_user_id = ? AND `+condition, args...); err != nil {
+		return fmt.Errorf("rebind tenant profile snapshots: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET profile_version_high_water = MAX(profile_version_high_water, ?) WHERE canonical_user_id = ?`, profile.Version, userID); err != nil {
+		return fmt.Errorf("advance rebound profile high-water: %w", err)
+	}
+	return nil
 }

@@ -63,17 +63,17 @@ Echo a value.
 
 func TestRegistryUnknownToolListsMatchingPrefixHandlers(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
-	registerTestTool(t, reg, "memory.search")
-	registerTestTool(t, reg, "memory.list")
-	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "files.read")
+	registerTestTool(t, reg, "files.search")
+	registerTestTool(t, reg, "files.list")
+	registerTestTool(t, reg, "files.delete")
 	registerTestTool(t, reg, "web.search")
 
-	_, err := reg.Execute(context.Background(), "memory.delete", nil)
+	_, err := reg.Execute(context.Background(), "files.missing", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "memory.delete"; available tools in prefix "memory": memory.forget, memory.list, memory.save, memory.search`
+	want := `no handler registered for tool "files.missing"; available tools in prefix "files": files.delete, files.list, files.read, files.search`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}
@@ -81,15 +81,15 @@ func TestRegistryUnknownToolListsMatchingPrefixHandlers(t *testing.T) {
 
 func TestRegistryUnknownToolWithoutPrefixListsAllHandlers(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
-	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "files.read")
+	registerTestTool(t, reg, "files.delete")
 	registerTestTool(t, reg, "web.search")
 
 	_, err := reg.Execute(context.Background(), "delete", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "delete"; available tools: memory.forget, memory.save, web.search`
+	want := `no handler registered for tool "delete"; available tools: files.delete, files.read, web.search`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}
@@ -97,7 +97,7 @@ func TestRegistryUnknownToolWithoutPrefixListsAllHandlers(t *testing.T) {
 
 func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
+	registerTestTool(t, reg, "files.read")
 	registerTestTool(t, reg, "web.search")
 
 	_, err := reg.Execute(context.Background(), "missing.write", nil)

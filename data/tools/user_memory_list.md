@@ -1,4 +1,4 @@
-# memory.list
+# user_memory_list
 
 ## Description
 
@@ -6,7 +6,7 @@ List active memories and stable canonical memory IDs stored for the authenticate
 
 Entries include confidence, formation provenance, source authority, epistemic status, and sensitivity. Treat `uncertain_inference` as a hypothesis rather than an established fact.
 
-Do not use this for normal memory retrieval during conversation; use memory.search instead. Do not use this for Oswald's own identity/directives, public facts, or web lookup.
+Do not use this for normal memory retrieval during conversation; use user_memory_search instead. Do not use this for Oswald's own identity/directives, public facts, or web lookup.
 
 ## Parameters
 

@@ -220,9 +220,9 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	err = responder.SendAgentResponse(result.Response)
 	if err != nil {
 		log.Error("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
-		if deps.DeploymentMemory != nil {
-			if discardErr := deps.DeploymentMemory.DiscardDeploymentMemories(context.Background(), userID, req.RequestID); discardErr != nil {
-				log.Warn("deployment_memory.discard_failed", "failed to discard undelivered deployment memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(discardErr))
+		if deps.GlobalMemory != nil {
+			if discardErr := deps.GlobalMemory.DiscardGlobalMemories(context.Background(), userID, req.RequestID); discardErr != nil {
+				log.Warn("global_memory.discard_failed", "failed to discard undelivered global memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(discardErr))
 			}
 		}
 		if deps.Compaction != nil && result.Response != nil && result.Response.SourceTurnID > 0 {
@@ -239,9 +239,9 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
-		if deps.DeploymentMemory != nil && result.Response.SourceTurnID > 0 {
-			if _, publishErr := deps.DeploymentMemory.PublishDeploymentMemories(context.Background(), userID, req.RequestID, result.Response.SourceTurnID); publishErr != nil {
-				log.Warn("deployment_memory.publish_failed", "failed to publish delivered deployment memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(publishErr))
+		if deps.GlobalMemory != nil && result.Response.SourceTurnID > 0 {
+			if _, publishErr := deps.GlobalMemory.PublishGlobalMemories(context.Background(), userID, req.RequestID, result.Response.SourceTurnID); publishErr != nil {
+				log.Warn("global_memory.publish_failed", "failed to publish delivered global memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(publishErr))
 			}
 		}
 		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
@@ -252,7 +252,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				ExtractorVersion: usermemory.FormationExtractorVersion,
 			}
 			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
-				log.Warn("memory.formation.job.enqueue_failed", "failed to enqueue post-turn memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
+				log.Warn("user_memory.formation.job.enqueue_failed", "failed to enqueue post-turn user-memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
 			}
 		}
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {

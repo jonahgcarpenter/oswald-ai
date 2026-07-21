@@ -28,7 +28,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	if err := db.ReplaceAccountLinks(data); err != nil {
 		t.Fatalf("initial replace: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, "usr_test", "You are speaking with Test User.", formatDBTime(now), formatDBTime(now)); err != nil {
+	if _, err := db.SQL().Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, "You are speaking with Test User.", "usr_test"); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
 	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "the user likes purple.", "test evidence", 0.9, 3, "active", formatDBTime(now), formatDBTime(now)); err != nil {
@@ -45,7 +45,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	}
 
 	var profileCount int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM user_memory_profiles WHERE canonical_user_id = ?`, "usr_test").Scan(&profileCount); err != nil {
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ? AND speaker_intro != ''`, "usr_test").Scan(&profileCount); err != nil {
 		t.Fatalf("count profiles: %v", err)
 	}
 	var entryCount int

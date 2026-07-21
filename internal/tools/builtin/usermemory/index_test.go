@@ -31,7 +31,7 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM derived_index_changes`).Scan(&count); err != nil || count != 1 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("idempotent count=%d err=%v", count, err)
 	}
 	change, err := store.ClaimDerivedIndexChange(context.Background(), "test", time.Minute)
@@ -41,7 +41,7 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 	if err := store.RetryDerivedIndexChange(context.Background(), change, "offline"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE derived_index_changes SET available_at = ? WHERE sequence = ?`, formatTime(time.Now().Add(-time.Second)), change.Sequence); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ? AND job_kind = 'derived_index'`, formatTime(time.Now().Add(-time.Second)), change.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -62,6 +62,32 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 	if err := store.CompleteDerivedIndexChange(context.Background(), reclaimed.Sequence); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestDeleteIndexRecordCannotCrossTenant(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-a", "user-b")
+	memory, err := store.SaveMemory(ctx, "user-b", SaveRequest{Scope: ScopeLongTerm, Statement: "Tenant B private memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.MemoryIndexRecordByID(ctx, memory.ID, "user-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteIndexRecord(ctx, revision, memory.ID, "user-a"); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
 }
 
 func TestStaleMemoryIndexWriteCannotRepublishAfterPrivacyMutation(t *testing.T) {

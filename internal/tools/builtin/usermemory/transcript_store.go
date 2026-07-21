@@ -71,7 +71,7 @@ SELECT turns.id, turns.session_id, turns.session_generation, turns.user_text,
 	turns.assistant_text, turns.created_at, turns.delivered_at
 FROM `+table+`
 JOIN session_turns turns ON turns.id = `+table+`.rowid
-JOIN tenant_sessions sessions
+JOIN sessions
 	ON sessions.canonical_user_id = turns.canonical_user_id
 	AND sessions.session_id = turns.session_id
 WHERE `+table+` MATCH ?
@@ -84,6 +84,7 @@ WHERE `+table+` MATCH ?
 	AND sessions.canonical_user_id = ?
 	AND sessions.session_id = ?
 	AND sessions.generation = ?
+	AND sessions.is_active = 1
 	AND julianday(sessions.expires_at) > julianday(?)
 	AND turns.delivered_at IS NOT NULL
 ORDER BY bm25(`+table+`, 0.0, 0.0, 0.0, 1.0, 1.0), turns.created_at DESC, turns.id DESC

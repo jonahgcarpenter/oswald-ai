@@ -13,9 +13,7 @@ func TestMemoryFormationFreshSchema(t *testing.T) {
 	for _, table := range []string{
 		"memory_candidates",
 		"memory_evidence",
-		"memory_relations",
-		"memory_formation_jobs",
-		"memory_formation_audit",
+		"durable_jobs",
 	} {
 		assertSchemaObject(t, db, "table", table)
 	}
@@ -23,14 +21,14 @@ func TestMemoryFormationFreshSchema(t *testing.T) {
 		"idx_memory_candidates_state",
 		"idx_memory_candidates_statement",
 		"idx_memory_evidence_candidate",
-		"idx_memory_relations_target_memory",
-		"idx_memory_formation_jobs_ready",
-		"idx_memory_formation_audit_tenant_time",
+		"idx_durable_jobs_ready",
+		"idx_memory_events_audit_key",
 		"idx_memory_entries_candidate",
 	} {
 		assertSchemaObject(t, db, "index", index)
 	}
-	for _, trigger := range []string{"memory_formation_audit_no_update", "memory_formation_audit_no_delete"} {
+	assertSchemaObject(t, db, "view", "memory_formation_audit")
+	for _, trigger := range []string{"memory_formation_audit_update", "memory_formation_audit_delete"} {
 		assertSchemaObject(t, db, "trigger", trigger)
 	}
 	for _, column := range []string{
@@ -42,19 +40,13 @@ func TestMemoryFormationFreshSchema(t *testing.T) {
 		assertTableColumn(t, db, "memory_entries", column)
 	}
 
-	var migrationCount int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, memoryFormationMigration).Scan(&migrationCount); err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if migrationCount != 1 {
-		t.Fatalf("migration count = %d, want 1", migrationCount)
-	}
 }
 
 func TestMemoryFormationStateAndIdempotencyConstraints(t *testing.T) {
 	db := openTestDB(t)
 	insertFormationUser(t, db, "user-a")
 	insertFormationUser(t, db, "user-b")
+	turnID := insertFormationTurn(t, db, "user-a", "session-a")
 
 	for i, state := range []string{"proposed", "pending_confirmation", "approved", "rejected"} {
 		insertFormationCandidate(t, db, "user-a", fmt.Sprintf("candidate-%d", i), state)
@@ -72,22 +64,22 @@ func TestMemoryFormationStateAndIdempotencyConstraints(t *testing.T) {
 
 	for i, state := range []string{"queued", "running", "retry", "succeeded", "skipped", "dead"} {
 		if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, available_at, created_at, updated_at
-) VALUES (?, ?, 'post_turn', ?, ?, ?, ?)`, "user-a", fmt.Sprintf("job-%d", i), state, formationTestTime, formationTestTime, formationTestTime); err != nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', ?, ?, 'post_turn', ?, 1, ?, 'test-v1', ?, ?, ?)`, "user-a", fmt.Sprintf("job-%d", i), state, turnID, formationTestTime, formationTestTime, formationTestTime); err != nil {
 			t.Fatalf("insert job state %q: %v", state, err)
 		}
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, available_at, created_at, updated_at
-) VALUES ('user-a', 'invalid-job', 'post_turn', 'failed', ?, ?, ?)`, formationTestTime, formationTestTime, formationTestTime); err == nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', 'user-a', 'invalid-job', 'post_turn', 'failed', 1, ?, 'test-v1', ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err == nil {
 		t.Fatal("expected invalid job state to fail")
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, available_at, created_at, updated_at
-) VALUES ('user-a', 'job-0', 'post_turn', 'queued', ?, ?, ?)`, formationTestTime, formationTestTime, formationTestTime); err == nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', 'user-a', 'job-0', 'post_turn', 'queued', 1, ?, 'test-v1', ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err == nil {
 		t.Fatal("expected duplicate job idempotency key to fail")
 	}
 }
@@ -113,9 +105,9 @@ VALUES ('session-a', 'user-a', 'hello', 'hi', ?)`, formationTestTime)
 		t.Fatal("expected cross-tenant candidate source turn to fail")
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, source_turn_id, available_at, created_at, updated_at
-) VALUES ('user-b', 'wrong-turn-job', 'post_turn', 'queued', ?, ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err == nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', 'user-b', 'wrong-turn-job', 'post_turn', 'queued', 1, ?, 'test-v1', ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err == nil {
 		t.Fatal("expected cross-tenant job source turn to fail")
 	}
 
@@ -161,18 +153,6 @@ INSERT INTO memory_evidence (
 		t.Fatal("expected evidence with two owners to fail")
 	}
 
-	otherCandidateID := insertFormationCandidate(t, db, "user-a", "candidate-b", "proposed")
-	if _, err := db.SQL().Exec(`
-INSERT INTO memory_relations (
-	canonical_user_id, idempotency_key, relation_type, source_candidate_id, target_memory_id, created_at
-) VALUES ('user-a', 'relation-a', 'contradicts', ?, ?, ?)`, otherCandidateID, memoryID, formationTestTime); err != nil {
-		t.Fatalf("insert relation: %v", err)
-	}
-	if _, err := db.SQL().Exec(`DELETE FROM memory_candidates WHERE id = ?`, otherCandidateID); err != nil {
-		t.Fatalf("delete source candidate: %v", err)
-	}
-	assertRowCount(t, db, "memory_relations", 0)
-
 	if _, err := db.SQL().Exec(`DELETE FROM memory_candidates WHERE id = ?`, candidateID); err != nil {
 		t.Fatalf("delete evidence candidate: %v", err)
 	}
@@ -203,9 +183,9 @@ VALUES ('session-a', 'user-a', 'hello', 'hi', ?)`, formationTestTime)
 		t.Fatalf("candidate id: %v", err)
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, source_turn_id, available_at, created_at, updated_at
-) VALUES ('user-a', 'job-a', 'post_turn', 'succeeded', ?, ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err != nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', 'user-a', 'job-a', 'post_turn', 'succeeded', 1, ?, 'test-v1', ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err != nil {
 		t.Fatalf("insert sourced job: %v", err)
 	}
 	if _, err := db.SQL().Exec(`
@@ -218,9 +198,13 @@ INSERT INTO memory_evidence (
 	if _, err := db.SQL().Exec(`DELETE FROM session_turns WHERE id = ?`, turnID); err != nil {
 		t.Fatalf("delete source turn: %v", err)
 	}
-	for _, table := range []string{"memory_candidates", "memory_evidence", "memory_formation_jobs"} {
+	for _, table := range []string{"memory_candidates", "memory_evidence", "durable_jobs"} {
 		var count, withSource int
-		if err := db.SQL().QueryRow(`SELECT COUNT(*), COUNT(source_turn_id) FROM `+table).Scan(&count, &withSource); err != nil {
+		query := `SELECT COUNT(*), COUNT(source_turn_id) FROM ` + table
+		if table == "durable_jobs" {
+			query += ` WHERE job_kind = 'memory_formation'`
+		}
+		if err := db.SQL().QueryRow(query).Scan(&count, &withSource); err != nil {
 			t.Fatalf("inspect %s source: %v", table, err)
 		}
 		if count != 1 || withSource != 0 {
@@ -234,10 +218,11 @@ func TestMemoryFormationAuditIsAppendOnlyAndTenantCascadeDeletes(t *testing.T) {
 	insertFormationUser(t, db, "user-a")
 	insertFormationUser(t, db, "user-b")
 	insertFormationCandidate(t, db, "user-a", "candidate-a", "proposed")
+	turnID := insertFormationTurn(t, db, "user-a", "session-a")
 	if _, err := db.SQL().Exec(`
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, available_at, created_at, updated_at
-) VALUES ('user-a', 'job-a', 'post_turn', 'queued', ?, ?, ?)`, formationTestTime, formationTestTime, formationTestTime); err != nil {
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_session_generation, source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', 'user-a', 'job-a', 'post_turn', 'queued', 1, ?, 'test-v1', ?, ?, ?)`, turnID, formationTestTime, formationTestTime, formationTestTime); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
 	if _, err := db.SQL().Exec(`
@@ -259,32 +244,66 @@ INSERT INTO memory_formation_audit (
 	if _, err := db.SQL().Exec(`DELETE FROM account_users WHERE canonical_user_id = 'user-a'`); err != nil {
 		t.Fatalf("delete tenant: %v", err)
 	}
-	for _, table := range []string{"memory_candidates", "memory_formation_jobs", "memory_formation_audit"} {
+	for _, table := range []string{"memory_candidates", "durable_jobs", "memory_formation_audit"} {
 		assertRowCount(t, db, table, 0)
 	}
 }
 
-func TestMemoryFormationMigrationIsIdempotent(t *testing.T) {
+func TestMemoryEventsRejectInvalidTenantReferences(t *testing.T) {
 	db := openTestDB(t)
 	insertFormationUser(t, db, "user-a")
-	candidateID := insertFormationCandidate(t, db, "user-a", "candidate-a", "proposed")
+	insertFormationUser(t, db, "user-b")
+	turnA := insertFormationTurn(t, db, "user-a", "session-a")
+	turnB := insertFormationTurn(t, db, "user-b", "session-b")
+	candidateA := insertFormationCandidate(t, db, "user-a", "candidate-a", "approved")
+	candidateB := insertFormationCandidate(t, db, "user-b", "candidate-b", "approved")
+	memoryA := insertFormationMemory(t, db, "user-a", "memory-a")
+	memoryB := insertFormationMemory(t, db, "user-b", "memory-b")
+	jobA := insertFormationJob(t, db, "user-a", "job-a", turnA)
+	jobB := insertFormationJob(t, db, "user-b", "job-b", turnB)
+	derivedJob := insertDerivedIndexJob(t, db, "user-a", "derived-a", memoryA)
 
-	if err := db.migrateMemoryFormationSchema(); err != nil {
-		t.Fatalf("second migration: %v", err)
+	validResult, err := db.SQL().Exec(`
+INSERT INTO memory_events (
+	canonical_user_id, memory_id, event_type, created_at, candidate_id, job_id, turn_id
+) VALUES ('user-a', ?, 'formation.valid', ?, ?, ?, ?)`, memoryA, formationTestTime, candidateA, jobA, turnA)
+	if err != nil {
+		t.Fatalf("insert valid memory event: %v", err)
 	}
-	if err := db.initializeUserMemory(); err != nil {
-		t.Fatalf("repeat user memory initialization: %v", err)
+	validID, err := validResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("valid memory event id: %v", err)
 	}
 
-	var migrationCount, candidateCount int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name = ?`, memoryFormationMigration).Scan(&migrationCount); err != nil {
-		t.Fatalf("count migration: %v", err)
+	invalid := []struct {
+		name   string
+		column string
+		value  int64
+	}{
+		{name: "memory owner", column: "memory_id", value: memoryB},
+		{name: "candidate owner", column: "candidate_id", value: candidateB},
+		{name: "job owner", column: "job_id", value: jobB},
+		{name: "job kind", column: "job_id", value: derivedJob},
+		{name: "turn owner", column: "turn_id", value: turnB},
 	}
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE id = ?`, candidateID).Scan(&candidateCount); err != nil {
-		t.Fatalf("count candidate: %v", err)
+	for i, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			insertSQL := fmt.Sprintf(`INSERT INTO memory_events (canonical_user_id, event_type, created_at, %s) VALUES ('user-a', ?, ?, ?)`, test.column)
+			if _, err := db.SQL().Exec(insertSQL, fmt.Sprintf("invalid.insert.%d", i), formationTestTime, test.value); err == nil {
+				t.Fatal("expected invalid memory event insert to fail")
+			}
+			updateSQL := fmt.Sprintf(`UPDATE memory_events SET %s = ? WHERE id = ?`, test.column)
+			if _, err := db.SQL().Exec(updateSQL, test.value, validID); err == nil {
+				t.Fatal("expected invalid memory event update to fail")
+			}
+		})
 	}
-	if migrationCount != 1 || candidateCount != 1 {
-		t.Fatalf("migration count=%d candidate count=%d", migrationCount, candidateCount)
+
+	if _, err := db.SQL().Exec(`
+INSERT INTO memory_formation_audit (
+	canonical_user_id, idempotency_key, event_type, candidate_id, actor_type, created_at
+) VALUES ('user-a', 'invalid-view-reference', 'candidate.invalid', ?, 'agent', ?)`, candidateB, formationTestTime); err == nil {
+		t.Fatal("expected audit view insert with cross-tenant reference to fail")
 	}
 }
 
@@ -318,6 +337,69 @@ func insertFormationCandidate(t *testing.T, db *DB, userID, key, state string) i
 	id, err := result.LastInsertId()
 	if err != nil {
 		t.Fatalf("candidate %q id: %v", key, err)
+	}
+	return id
+}
+
+func insertFormationTurn(t *testing.T, db *DB, userID, sessionID string) int64 {
+	t.Helper()
+	result, err := db.SQL().Exec(`INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, created_at) VALUES (?, ?, 1, 'hello', 'hi', ?)`, sessionID, userID, formationTestTime)
+	if err != nil {
+		t.Fatalf("insert formation turn: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("formation turn id: %v", err)
+	}
+	return id
+}
+
+func insertFormationMemory(t *testing.T, db *DB, userID, key string) int64 {
+	t.Helper()
+	result, err := db.SQL().Exec(`
+INSERT INTO memory_entries (
+	canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at
+) VALUES (?, 'long_term', 'notes', ?, ?, 'evidence', ?, ?)`, userID, "Statement "+key, key, formationTestTime, formationTestTime)
+	if err != nil {
+		t.Fatalf("insert memory %q: %v", key, err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("memory %q id: %v", key, err)
+	}
+	return id
+}
+
+func insertFormationJob(t *testing.T, db *DB, userID, key string, turnID int64) int64 {
+	t.Helper()
+	result, err := db.SQL().Exec(`
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, source_session_generation,
+	source_turn_id, extractor_version, available_at, created_at, updated_at
+) VALUES ('memory_formation', ?, ?, 'post_turn', 1, ?, 'test-v1', ?, ?, ?)`, userID, key, turnID, formationTestTime, formationTestTime, formationTestTime)
+	if err != nil {
+		t.Fatalf("insert formation job %q: %v", key, err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("formation job %q id: %v", key, err)
+	}
+	return id
+}
+
+func insertDerivedIndexJob(t *testing.T, db *DB, userID, key string, memoryID int64) int64 {
+	t.Helper()
+	result, err := db.SQL().Exec(`
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, entity_kind, entity_id, operation,
+	available_at, created_at, updated_at
+) VALUES ('derived_index', ?, ?, 'memory', ?, 'upsert', ?, ?, ?)`, userID, key, memoryID, formationTestTime, formationTestTime, formationTestTime)
+	if err != nil {
+		t.Fatalf("insert derived-index job %q: %v", key, err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("derived-index job %q id: %v", key, err)
 	}
 	return id
 }

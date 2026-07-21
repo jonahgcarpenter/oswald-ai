@@ -182,12 +182,12 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 			return FormationCandidate{}, false, fmt.Errorf("formation candidate scope does not match fenced job")
 		}
 		fenced, err := tx.ExecContext(ctx, `
-UPDATE memory_formation_jobs SET updated_at = updated_at
-WHERE id = ? AND canonical_user_id = ? AND state = 'running'
+UPDATE durable_jobs SET updated_at = updated_at
+WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'
 	AND lease_until = ? AND julianday(lease_until) > julianday(?)
 	AND EXISTS (
 		SELECT 1 FROM account_users active
-		WHERE active.canonical_user_id = memory_formation_jobs.canonical_user_id
+		WHERE active.canonical_user_id = durable_jobs.canonical_user_id
 			AND active.lifecycle_state = 'active'
 	)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
 		if err != nil {
@@ -199,23 +199,24 @@ WHERE id = ? AND canonical_user_id = ? AND state = 'running'
 	}
 	if job := proposal.CompactionJob; job != nil {
 		fenced, err := tx.ExecContext(ctx, `
-UPDATE session_compaction_jobs SET updated_at = updated_at
-WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
+UPDATE durable_jobs SET updated_at = updated_at
+WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
 	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)
 	AND EXISTS (
-		SELECT 1 FROM tenant_sessions active
-		WHERE active.canonical_user_id = session_compaction_jobs.canonical_user_id
-			AND active.session_id = session_compaction_jobs.session_id
-			AND active.generation = session_compaction_jobs.session_generation
+		SELECT 1 FROM sessions active
+		WHERE active.canonical_user_id = durable_jobs.canonical_user_id
+			AND active.session_id = durable_jobs.session_id
+			AND active.generation = durable_jobs.session_generation
+			AND active.is_active = 1
 			AND julianday(active.expires_at) > julianday(?)
 	)
 	AND ? BETWEEN covered_from_turn_id AND covered_through_turn_id
 	AND EXISTS (
 		SELECT 1 FROM session_turns source
-		WHERE source.id = ? AND source.canonical_user_id = session_compaction_jobs.canonical_user_id
-			AND source.session_id = session_compaction_jobs.session_id
-			AND source.session_generation = session_compaction_jobs.session_generation
+		WHERE source.id = ? AND source.canonical_user_id = durable_jobs.canonical_user_id
+			AND source.session_id = durable_jobs.session_id
+			AND source.session_generation = durable_jobs.session_generation
 			AND source.delivered_at IS NOT NULL
 	)`,
 			job.ID, job.UserID, job.SessionID, job.SessionGeneration,
@@ -275,15 +276,6 @@ VALUES (?, ?, ?, 'exact_user_quote', ?, ?, ?, ?, ?, ?, ?, 'supports', ?, ?, ?, ?
 		}
 		if err := insertFormationAuditTx(ctx, tx, userID, key+":proposed", "candidate."+state, candidate.ID, 0, 0, proposal.Source, "policy", decisionReason); err != nil {
 			return FormationCandidate{}, false, err
-		}
-		if candidate.SupersedesMemoryID > 0 {
-			if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_relations (canonical_user_id, idempotency_key, relation_type, source_candidate_id, target_memory_id, created_at, metadata)
-VALUES (?, ?, 'contradicts', ?, ?, ?, '{"resolution":"automatic_supersession"}')
-ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
-`, userID, key+":contradicts", candidate.ID, candidate.SupersedesMemoryID, formatTime(now)); err != nil {
-				return FormationCandidate{}, false, fmt.Errorf("record candidate contradiction: %w", err)
-			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -346,7 +338,7 @@ func (s *Store) PublishCandidate(ctx context.Context, userID string, candidateID
 			if err := s.supersedeActiveMemoryTx(ctx, tx, userID, candidate.SupersedesMemoryID, duplicateID, now); err != nil {
 				return MemoryEntry{}, err
 			}
-			if _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+			if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
 				return MemoryEntry{}, fmt.Errorf("advance profile after duplicate correction: %w", err)
 			}
 		}
@@ -387,19 +379,16 @@ func (s *Store) PublishCandidate(ctx context.Context, userID string, candidateID
 			candidate.ClaimKey, candidate.ClaimSlot, candidate.ClaimValue, formatTime(now), duplicateID, userID); err != nil {
 			return MemoryEntry{}, fmt.Errorf("reinforce active memory: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations (canonical_user_id, idempotency_key, relation_type, source_candidate_id, target_memory_id, created_at, metadata) VALUES (?, ?, 'duplicate', ?, ?, ?, '{"resolution":"reinforced"}') ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING`, userID, formationKey("reinforces", candidate.ID, duplicateID), candidate.ID, duplicateID, formatTime(now)); err != nil {
-			return MemoryEntry{}, fmt.Errorf("record memory reinforcement: %w", err)
-		}
 		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", duplicateID, "upsert", "reinforce:"+formatTime(now)); err != nil {
 			return MemoryEntry{}, err
 		}
-		if _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+		if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
 			return MemoryEntry{}, fmt.Errorf("advance profile after memory reinforcement: %w", err)
 		}
 		if err := markCandidatePublishedTx(ctx, tx, candidate, duplicateID); err != nil {
 			return MemoryEntry{}, err
 		}
-		if err := insertFormationAuditTx(ctx, tx, userID, formationKey("duplicate", candidate.ID, duplicateID), "memory.duplicate_observed", candidate.ID, duplicateID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", "exact duplicate"); err != nil {
+		if err := insertFormationAuditTx(ctx, tx, userID, formationKey("duplicate", candidate.ID, duplicateID), "user_memory.duplicate_observed", candidate.ID, duplicateID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", "exact duplicate"); err != nil {
 			return MemoryEntry{}, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -474,13 +463,13 @@ RETURNING id
 	if err := attachPublishedEvidenceTx(ctx, tx, candidate, memoryID); err != nil {
 		return MemoryEntry{}, err
 	}
-	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("published", candidate.ID, memoryID), "memory.published", candidate.ID, memoryID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", candidate.PolicyDecision); err != nil {
+	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("published", candidate.ID, memoryID), "user_memory.published", candidate.ID, memoryID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", candidate.PolicyDecision); err != nil {
 		return MemoryEntry{}, err
 	}
 	if err := s.formationStage("audit_written"); err != nil {
 		return MemoryEntry{}, err
 	}
-	if _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+	if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
 		return MemoryEntry{}, fmt.Errorf("advance profile after memory publication: %w", err)
 	}
 	if err := s.formationStage("profile_written"); err != nil {
@@ -575,23 +564,37 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 	if source.TurnID <= 0 || strings.TrimSpace(userID) == "" {
 		return 0, fmt.Errorf("formation job requires tenant and source turn")
 	}
+	var storedSessionID string
+	var storedGeneration int
+	if err := s.sql.QueryRowContext(ctx, `SELECT session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ?`, source.TurnID, userID).Scan(&storedSessionID, &storedGeneration); err != nil {
+		return 0, fmt.Errorf("resolve formation job source turn: %w", err)
+	}
+	if source.SessionID == "" {
+		source.SessionID = storedSessionID
+	}
+	if source.SessionGeneration <= 0 {
+		source.SessionGeneration = storedGeneration
+	}
+	if source.SessionID != storedSessionID || source.SessionGeneration != storedGeneration {
+		return 0, fmt.Errorf("formation job source scope does not match persisted turn")
+	}
 	version := firstNonEmptyFormation(source.ExtractorVersion, FormationExtractorVersion)
 	key := fmt.Sprintf("turn:%d:%s", source.TurnID, version)
 	now := time.Now().UTC()
 	if _, err := s.sql.ExecContext(ctx, `
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, source_request_id,
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_request_id,
 	source_session_id, source_session_generation, source_turn_id, extraction_model,
 	extractor_version, available_at, created_at, updated_at
 )
-VALUES (?, ?, 'post_turn_extract', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
+VALUES ('memory_formation', ?, ?, 'post_turn_extract', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING
 `, userID, key, source.RequestID, source.SessionID, source.SessionGeneration, source.TurnID,
 		source.Model, version, formatTime(now), formatTime(now), formatTime(now)); err != nil {
 		return 0, fmt.Errorf("enqueue memory formation job: %w", err)
 	}
 	var id int64
-	if err := s.sql.QueryRowContext(ctx, `SELECT id FROM memory_formation_jobs WHERE canonical_user_id = ? AND idempotency_key = ?`, userID, key).Scan(&id); err != nil {
+	if err := s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND idempotency_key = ?`, userID, key).Scan(&id); err != nil {
 		return 0, err
 	}
 	return id, nil
@@ -629,18 +632,18 @@ func (s *Store) ReconcileFormationJobs(ctx context.Context, model, version strin
 	version = firstNonEmptyFormation(version, FormationExtractorVersion)
 	now := time.Now().UTC()
 	result, err := s.sql.ExecContext(ctx, `
-INSERT INTO memory_formation_jobs (
-	canonical_user_id, idempotency_key, job_type, state, source_request_id,
+INSERT INTO durable_jobs (
+	job_kind, canonical_user_id, idempotency_key, job_type, state, source_request_id,
 	source_session_id, source_session_generation, source_turn_id, extraction_model,
 	extractor_version, available_at, created_at, updated_at
 )
-SELECT turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'post_turn_extract', 'queued',
+SELECT 'memory_formation', turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'post_turn_extract', 'queued',
 	turns.source_request_id, turns.session_id, turns.session_generation, turns.id, ?, ?, ?, ?, ?
 FROM session_turns turns
 WHERE turns.created_at >= ? AND turns.formation_eligible_at IS NOT NULL
 	AND NOT EXISTS (
-		SELECT 1 FROM memory_formation_jobs jobs
-		WHERE jobs.canonical_user_id = turns.canonical_user_id
+		SELECT 1 FROM durable_jobs jobs
+		WHERE jobs.job_kind = 'memory_formation' AND jobs.canonical_user_id = turns.canonical_user_id
 			AND jobs.idempotency_key = 'turn:' || turns.id || ':' || ?
 	)
 `, version, model, version, formatTime(now), formatTime(now), formatTime(now), formatTime(now.Add(-24*time.Hour)), version)
@@ -657,10 +660,10 @@ func (s *Store) RedriveDeadFormationJobs(ctx context.Context, delay time.Duratio
 	}
 	now := time.Now().UTC()
 	result, err := s.sql.ExecContext(ctx, `
-UPDATE memory_formation_jobs
+UPDATE durable_jobs
 SET state = 'retry', attempt_count = 0, available_at = ?, completed_at = NULL,
 	redrive_count = redrive_count + 1, updated_at = ?
-WHERE state = 'dead' AND redrive_count < 3 AND last_error_code LIKE 'transient_%'
+WHERE job_kind = 'memory_formation' AND state = 'dead' AND redrive_count < 3 AND last_error_code LIKE 'transient_%'
 	AND ((redrive_count = 0 AND updated_at <= ?)
 		OR (redrive_count = 1 AND updated_at <= ?)
 		OR (redrive_count = 2 AND updated_at <= ?))
@@ -688,8 +691,8 @@ func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (For
 SELECT id, canonical_user_id, source_request_id, source_session_id,
 	source_session_generation, COALESCE(source_turn_id, 0), extraction_model,
 	extractor_version, attempt_count
-FROM memory_formation_jobs
-WHERE ((state IN ('queued', 'retry') AND available_at <= ?)
+FROM durable_jobs
+WHERE job_kind = 'memory_formation' AND ((state IN ('queued', 'retry') AND available_at <= ?)
 	OR (state = 'running' AND lease_until <= ?))
 ORDER BY available_at, id LIMIT 1
 `, formatTime(now), formatTime(now)).Scan(&job.ID, &job.UserID, &job.RequestID, &job.SessionID,
@@ -697,7 +700,7 @@ ORDER BY available_at, id LIMIT 1
 	if err != nil {
 		return FormationJob{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_until = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ?`, formatTime(now), formatTime(leaseUntil), formatTime(now), job.ID, job.UserID)
+	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, formatTime(now), formatTime(leaseUntil), formatTime(now), job.ID, job.UserID)
 	if err != nil {
 		return FormationJob{}, err
 	}
@@ -716,7 +719,7 @@ ORDER BY available_at, id LIMIT 1
 // FormationJobArtifact returns the first persisted extractor result for replay.
 func (s *Store) FormationJobArtifact(ctx context.Context, job FormationJob) (string, error) {
 	var payload string
-	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM memory_formation_jobs WHERE id = ? AND canonical_user_id = ?`, job.ID, job.UserID).Scan(&payload)
+	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, job.ID, job.UserID).Scan(&payload)
 	return payload, err
 }
 
@@ -725,7 +728,7 @@ func (s *Store) SaveFormationJobArtifact(ctx context.Context, job FormationJob, 
 	if strings.TrimSpace(payload) == "" {
 		payload = "[]"
 	}
-	_, err := s.sql.ExecContext(ctx, `UPDATE memory_formation_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'running'`, payload, formatTime(time.Now().UTC()), job.ID, job.UserID)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, payload, formatTime(time.Now().UTC()), job.ID, job.UserID)
 	return err
 }
 
@@ -736,14 +739,14 @@ func (s *Store) CompleteFormationJob(ctx context.Context, job FormationJob, skip
 		state = "skipped"
 	}
 	now := time.Now().UTC()
-	_, err := s.sql.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = ?, completed_at = ?, lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now), formatTime(now), job.ID, job.UserID)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now), formatTime(now), job.ID, job.UserID)
 	return err
 }
 
 // SkipFormationJob terminally skips a running job that cannot succeed by retrying.
 func (s *Store) SkipFormationJob(ctx context.Context, job FormationJob, code string) error {
 	now := time.Now().UTC()
-	_, err := s.sql.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = 'skipped', completed_at = ?, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'running'`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
 	return err
 }
 
@@ -755,14 +758,14 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 		state = "dead"
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
-	_, err := s.sql.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
 	return err
 }
 
 // FormationJobState returns one tenant-owned job state for observability/tests.
 func (s *Store) FormationJobState(ctx context.Context, userID string, jobID int64) (string, error) {
 	var state string
-	err := s.sql.QueryRowContext(ctx, `SELECT state FROM memory_formation_jobs WHERE id = ? AND canonical_user_id = ?`, jobID, userID).Scan(&state)
+	err := s.sql.QueryRowContext(ctx, `SELECT state FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, jobID, userID).Scan(&state)
 	return state, err
 }
 
@@ -914,13 +917,6 @@ WHERE id = ? AND canonical_user_id = ? AND status = 'active'
 	if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", oldMemoryID, "delete", "supersede:"+formatTime(now)); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_relations (canonical_user_id, idempotency_key, relation_type, source_memory_id, target_memory_id, created_at)
-VALUES (?, ?, 'supersedes', ?, ?, ?)
-ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
-`, userID, formationKey("supersedes", replacementMemoryID, oldMemoryID), replacementMemoryID, oldMemoryID, formatTime(now)); err != nil {
-		return fmt.Errorf("record memory supersession relation: %w", err)
-	}
 	return nil
 }
 
@@ -938,11 +934,10 @@ func markCandidatePublishedTx(ctx context.Context, tx *sql.Tx, candidate Formati
 
 func insertFormationAuditTx(ctx context.Context, tx *sql.Tx, userID, key, event string, candidateID, memoryID, jobID int64, source FormationSource, actor, reason string) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT INTO memory_formation_audit (canonical_user_id, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, created_at, metadata)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
+INSERT OR IGNORE INTO memory_events (canonical_user_id, event_kind, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, created_at, updated_at, metadata)
+VALUES (?, 'formation_audit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, userID, key, event, nullableID(candidateID), nullableID(memoryID), nullableID(jobID), source.RequestID,
-		source.SessionID, nullableID(source.TurnID), actor, formatTime(time.Now().UTC()), `{"reason":`+quoteProfileText(reason)+`}`)
+		source.SessionID, nullableID(source.TurnID), actor, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), `{"reason":`+quoteProfileText(reason)+`}`)
 	if err != nil {
 		return fmt.Errorf("append memory formation audit: %w", err)
 	}

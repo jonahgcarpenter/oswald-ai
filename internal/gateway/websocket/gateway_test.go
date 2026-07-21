@@ -427,7 +427,7 @@ func newWebSocketTestGateway(t *testing.T) (*Gateway, *broker.Broker, *wsFakeCha
 	}
 	soulStore := soul.NewStore(soulPath)
 	chat := &wsFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, nil, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService(wsPingHandler{})

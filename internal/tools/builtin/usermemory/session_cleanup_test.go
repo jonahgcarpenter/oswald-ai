@@ -45,7 +45,7 @@ func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-session'`, formatTime(now.Add(-time.Second))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-session'`, formatTime(now.Add(-time.Second))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.sql.Exec(`UPDATE session_turns SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'independently-expired'`, formatTime(now.Add(-time.Second))); err != nil {
@@ -59,14 +59,13 @@ func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts != (SessionCleanupCounts{SessionTurnsDeleted: 2, TenantSessionsDeleted: 1, ProfileVersionsDeleted: 1}) {
+	if counts != (SessionCleanupCounts{SessionTurnsDeleted: 2, TenantSessionsDeleted: 1}) {
 		t.Fatalf("unexpected cleanup counts: %+v", counts)
 	}
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user'`, 1)
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE session_id = 'subsecond-future'`, 1)
-	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM tenant_session_generations WHERE canonical_user_id = 'user' AND session_id = 'expired-session'`, 1)
-	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM tenant_profile_versions WHERE id = ?`, 1, latestProfile.VersionID)
-	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM tenant_profile_versions WHERE id = ?`, 0, expiredProfile.VersionID)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'user' AND session_id = 'expired-session' AND is_active = 0`, 1)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'user' AND profile_version = ?`, 1, latestProfile.VersionID)
 
 	next, err := store.ResolveSessionProfile(ctx, "user", "expired-session", time.Hour)
 	if err != nil {
@@ -101,7 +100,7 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if _, err := store.sql.Exec(`UPDATE memory_candidates SET created_at = ? WHERE id = ?; UPDATE memory_formation_jobs SET state = 'succeeded', completed_at = ? WHERE id = ?`, formatTime(now.Add(-31*24*time.Hour)), candidate.ID, formatTime(now.Add(-8*24*time.Hour)), jobID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET created_at = ? WHERE id = ?; UPDATE durable_jobs SET state = 'succeeded', completed_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(now.Add(-31*24*time.Hour)), candidate.ID, formatTime(now.Add(-8*24*time.Hour)), jobID); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
@@ -126,7 +125,7 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 		t.Fatalf("status=%s candidate=%q evidence=%q", status, candidateStatement, evidence)
 	}
 	var deleteChanges int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM derived_index_changes WHERE entity_kind = 'memory' AND entity_id = ? AND operation = 'delete'`, memory.ID).Scan(&deleteChanges); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ? AND operation = 'delete'`, memory.ID).Scan(&deleteChanges); err != nil {
 		t.Fatal(err)
 	}
 	if deleteChanges != 1 {
@@ -147,10 +146,10 @@ func TestCleanupExpiredSessionsRollsBackOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user'`, formatTime(now.Add(-time.Second))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user'`, formatTime(now.Add(-time.Second))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`CREATE TRIGGER fail_session_cleanup BEFORE DELETE ON tenant_sessions BEGIN SELECT RAISE(ABORT, 'cleanup blocked'); END`); err != nil {
+	if _, err := store.sql.Exec(`CREATE TRIGGER fail_session_cleanup BEFORE UPDATE OF is_active ON sessions BEGIN SELECT RAISE(ABORT, 'cleanup blocked'); END`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,7 +157,7 @@ func TestCleanupExpiredSessionsRollsBackOnFailure(t *testing.T) {
 		t.Fatal("cleanup unexpectedly succeeded")
 	}
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user'`, 1)
-	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM tenant_sessions WHERE canonical_user_id = 'user'`, 1)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'user' AND is_active = 1`, 1)
 }
 
 func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T) {
@@ -209,7 +208,7 @@ func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'user' AND session_id = 'session'`, 2)
 	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = 'user' AND session_id = 'session'`, 1)
 
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(now.Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	counts, err = store.CleanupExpiredSessions(ctx, now)

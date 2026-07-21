@@ -93,7 +93,7 @@ func (s *Service) run(ctx context.Context) {
 				s.publishApproved(ctx)
 				_, _ = s.store.RedriveDeadFormationJobs(ctx, 5*time.Minute)
 				if _, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
-					s.warn("memory.formation.job.reconcile_failed", "failed to reconcile memory formation jobs", err)
+					s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
 				}
 			}
 		case <-s.notify:
@@ -104,13 +104,13 @@ func (s *Service) run(ctx context.Context) {
 func (s *Service) publishApproved(ctx context.Context) {
 	candidates, err := s.store.ApprovedUnpublishedCandidates(ctx, 20)
 	if err != nil {
-		s.warn("memory.formation.publication.scan_failed", "failed to scan approved memory candidates", err)
+		s.warn("user_memory.formation.publication.scan_failed", "failed to scan approved user-memory candidates", err)
 		return
 	}
 	for _, candidate := range candidates {
 		if _, err := s.store.PublishCandidate(ctx, candidate.UserID, candidate.ID); err != nil {
 			_ = s.store.DeferCandidatePublication(context.Background(), candidate.UserID, candidate.ID)
-			s.warn("memory.formation.publication.retry", "approved memory publication will retry", err, config.F("candidate_id", candidate.ID), config.F("user_id", candidate.UserID), config.F("status", "retry"))
+			s.warn("user_memory.formation.publication.retry", "approved user-memory publication will retry", err, config.F("candidate_id", candidate.ID), config.F("user_id", candidate.UserID), config.F("status", "retry"))
 		}
 	}
 }
@@ -122,30 +122,30 @@ func (s *Service) drain(ctx context.Context) {
 			return
 		}
 		if err != nil {
-			s.warn("memory.formation.job.claim_failed", "failed to claim memory formation job", err)
+			s.warn("user_memory.formation.job.claim_failed", "failed to claim user-memory formation job", err)
 			return
 		}
 		if err := s.process(ctx, job); err != nil {
 			if errors.Is(err, errPermanentExtraction) {
 				if skipErr := s.store.SkipFormationJob(context.Background(), job, errorCode(err)); skipErr != nil {
-					s.warn("memory.formation.job.complete_failed", "failed to terminally skip memory formation job", skipErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+					s.warn("user_memory.formation.job.complete_failed", "failed to terminally skip user-memory formation job", skipErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
 				} else {
-					s.warn("memory.formation.job.skipped", "memory formation job returned invalid structured output", err, config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("attempt_count", job.AttemptCount))
+					s.warn("user_memory.formation.job.skipped", "user-memory formation job returned invalid structured output", err, config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("attempt_count", job.AttemptCount))
 				}
 				continue
 			}
 			_ = s.store.RetryFormationJob(context.Background(), job, errorCode(err), formationMaxAttempts)
 			state, _ := s.store.FormationJobState(context.Background(), job.UserID, job.ID)
-			event, message, status := "memory.formation.job.retry", "memory formation job will retry", "retry"
+			event, message, status := "user_memory.formation.job.retry", "user-memory formation job will retry", "retry"
 			if state == "dead" {
-				event, message, status = "memory.formation.job.dead", "memory formation job exhausted immediate retries", "degraded"
+				event, message, status = "user_memory.formation.job.dead", "user-memory formation job exhausted immediate retries", "degraded"
 			}
 			s.warn(event, message, err,
 				config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("attempt_count", job.AttemptCount), config.F("job_state", state), config.F("status", status))
 			continue
 		}
 		if err := s.store.CompleteFormationJob(context.Background(), job, false); err != nil {
-			s.warn("memory.formation.job.complete_failed", "failed to complete memory formation job", err, config.F("job_id", job.ID))
+			s.warn("user_memory.formation.job.complete_failed", "failed to complete user-memory formation job", err, config.F("job_id", job.ID))
 		}
 	}
 }
@@ -220,7 +220,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		}
 	}
 	if s.log != nil {
-		s.log.Server("memory.formation").Info("memory.formation.extraction.complete", "completed memory formation extraction",
+		s.log.Server("user_memory.formation").Info("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
 			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("candidate_count", len(extracted)),
 			config.F("created_count", createdCount), config.F("approved_count", publishedCount),
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
@@ -240,7 +240,7 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 		return
 	}
 	fields = append(fields, config.F("status", "degraded"), config.ErrorField(err))
-	s.log.Server("memory.formation").Warn(event, message, fields...)
+	s.log.Server("user_memory.formation").Warn(event, message, fields...)
 }
 
 func errorCode(err error) string {

@@ -337,7 +337,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 
 	db := links.db.SQL()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT OR REPLACE INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, targetID, "You are speaking with Target.", now, now); err != nil {
+	if _, err := db.Exec(`UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, "You are speaking with Target.", now, targetID); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "the user likes green.", "test", 0.9, 3, "active", "session-target", now, now); err != nil {
@@ -370,7 +370,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 
 	assertRowCount(t, db, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM linked_accounts WHERE canonical_user_id = ?`, targetID, 0)
-	assertRowCount(t, db, `SELECT COUNT(*) FROM user_memory_profiles WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM mcp_servers WHERE owner_user_id = ?`, targetID, 0)

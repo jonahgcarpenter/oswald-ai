@@ -7,44 +7,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 type schemaMigration struct {
 	version    int
 	name       string
 	definition string
-	optional   bool
 	apply      func(context.Context, *sql.Conn) error
 }
 
 func orderedMigrations() []schemaMigration {
 	return []schemaMigration{
-		{version: 1, name: "legacy_core_schema", definition: baselineV1Definition, apply: applyBaselineV1},
-		{version: 2, name: "stable_tenant_profiles", definition: baselineV2Definition, apply: applyBaselineV2},
-		{version: 3, name: "canonical_memory_formation", definition: baselineV3Definition, apply: applyBaselineV3},
-		{version: 4, name: "session_compaction", definition: baselineV4Definition, apply: applyBaselineV4},
-		{version: 5, name: "memory_fts", definition: baselineV5Definition, optional: true, apply: applyBaselineV5},
-		{version: 6, name: "session_transcript_fts", definition: baselineV6Definition, optional: true, apply: applyBaselineV6},
-		{version: 7, name: "memory_operations_privacy", definition: phase7MigrationDefinition, apply: applyPhase7Migration},
-		{version: 8, name: "privacy_operation_corrections", definition: phase8MigrationDefinition, apply: applyPhase8Migration},
-		{version: 9, name: "privacy_operation_retention", definition: phase9MigrationDefinition, apply: applyPhase9Migration},
-		{version: 10, name: "memory_event_redaction_retention", definition: phase10MigrationDefinition, apply: applyPhase10Migration},
-		{version: 11, name: "privacy_invalidation_outbox", definition: phase11MigrationDefinition, apply: applyPhase11Migration},
-		{version: 12, name: "websocket_device_authorization", definition: phase12MigrationDefinition, apply: applyPhase12Migration},
-		{version: 13, name: "confidence_evidence_memory", definition: phase13MigrationDefinition, apply: applyPhase13Migration},
-		{version: 14, name: "deployment_memory", definition: phase14MigrationDefinition, apply: applyPhase14Migration},
+		{version: 1, name: "v4_compact_baseline", definition: compactV4BaselineDefinition, apply: applyCompactV4Baseline},
 	}
-}
-
-var legacySymbolicChecksums = map[int]string{
-	1: migrationChecksum(schemaMigration{version: 1, name: "legacy_core_schema", definition: "baseline:v1:account and memory core"}),
-	2: migrationChecksum(schemaMigration{version: 2, name: "stable_tenant_profiles", definition: "baseline:v2:stable_tenant_profiles_v1"}),
-	3: migrationChecksum(schemaMigration{version: 3, name: "canonical_memory_formation", definition: "baseline:v3:canonical_memory_formation_v1"}),
-	4: migrationChecksum(schemaMigration{version: 4, name: "session_compaction", definition: "baseline:v4:session_compaction_v2"}),
-	5: migrationChecksum(schemaMigration{version: 5, name: "memory_fts", definition: "baseline:v5:memory_fts_v3_active_only:optional-derived"}),
-	6: migrationChecksum(schemaMigration{version: 6, name: "session_transcript_fts", definition: "baseline:v6:session_turns_fts_v1:optional-derived"}),
 }
 
 func migrationChecksum(m schemaMigration) string {
@@ -62,8 +37,8 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 	}
 	defer conn.Close()
 
-	// Rebuild migrations need to replace parent tables without firing legacy
-	// cascading actions. Integrity is checked before the transaction commits.
+	// Build the frozen baseline without applying foreign-key actions until every
+	// referenced table exists, then verify integrity before commit.
 	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		return fmt.Errorf("disable foreign keys for schema migrations: %w", err)
 	}
@@ -82,6 +57,21 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+	var ledgerExists, schemaObjectCount int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration_versions'`).Scan(&ledgerExists); err != nil {
+		return fmt.Errorf("inspect schema migration ledger: %w", err)
+	}
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`).Scan(&schemaObjectCount); err != nil {
+		return fmt.Errorf("inspect existing database schema: %w", err)
+	}
+	if ledgerExists == 0 && schemaObjectCount != 0 {
+		return fmt.Errorf("database predates the disposable v4 baseline; reset the development database")
+	}
+	if ledgerExists != 0 {
+		if err := validateFrozenV4Ledger(ctx, conn, registry); err != nil {
+			return err
+		}
+	}
 
 	if _, err := conn.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migration_versions (
@@ -119,8 +109,7 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 			return fmt.Errorf("database has unknown schema migration version %d", version)
 		}
 		expected := migrationChecksum(migration)
-		legacyChecksum := legacySymbolicChecksums[version]
-		if name != migration.name || (checksum != expected && checksum != legacyChecksum) {
+		if name != migration.name || checksum != expected {
 			rows.Close() // nolint:errcheck
 			return fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", version, name, checksum, migration.name, expected)
 		}
@@ -132,19 +121,6 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close applied schema migrations: %w", err)
 	}
-	// The first ordered framework used symbolic validators for versions 1-6.
-	// Rebase only those exact known checksums after every ledger row has passed
-	// drift validation, then apply the frozen operations idempotently.
-	for _, migration := range registry {
-		legacyChecksum, ok := legacySymbolicChecksums[migration.version]
-		if !ok {
-			continue
-		}
-		if _, err := conn.ExecContext(ctx, `DELETE FROM schema_migration_versions WHERE version = ? AND name = ? AND checksum = ?`, migration.version, migration.name, legacyChecksum); err != nil {
-			return fmt.Errorf("rebase symbolic schema migration %d: %w", migration.version, err)
-		}
-	}
-
 	for _, migration := range registry {
 		checksum := migrationChecksum(migration)
 		var appliedName, appliedChecksum string
@@ -159,12 +135,7 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 			return fmt.Errorf("inspect schema migration version %d: %w", migration.version, err)
 		}
 		if err := migration.apply(ctx, conn); err != nil {
-			if !migration.optional || !errors.Is(err, ErrFTS5Unavailable) {
-				return fmt.Errorf("apply schema migration %d %q: %w", migration.version, migration.name, err)
-			}
-			if d.log != nil {
-				d.log.Server("database.migrations").Warn("database.schema.optional_unavailable", "optional database schema capability unavailable", config.F("status", "degraded"), config.F("migration_version", migration.version), config.F("migration_name", migration.name), config.ErrorField(err))
-			}
+			return fmt.Errorf("apply schema migration %d %q: %w", migration.version, migration.name, err)
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migration_versions (version, name, checksum, applied_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, migration.version, migration.name, checksum); err != nil {
 			return fmt.Errorf("record schema migration %d %q: %w", migration.version, migration.name, err)
@@ -180,6 +151,27 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 	return nil
 }
 
+func validateFrozenV4Ledger(ctx context.Context, conn *sql.Conn, registry []schemaMigration) error {
+	var rowCount int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migration_versions`).Scan(&rowCount); err != nil {
+		return fmt.Errorf("read frozen v4 schema migration ledger: %w", err)
+	}
+	if rowCount != len(registry) {
+		return fmt.Errorf("invalid frozen v4 schema migration ledger: found %d rows, expected %d", rowCount, len(registry))
+	}
+	for _, migration := range registry {
+		var name, checksum string
+		if err := conn.QueryRowContext(ctx, `SELECT name, checksum FROM schema_migration_versions WHERE version = ?`, migration.version).Scan(&name, &checksum); err != nil {
+			return fmt.Errorf("read frozen v4 schema migration version %d: %w", migration.version, err)
+		}
+		expected := migrationChecksum(migration)
+		if name != migration.name || checksum != expected {
+			return fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", migration.version, name, checksum, migration.name, expected)
+		}
+	}
+	return nil
+}
+
 func validateMigrationRegistry(registry []schemaMigration) error {
 	previous := 0
 	names := make(map[string]struct{}, len(registry))
@@ -192,19 +184,6 @@ func validateMigrationRegistry(registry []schemaMigration) error {
 		}
 		names[migration.name] = struct{}{}
 		previous = migration.version
-	}
-	return nil
-}
-
-func requireTables(ctx context.Context, conn *sql.Conn, names ...string) error {
-	for _, name := range names {
-		var count int
-		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&count); err != nil {
-			return err
-		}
-		if count != 1 {
-			return fmt.Errorf("required legacy table %q is missing", name)
-		}
 	}
 	return nil
 }

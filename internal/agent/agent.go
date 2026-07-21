@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -73,22 +74,30 @@ type ToolStreamSearchPayload struct {
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name       string                   `json:"name"`
-	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
-	ResultText string                   `json:"result_text,omitempty"`
-	DurationMS int64                    `json:"duration_ms,omitempty"`
-	IsError    bool                     `json:"is_error,omitempty"`
-	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
-	Memory     *ToolStreamMemoryPayload `json:"memory,omitempty"`
+	Name         string                         `json:"name"`
+	Arguments    map[string]interface{}         `json:"arguments,omitempty"`
+	ResultText   string                         `json:"result_text,omitempty"`
+	DurationMS   int64                          `json:"duration_ms,omitempty"`
+	IsError      bool                           `json:"is_error,omitempty"`
+	WebSearch    *ToolStreamSearchPayload       `json:"web.search,omitempty"`
+	UserMemory   *ToolStreamUserMemoryPayload   `json:"user_memory,omitempty"`
+	GlobalMemory *ToolStreamGlobalMemoryPayload `json:"global_memory,omitempty"`
 }
 
-// ToolStreamMemoryPayload contains structured memory tool details.
-type ToolStreamMemoryPayload struct {
+// ToolStreamUserMemoryPayload contains structured user-memory tool details.
+type ToolStreamUserMemoryPayload struct {
 	Action    string                    `json:"action,omitempty"`
 	Category  string                    `json:"category,omitempty"`
 	Statement string                    `json:"statement,omitempty"`
 	Evidence  string                    `json:"evidence,omitempty"`
 	Content   *usermemory.ParsedContent `json:"content,omitempty"`
+}
+
+// ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
+type ToolStreamGlobalMemoryPayload struct {
+	Action    string `json:"action,omitempty"`
+	Statement string `json:"statement,omitempty"`
+	Evidence  string `json:"evidence,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -110,8 +119,10 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web.search" {
 		switch toolName {
-		case "memory.save", "memory.search", "memory.list", "memory.forget":
-			payload.Memory = memoryStreamPayload(toolName, args, result, isError)
+		case toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.UserMemoryForget:
+			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
+		case toolnames.GlobalMemorySave:
+			payload.GlobalMemory = globalMemoryStreamPayload(args)
 		}
 		return payload
 	}
@@ -135,9 +146,8 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 	return payload
 }
 
-func memoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamMemoryPayload {
-	payload := &ToolStreamMemoryPayload{}
-	payload.Action = memoryToolAction(toolName)
+func userMemoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamUserMemoryPayload {
+	payload := &ToolStreamUserMemoryPayload{Action: userMemoryToolAction(toolName)}
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
 	}
@@ -159,11 +169,29 @@ func memoryStreamPayload(toolName string, args map[string]interface{}, result st
 	return payload
 }
 
-func memoryToolAction(toolName string) string {
-	if suffix, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(toolName)), "memory."); ok {
-		return suffix
+func userMemoryToolAction(toolName string) string {
+	switch toolName {
+	case toolnames.UserMemorySave:
+		return "save"
+	case toolnames.UserMemorySearch:
+		return "search"
+	case toolnames.UserMemoryList:
+		return "list"
+	case toolnames.UserMemoryForget:
+		return "forget"
 	}
 	return ""
+}
+
+func globalMemoryStreamPayload(args map[string]interface{}) *ToolStreamGlobalMemoryPayload {
+	payload := &ToolStreamGlobalMemoryPayload{Action: "save"}
+	if statement, ok := args["statement"].(string); ok {
+		payload.Statement = strings.TrimSpace(statement)
+	}
+	if evidence, ok := args["evidence"].(string); ok {
+		payload.Evidence = strings.TrimSpace(evidence)
+	}
+	return payload
 }
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -210,6 +238,7 @@ type Agent struct {
 	model                 string
 	soul                  *soul.Store
 	userMemory            *usermemory.Store
+	globalMemory          GlobalMemoryPromptProvider
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
@@ -223,15 +252,21 @@ type MCPProvider interface {
 	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
 }
 
+// GlobalMemoryPromptProvider renders active global memory for the model prompt.
+type GlobalMemoryPromptProvider interface {
+	GlobalMemoryPrompt(context.Context) (string, error)
+}
+
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, prompt budget, tool failure retry budget,
-// and logger.
+// soul store, SQLite user memory store, global-memory prompt provider, prompt
+// budget, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
 	model string,
 	soul *soul.Store,
 	userMemory *usermemory.Store,
+	globalMemory GlobalMemoryPromptProvider,
 	budget promptbudget.ContextBudget,
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
@@ -250,6 +285,7 @@ func NewAgent(
 		model:                 model,
 		soul:                  soul,
 		userMemory:            userMemory,
+		globalMemory:          globalMemory,
 		maxToolFailureRetries: maxToolFailureRetries,
 		requestTimeout:        requestTimeout,
 		log:                   log,
@@ -498,11 +534,13 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				)
 			}
 		}
-		deploymentMemory, err := a.userMemory.DeploymentMemoryPrompt(ctx)
+	}
+	if a.globalMemory != nil {
+		globalMemory, err := a.globalMemory.GlobalMemoryPrompt(ctx)
 		if err != nil {
-			reqLog.Warn("agent.deployment_memory.load_failed", "failed to load deployment memory", config.F("status", "degraded"), config.ErrorField(err))
-		} else if deploymentMemory != "" {
-			profileContent = strings.TrimSpace(deploymentMemory + "\n\n" + profileContent)
+			reqLog.Warn("agent.global_memory.load_failed", "failed to load global memory", config.F("status", "degraded"), config.ErrorField(err))
+		} else if globalMemory != "" {
+			profileContent = strings.TrimSpace(globalMemory + "\n\n" + profileContent)
 		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
@@ -516,12 +554,12 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		var recallStats usermemory.RecallStats
 		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, usermemory.RecallRequest{TopK: automaticRecallTopK})
 		if recallStats.LexicalError != nil {
-			reqLog.Warn("agent.memory.recall.lexical_degraded", "durable memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
+			reqLog.Warn("agent.user_memory.recall.lexical_degraded", "user-memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
 		}
 		if recallStats.SemanticError != nil {
-			reqLog.Warn("agent.memory.recall.semantic_degraded", "durable memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
+			reqLog.Warn("agent.user_memory.recall.semantic_degraded", "user-memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
 		}
-		reqLog.Debug("agent.memory.recall.complete", "completed durable memory recall",
+		reqLog.Debug("agent.user_memory.recall.complete", "completed user-memory recall",
 			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
 			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
 			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
@@ -547,7 +585,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		}
 		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
-			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
+			reqLog.Warn("agent.session_memory.context.failed", "failed to build session-memory context", config.F("status", "degraded"), config.ErrorField(err))
 			recentTurns = nil
 		} else {
 			toolTurnCount := len(recentTurns)
@@ -558,7 +596,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				recentToolNames = append(recentToolNames, turn.ToolNames...)
 			}
 			recentToolNames = uniqueToolNames(recentToolNames)
-			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
+			reqLog.Debug("agent.session_memory.context.loaded", "loaded session-memory context",
 				config.F("candidate_turn_count", len(recentTurns)),
 			)
 		}
@@ -913,7 +951,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		var err error
 		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResult(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL)
 		if err != nil {
-			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
+			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
 

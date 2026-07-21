@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 )
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
@@ -35,7 +36,7 @@ func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Prin
 // NewSaveHandler returns a Handler for explicit user-requested memory saves.
 func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		principal, err := authenticatedPrincipal(ctx, "memory.save")
+		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemorySave)
 		if err != nil {
 			return "", err
 		}
@@ -43,13 +44,13 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 		meta := requestctx.MetadataFromContext(ctx)
 		statement := stringArg(args, "statement")
 		if statement == "" {
-			return "", fmt.Errorf("memory.save: statement is required")
+			return "", fmt.Errorf("%s: statement is required", toolnames.UserMemorySave)
 		}
 		evidence := stringArg(args, "evidence")
 		if evidence == "" {
 			remembered, ok := memoryformation.ParseExplicitRemember(meta.CurrentUserText)
 			if !ok {
-				return "", fmt.Errorf("memory.save: current user turn is not an explicit remember request")
+				return "", fmt.Errorf("%s: current user turn is not an explicit remember request", toolnames.UserMemorySave)
 			}
 			evidence = remembered
 		}
@@ -89,17 +90,17 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 			return "", err
 		}
 		if output.Decision == memoryformation.DecisionDisallowed {
-			return "", fmt.Errorf("memory.save: %s", output.Reason)
+			return "", fmt.Errorf("%s: %s", toolnames.UserMemorySave, output.Reason)
 		}
 		candidate, _, err := store.ProposeCandidate(ctx, userID, CandidateProposal{
 			Output:              output,
-			Source:              FormationSource{RequestID: meta.RequestID, SessionID: meta.SessionID, Model: meta.Model, ExtractorVersion: FormationExtractorVersion, ToolName: "memory.save"},
+			Source:              FormationSource{RequestID: meta.RequestID, SessionID: meta.SessionID, Model: meta.Model, ExtractorVersion: FormationExtractorVersion, ToolName: toolnames.UserMemorySave},
 			SupersedesStatement: stringArg(args, "supersedes"),
 		})
 		if err != nil {
 			return "", err
 		}
-		requestLog(log, ctx).Debug("agent.tool.memory.candidate_staged", "staged explicit memory candidate", config.F("tool_name", "memory.save"), config.F("scope", candidate.Scope), config.F("category", candidate.Category), config.F("candidate_id", candidate.ID))
+		requestLog(log, ctx).Debug("agent.tool.user_memory.candidate_staged", "staged explicit user memory candidate", config.F("tool_name", toolnames.UserMemorySave), config.F("scope", candidate.Scope), config.F("category", candidate.Category), config.F("candidate_id", candidate.ID))
 		return fmt.Sprintf("Accepted explicit %s memory candidate (%s). It will be published after this turn is persisted.", candidate.Scope, candidate.Category), nil
 	}
 }
@@ -107,7 +108,7 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 // NewSearchHandler returns a Handler for memory search.
 func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		principal, err := authenticatedPrincipal(ctx, "memory.search")
+		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemorySearch)
 		if err != nil {
 			return "", err
 		}
@@ -129,13 +130,13 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 		})
 		searchLog := requestLog(log, ctx)
 		if stats.LexicalError != nil {
-			searchLog.Warn("agent.tool.memory.search_lexical_degraded", "memory search lexical channel degraded", config.F("tool_name", "memory.search"), config.F("status", "degraded"), config.ErrorField(stats.LexicalError))
+			searchLog.Warn("agent.tool.user_memory.search_lexical_degraded", "user memory search lexical channel degraded", config.F("tool_name", toolnames.UserMemorySearch), config.F("status", "degraded"), config.ErrorField(stats.LexicalError))
 		}
 		if stats.SemanticError != nil {
-			searchLog.Warn("agent.tool.memory.search_semantic_degraded", "memory search semantic channel degraded", config.F("tool_name", "memory.search"), config.F("status", "degraded"), config.ErrorField(stats.SemanticError))
+			searchLog.Warn("agent.tool.user_memory.search_semantic_degraded", "user memory search semantic channel degraded", config.F("tool_name", toolnames.UserMemorySearch), config.F("status", "degraded"), config.ErrorField(stats.SemanticError))
 		}
 		if !stats.LexicalAvailable && !stats.SemanticAvailable {
-			return "", fmt.Errorf("memory.search: retrieval indexes unavailable")
+			return "", fmt.Errorf("%s: retrieval indexes unavailable", toolnames.UserMemorySearch)
 		}
 		if len(results) == 0 {
 			if stats.LexicalError != nil || stats.SemanticError != nil {
@@ -144,8 +145,8 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 			return "No matching memories found for this user.", nil
 		}
 		store.RecordRecallUsage(ctx, userID, results)
-		searchLog.Debug("agent.tool.memory.searched", "searched memory",
-			config.F("tool_name", "memory.search"), config.F("returned_count", len(results)),
+		searchLog.Debug("agent.tool.user_memory.searched", "searched user memory",
+			config.F("tool_name", toolnames.UserMemorySearch), config.F("returned_count", len(results)),
 			config.F("lexical_candidate_count", stats.LexicalCandidateCount),
 			config.F("semantic_candidate_count", stats.SemanticCandidateCount))
 		output := RenderDurableMemoryRecall(results, 12000)
@@ -159,7 +160,7 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 // NewListHandler returns a Handler for listing active memory.
 func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		principal, err := authenticatedPrincipal(ctx, "memory.list")
+		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemoryList)
 		if err != nil {
 			return "", err
 		}
@@ -172,7 +173,7 @@ func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 			return "No active memories found for this user.", nil
 		}
 		intro, _ := store.ReadIntro(userID)
-		requestLog(log, ctx).Debug("agent.tool.memory.listed", "listed memory", config.F("tool_name", "memory.list"), config.F("returned_count", len(entries)))
+		requestLog(log, ctx).Debug("agent.tool.user_memory.listed", "listed user memory", config.F("tool_name", toolnames.UserMemoryList), config.F("returned_count", len(entries)))
 		return RenderMemory(intro, entries), nil
 	}
 }
@@ -195,17 +196,17 @@ func NewForgetHandler(store *Store, policy config.RetentionPolicy, log *config.L
 		policy.ForgottenContentGrace = defaultForgottenContentGrace
 	}
 	return func(ctx context.Context, args map[string]interface{}) (string, error) {
-		principal, err := authenticatedPrincipal(ctx, "memory.forget")
+		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemoryForget)
 		if err != nil {
 			return "", err
 		}
 		memoryID, ok := positiveInt64Arg(args, "memory_id")
 		if !ok {
-			return "", fmt.Errorf("memory.forget: memory_id must be an exact positive integer")
+			return "", fmt.Errorf("%s: memory_id must be an exact positive integer", toolnames.UserMemoryForget)
 		}
 		meta := requestctx.MetadataFromContext(ctx)
 		if !hasExplicitForgetIntent(meta.CurrentUserText) {
-			return "", fmt.Errorf("memory.forget: current user turn does not contain an explicit first-party forget, remove, or delete request")
+			return "", fmt.Errorf("%s: current user turn does not contain an explicit first-party forget, remove, or delete request", toolnames.UserMemoryForget)
 		}
 		now := time.Now().UTC()
 		state, err := store.ForgetMemory(ctx, principal.CanonicalUserID, memoryActorHash(principal), memoryID, meta.RequestID, now, policy)
@@ -215,7 +216,7 @@ func NewForgetHandler(store *Store, policy config.RetentionPolicy, log *config.L
 		if err != nil {
 			return "", err
 		}
-		requestLog(log, ctx).Debug("agent.tool.memory.forgot", "deactivated memory", config.F("tool_name", "memory.forget"), config.F("memory_id", memoryID), config.F("status", state))
+		requestLog(log, ctx).Debug("agent.tool.user_memory.forgot", "deactivated user memory", config.F("tool_name", toolnames.UserMemoryForget), config.F("memory_id", memoryID), config.F("status", state))
 		return fmt.Sprintf("Memory ID %d is deactivated immediately and is no longer available to recall, lists, or profiles. Its retained canonical content is scheduled for permanent erasure after the %s grace period.", memoryID, formatGracePeriod(policy.ForgottenContentGrace)), nil
 	}
 }

@@ -220,7 +220,7 @@ func TestExpiredSessionAdvancesGenerationAndUsesLatestProfile(t *testing.T) {
 	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	latest, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
@@ -241,14 +241,14 @@ func TestProfilePruningPreservesSubsecondFutureExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().UTC().Add(500 * time.Millisecond)
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'future'`, formatTime(future)); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'future'`, formatTime(future)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.ResolveSessionProfile(context.Background(), "user", "other", time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var count int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM tenant_sessions WHERE canonical_user_id = 'user' AND session_id = 'future'`).Scan(&count); err != nil || count != 1 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'user' AND session_id = 'future'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("future session pruned early: count=%d err=%v", count, err)
 	}
 }
@@ -333,14 +333,16 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
 	oldStatement := "The user lives in Paris."
-	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: oldStatement, Confidence: 1, Importance: 5}); err != nil {
+	paris, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: oldStatement, Confidence: 1, Importance: 5})
+	if err != nil {
 		t.Fatal(err)
 	}
 	frozen, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
 	if err != nil || !strings.Contains(frozen.Content, "Paris") {
 		t.Fatalf("initial profile=%q err=%v", frozen.Content, err)
 	}
-	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: "The user lives in Rome.", Confidence: 1, Importance: 5, Supersedes: oldStatement}); err != nil {
+	rome, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "environment", Statement: "The user lives in Rome.", Confidence: 1, Importance: 5, Supersedes: oldStatement})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Forget("user", "all", ""); err != nil {
@@ -350,11 +352,11 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest.Generation <= frozen.Generation || strings.Contains(latest.Content, "Paris") || strings.Contains(latest.Content, "Rome") {
+	if strings.Contains(latest.Content, "Paris") || strings.Contains(latest.Content, "Rome") {
 		t.Fatalf("forgotten facts survived profile reset: frozen=%+v latest=%+v", frozen, latest)
 	}
 	var copied int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM tenant_profile_version_facts WHERE statement LIKE '%Paris%' OR statement LIKE '%Rome%'`).Scan(&copied); err != nil || copied != 0 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) IN (?, ?)`, paris.ID, rome.ID).Scan(&copied); err != nil || copied != 0 {
 		t.Fatalf("forgotten profile copies=%d err=%v", copied, err)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
@@ -92,6 +93,12 @@ func main() {
 	defer userMemStore.Close() // nolint:errcheck
 	userMemStore.SetRetentionPolicy(cfg.RetentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
+	globalMemStore, err := globalmemory.NewStore(config.DefaultAccountLinkPath, rootLog.Server("memory.global"))
+	if err != nil {
+		log.Fatal("app.memory_global.init_failed", "failed to initialize global memory store", config.ErrorField(err))
+	}
+	defer globalMemStore.Close() // nolint:errcheck
+	log.Debug("app.memory_global.configured", "configured global memory database", config.F("path", config.DefaultAccountLinkPath))
 	mcpStore, err := mcp.NewStore(config.DefaultAccountLinkPath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		log.Fatal("app.mcp.init_failed", "failed to initialize MCP config store", config.ErrorField(err))
@@ -143,20 +150,20 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
 	}
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, accountLinkService, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, accountLinkService, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 
 	privacyBus := privacyruntime.NewBus()
 	runtimeDeps := gatewayruntime.Dependencies{
-		Commands:         commandService,
-		Access:           accountLinkService,
-		Log:              rootLog,
-		Formation:        formationService,
-		Compaction:       compactionService,
-		DeploymentMemory: userMemStore,
-		PrivacyBus:       privacyBus,
+		Commands:     commandService,
+		Access:       accountLinkService,
+		Log:          rootLog,
+		Formation:    formationService,
+		Compaction:   compactionService,
+		GlobalMemory: globalMemStore,
+		PrivacyBus:   privacyBus,
 	}
 	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, webSocketAuth, runtimeDeps, rootLog)
 	if err != nil {
@@ -171,6 +178,7 @@ func main() {
 		cfg.LLMGatewayModel,
 		soulStore,
 		userMemStore,
+		globalMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
 		agentRequestTimeout,

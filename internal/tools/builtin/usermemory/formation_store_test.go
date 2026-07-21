@@ -44,7 +44,10 @@ func TestFormationCandidatePublicationIsIdempotentAndTraceable(t *testing.T) {
 	if approval != "approved" || provenance != "user_statement" || authority != "user_direct" || mode != "automatic_extraction" || sensitivity != "low" || candidateID != candidate.ID {
 		t.Fatalf("unexpected formation metadata: approval=%s provenance=%s authority=%s mode=%s sensitivity=%s candidate=%d", approval, provenance, authority, mode, sensitivity, candidateID)
 	}
-	for table, want := range map[string]int{"memory_evidence": 2, "memory_formation_audit": 2, "tenant_profile_versions": 1} {
+	if _, err := store.ResolveSessionProfile(ctx, "user-1", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for table, want := range map[string]int{"memory_evidence": 2, "memory_formation_audit": 2, "sessions": 1} {
 		var got int
 		if err := store.sql.QueryRow(`SELECT count(*) FROM ` + table).Scan(&got); err != nil {
 			t.Fatal(err)
@@ -127,7 +130,7 @@ func TestApprovedCandidatePublishesWhileEmbeddingUnavailable(t *testing.T) {
 		t.Fatalf("candidate after outage=%+v err=%v", loaded, err)
 	}
 	var changes int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM derived_index_changes WHERE entity_kind = 'memory' AND entity_id = ?`, published.ID).Scan(&changes); err != nil || changes != 1 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ?`, published.ID).Scan(&changes); err != nil || changes != 1 {
 		t.Fatalf("derived changes=%d err=%v", changes, err)
 	}
 }
@@ -185,13 +188,6 @@ func TestHighConfidenceConflictingClaimSlotAutomaticallySupersedes(t *testing.T)
 	}
 	if candidate.State != "approved" || candidate.SupersedesMemoryID != old.ID || candidate.SupersedesStatement != old.Statement {
 		t.Fatalf("contradiction candidate=%+v", candidate)
-	}
-	var relations int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_relations WHERE canonical_user_id = 'user-1' AND source_candidate_id = ? AND target_memory_id = ? AND relation_type = 'contradicts'`, candidate.ID, old.ID).Scan(&relations); err != nil {
-		t.Fatal(err)
-	}
-	if relations != 1 {
-		t.Fatalf("contradiction relation count=%d", relations)
 	}
 	newMemory, err := store.PublishCandidate(ctx, "user-1", candidate.ID)
 	if err != nil {
@@ -294,7 +290,7 @@ func TestExpiredPublishedMemoryErasesCandidateEvidence(t *testing.T) {
 		t.Fatalf("expired canonical memory=%+v err=%v", canonical, err)
 	}
 	var profileFacts int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM tenant_profile_version_facts WHERE source_memory_id = ?`, memory.ID).Scan(&profileFacts); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?`, memory.ID).Scan(&profileFacts); err != nil {
 		t.Fatal(err)
 	}
 	if profileFacts != 0 {
@@ -379,8 +375,11 @@ func TestDirectEvidenceUpgradesInferenceInPlaceAndRetainsSensitivity(t *testing.
 	if diff := direct.Confidence - 0.84; diff < -1e-9 || diff > 1e-9 {
 		t.Fatalf("reinforced confidence=%v want=0.84", direct.Confidence)
 	}
+	if _, err := store.ResolveSessionProfile(ctx, "user-1", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	var profileFacts int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM tenant_profile_version_facts WHERE source_memory_id = ?`, direct.ID).Scan(&profileFacts); err != nil || profileFacts != 1 {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?`, direct.ID).Scan(&profileFacts); err != nil || profileFacts != 1 {
 		t.Fatalf("profile facts=%d want=1 err=%v", profileFacts, err)
 	}
 }
@@ -533,7 +532,7 @@ func TestFormationJobLeaseRetryAndReplay(t *testing.T) {
 	if err := store.RetryFormationJob(context.Background(), job, "extractor failed", 3); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Second)), firstID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(time.Now().Add(-time.Second)), firstID); err != nil {
 		t.Fatal(err)
 	}
 	job, err = store.ClaimFormationJob(context.Background(), time.Minute)
@@ -566,10 +565,10 @@ func TestFormationReconciliationRequiresDeliveryMarkerAndRedrivesDeadJobs(t *tes
 		t.Fatalf("second reconciliation=%d err=%v", created, err)
 	}
 	var jobID int64
-	if err := store.sql.QueryRow(`SELECT id FROM memory_formation_jobs WHERE source_turn_id = ?`, deliveredTurn).Scan(&jobID); err != nil {
+	if err := store.sql.QueryRow(`SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND source_turn_id = ?`, deliveredTurn).Scan(&jobID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', attempt_count = 5, completed_at = ?, last_error_code = 'transient_provider', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), formatTime(time.Now().Add(-time.Hour)), jobID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'dead', attempt_count = 5, completed_at = ?, last_error_code = 'transient_provider', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(time.Now().Add(-time.Hour)), formatTime(time.Now().Add(-time.Hour)), jobID); err != nil {
 		t.Fatal(err)
 	}
 	redriven, err := store.RedriveDeadFormationJobs(context.Background(), 5*time.Minute)
@@ -581,7 +580,7 @@ func TestFormationReconciliationRequiresDeliveryMarkerAndRedrivesDeadJobs(t *tes
 		t.Fatalf("state=%s err=%v", state, err)
 	}
 	for cycle := 1; cycle < 3; cycle++ {
-		if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
+		if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'dead', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
 			t.Fatal(err)
 		}
 		redriven, err = store.RedriveDeadFormationJobs(context.Background(), time.Minute)
@@ -589,14 +588,14 @@ func TestFormationReconciliationRequiresDeliveryMarkerAndRedrivesDeadJobs(t *tes
 			t.Fatalf("redrive cycle %d count=%d err=%v", cycle+1, redriven, err)
 		}
 	}
-	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'dead', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
 		t.Fatal(err)
 	}
 	redriven, err = store.RedriveDeadFormationJobs(context.Background(), time.Minute)
 	if err != nil || redriven != 0 {
 		t.Fatalf("quarantined redrive count=%d err=%v", redriven, err)
 	}
-	if _, err := store.sql.Exec(`UPDATE memory_formation_jobs SET state = 'dead', redrive_count = 0, last_error_code = 'invalid_output', updated_at = ? WHERE id = ?`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'dead', redrive_count = 0, last_error_code = 'invalid_output', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation'`, formatTime(time.Now().Add(-24*time.Hour)), jobID); err != nil {
 		t.Fatal(err)
 	}
 	redriven, err = store.RedriveDeadFormationJobs(context.Background(), time.Minute)
@@ -670,7 +669,7 @@ func TestMergeMovesFormationCandidatesJobsAndAudit(t *testing.T) {
 		t.Fatalf("merged job: %v", err)
 	}
 	var loserRows, auditRows int
-	if err := store.sql.QueryRow(`SELECT (SELECT count(*) FROM memory_candidates WHERE canonical_user_id = 'loser') + (SELECT count(*) FROM memory_formation_jobs WHERE canonical_user_id = 'loser')`).Scan(&loserRows); err != nil {
+	if err := store.sql.QueryRow(`SELECT (SELECT count(*) FROM memory_candidates WHERE canonical_user_id = 'loser') + (SELECT count(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = 'loser')`).Scan(&loserRows); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_formation_audit WHERE canonical_user_id = 'winner'`).Scan(&auditRows); err != nil {

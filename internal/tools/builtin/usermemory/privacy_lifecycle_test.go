@@ -25,7 +25,7 @@ func TestPrivacySessionDeleteFindsBindinglessArtifactGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`DELETE FROM tenant_sessions WHERE canonical_user_id = 'user' AND session_id = 'session'`); err != nil {
+	if _, err := store.sql.Exec(`DELETE FROM sessions WHERE canonical_user_id = 'user' AND session_id = 'session'`); err != nil {
 		t.Fatal(err)
 	}
 	deleted, err := store.DeleteSessionPrivacy(ctx, "user", hashText("actor"), "session", "bindingless-delete", time.Now().UTC())
@@ -70,7 +70,7 @@ func TestDeleteAllMemoriesCancelsLeasedFormationJob(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stale or cancelled") {
 		t.Fatalf("stale proposal err=%v", err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_formation_jobs WHERE canonical_user_id = 'user'`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = 'user'`, 0)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND statement != ''`, 0)
 }
 

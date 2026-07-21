@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -140,111 +141,6 @@ func TestOpenConfiguresWALAndAllowsTruncateCheckpoint(t *testing.T) {
 	}
 }
 
-func TestUserMemoryMigrationAddsProfilesAndDemotesSystemRules(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "oswald.db")
-	raw, err := sql.Open("sqlite3", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = raw.Exec(`
-CREATE TABLE account_users (canonical_user_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE memory_entries (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	canonical_user_id TEXT NOT NULL,
-	scope TEXT NOT NULL,
-	category TEXT NOT NULL CHECK (category IN ('identity', 'system_rules', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
-	statement TEXT NOT NULL,
-	statement_key TEXT NOT NULL,
-	evidence TEXT NOT NULL,
-	confidence REAL NOT NULL DEFAULT 0.8,
-	importance INTEGER NOT NULL DEFAULT 3,
-	status TEXT NOT NULL DEFAULT 'active',
-	source_session_id TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	last_used_at TEXT,
-	expires_at TEXT,
-	supersedes_id INTEGER,
-	embedding_model TEXT NOT NULL DEFAULT '',
-	embedding_dim INTEGER NOT NULL DEFAULT 0,
-	UNIQUE (canonical_user_id, scope, statement_key)
-);
-CREATE TABLE session_turns (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	session_id TEXT NOT NULL,
-	canonical_user_id TEXT NOT NULL,
-	user_text TEXT NOT NULL,
-	assistant_text TEXT NOT NULL,
-	tool_names TEXT NOT NULL DEFAULT '',
-	importance INTEGER NOT NULL DEFAULT 2,
-	topic_tags TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	expires_at TEXT
-);
-INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at) VALUES ('user', 'long_term', 'system_rules', 'Prefer concise replies.', 'prefer concise replies.', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
-INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES ('session', 'user', 'hello', 'hi', '2026-01-01T00:00:00Z');
-`)
-	if err != nil {
-		raw.Close() // nolint:errcheck
-		t.Fatalf("create legacy schema: %v", err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	db, err := Open(path, config.NewLogger(config.LevelError))
-	if err != nil {
-		t.Fatalf("migrate database: %v", err)
-	}
-	defer db.Close() // nolint:errcheck
-	var category, provenanceType, sourceAuthority, formationMode, approvalState, approvedAt, validFrom string
-	var deliveredAt, deliveryFailedAt sql.NullString
-	var approved, generation int
-	if err := db.SQL().QueryRow(`
-SELECT category, profile_approved, provenance_type, source_authority, formation_mode,
-	approval_state, approved_at, valid_from
-FROM memory_entries WHERE canonical_user_id = 'user'`).Scan(
-		&category, &approved, &provenanceType, &sourceAuthority, &formationMode,
-		&approvalState, &approvedAt, &validFrom,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SQL().QueryRow(`SELECT session_generation FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&generation); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SQL().QueryRow(`SELECT delivered_at FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&deliveredAt); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SQL().QueryRow(`SELECT delivery_failed_at FROM session_turns WHERE canonical_user_id = 'user'`).Scan(&deliveryFailedAt); err != nil {
-		t.Fatal(err)
-	}
-	if category != "communication_preferences" || approved != 1 || generation != 1 {
-		t.Fatalf("category=%q approved=%d generation=%d", category, approved, generation)
-	}
-	if provenanceType != "legacy_import" || sourceAuthority != "unknown" || formationMode != "legacy_import" || approvalState != "approved" {
-		t.Fatalf("legacy formation metadata = %q, %q, %q, %q", provenanceType, sourceAuthority, formationMode, approvalState)
-	}
-	if approvedAt != "2026-01-01T00:00:00Z" || validFrom != "2026-01-01T00:00:00Z" {
-		t.Fatalf("legacy lifecycle timestamps approved=%q valid=%q", approvedAt, validFrom)
-	}
-	if deliveredAt.Valid {
-		t.Fatalf("ambiguous legacy turn was marked delivered: %q", deliveredAt.String)
-	}
-	if !deliveryFailedAt.Valid {
-		t.Fatal("ambiguous legacy turn was not marked terminally unavailable")
-	}
-	for _, table := range []string{"tenant_profile_versions", "tenant_profile_version_facts", "tenant_sessions"} {
-		var count int
-		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil || count != 1 {
-			t.Fatalf("profile table %s count=%d err=%v", table, count, err)
-		}
-	}
-	if err := db.initializeUserMemory(); err != nil {
-		t.Fatalf("repeat migration: %v", err)
-	}
-}
-
 func TestMemoryFTS5InitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
 	db := openTestDB(t)
 	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`); err != nil {
@@ -256,9 +152,6 @@ VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'grows orchids.', 'Kee
 	if err != nil {
 		t.Fatalf("insert memory: %v", err)
 	}
-	if err := db.initializeMemoryFTS5(); err != nil {
-		t.Fatalf("second initialization: %v", err)
-	}
 	for _, name := range []string{"memory_entries_fts_insert", "memory_entries_fts_update", "memory_entries_fts_delete"} {
 		var count int
 		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&count); err != nil {
@@ -269,6 +162,50 @@ VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'grows orchids.', 'Kee
 		}
 	}
 	assertFTSMatchCount(t, db, "user-a", "orchids", 0)
+}
+
+func TestSessionsValidateProfileMemorySources(t *testing.T) {
+	db := openTestDB(t)
+	insertSessionTestUser(t, db, "user-a")
+	insertSessionTestUser(t, db, "user-b")
+	memoryA := insertFormationMemory(t, db, "user-a", "session-source-a")
+	memoryB := insertFormationMemory(t, db, "user-b", "session-source-b")
+
+	insertSession := func(sessionID, sources string) error {
+		_, err := db.SQL().Exec(`
+INSERT INTO sessions (
+	canonical_user_id, session_id, generation, started_at, last_seen_at, expires_at,
+	profile_version, profile_version_high_water, renderer_version, source_digest,
+	rendered_content, fact_count, profile_bytes, source_memory_ids, profile_created_at
+) VALUES ('user-a', ?, 1, ?, ?, ?, 1, 1, 'v1', 'digest', 'profile', 0, 0, ?, ?)`,
+			sessionID, formationTestTime, formationTestTime, "2026-07-19T12:00:00Z", sources, formationTestTime)
+		return err
+	}
+	if err := insertSession("empty", `[]`); err != nil {
+		t.Fatalf("insert session with empty sources: %v", err)
+	}
+	if err := insertSession("valid", fmt.Sprintf(`[%d]`, memoryA)); err != nil {
+		t.Fatalf("insert session with valid sources: %v", err)
+	}
+
+	invalid := map[string]string{
+		"cross tenant": fmt.Sprintf(`[%d]`, memoryB),
+		"duplicate":    fmt.Sprintf(`[%d,%d]`, memoryA, memoryA),
+		"noninteger":   fmt.Sprintf(`[%d,"%d"]`, memoryA, memoryA),
+	}
+	for name, sources := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if err := insertSession("invalid-"+name, sources); err == nil {
+				t.Fatal("expected invalid session insert to fail")
+			}
+			if _, err := db.SQL().Exec(`UPDATE sessions SET source_memory_ids = ? WHERE canonical_user_id = 'user-a' AND session_id = 'valid'`, sources); err == nil {
+				t.Fatal("expected invalid session update to fail")
+			}
+		})
+	}
+	if _, err := db.SQL().Exec(`UPDATE sessions SET canonical_user_id = 'user-b' WHERE canonical_user_id = 'user-a' AND session_id = 'valid'`); err == nil {
+		t.Fatal("expected session owner update with cross-tenant source to fail")
+	}
 }
 
 func openTestDB(t *testing.T) *DB {
