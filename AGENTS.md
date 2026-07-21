@@ -62,7 +62,7 @@ Current layers:
 4. Create the LLM gateway client
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
 6. Create the soul store
-7. Open the user-memory SQLite handle, install retention policy, and run ordered database migrations `v1` through `v14`
+7. Open the user-memory SQLite handle, install retention policy, and apply the checksum-frozen disposable v4 baseline
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
@@ -73,32 +73,13 @@ Current layers:
 15. Start each gateway in its own goroutine
 16. Wait for shutdown signal, stop maintenance and privacy dispatch, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
 
-### Ordered Schema Migrations
+### Database Baseline
 
-Database startup serializes schema initialization and applies this exact registry in order:
+The unreleased v4 database is intentionally disposable. A fresh database receives one checksum-frozen `v4_compact_baseline` row in `schema_migration_versions`; startup rejects development ledgers, checksum drift, and non-empty databases without that ledger. Reset the development database instead of adding compatibility migrations or editing the ledger.
 
-| Version | Name | Purpose |
-| --- | --- | --- |
-| `v1` | `legacy_core_schema` | Frozen account, linked-account, challenge, memory/session, cleanup-index, and MCP baseline. |
-| `v2` | `stable_tenant_profiles` | Demote legacy `system_rules`, approve migrated profile facts, and record the legacy profile ledger. |
-| `v3` | `canonical_memory_formation` | Add canonical provenance/approval columns, formation candidates/evidence/jobs/audit, and backfill. |
-| `v4` | `session_compaction` | Add delivery state and durable summary, source-link, and compaction-job schema. |
-| `v5` | `memory_fts` | Optional FTS5 durable-memory baseline. |
-| `v6` | `session_transcript_fts` | Optional FTS5 delivered-transcript baseline. |
-| `v7` | `memory_operations_privacy` | Add account lifecycle fencing, forgotten-memory lifecycle fields, tenant-safe events, privacy operations, derived-index revisions/outbox, and maintenance runs. |
-| `v8` | `privacy_operation_corrections` | Expand privacy operation types and correct privacy/audit retention triggers. |
-| `v9` | `privacy_operation_retention` | Permit dependency-safe deletion only for completed privacy and redacted audit tombstones. |
-| `v10` | `memory_event_redaction_retention` | Add event redaction/update timestamps and automatic redaction timestamping. |
-| `v11` | `privacy_invalidation_outbox` | Add the leased, retryable durable runtime-invalidation outbox. |
-| `v12` | `websocket_device_authorization` | Add durable device approvals, revocable rotating client credentials, and fresh-install administrator bootstrap state. |
-| `v13` | `confidence_evidence_memory` | Add stable memory claims, evidence contributions, confidence reinforcement, and retire conversational memory approval. |
-| `v14` | `deployment_memory` | Add evidence-backed global deployment candidates, canonical facts, and exact MCP provenance. |
+Baseline creation runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table construction. `PRAGMA foreign_key_check` must pass before commit and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
-`v14` exists only on the unreleased `v4-development` branch and is intentionally being replaced before v4 ships. Databases that recorded an earlier development checksum for v14 must be reset; do not bypass checksum validation or edit the migration ledger manually.
-
-The registry must be contiguous and have unique non-empty names and definitions. The database stores each version, name, SHA-256 checksum of the frozen definition, and application time in `schema_migration_versions`. Startup rejects unknown versions and any name/checksum drift. Exact symbolic checksums emitted by the first ordered framework for `v1` through `v6` are accepted only as known legacy values; after all rows pass validation they are removed and those frozen idempotent migrations are reapplied and recorded with definition checksums.
-
-All pending migrations run on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table rebuilds. `PRAGMA foreign_key_check` must pass before commit, foreign keys are restored afterward, and any required migration or integrity failure aborts startup. Only `v5` and `v6` are optional: `ErrFTS5Unavailable` logs `database.schema.optional_unavailable`, records that frozen version, and allows startup with the affected lexical capability degraded. Other errors fail startup.
+The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, standalone formation-audit table, or persisted maintenance-run history. Formation audit records are append-only `memory_events` rows exposed through a compatibility projection. Formation, compaction, derived-index, and privacy-invalidation work share the typed `durable_jobs` table and are isolated by `job_kind`. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields plus compact events. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
 
 ## Request Lifecycle
 
@@ -201,7 +182,7 @@ Oswald keeps four distinct memory layers.
 | Layer                  | Storage                    | Purpose                                     | Mutable by agent |
 | ---------------------- | -------------------------- | ------------------------------------------- | ---------------- |
 | Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | No               |
-| Deployment memory      | SQLite `deployment_memory_entries` | Evidence-backed facts about Oswald shared across tenants | Yes |
+| Global memory          | SQLite `global_memory_claims` | Evidence-backed facts about Oswald shared across tenants | Yes |
 | Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart     | Yes              |
 | Session chat memory    | SQLite `session_turns`     | Conversation history for the active session | Implicitly       |
 
@@ -213,21 +194,22 @@ Oswald keeps four distinct memory layers.
 - Changed only through operator filesystem or deployment access; model tools cannot read or mutate it
 - Manual changes take effect on the next request without restart and affect every user
 
-### Deployment Memory
+### Global Memory
 
-- Deployment memory is factual lower-authority reference data, separate from soul policy and personality
+- Global memory is factual lower-authority reference data, separate from soul policy and personality
 - A successful non-discovery tool call from any globally configured MCP server may become same-request evidence regardless of which tenant triggered it; user-scoped MCP results never qualify
 - `global_memory_save` is default-visible so authenticated administrators can cite direct statements; server-side checks otherwise require qualifying same-request global MCP evidence
 - A proposal must cite an exact normalized excerpt from either the identified same-request global MCP result or the current authenticated administrator's direct statement; the model judges whether the source concerns Oswald
-- Raw MCP results remain request-local. Canonical storage retains only selected evidence, SHA-256 argument/result digests, server/tool identity, confidence, claim identity, and publication provenance
-- Proposals remain staged until successful gateway delivery. Failed delivery deletes the staged candidate and evidence
+- Raw MCP results remain request-local. Canonical storage retains only selected evidence, SHA-256 argument/result digests, server/tool identity, confidence, claim identity, and non-user publication provenance
+- Claims remain staged until successful gateway delivery, then activate in place with the same stable claim ID. Failed delivery deletes the staged claim and evidence
+- Publication clears the initiating canonical user, request, session, and turn identifiers. Account deletion also discards any still-staged proposals before removing the account
 - Active facts are read fresh and injected for every tenant under an explicitly lower-authority block that cannot grant authorization, expose tools, or override policy
 - All globally configured MCP servers are part of this trust boundary. A malicious or irrelevant global result can still produce factual contamination because deployment relevance is model-judged; evidence provenance and claim supersession make such state inspectable and correctable but do not prove truth
 
 ### Persistent User Memory
 
-- Stored in `data/database/oswald.db` tables `user_memory_profiles` and `memory_entries`
-- Managed by the `memory.*` tools
+- Stored in `data/database/oswald.db`; the speaker intro lives on `account_users` and durable user facts remain tenant-owned memory claims
+- Managed by the `user_memory_*` tools
 - Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
@@ -237,7 +219,7 @@ Oswald keeps four distinct memory layers.
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
-- New durable facts pass through canonical candidate states (`proposed`, `approved`, or `rejected`) before approved publication into the memory lifecycle (`active`, `superseded`, `expired`, or `deleted`)
+- New durable facts pass through candidate states (`proposed`, `approved`, or `rejected`) before approved publication into the memory lifecycle (`active`, `superseded`, `expired`, or `deleted`); supersession fields and audit events replace a general relation graph
 - While retained as content-bearing canonical state, every published memory records exact evidence, source request/session/turn, provenance, source authority, formation mode, sensitivity, and approval metadata. Privacy deletion, forget-grace expiry, and retention may later scrub or remove content and linked source exchanges
 - The serialized post-delivery worker requests one JSON-object artifact containing at most five candidates. Malformed outer JSON, trailing JSON, unknown outer fields, excessive candidate count, and non-retryable provider 4xx responses are terminally skipped. Malformed individual entries and candidates rejected by deterministic policy are dropped individually
 - Formation jobs use leases and idempotency keys, receive up to five immediate attempts, and may receive at most three delayed redrives only when the stored error code is explicitly transient. Startup reconciliation backfills missing jobs only for formation-eligible turns created during the previous 24 hours
@@ -259,13 +241,13 @@ Oswald keeps four distinct memory layers.
 ### Canonical and Derived State
 
 - Canonical account, memory, profile, candidate, audit, session, summary, job, privacy, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
-- FTS5 memory/transcript tables and sqlite-vec memory tables are rebuildable derived revisions; `derived_index_changes` is the leased, idempotent canonical-mutation outbox
+- FTS5 memory/transcript tables and sqlite-vec memory tables are rebuildable derived revisions; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
 - Startup bootstraps valid legacy index tables as revision one, removes legacy synchronization triggers, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
 - Canonical writes enqueue outbox changes transactionally. The serialized worker applies each change to all matching live and building revisions and retries stale canonical reads, leases, provider failures, and failed changes without weakening tenant predicates
 - Rebuilds create an internally named shadow table with kind, provider, model, dimension, schema version, and monotonically increasing revision metadata
 - Before publication, validation checks the physical vector dimension when applicable, exact canonical expected count, physical indexed count, canonical-user ownership joins, active/approved/unexpired memory eligibility, delivered active-generation transcript eligibility, and vector model identity
 - Publication retires the old live pointer and promotes the validated shadow revision atomically. Failed validation marks only the shadow failed, so the old live revision remains available
-- Maintenance removes orphan/non-canonical rows, marks missing/corrupt/coverage-mismatched live revisions unhealthy, and drops only internally generated retired or failed tables after the configured retention period
+- Maintenance removes orphan/non-canonical rows, marks missing/corrupt/coverage-mismatched live revisions unhealthy, and drops only internally generated retired or failed tables after the configured retention period; maintenance runs are logged rather than stored as canonical rows
 - Lexical and semantic channels fail independently. Automatic recall and `user_memory_search` continue with the available channel and log the unavailable channel as degraded
 - During an embedding-model rebuild, semantic queries continue to embed with the old live revision's model until replacement publication; that old model must remain accessible from the provider
 - The derived-index worker probes the configured embedding dimension until its first success, caches it for the process lifetime, and requires an Oswald restart to recognize gateway-side embedding route changes
@@ -277,7 +259,7 @@ Oswald keeps four distinct memory layers.
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` creates or confirms a hashed, expiring, one-time challenge in a direct authenticated conversation
 - Confirmation atomically moves linked accounts, memories, sessions, moderation references, and re-encrypted MCP ownership before deleting the losing canonical user
-- The merge also preserves profile versions/counters, candidates/evidence/relations, formation and compaction jobs/audit, summaries/source links, generation counters, privacy-safe events, and pending derived-index changes; loser-owned rows are verified absent before commit
+- The merge preserves consolidated session rows and their profile/generation high-water, candidates/evidence, formation and compaction jobs/audit, summaries/source links, privacy-safe events, and pending derived-index changes; loser-owned rows are verified absent before commit
 - The profile that creates the challenge remains the canonical winner; admin state is preserved if either profile was admin
 - Both participating external accounts are marked verified only after successful confirmation
 - `/disconnect` requires an authenticated direct conversation and cannot remove the final account
@@ -296,7 +278,7 @@ Commands:
 - `/privacy forget-memory <id>` immediately removes one memory from profile and retrieval serving state, marks it forgotten, and schedules canonical/source-exchange scrubbing after `MEMORY_FORGOTTEN_CONTENT_GRACE` (`720h` by default)
 - `/privacy delete-memory <id>` immediately scrubs one exact memory, related candidate/evidence/audit/event/relation data, derived rows, profile copies, and its linked source exchange
 - `/privacy delete-candidate <id>` immediately scrubs one exact candidate, any published memory, related evidence/audit/relations, derived rows, and linked source exchanges
-- `/privacy delete-session` deletes only the current session's current generation, including turns, summaries, compaction jobs, and transcript-index rows, then advances the preserved generation counter
+- `/privacy delete-session` deletes only the current session's current generation, including turns, summaries, compaction jobs, and transcript-index rows, then deactivates the retained session row and advances its generation high-water
 - `/privacy delete-all-memories` requires confirmation and scrubs all memories/candidates and linked source exchanges while preserving the canonical user and unrelated sessions
 - `/privacy delete-account` requires confirmation and erases the canonical user, linked accounts, memories, sessions, profiles, candidates, audit, jobs, derived work/rows, account-link state, and user-owned MCP configuration
 - `/privacy confirm <code>` consumes a one-time challenge bound to the initiating normalized gateway identity; codes expire after 10 minutes and cannot be replayed or confirmed by another linked actor
@@ -338,7 +320,7 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - Successful gateway delivery is recorded separately; only delivered turns are eligible for compaction and `session_transcript_search`
 - A proactive background planner creates durable, idempotent fixed-range compaction jobs when delivered history grows past its count or prompt-budget threshold, while always leaving at least eight newest complete exchanges outside the planned range
 - One serialized worker leases and retries compaction jobs, reconciles recoverable work at startup, periodically scans active sessions, and redrives bounded failed work. Unlike formation, malformed compaction output is not classified as terminal and follows the ordinary bounded retry/dead-job redrive path
-- Each compaction publishes a new immutable structured checkpoint containing narrative, open tasks, commitments, entities, decisions, topic tags, covered turn range, generation model/version, source digest, and ordered immutable source-turn links
+- Each compaction publishes a new immutable structured checkpoint containing narrative, open tasks, commitments, entities, decisions, topic tags, covered turn range, generation model/version, source digest, and ordered source-turn IDs stored as JSON on the checkpoint
 - Incremental checkpoints summarize the previous checkpoint plus newly covered role-correct exchanges; published checkpoints and their source links are historical session artifacts, not durable user memories or operator instructions
 - When budget permits, the agent injects the latest checkpoint only as explicitly labeled untrusted historical reference data, followed by a minimum recent verbatim tail and then any additional complete `user`/`assistant` exchanges that fit
 - If the budget cannot hold all optional context, selection preserves whole exchanges, reserves the minimum recent tail before the summary, and then considers durable recall and additional history; required policy, profile, and current turn still take precedence
@@ -351,7 +333,9 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and periodic maintenance at `MEMORY_MAINTENANCE_INTERVAL` remove expired artifacts, while privacy operations may remove linked source exchanges earlier
 - `/reset` advances the generation, deletes that tenant session's turns, summaries, and compaction jobs, and binds the latest tenant profile; the old transcript is no longer searchable
 - Session expiry causes the next request to use a new generation, while cleanup removes inactive summaries, compaction jobs, turns, and the expired session. Generation counters are preserved so reset or expired generations are never reused
-- Cleanup retains profile versions referenced by active sessions
+- `sessions` is the sole physical profile/session bookkeeping table: one row is retained per canonical user/session, including inactive rows, so generation high-water is never reused
+- Each session row stores active/expiry state and its frozen profile version, renderer, digest, speaker intro, rendered snapshot, size/count metadata, profile high-water, and exact source memory IDs as a checked JSON array
+- Cleanup deletes expired generation artifacts and marks the session inactive without deleting its row; privacy memory removal recompiles and rebinds snapshots whose JSON source membership contains the removed memory
 - Tool messages and intermediate reasoning are intentionally not persisted
 
 Prompt-budget behavior:
@@ -839,6 +823,7 @@ Current startup requirements:
 | `internal/tools/runtime/`                      | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
 | `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |
+| `internal/tools/builtin/globalmemory/`         | Shared global-memory store and handler        |
 | `internal/tools/builtin/usermemory/store.go`   | Persistent per-user memory store             |
 | `internal/soul/store.go`                       | Read-only soul system-prompt loader          |
 | `internal/commands/service.go`                 | Shared command service                       |
@@ -885,13 +870,9 @@ Current startup requirements:
 7. Add principal assurance and validity tests
 8. Do not import concrete gateway packages directly in `cmd/agent/main.go`
 
-### Adding a Migration
+### Changing The Baseline
 
-1. Append the next contiguous migration version in `internal/database/migrations.go`
-2. Give it a unique non-empty stable name and frozen definition
-3. Keep the migration idempotent because every database handle reruns initialization
-4. Add migration, checksum-drift, foreign-key, and restart/idempotency coverage
-5. Never edit an already shipped migration definition; checksum drift intentionally stops startup
+Until v4 ships, update the single frozen baseline definition and reset development databases. Keep fresh-create, checksum-drift, foreign-key, and reopen coverage. After v4 ships, freeze this baseline and append migrations rather than editing its definition.
 
 ### Changing Personality
 

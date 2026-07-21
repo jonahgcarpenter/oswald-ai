@@ -295,7 +295,7 @@ func (s *Service) applyChange(ctx context.Context, change usermemory.DerivedInde
 			}
 			record, recordErr := s.store.MemoryIndexRecordByID(ctx, change.EntityID, change.UserID)
 			if errors.Is(recordErr, sql.ErrNoRows) {
-				if err := s.store.DeleteIndexRecord(ctx, revision, change.EntityID); err != nil {
+				if err := s.store.DeleteIndexRecord(ctx, revision, change.EntityID, change.UserID); err != nil {
 					return err
 				}
 				continue
@@ -312,7 +312,7 @@ func (s *Service) applyChange(ctx context.Context, change usermemory.DerivedInde
 	for _, revision := range revisions {
 		record, recordErr := s.store.TranscriptIndexRecordByID(ctx, change.EntityID, change.UserID)
 		if errors.Is(recordErr, sql.ErrNoRows) {
-			if err := s.store.DeleteIndexRecord(ctx, revision, change.EntityID); err != nil {
+			if err := s.store.DeleteIndexRecord(ctx, revision, change.EntityID, change.UserID); err != nil {
 				return err
 			}
 			continue

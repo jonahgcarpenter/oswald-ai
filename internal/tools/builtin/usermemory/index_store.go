@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -260,7 +259,7 @@ func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.sql.QueryContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id > ? AND turns.delivered_at IS NOT NULL AND active.expires_at > ? ORDER BY turns.id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
+	rows, err := s.sql.QueryContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id > ? AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ? ORDER BY turns.id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +285,7 @@ func (s *Store) MemoryIndexRecordByID(ctx context.Context, id int64, userID stri
 // TranscriptIndexRecordByID resolves delivered active-generation eligibility.
 func (s *Store) TranscriptIndexRecordByID(ctx context.Context, id int64, userID string) (TranscriptIndexRecord, error) {
 	var record TranscriptIndexRecord
-	err := s.sql.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND active.expires_at > ?`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.Version)
+	err := s.sql.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.SessionID, &record.Generation, &record.UserText, &record.AssistantText, &record.Version)
 	return record, err
 }
 
@@ -362,7 +361,7 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 	}
 	defer tx.Rollback() // nolint:errcheck
 	var current TranscriptIndexRecord
-	err = tx.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND active.expires_at > ?`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.SessionID, &current.Generation, &current.UserText, &current.AssistantText, &current.Version)
+	err = tx.QueryRowContext(ctx, `SELECT turns.id, turns.canonical_user_id, turns.session_id, turns.session_generation, turns.user_text, turns.assistant_text, turns.delivered_at FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = ? AND turns.canonical_user_id = ? AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.SessionID, &current.Generation, &current.UserText, &current.AssistantText, &current.Version)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && current != record) {
 		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, record.ID); deleteErr != nil {
 			return deleteErr
@@ -412,12 +411,12 @@ func (s *Store) IndexRevisionNeedsRebuild(ctx context.Context, kind string) (boo
 	return false, nil
 }
 
-// DeleteIndexRecord removes one row from a revision.
-func (s *Store) DeleteIndexRecord(ctx context.Context, revision DerivedIndexRevision, id int64) error {
+// DeleteIndexRecord removes one tenant-owned row from a revision.
+func (s *Store) DeleteIndexRecord(ctx context.Context, revision DerivedIndexRevision, id int64, userID string) error {
 	if err := validateRevisionTable(revision.TableName); err != nil {
 		return err
 	}
-	_, err := s.sql.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, id)
+	_, err := s.sql.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = ?`, id, userID)
 	return err
 }
 
@@ -465,16 +464,11 @@ func (s *Store) ClaimDerivedIndexChange(ctx context.Context, owner string, lease
 	}
 	defer tx.Rollback() // nolint:errcheck
 	var change DerivedIndexChange
-	var entityID string
-	err = tx.QueryRowContext(ctx, `SELECT sequence, canonical_user_id, entity_kind, entity_id, operation, attempt_count FROM derived_index_changes WHERE (state IN ('pending', 'failed') AND available_at <= ?) OR (state = 'processing' AND lease_until <= ?) ORDER BY sequence LIMIT 1`, formatTime(now), formatTime(now)).Scan(&change.Sequence, &change.UserID, &change.EntityKind, &entityID, &change.Operation, &change.AttemptCount)
+	err = tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, entity_kind, entity_id, operation, attempt_count FROM durable_jobs WHERE job_kind = 'derived_index' AND ((state IN ('queued', 'retry') AND available_at <= ?) OR (state = 'running' AND lease_until <= ?)) ORDER BY id LIMIT 1`, formatTime(now), formatTime(now)).Scan(&change.Sequence, &change.UserID, &change.EntityKind, &change.EntityID, &change.Operation, &change.AttemptCount)
 	if err != nil {
 		return DerivedIndexChange{}, err
 	}
-	change.EntityID, err = strconv.ParseInt(entityID, 10, 64)
-	if err != nil {
-		return DerivedIndexChange{}, fmt.Errorf("invalid derived change entity id")
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE derived_index_changes SET state = 'processing', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?, updated_at = ? WHERE sequence = ?`, owner, formatTime(now.Add(lease)), formatTime(now), change.Sequence)
+	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'derived_index'`, owner, formatTime(now.Add(lease)), formatTime(now), change.Sequence)
 	if err != nil {
 		return DerivedIndexChange{}, err
 	}
@@ -491,7 +485,7 @@ func (s *Store) ClaimDerivedIndexChange(ctx context.Context, owner string, lease
 // CompleteDerivedIndexChange acknowledges a leased change.
 func (s *Store) CompleteDerivedIndexChange(ctx context.Context, sequence int64) error {
 	now := formatTime(time.Now().UTC())
-	_, err := s.sql.ExecContext(ctx, `UPDATE derived_index_changes SET state = 'completed', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', updated_at = ? WHERE sequence = ? AND state = 'processing'`, now, now, sequence)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'succeeded', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'derived_index' AND state = 'running'`, now, now, sequence)
 	return err
 }
 
@@ -499,7 +493,7 @@ func (s *Store) CompleteDerivedIndexChange(ctx context.Context, sequence int64) 
 func (s *Store) RetryDerivedIndexChange(ctx context.Context, change DerivedIndexChange, code string) error {
 	now := time.Now().UTC()
 	delay := time.Duration(1<<min(change.AttemptCount, 6)) * time.Second
-	_, err := s.sql.ExecContext(ctx, `UPDATE derived_index_changes SET state = 'failed', available_at = ?, lease_owner = '', lease_until = NULL, last_error_code = ?, updated_at = ? WHERE sequence = ? AND state = 'processing'`, formatTime(now.Add(delay)), safeErrorCode(code), formatTime(now), change.Sequence)
+	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'derived_index' AND state = 'running'`, formatTime(now.Add(delay)), safeErrorCode(code), formatTime(now), change.Sequence)
 	return err
 }
 
@@ -508,13 +502,13 @@ func (s *Store) RetryDerivedIndexChange(ctx context.Context, change DerivedIndex
 func (s *Store) ReconcileDerivedIndexChanges(ctx context.Context) error {
 	now := formatTime(time.Now().UTC())
 	_, err := s.sql.ExecContext(ctx, `
-UPDATE derived_index_changes SET state = 'failed', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ? WHERE state = 'processing' AND lease_until <= ?;
-INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'reconcile:memory:' || id || ':' || updated_at, canonical_user_id, 'memory', CAST(id AS TEXT), 'upsert', ?, ?, ? FROM memory_entries WHERE status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?)
-ON CONFLICT(idempotency_key) DO NOTHING;
-INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', CAST(turns.id AS TEXT), 'upsert', ?, ?, ? FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.expires_at > ?
-ON CONFLICT(idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now)
+UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ? WHERE job_kind = 'derived_index' AND state = 'running' AND lease_until <= ?;
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'reconcile:memory:' || id || ':' || updated_at, canonical_user_id, 'memory', id, 'upsert', ?, ?, ? FROM memory_entries WHERE status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now)
 	return err
 }
 
@@ -584,8 +578,8 @@ func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
 		}
 	}
 	if revision.Kind == IndexKindTranscriptFTS {
-		expected = `SELECT COUNT(*) FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.expires_at > ?`
-		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN session_turns turns ON turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.expires_at > ? AND idx.user_text = turns.user_text AND idx.assistant_text = turns.assistant_text`
+		expected = `SELECT COUNT(*) FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?`
+		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN session_turns turns ON turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ? AND idx.user_text = turns.user_text AND idx.assistant_text = turns.assistant_text`
 	}
 	return expected, valid
 }
@@ -634,7 +628,7 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE idx.embedding_model != ? OR NOT EXISTS (SELECT 1 FROM memory_entries entries WHERE entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id AND entries.status = 'active' AND entries.approval_state = 'approved' AND (entries.expires_at IS NULL OR entries.expires_at > ?)) LIMIT ?)`
 			args = []any{revision.Model, nowText, batch}
 		} else if revision.Kind == IndexKindTranscriptFTS {
-			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM session_turns turns JOIN tenant_sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) AND turns.delivered_at IS NOT NULL AND active.expires_at > ?) LIMIT ?)`
+			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?) LIMIT ?)`
 			args = []any{nowText, batch}
 		}
 		result, err := s.sql.ExecContext(ctx, deleteSQL, args...)
@@ -750,7 +744,7 @@ func enqueueDerivedChangeTx(ctx context.Context, tx *sql.Tx, userID, entityKind 
 	}
 	now := formatTime(time.Now().UTC())
 	key := formationKey("derived-index", entityKind, entityID, operation, token)
-	_, err := tx.ExecContext(ctx, `INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`, key, userID, entityKind, strconv.FormatInt(entityID, 10), operation, now, now, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, key, userID, entityKind, entityID, operation, now, now, now)
 	if err != nil {
 		return fmt.Errorf("enqueue derived index change: %w", err)
 	}

@@ -26,7 +26,7 @@ func TestPrivacyInvalidationOutboxRollbackLeaseRetryAndScrub(t *testing.T) {
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM privacy_invalidation_events`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'privacy_invalidation'`, 0)
 
 	tx, err = store.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -63,10 +63,10 @@ func TestPrivacyInvalidationOutboxRollbackLeaseRetryAndScrub(t *testing.T) {
 		t.Fatal(err)
 	}
 	var external, sessions, state string
-	if err := store.sql.QueryRow(`SELECT external_identities, session_ids, state FROM privacy_invalidation_events WHERE id = ?`, final.ID).Scan(&external, &sessions, &state); err != nil {
+	if err := store.sql.QueryRow(`SELECT external_identities, session_ids, state FROM durable_jobs WHERE id = ? AND job_kind = 'privacy_invalidation'`, final.ID).Scan(&external, &sessions, &state); err != nil {
 		t.Fatal(err)
 	}
-	if external != "[]" || sessions != "[]" || state != "completed" {
+	if external != "[]" || sessions != "[]" || state != "succeeded" {
 		t.Fatalf("completed event retained payload: external=%q sessions=%q state=%q", external, sessions, state)
 	}
 }
@@ -114,7 +114,7 @@ func TestPrivacyExportIncludesWebSocketClientMetadataWithoutTokens(t *testing.T)
 	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	now := time.Now().UTC()
-	if _, err := store.sql.Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('user', ?, ?); INSERT INTO linked_accounts(gateway, identifier, canonical_user_id, display_name, linked_at) VALUES ('websocket', 'external', 'user', 'User', ?); INSERT INTO user_memory_profiles(canonical_user_id, intro, created_at, updated_at) VALUES ('user', 'You are speaking with User.', ?, ?)`, formatTime(now), formatTime(now), formatTime(now), formatTime(now), formatTime(now)); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at, speaker_intro) VALUES ('user', ?, ?, 'You are speaking with User.'); INSERT INTO linked_accounts(gateway, identifier, canonical_user_id, display_name, linked_at) VALUES ('websocket', 'external', 'user', 'User', ?)`, formatTime(now), formatTime(now), formatTime(now)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.sql.Exec(`INSERT INTO websocket_clients(client_id, canonical_user_id, websocket_identifier, client_name, refresh_token_hash, refresh_expires_at, created_at) VALUES ('wsc_client_123456', 'user', 'external', 'Laptop', zeroblob(32), ?, ?)`, formatTime(now.Add(time.Hour)), formatTime(now)); err != nil {
@@ -187,8 +187,8 @@ func TestPrivacyHardDeletePurgesCanonicalProfileTranscriptAndRevisions(t *testin
 		t.Fatalf("canonical tombstone retained content: status=%q statement=%q evidence=%q", status, statement, evidence)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE id = ?`, 0, turn.ID)
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?`, 1, userID, "session", profile.Generation)
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM tenant_profile_version_facts WHERE source_memory_id = ?`, 0, memory.ID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?`, 1, userID, "session", profile.Generation)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?`, 0, memory.ID)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+memoryRevision.TableName+` WHERE rowid = ?`, 0, memory.ID)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+transcriptRevision.TableName+` WHERE rowid = ?`, 0, turn.ID)
 
@@ -220,7 +220,7 @@ func TestPrivacySessionDeletePreservesGenerationHighWater(t *testing.T) {
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, 0, userID, "session")
 	var highWater int
-	if err := store.sql.QueryRow(`SELECT generation FROM tenant_session_generations WHERE canonical_user_id = ? AND session_id = ?`, userID, "session").Scan(&highWater); err != nil {
+	if err := store.sql.QueryRow(`SELECT generation FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, "session").Scan(&highWater); err != nil {
 		t.Fatal(err)
 	}
 	if highWater <= profile.Generation {

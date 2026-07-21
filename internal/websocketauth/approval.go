@@ -55,7 +55,7 @@ func (s *Store) createAndApproveUserTx(ctx context.Context, tx *sql.Tx, userCode
 	if _, err := tx.ExecContext(ctx, `INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, linked_at, verified) VALUES ('websocket', ?, ?, ?, ?, 1)`, identifier, userID, cleanDisplayName(displayName), now); err != nil {
 		return fmt.Errorf("create websocket linked identity: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, userID, "You are speaking with "+cleanDisplayName(displayName)+".", now, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, "You are speaking with "+cleanDisplayName(displayName)+".", now, userID); err != nil {
 		return fmt.Errorf("create websocket user profile: %w", err)
 	}
 	return s.approveCodeTx(ctx, tx, userCode, userID, identifier)

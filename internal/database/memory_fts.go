@@ -23,9 +23,6 @@ func (d *DB) initializeMemoryFTS5() error {
 	if err != nil {
 		return classifyFTSError("create memory FTS5 index", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO schema_migrations(name, applied_at) VALUES (?, datetime('now')) ON CONFLICT(name) DO NOTHING`, memoryFTSMigration); err != nil {
-		return fmt.Errorf("record memory FTS5 migration: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit memory FTS5 initialization: %w", err)
 	}
@@ -38,10 +35,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
 	statement,
 	evidence
 );
-
-DROP TRIGGER IF EXISTS memory_entries_fts_insert;
-DROP TRIGGER IF EXISTS memory_entries_fts_delete;
-DROP TRIGGER IF EXISTS memory_entries_fts_update;
 `
 
 func applyMemoryFTSMigration(ctx context.Context, conn *sql.Conn) error {

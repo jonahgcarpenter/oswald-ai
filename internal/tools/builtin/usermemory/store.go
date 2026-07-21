@@ -110,16 +110,17 @@ type SaveRequest struct {
 
 // Store manages speaker profiles, user memories, and session memory in SQLite.
 type Store struct {
-	dbPath      string
-	db          *database.DB
-	sql         *sql.DB
-	log         *config.Logger
-	embedder    llm.Embedder
-	embedModel  string
-	indexNotify func()
-	retention   config.RetentionPolicy
-	mutationMu  sync.Mutex
-	userLocks   map[string]*sync.Mutex
+	dbPath         string
+	db             *database.DB
+	sql            *sql.DB
+	log            *config.Logger
+	embedder       llm.Embedder
+	embedModel     string
+	indexNotify    func()
+	retention      config.RetentionPolicy
+	mutationMu     sync.Mutex
+	lastOptimizeAt time.Time
+	userLocks      map[string]*sync.Mutex
 
 	formationFailpoint func(string) error
 	indexWriteHook     func(string)
@@ -198,12 +199,7 @@ func (s *Store) SyncSpeakerIntro(userID, intro string) error {
 	if err := s.ensureAccountUser(userID); err != nil {
 		return err
 	}
-	now := formatTime(time.Now())
-	_, err := s.sql.Exec(`
-INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at = excluded.updated_at
-`, userID, strings.TrimSpace(intro), now, now)
+	_, err := s.sql.Exec(`UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), formatTime(time.Now()), userID)
 	if err != nil {
 		return fmt.Errorf("failed to sync user memory intro for %q: %w", userID, err)
 	}
@@ -213,7 +209,7 @@ ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at 
 // ReadIntro returns the current speaker intro for a user.
 func (s *Store) ReadIntro(userID string) (string, error) {
 	var intro string
-	err := s.sql.QueryRow(`SELECT intro FROM user_memory_profiles WHERE canonical_user_id = ?`, userID).Scan(&intro)
+	err := s.sql.QueryRow(`SELECT speaker_intro FROM account_users WHERE canonical_user_id = ?`, userID).Scan(&intro)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -289,8 +285,8 @@ CREATE TEMP TABLE merge_session_generation_map AS
 WITH loser_generations AS (
 	SELECT session_id, session_generation AS generation FROM session_turns WHERE canonical_user_id = ?
 	UNION SELECT session_id, session_generation FROM session_summaries WHERE canonical_user_id = ?
-	UNION SELECT session_id, session_generation FROM session_compaction_jobs WHERE canonical_user_id = ?
-	UNION SELECT session_id, generation FROM tenant_sessions WHERE canonical_user_id = ?
+	UNION SELECT session_id, session_generation FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?
+	UNION SELECT session_id, generation FROM sessions WHERE canonical_user_id = ?
 ), numbered AS (
 	SELECT session_id, generation,
 		ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY generation) AS ordinal
@@ -301,17 +297,16 @@ SELECT numbered.session_id, numbered.generation AS old_generation,
 		SELECT 1 FROM (
 			SELECT session_id, session_generation AS generation FROM session_turns WHERE canonical_user_id = ?
 			UNION SELECT session_id, session_generation FROM session_summaries WHERE canonical_user_id = ?
-			UNION SELECT session_id, session_generation FROM session_compaction_jobs WHERE canonical_user_id = ?
-			UNION SELECT session_id, generation FROM tenant_sessions WHERE canonical_user_id = ?
+			UNION SELECT session_id, session_generation FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?
+			UNION SELECT session_id, generation FROM sessions WHERE canonical_user_id = ?
 		) winner_state
 		WHERE winner_state.session_id = numbered.session_id AND winner_state.generation = numbered.generation
 	) THEN COALESCE((
 		SELECT MAX(generation) FROM (
 			SELECT session_generation AS generation FROM session_turns WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
 			UNION ALL SELECT session_generation FROM session_summaries WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
-			UNION ALL SELECT session_generation FROM session_compaction_jobs WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
-			UNION ALL SELECT generation FROM tenant_sessions WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
-			UNION ALL SELECT generation FROM tenant_session_generations WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
+			UNION ALL SELECT session_generation FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id IN (?, ?) AND session_id = numbered.session_id
+			UNION ALL SELECT generation FROM sessions WHERE canonical_user_id IN (?, ?) AND session_id = numbered.session_id
 		)
 	), 0) + numbered.ordinal
 	ELSE numbered.generation END AS new_generation
@@ -319,22 +314,23 @@ FROM numbered;
 
 DROP TABLE IF EXISTS temp.merge_session_summaries;
 CREATE TEMP TABLE merge_session_summaries AS SELECT * FROM session_summaries WHERE canonical_user_id = ?;
-DROP TABLE IF EXISTS temp.merge_summary_sources;
-CREATE TEMP TABLE merge_summary_sources AS SELECT * FROM session_summary_sources WHERE canonical_user_id = ?;
 DROP TABLE IF EXISTS temp.merge_compaction_jobs;
-CREATE TEMP TABLE merge_compaction_jobs AS SELECT * FROM session_compaction_jobs WHERE canonical_user_id = ?;
-DROP TABLE IF EXISTS temp.merge_tenant_sessions;
-CREATE TEMP TABLE merge_tenant_sessions AS
+CREATE TEMP TABLE merge_compaction_jobs AS SELECT * FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?;
+DROP TABLE IF EXISTS temp.merge_sessions;
+CREATE TEMP TABLE merge_sessions AS
 SELECT sessions.session_id, COALESCE(map.new_generation, sessions.generation) AS generation,
-	sessions.profile_version_id, sessions.started_at, sessions.last_seen_at, sessions.expires_at
-FROM tenant_sessions sessions
+	sessions.is_active, sessions.started_at, sessions.last_seen_at, sessions.expires_at,
+	sessions.profile_version, sessions.profile_version_high_water, sessions.renderer_version,
+	sessions.source_digest, sessions.speaker_intro, sessions.rendered_content, sessions.fact_count,
+	sessions.profile_bytes, sessions.source_memory_ids, sessions.profile_created_at
+FROM sessions
 LEFT JOIN merge_session_generation_map map
 	ON map.session_id = sessions.session_id AND map.old_generation = sessions.generation
 WHERE sessions.canonical_user_id = ?;
 
-DELETE FROM session_compaction_jobs WHERE canonical_user_id = ?;
+DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?;
 DELETE FROM session_summaries WHERE canonical_user_id = ?;
-DELETE FROM tenant_sessions WHERE canonical_user_id = ?;
+DELETE FROM sessions WHERE canonical_user_id = ?;
 
 UPDATE session_turns
 SET canonical_user_id = ?,
@@ -342,8 +338,8 @@ SET canonical_user_id = ?,
 WHERE canonical_user_id = ?;
 `, loserID, loserID, loserID, loserID,
 		winnerID, winnerID, winnerID, winnerID,
-		winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID,
-		loserID, loserID, loserID, loserID,
+		winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID,
+		loserID, loserID, loserID,
 		loserID, loserID, loserID, winnerID, loserID); err != nil {
 		return fmt.Errorf("snapshot and move merged sessions: %w", err)
 	}
@@ -352,95 +348,74 @@ WHERE canonical_user_id = ?;
 INSERT INTO session_summaries (
 	id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
 	narrative, open_tasks, commitments, entities, decisions, topic_tags, generation_model,
-	generator_version, source_digest, created_at, expires_at
+	generator_version, source_digest, created_at, expires_at, source_turn_ids
 )
 SELECT summary.id, ?, summary.session_id, COALESCE(map.new_generation, summary.session_generation),
 	summary.covered_from_turn_id, summary.covered_through_turn_id, summary.narrative, summary.open_tasks,
 	summary.commitments, summary.entities, summary.decisions, summary.topic_tags, summary.generation_model,
-	summary.generator_version, summary.source_digest, summary.created_at, summary.expires_at
+	summary.generator_version, summary.source_digest, summary.created_at, summary.expires_at, summary.source_turn_ids
 FROM merge_session_summaries summary
 LEFT JOIN merge_session_generation_map map
 	ON map.session_id = summary.session_id AND map.old_generation = summary.session_generation;
 
-INSERT INTO session_summary_sources (summary_id, canonical_user_id, session_id, session_generation, turn_id, ordinal)
-SELECT source.summary_id, ?, source.session_id, COALESCE(map.new_generation, source.session_generation), source.turn_id, source.ordinal
-FROM merge_summary_sources source
-LEFT JOIN merge_session_generation_map map
-	ON map.session_id = source.session_id AND map.old_generation = source.session_generation;
+UPDATE merge_compaction_jobs
+SET canonical_user_id = ?,
+	session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = merge_compaction_jobs.session_id AND map.old_generation = merge_compaction_jobs.session_generation), session_generation),
+	state = CASE WHEN state = 'running' THEN 'retry' ELSE state END,
+	lease_owner = CASE WHEN state = 'running' THEN '' ELSE lease_owner END,
+	lease_until = CASE WHEN state = 'running' THEN NULL ELSE lease_until END;
+INSERT INTO durable_jobs SELECT * FROM merge_compaction_jobs;
 
-INSERT INTO session_compaction_jobs (
-	id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	state, artifact_payload, artifact_summary_id, generation_model, generator_version, attempt_count,
-	redrive_count, available_at, lease_owner, lease_until, started_at, completed_at,
-	last_error_code, last_error_message, created_at, updated_at
-)
-SELECT job.id, ?, job.session_id, COALESCE(map.new_generation, job.session_generation),
-	job.covered_from_turn_id, job.covered_through_turn_id,
-	CASE WHEN job.state = 'running' THEN 'retry' ELSE job.state END,
-	job.artifact_payload, job.artifact_summary_id, job.generation_model, job.generator_version,
-	job.attempt_count, job.redrive_count, job.available_at,
-	CASE WHEN job.state = 'running' THEN '' ELSE job.lease_owner END,
-	CASE WHEN job.state = 'running' THEN NULL ELSE job.lease_until END,
-	job.started_at, job.completed_at, job.last_error_code, job.last_error_message, job.created_at, job.updated_at
-FROM merge_compaction_jobs job
-LEFT JOIN merge_session_generation_map map
-	ON map.session_id = job.session_id AND map.old_generation = job.session_generation;
-
-UPDATE session_compaction_jobs
+UPDATE durable_jobs
 SET state = 'retry', lease_owner = '', lease_until = NULL
-WHERE canonical_user_id = ? AND state = 'running';
-`, winnerID, winnerID, winnerID, winnerID); err != nil {
+WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running';
+`, winnerID, winnerID, winnerID); err != nil {
 		return fmt.Errorf("restore merged session compaction state: %w", err)
 	}
 
 	mergeTurnNow := formatTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'merge:turn:' || ? || ':' || id || ':' || created_at, ?, 'session_turn', CAST(id AS TEXT), 'upsert', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'merge:turn:' || ? || ':' || id || ':' || created_at, ?, 'session_turn', id, 'upsert', ?, ?, ?
 FROM session_turns WHERE canonical_user_id = ?
-ON CONFLICT(idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
+ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
-	state = 'pending', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
+	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
 	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeTurnNow, mergeTurnNow, mergeTurnNow, winnerID); err != nil {
 		return fmt.Errorf("enqueue merged transcript indexes: %w", err)
 	}
 
-	// Version numbers are tenant-local. Keep immutable profile IDs and frozen
-	// bindings, but place loser versions after the winner's current sequence.
+	// Profile version numbers are tenant-local. Place the losing snapshots after
+	// the winner's high-water before restoring the consolidated session rows.
 	if _, err := tx.ExecContext(ctx, `
-UPDATE tenant_profile_versions
-SET version = version + (SELECT COALESCE(MAX(version), 0) FROM tenant_profile_versions WHERE canonical_user_id = ?),
-	canonical_user_id = ?
-WHERE canonical_user_id = ?;
-INSERT INTO tenant_profile_version_counters (canonical_user_id, version)
-SELECT ?, COALESCE(MAX(version), 0) FROM tenant_profile_versions WHERE canonical_user_id = ?
-ON CONFLICT(canonical_user_id) DO UPDATE SET version = MAX(version, excluded.version);
-DELETE FROM tenant_profile_version_counters WHERE canonical_user_id = ?;
-`, winnerID, winnerID, loserID, winnerID, winnerID, loserID); err != nil {
-		return fmt.Errorf("move merged tenant profile versions: %w", err)
+UPDATE merge_sessions
+SET profile_version = profile_version + (SELECT COALESCE(MAX(profile_version_high_water), 0) FROM sessions WHERE canonical_user_id = ?),
+	profile_version_high_water = profile_version_high_water + (SELECT COALESCE(MAX(profile_version_high_water), 0) FROM sessions WHERE canonical_user_id = ?);
+`, winnerID, winnerID); err != nil {
+		return fmt.Errorf("renumber merged tenant profiles: %w", err)
 	}
 
 	// Tenant-scoped idempotency keys become colliding only after ownership moves.
 	// Re-key just those collisions, including the row ID so the mapping is stable.
-	for _, table := range []string{"memory_candidates", "memory_evidence", "memory_relations", "memory_formation_jobs"} {
+	for _, table := range []string{"memory_candidates", "memory_evidence"} {
 		if _, err := tx.ExecContext(ctx, `UPDATE `+table+` AS loser SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id WHERE loser.canonical_user_id = ? AND EXISTS (SELECT 1 FROM `+table+` winner WHERE winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key)`, loserID, loserID, winnerID); err != nil {
 			return fmt.Errorf("re-key merged %s: %w", table, err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs AS loser SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id WHERE loser.job_kind = 'memory_formation' AND loser.canonical_user_id = ? AND EXISTS (SELECT 1 FROM durable_jobs winner WHERE winner.job_kind = loser.job_kind AND winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key)`, loserID, loserID, winnerID); err != nil {
+		return fmt.Errorf("re-key merged memory formation jobs: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_candidates
 SET source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = memory_candidates.source_session_id AND map.old_generation = memory_candidates.source_session_generation), source_session_generation)
 WHERE canonical_user_id = ?;
-UPDATE memory_formation_jobs
-SET source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = memory_formation_jobs.source_session_id AND map.old_generation = memory_formation_jobs.source_session_generation), source_session_generation)
-WHERE canonical_user_id = ?;
+UPDATE durable_jobs
+SET source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = durable_jobs.source_session_id AND map.old_generation = durable_jobs.source_session_generation), source_session_generation)
+WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
 UPDATE memory_evidence
 SET source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = memory_evidence.source_session_id AND map.old_generation = memory_evidence.source_session_generation), source_session_generation)
 WHERE canonical_user_id = ?;
-UPDATE memory_confirmation_presentations
-SET session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = memory_confirmation_presentations.session_id AND map.old_generation = memory_confirmation_presentations.session_generation), session_generation)
-WHERE canonical_user_id = ?;
-`, loserID, loserID, loserID, loserID); err != nil {
+`, loserID, loserID, loserID); err != nil {
 		return fmt.Errorf("remap merged formation session generations: %w", err)
 	}
 
@@ -505,9 +480,6 @@ WHERE loser.canonical_user_id = ?`
 	}
 	winnerForDuplicate := `
 SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_events.memory_id`
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = (`+winnerForDuplicate+`) WHERE canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)`, winnerID, winnerID, loserID, loserID, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to redirect merged memory events: %w", err)
-	}
 	winnerForSuperseded := `
 SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_entries.supersedes_id`
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET supersedes_id = (`+winnerForSuperseded+`) WHERE supersedes_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
@@ -535,14 +507,8 @@ UPDATE memory_entries SET candidate_id = NULL, source_turn_id = NULL WHERE canon
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET memory_id = (`+winnerForEvidence+`) WHERE memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to redirect merged memory evidence: %w", err)
 	}
-	for _, column := range []string{"source_memory_id", "target_memory_id"} {
-		winnerForRelation := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_relations.` + column
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_relations SET `+column+` = (`+winnerForRelation+`) WHERE `+column+` IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
-			return fmt.Errorf("failed to redirect merged memory relation %s: %w", column, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tenant_profile_version_facts SET source_memory_id = (SELECT winner.id `+duplicateJoin+` AND loser.id = tenant_profile_version_facts.source_memory_id) WHERE source_memory_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
-		return fmt.Errorf("redirect merged profile facts: %w", err)
+	if _, err := tx.ExecContext(ctx, `UPDATE merge_sessions SET source_memory_ids = COALESCE((SELECT json_group_array(COALESCE((SELECT winner.id `+duplicateJoin+` AND loser.id = CAST(source.value AS INTEGER)), CAST(source.value AS INTEGER))) FROM json_each(merge_sessions.source_memory_ids) source), '[]')`, winnerID, loserID); err != nil {
+		return fmt.Errorf("redirect merged profile sources: %w", err)
 	}
 	winnerForFormationAudit := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_formation_audit.memory_id`
 	if _, err := tx.ExecContext(ctx, `
@@ -557,14 +523,26 @@ FROM memory_formation_audit WHERE canonical_user_id = ? AND memory_id IN (`+dupl
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.merge_duplicate_memory_ids; CREATE TEMP TABLE merge_duplicate_memory_ids AS SELECT id FROM memory_entries WHERE id IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
 		return fmt.Errorf("snapshot duplicate merged memories: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (SELECT id FROM merge_duplicate_memory_ids)`); err != nil {
-		return fmt.Errorf("failed to delete duplicate memories: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory candidates: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET canonical_user_id = ? WHERE job_kind = 'memory_formation' AND canonical_user_id = ?`, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to move merged memory formation jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = (`+winnerForDuplicate+`) WHERE canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)`, winnerID, winnerID, loserID, loserID, winnerID, loserID); err != nil {
+		return fmt.Errorf("failed to redirect merged memory events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (SELECT id FROM merge_duplicate_memory_ids)`); err != nil {
+		return fmt.Errorf("failed to delete duplicate memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.merge_evidence_turns; CREATE TEMP TABLE merge_evidence_turns AS SELECT id, source_turn_id FROM memory_evidence WHERE canonical_user_id = ?; UPDATE memory_evidence SET source_turn_id = NULL WHERE canonical_user_id = ?`, loserID, loserID); err != nil {
+		return fmt.Errorf("snapshot merged memory evidence turns: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memories: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events AS loser SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id WHERE loser.canonical_user_id = ? AND loser.event_kind = 'formation_audit' AND loser.idempotency_key != '' AND EXISTS (SELECT 1 FROM memory_events winner WHERE winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key)`, loserID, loserID, winnerID); err != nil {
+		return fmt.Errorf("re-key merged memory audit events: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory events: %w", err)
@@ -572,17 +550,11 @@ FROM memory_formation_audit WHERE canonical_user_id = ? AND memory_id IN (`+dupl
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory evidence: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_relations SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to move merged memory relations: %w", err)
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET source_turn_id = (SELECT source_turn_id FROM merge_evidence_turns snapshot WHERE snapshot.id = memory_evidence.id) WHERE id IN (SELECT id FROM merge_evidence_turns); DROP TABLE merge_evidence_turns`); err != nil {
+		return fmt.Errorf("restore merged memory evidence turns: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to move merged memory formation jobs: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET state = 'retry', lease_until = NULL WHERE canonical_user_id = ? AND state = 'running'`, winnerID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', lease_owner = '', lease_until = NULL WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, winnerID); err != nil {
 		return fmt.Errorf("reset merged memory formation leases: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_confirmation_presentations SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("move merged confirmation presentations: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO memory_formation_audit (
@@ -620,95 +592,74 @@ DROP TABLE merge_memory_links;
 	}
 	mergeNow := formatTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'merge:memory:' || ? || ':' || id || ':' || updated_at, ?, 'memory', CAST(id AS TEXT), 'upsert', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'merge:memory:' || ? || ':' || id || ':' || updated_at, ?, 'memory', id, 'upsert', ?, ?, ?
 FROM memory_entries WHERE canonical_user_id = ?
-ON CONFLICT(idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
+ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
-	state = 'pending', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
+	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
 	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeNow, mergeNow, mergeNow, winnerID); err != nil {
 		return fmt.Errorf("enqueue merged memory indexes: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO derived_index_changes(idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'merge:memory-delete:' || ? || ':' || id, ?, 'memory', CAST(id AS TEXT), 'delete', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'merge:memory-delete:' || ? || ':' || id, ?, 'memory', id, 'delete', ?, ?, ?
 FROM merge_duplicate_memory_ids
 WHERE 1
-ON CONFLICT(idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
+ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
-	state = 'pending', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
+	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
 	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at;
 DROP TABLE merge_duplicate_memory_ids`, loserID, winnerID, mergeNow, mergeNow, mergeNow); err != nil {
 		return fmt.Errorf("enqueue duplicate merged memory index deletion: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_session_generations (canonical_user_id, session_id, generation)
-SELECT ?, session_id, MAX(generation)
-FROM (
-	SELECT session_id, generation FROM tenant_session_generations WHERE canonical_user_id IN (?, ?)
-	UNION ALL SELECT session_id, session_generation FROM session_turns WHERE canonical_user_id = ?
-	UNION ALL SELECT session_id, session_generation FROM session_summaries WHERE canonical_user_id = ?
-	UNION ALL SELECT session_id, session_generation FROM session_compaction_jobs WHERE canonical_user_id = ?
-	UNION ALL SELECT session_id, generation FROM merge_tenant_sessions
-)
-GROUP BY session_id
-ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET generation = MAX(generation, excluded.generation)
-`, winnerID, winnerID, loserID, winnerID, winnerID, winnerID); err != nil {
-		return fmt.Errorf("failed to preserve merged session generations: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_session_generations WHERE canonical_user_id = ?`, loserID); err != nil {
-		return fmt.Errorf("failed to remove merged session generations: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO tenant_sessions (canonical_user_id, session_id, generation, profile_version_id, started_at, last_seen_at, expires_at)
-SELECT ?, session_id, generation, profile_version_id, started_at, last_seen_at, expires_at
-FROM merge_tenant_sessions
+INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
+	fact_count, profile_bytes, source_memory_ids, profile_created_at)
+SELECT ?, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
+	fact_count, profile_bytes, source_memory_ids, profile_created_at
+FROM merge_sessions
 WHERE 1
 ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
-	generation = CASE WHEN excluded.generation > tenant_sessions.generation THEN excluded.generation ELSE tenant_sessions.generation END,
-	profile_version_id = CASE WHEN excluded.generation > tenant_sessions.generation THEN excluded.profile_version_id ELSE tenant_sessions.profile_version_id END,
-	started_at = CASE WHEN excluded.generation > tenant_sessions.generation THEN excluded.started_at ELSE tenant_sessions.started_at END,
-	last_seen_at = MAX(tenant_sessions.last_seen_at, excluded.last_seen_at),
-	expires_at = MAX(tenant_sessions.expires_at, excluded.expires_at);
+	generation = MAX(sessions.generation, excluded.generation),
+	is_active = CASE WHEN excluded.generation > sessions.generation THEN excluded.is_active ELSE sessions.is_active END,
+	started_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.started_at ELSE sessions.started_at END,
+	last_seen_at = MAX(sessions.last_seen_at, excluded.last_seen_at),
+	expires_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.expires_at ELSE sessions.expires_at END,
+	profile_version = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_version ELSE sessions.profile_version END,
+	profile_version_high_water = MAX(sessions.profile_version_high_water, excluded.profile_version_high_water),
+	renderer_version = CASE WHEN excluded.generation > sessions.generation THEN excluded.renderer_version ELSE sessions.renderer_version END,
+	source_digest = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_digest ELSE sessions.source_digest END,
+	speaker_intro = CASE WHEN excluded.generation > sessions.generation THEN excluded.speaker_intro ELSE sessions.speaker_intro END,
+	rendered_content = CASE WHEN excluded.generation > sessions.generation THEN excluded.rendered_content ELSE sessions.rendered_content END,
+	fact_count = CASE WHEN excluded.generation > sessions.generation THEN excluded.fact_count ELSE sessions.fact_count END,
+	profile_bytes = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_bytes ELSE sessions.profile_bytes END,
+	source_memory_ids = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_memory_ids ELSE sessions.source_memory_ids END,
+	profile_created_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_created_at ELSE sessions.profile_created_at END;
 `, winnerID); err != nil {
-		return fmt.Errorf("restore merged tenant sessions: %w", err)
+		return fmt.Errorf("restore merged sessions: %w", err)
 	}
 
-	now := formatTime(time.Now())
-	createdAt := now
-	err = tx.QueryRowContext(ctx, `
-SELECT created_at FROM user_memory_profiles
-WHERE canonical_user_id IN (?, ?)
-ORDER BY CASE canonical_user_id WHEN ? THEN 0 ELSE 1 END
-LIMIT 1`, winnerID, loserID, winnerID).Scan(&createdAt)
-	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to read merged memory profile: %w", err)
+	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), formatTime(time.Now()), winnerID); err != nil {
+		return fmt.Errorf("failed to update merged speaker intro: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM user_memory_profiles WHERE canonical_user_id = ?`, loserID); err != nil {
-		return fmt.Errorf("failed to remove merged memory profile: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(canonical_user_id) DO UPDATE SET intro = excluded.intro, updated_at = excluded.updated_at
-`, winnerID, strings.TrimSpace(intro), createdAt, now); err != nil {
-		return fmt.Errorf("failed to upsert merged memory profile: %w", err)
-	}
-	if _, err := refreshProfileTx(ctx, tx, winnerID, time.Now().UTC()); err != nil {
+	if _, _, err := refreshProfileTx(ctx, tx, winnerID, time.Now().UTC()); err != nil {
 		return fmt.Errorf("publish unified merged tenant profile: %w", err)
 	}
 
 	// Existing outbox work remains useful after a merge. Move it and make any
 	// in-flight lease retryable under the winner before queuing reconciliation work.
 	if _, err := tx.ExecContext(ctx, `
-UPDATE derived_index_changes
+UPDATE durable_jobs
 SET canonical_user_id = ?,
-	state = CASE WHEN state = 'processing' THEN 'failed' ELSE state END,
-	lease_owner = CASE WHEN state = 'processing' THEN '' ELSE lease_owner END,
-	lease_until = CASE WHEN state = 'processing' THEN NULL ELSE lease_until END,
-	available_at = CASE WHEN state = 'processing' THEN ? ELSE available_at END,
-	updated_at = CASE WHEN state = 'processing' THEN ? ELSE updated_at END
-WHERE canonical_user_id = ?;
+	state = CASE WHEN state = 'running' THEN 'retry' ELSE state END,
+	lease_owner = CASE WHEN state = 'running' THEN '' ELSE lease_owner END,
+	lease_until = CASE WHEN state = 'running' THEN NULL ELSE lease_until END,
+	available_at = CASE WHEN state = 'running' THEN ? ELSE available_at END,
+	updated_at = CASE WHEN state = 'running' THEN ? ELSE updated_at END
+WHERE job_kind = 'derived_index' AND canonical_user_id = ?;
 `, winnerID, mergeNow, mergeNow, loserID); err != nil {
 		return fmt.Errorf("move merged derived index changes: %w", err)
 	}
@@ -738,28 +689,19 @@ WHERE target_user_id = ?;
 	var remaining int
 	if err := tx.QueryRowContext(ctx, `
 SELECT SUM(row_count) FROM (
-	SELECT COUNT(*) row_count FROM user_memory_profiles WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?
+	SELECT COUNT(*) row_count FROM memory_entries WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_events WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM tenant_profile_versions WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM tenant_profile_version_counters WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM tenant_sessions WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM tenant_session_generations WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM sessions WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM memory_confirmation_presentations WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_evidence WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM memory_relations WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM memory_formation_jobs WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_formation_audit WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM session_summary_sources WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM session_compaction_jobs WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM derived_index_changes WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM privacy_operations WHERE target_user_id = ?
 )
-`, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID,
-		loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
+`, loserID, loserID, loserID, loserID, loserID, loserID, loserID,
+		loserID, loserID, loserID).Scan(&remaining); err != nil {
 		return fmt.Errorf("verify merged tenant ownership: %w", err)
 	}
 	if remaining != 0 {
@@ -865,18 +807,15 @@ RETURNING id
 		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", supersedesID, "delete", "supersede:"+formatTime(now)); err != nil {
 			return MemoryEntry{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations(canonical_user_id, idempotency_key, relation_type, source_memory_id, target_memory_id, created_at) VALUES (?, ?, 'supersedes', ?, ?, ?) ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING`, userID, formationKey("legacy-supersedes", id, supersedesID), id, supersedesID, formatTime(now)); err != nil {
-			return MemoryEntry{}, err
-		}
 	}
 	meta := requestctx.MetadataFromContext(ctx)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events(canonical_user_id, memory_id, event_type, request_id, session_id, created_at, metadata) VALUES (?, ?, 'updated', ?, ?, ?, '{"source":"legacy_api"}')`, userID, id, meta.RequestID, firstNonEmptyFormation(meta.SessionID, req.SourceSessionID), formatTime(now)); err != nil {
 		return MemoryEntry{}, fmt.Errorf("record legacy memory event: %w", err)
 	}
-	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("legacy-save", id, formatTime(now)), "memory.legacy_saved", 0, id, 0, FormationSource{RequestID: meta.RequestID, SessionID: firstNonEmptyFormation(meta.SessionID, req.SourceSessionID)}, "legacy_api", "compatibility save"); err != nil {
+	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("legacy-save", id, formatTime(now)), "user_memory.legacy_saved", 0, id, 0, FormationSource{RequestID: meta.RequestID, SessionID: firstNonEmptyFormation(meta.SessionID, req.SourceSessionID)}, "legacy_api", "compatibility save"); err != nil {
 		return MemoryEntry{}, err
 	}
-	if _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+	if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
 		return MemoryEntry{}, fmt.Errorf("advance profile after legacy save: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1071,7 +1010,7 @@ func eraseForgottenFormationTx(tx *sql.Tx, userID string, eraseAll bool) error {
 	if eraseAll {
 		if _, err := tx.Exec(`
 UPDATE memory_evidence SET content = '', correlation_key = '' WHERE canonical_user_id = ?;
-UPDATE memory_formation_jobs SET extraction_payload = '' WHERE canonical_user_id = ?;
+UPDATE durable_jobs SET extraction_payload = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
 UPDATE memory_candidates
 SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected',
 	decision_reason = 'user_forget_all', decided_at = ?, decided_by = 'user', updated_at = ?
@@ -1092,9 +1031,9 @@ WHERE canonical_user_id = ? AND (
 	)
 );
 
-UPDATE memory_formation_jobs
+UPDATE durable_jobs
 SET extraction_payload = ''
-WHERE canonical_user_id = ? AND source_turn_id IN (
+WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id IN (
 	SELECT source_turn_id FROM memory_candidates
 	WHERE canonical_user_id = ? AND published_memory_id IN (
 		SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
@@ -1114,15 +1053,7 @@ WHERE canonical_user_id = ? AND published_memory_id IN (
 }
 
 func deleteForgottenProfileVersionsTx(tx *sql.Tx, userID string) error {
-	if _, err := tx.Exec(`
-DELETE FROM tenant_profile_versions
-WHERE canonical_user_id = ? AND id IN (
-	SELECT facts.profile_version_id
-	FROM tenant_profile_version_facts facts
-	JOIN memory_entries entries ON entries.id = facts.source_memory_id
-	WHERE entries.canonical_user_id = ? AND entries.status IN ('deleted', 'expired')
-)
-`, userID, userID); err != nil {
+	if err := rebindProfileCopiesTx(context.Background(), tx, userID, 0, time.Now().UTC()); err != nil {
 		return fmt.Errorf("failed to remove forgotten profile snapshots: %w", err)
 	}
 	return nil
@@ -1242,7 +1173,7 @@ INSERT INTO session_turns (session_id, canonical_user_id, session_generation, us
 INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id, delivered_at)
 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
-	SELECT 1 FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
+	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)
 	RETURNING id`
 		args = append(args, userID, sessionID, generation)

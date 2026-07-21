@@ -25,8 +25,8 @@ type SessionCleaner interface {
 	CleanupExpiredSessions(context.Context, time.Time) (SessionCleanupCounts, error)
 }
 
-// CleanupExpiredSessions removes expired session state without relying on a
-// subsequent session read. Session generation counters are intentionally kept.
+// CleanupExpiredSessions removes expired session artifacts while retaining each
+// session row as the generation high-water record.
 func (s *Store) CleanupExpiredSessions(ctx context.Context, now time.Time) (SessionCleanupCounts, error) {
 	return s.cleanupExpiredSessions(ctx, now, config.RetentionPolicy{
 		CandidateContentRetention: 30 * 24 * time.Hour,
@@ -80,9 +80,9 @@ WHERE id IN (SELECT id FROM memory_entries WHERE status = 'active' AND expires_a
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE memory_formation_jobs
+UPDATE durable_jobs
 SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL
-WHERE id IN (SELECT id FROM memory_formation_jobs WHERE source_turn_id IN (
+WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND source_turn_id IN (
 	SELECT source_turn_id FROM memory_candidates
 	WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
 		AND source_turn_id IS NOT NULL
@@ -102,20 +102,9 @@ WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELE
 `, batch, batch, nowText, nowText, batch); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase expired published memory provenance: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
-DELETE FROM tenant_profile_versions
-WHERE id IN (SELECT id FROM tenant_profile_versions WHERE id IN (
-	SELECT facts.profile_version_id
-	FROM tenant_profile_version_facts facts
-	JOIN memory_entries entries ON entries.id = facts.source_memory_id
-	WHERE entries.status = 'expired'
-) ORDER BY id LIMIT ?)
-`, batch); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("delete expired memory profile snapshots: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (
-		SELECT jobs.id FROM memory_formation_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
-		WHERE (candidate.state IN ('proposed', 'pending_confirmation', 'rejected') OR (candidate.state = 'approved' AND candidate.published_memory_id IS NULL))
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (
+		SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
+		WHERE jobs.job_kind = 'memory_formation' AND (candidate.state IN ('proposed', 'pending_confirmation', 'rejected') OR (candidate.state = 'approved' AND candidate.published_memory_id IS NULL))
 			AND ((candidate.expires_at IS NOT NULL AND candidate.expires_at <= ?) OR candidate.created_at <= ?)
 			AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL)
 		ORDER BY jobs.id LIMIT ?)`, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch); err != nil {
@@ -141,12 +130,12 @@ WHERE (state IN ('proposed', 'pending_confirmation', 'rejected') OR (state = 'ap
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT evidence.id FROM memory_evidence evidence JOIN memory_candidates candidate ON candidate.id = evidence.candidate_id WHERE candidate.statement = '' AND candidate.state = 'rejected' AND (evidence.content != '' OR evidence.correlation_key != '' OR evidence.source_request_id != '' OR evidence.source_session_id != '' OR evidence.source_turn_id IS NOT NULL) ORDER BY evidence.id LIMIT ?)`, batch); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase expired candidate evidence: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT jobs.id FROM memory_formation_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id WHERE candidate.statement = '' AND candidate.state = 'rejected' AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL) ORDER BY jobs.id LIMIT ?)`, batch); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id WHERE jobs.job_kind = 'memory_formation' AND candidate.statement = '' AND candidate.state = 'rejected' AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL) ORDER BY jobs.id LIMIT ?)`, batch); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase retained formation artifacts: %w", err)
 	}
 	result, err = tx.ExecContext(ctx, `
-DELETE FROM memory_formation_jobs
-WHERE id IN (SELECT id FROM memory_formation_jobs WHERE ((state IN ('succeeded', 'skipped') AND completed_at <= ?)
+DELETE FROM durable_jobs
+WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND ((state IN ('succeeded', 'skipped') AND completed_at <= ?)
 	OR (state = 'dead' AND completed_at <= ?))
 	AND extraction_payload = '' AND source_request_id = '' AND source_session_id = '' AND source_turn_id IS NULL
 	ORDER BY id LIMIT ?)
@@ -159,27 +148,29 @@ WHERE id IN (SELECT id FROM memory_formation_jobs WHERE ((state IN ('succeeded',
 	}
 
 	compactionMutation := `
-DELETE FROM session_compaction_jobs WHERE id IN (SELECT id FROM session_compaction_jobs jobs
-WHERE NOT EXISTS (
-	SELECT 1 FROM tenant_sessions active
+DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs jobs
+WHERE jobs.job_kind = 'session_compaction' AND NOT EXISTS (
+	SELECT 1 FROM sessions active
 	WHERE active.canonical_user_id = jobs.canonical_user_id
 		AND active.session_id = jobs.session_id
 		AND active.generation = jobs.session_generation
+		AND active.is_active = 1
 		AND active.expires_at > ?
 ) ORDER BY id LIMIT ?)
 `
 	if preserveCompactionJobs {
 		compactionMutation = `
-UPDATE session_compaction_jobs
+UPDATE durable_jobs
 SET state = CASE WHEN state IN ('queued','running','retry') THEN 'skipped' ELSE state END,
 	artifact_summary_id = NULL, lease_owner = '', lease_until = NULL,
 	completed_at = CASE WHEN state IN ('queued','running','retry') THEN COALESCE(completed_at, ?) ELSE completed_at END,
 	updated_at = CASE WHEN state IN ('queued','running','retry') THEN ? ELSE updated_at END
-WHERE id IN (SELECT id FROM session_compaction_jobs jobs WHERE (jobs.state IN ('queued','running','retry') OR jobs.artifact_summary_id IS NOT NULL) AND NOT EXISTS (
-	SELECT 1 FROM tenant_sessions active
+WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs jobs WHERE jobs.job_kind = 'session_compaction' AND (jobs.state IN ('queued','running','retry') OR jobs.artifact_summary_id IS NOT NULL) AND NOT EXISTS (
+	SELECT 1 FROM sessions active
 	WHERE active.canonical_user_id = jobs.canonical_user_id
 		AND active.session_id = jobs.session_id
 		AND active.generation = jobs.session_generation
+		AND active.is_active = 1
 		AND active.expires_at > ?
 ) ORDER BY id LIMIT ?)
 `
@@ -194,10 +185,11 @@ WHERE id IN (SELECT id FROM session_compaction_jobs jobs WHERE (jobs.state IN ('
 	result, err = tx.ExecContext(ctx, `
 DELETE FROM session_summaries WHERE id IN (SELECT id FROM session_summaries summaries
 WHERE NOT EXISTS (
-	SELECT 1 FROM tenant_sessions active
+	SELECT 1 FROM sessions active
 	WHERE active.canonical_user_id = summaries.canonical_user_id
 		AND active.session_id = summaries.session_id
 		AND active.generation = summaries.session_generation
+		AND active.is_active = 1
 		AND active.expires_at > ?
 ) ORDER BY id LIMIT ?)
 `, nowText, batch)
@@ -206,7 +198,7 @@ WHERE NOT EXISTS (
 	}
 	counts.SessionSummariesDeleted, _ = result.RowsAffected()
 
-	turnRows, err := tx.QueryContext(ctx, `SELECT id, canonical_user_id FROM session_turns WHERE ((expires_at IS NOT NULL AND expires_at <= ?) AND NOT EXISTS (SELECT 1 FROM tenant_sessions active WHERE active.canonical_user_id = session_turns.canonical_user_id AND active.session_id = session_turns.session_id AND active.generation = session_turns.session_generation AND active.expires_at > ?)) OR EXISTS (SELECT 1 FROM tenant_sessions sessions WHERE sessions.canonical_user_id = session_turns.canonical_user_id AND sessions.session_id = session_turns.session_id AND sessions.generation = session_turns.session_generation AND sessions.expires_at <= ?) ORDER BY id LIMIT ?`, nowText, nowText, nowText, batch)
+	turnRows, err := tx.QueryContext(ctx, `SELECT id, canonical_user_id FROM session_turns WHERE ((expires_at IS NOT NULL AND expires_at <= ?) AND NOT EXISTS (SELECT 1 FROM sessions active WHERE active.canonical_user_id = session_turns.canonical_user_id AND active.session_id = session_turns.session_id AND active.generation = session_turns.session_generation AND active.is_active = 1 AND active.expires_at > ?)) OR EXISTS (SELECT 1 FROM sessions WHERE sessions.canonical_user_id = session_turns.canonical_user_id AND sessions.session_id = session_turns.session_id AND sessions.generation = session_turns.session_generation AND (sessions.is_active = 0 OR sessions.expires_at <= ?)) ORDER BY id LIMIT ?`, nowText, nowText, nowText, batch)
 	if err != nil {
 		return counts, err
 	}
@@ -240,34 +232,14 @@ WHERE NOT EXISTS (
 		}
 	}
 
-	result, err = tx.ExecContext(ctx, `DELETE FROM tenant_sessions WHERE rowid IN (SELECT rowid FROM tenant_sessions WHERE expires_at <= ? ORDER BY expires_at, rowid LIMIT ?)`, nowText, batch)
+	result, err = tx.ExecContext(ctx, `UPDATE sessions SET is_active = 0 WHERE rowid IN (SELECT rowid FROM sessions WHERE is_active = 1 AND expires_at <= ? ORDER BY expires_at, rowid LIMIT ?)`, nowText, batch)
 	if err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("delete expired tenant sessions: %w", err)
+		return SessionCleanupCounts{}, fmt.Errorf("deactivate expired tenant sessions: %w", err)
 	}
 	if counts.TenantSessionsDeleted, err = result.RowsAffected(); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("count deleted tenant sessions: %w", err)
 	}
 
-	result, err = tx.ExecContext(ctx, `
-DELETE FROM tenant_profile_versions
-WHERE id IN (SELECT id FROM tenant_profile_versions profiles WHERE NOT EXISTS (
-	SELECT 1 FROM tenant_sessions sessions
-	WHERE sessions.profile_version_id = profiles.id
-)
-AND profiles.id != (
-	SELECT latest.id
-	FROM tenant_profile_versions latest
-	WHERE latest.canonical_user_id = profiles.canonical_user_id
-	ORDER BY latest.version DESC, latest.id DESC
-	LIMIT 1
-) ORDER BY profiles.id LIMIT ?)
-`, batch)
-	if err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("prune unreferenced tenant profiles: %w", err)
-	}
-	if counts.ProfileVersionsDeleted, err = result.RowsAffected(); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("count pruned tenant profiles: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("commit expired session cleanup: %w", err)
 	}
@@ -283,14 +255,14 @@ func RunSessionCleanup(ctx context.Context, cleaner SessionCleaner, interval tim
 		return
 	}
 	if logger != nil {
-		logger = logger.Server("memory.session_cleanup")
+		logger = logger.Server("session_memory.cleanup")
 	}
 	sweep := func() {
 		started := time.Now()
 		counts, err := cleaner.CleanupExpiredSessions(ctx, started.UTC())
 		if err != nil {
 			if logger != nil && ctx.Err() == nil {
-				logger.Warn("memory.session_cleanup.failed", "session cleanup failed", config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "degraded"), config.ErrorField(err))
+				logger.Warn("session_memory.cleanup.failed", "session-memory cleanup failed", config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "degraded"), config.ErrorField(err))
 			}
 			return
 		}
@@ -308,9 +280,9 @@ func RunSessionCleanup(ctx context.Context, cleaner SessionCleaner, interval tim
 				config.F("status", "ok"),
 			}
 			if counts.SessionTurnsDeleted+counts.TenantSessionsDeleted+counts.ProfileVersionsDeleted+counts.MemoryEntriesExpired+counts.CandidatesErased+counts.FormationJobsDeleted+counts.SessionSummariesDeleted+counts.CompactionJobsDeleted == 0 {
-				logger.Debug("memory.session_cleanup.complete", "session cleanup completed", fields...)
+				logger.Debug("session_memory.cleanup.complete", "session-memory cleanup completed", fields...)
 			} else {
-				logger.Info("memory.session_cleanup.complete", "session cleanup completed", fields...)
+				logger.Info("session_memory.cleanup.complete", "session-memory cleanup completed", fields...)
 			}
 		}
 	}

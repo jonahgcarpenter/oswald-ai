@@ -16,20 +16,20 @@ import (
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
-	Broker           *broker.Broker
-	Commands         *commands.Service
-	Access           AccessChecker
-	Log              *config.Logger
-	Formation        FormationEnqueuer
-	Compaction       CompactionEnqueuer
-	DeploymentMemory DeploymentMemoryPublisher
-	PrivacyBus       *privacyruntime.Bus
+	Broker       *broker.Broker
+	Commands     *commands.Service
+	Access       AccessChecker
+	Log          *config.Logger
+	Formation    FormationEnqueuer
+	Compaction   CompactionEnqueuer
+	GlobalMemory GlobalMemoryPublisher
+	PrivacyBus   *privacyruntime.Bus
 }
 
-// DeploymentMemoryPublisher activates request-staged global facts after delivery.
-type DeploymentMemoryPublisher interface {
-	PublishDeploymentMemories(context.Context, string, string, int64) (int, error)
-	DiscardDeploymentMemories(context.Context, string, string) error
+// GlobalMemoryPublisher activates request-staged global facts after delivery.
+type GlobalMemoryPublisher interface {
+	PublishGlobalMemories(context.Context, string, string, int64) (int, error)
+	DiscardGlobalMemories(context.Context, string, string) error
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.

@@ -144,8 +144,7 @@ func TestSessionCompactionArtifactPublicationAndIncrementalSources(t *testing.T)
 		t.Fatal(err)
 	}
 	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = 'user' AND session_id = 'session'`, 0)
-	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_summary_sources WHERE canonical_user_id = 'user' AND session_id = 'session'`, 0)
-	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_compaction_jobs WHERE canonical_user_id = 'user' AND session_id = 'session'`, 0)
+	assertCompactionCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = 'user' AND session_id = 'session'`, 0)
 }
 
 func TestExpiredSessionGenerationCannotCompact(t *testing.T) {
@@ -153,7 +152,7 @@ func TestExpiredSessionGenerationCannotCompact(t *testing.T) {
 	seedAccountUsers(t, store, "user")
 	generation := activateCompactionSession(t, store, "user", "session")
 	turn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(time.Now().Add(-time.Minute))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, formatTime(time.Now().Add(-time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.MarkSessionTurnDelivered(context.Background(), "user", turn); err == nil {
@@ -176,7 +175,7 @@ func TestPreCompactionCandidateRequiresLiveJobLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE session_compaction_jobs SET lease_until = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Minute)), job.ID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Minute)), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: "I work on Atlas.", Statement: "The user works on Atlas.", Evidence: "I work on Atlas.", Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryProjects, Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityModel, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModePreCompactionExtraction, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4})
@@ -187,7 +186,7 @@ func TestPreCompactionCandidateRequiresLiveJobLease(t *testing.T) {
 		t.Fatal("stale lease staged pre-compaction candidate")
 	}
 	assertCompactionCount(t, store, `SELECT COUNT(*) FROM memory_candidates WHERE idempotency_key = 'stale-lease'`, 0)
-	if _, err := store.sql.Exec(`UPDATE session_compaction_jobs SET lease_until = ? WHERE id = ?`, formatTime(time.Now().Add(time.Minute)), job.ID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(time.Minute)), job.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: "session-compaction:1", SessionID: "other-session", SessionGeneration: generation, TurnID: turn, Model: "model", ExtractorVersion: "v1"}, IdempotencyKey: "wrong-scope", CompactionJob: &job}); err == nil {
@@ -219,8 +218,7 @@ func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testi
 		t.Fatal("expected incomplete source range rejection")
 	}
 	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_summaries`, 0)
-	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_summary_sources`, 0)
-	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_compaction_jobs WHERE artifact_summary_id IS NOT NULL`, 0)
+	assertCompactionCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction' AND artifact_summary_id IS NOT NULL`, 0)
 
 	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), second); err != nil {
 		t.Fatal(err)
@@ -236,7 +234,7 @@ func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testi
 	if err != nil || changed != 0 {
 		t.Fatalf("reconciled = %d, err = %v", changed, err)
 	}
-	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_compaction_jobs`, 0)
+	assertCompactionCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction'`, 0)
 }
 
 func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
@@ -256,7 +254,7 @@ func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
 			t.Fatal(err)
 		}
 		if attempt < maxSessionCompactionAttempts {
-			if _, err := store.sql.Exec(`UPDATE session_compaction_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Second)), job.ID); err != nil {
+			if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Second)), job.ID); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -264,7 +262,7 @@ func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
 	if _, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("claim dead job error = %v", err)
 	}
-	if _, err := store.sql.Exec(`UPDATE session_compaction_jobs SET updated_at = ?`, formatTime(time.Now().Add(-time.Hour))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET updated_at = ? WHERE job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	redriven, err := store.RedriveDeadSessionCompactionJobs(context.Background(), time.Minute)

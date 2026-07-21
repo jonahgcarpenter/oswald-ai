@@ -22,13 +22,13 @@ It combines tools, private long-term memory, conversation continuity, image unde
 Oswald’s memory keeps useful context without treating every conversation detail as permanent.
 
 - The operator-managed soul file defines Oswald’s shared personality, behavior, and standing policy. It is used as the system prompt and can only be changed by manually editing `data/memory/soul/soul.md` outside Oswald.
-- Deployment memory stores evidence-backed facts Oswald learns about its own implementation, version, architecture, and capabilities from globally configured MCP tools. These facts are shared with every tenant but cannot override policy or authorization.
+- Global memory stores evidence-backed facts Oswald learns about its own implementation, version, architecture, and capabilities from globally configured MCP tools. These facts are shared with every tenant but cannot override policy or authorization.
 - Personal memory stores private details such as your preferences, projects, relationships, and environment. Relevant memories are recalled automatically and follow you across linked accounts.
 - Conversation memory preserves recent exchanges and summarizes longer conversations. Oswald can search earlier details from the current conversation when needed.
 
 Oswald automatically extracts useful direct facts from exact first-person clauses, including multiple facts embedded in a longer message, and also forms cautious hypotheses from indirect signals. You can still explicitly request a correction or save. Every memory retains confidence, provenance, evidence, and sensitivity metadata. Relevant low-confidence inferences are presented to the model as uncertain possibilities; later independent or direct evidence reinforces the same claim instead of creating disconnected facts. Memory formation never asks for conversational approval, and inferred memories do not enter the always-present user profile until direct evidence supports them.
 
-After any user triggers a successful tool on a globally configured MCP server, Oswald may propose an exact evidence-backed deployment fact. User-owned MCP results and user prompt text cannot become global evidence. Global MCP servers are therefore part of the deployment trust boundary and should be configured only when their results are suitable for shared memory.
+After any user triggers a successful tool on a globally configured MCP server, Oswald may propose an exact evidence-backed global fact. User-owned MCP results and user prompt text cannot become global evidence. Global MCP servers are therefore part of the global-memory trust boundary and should be configured only when their results are suitable for shared memory.
 `/reset` starts a fresh conversation without deleting personal memory. You can also inspect, export, forget, or delete retained data through the `/privacy` commands.
 
 ## Usage

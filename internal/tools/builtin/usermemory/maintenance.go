@@ -3,7 +3,6 @@ package usermemory
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -127,21 +126,21 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 		counts.ForgottenMemories++
 	}
 
-	if counts.AuditRowsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_formation_audit WHERE redacted_at IS NULL AND (julianday(content_expires_at) <= julianday(?) OR (content_expires_at IS NULL AND julianday(created_at) <= julianday(?))) ORDER BY id LIMIT ?) UPDATE memory_formation_audit SET metadata = '', request_id = '', session_id = '', actor_id = '', redacted_at = ? WHERE id IN (SELECT id FROM due)`, nowText, contentCutoff, batch, nowText); err != nil {
+	if counts.AuditRowsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_events WHERE event_kind = 'formation_audit' AND redacted_at IS NULL AND (julianday(content_expires_at) <= julianday(?) OR (content_expires_at IS NULL AND julianday(created_at) <= julianday(?))) ORDER BY id LIMIT ?) UPDATE memory_events SET metadata = '', request_id = '', session_id = '', actor_id = '', redacted_at = ? WHERE id IN (SELECT id FROM due)`, nowText, contentCutoff, batch, nowText); err != nil {
 		return counts, err
 	}
-	if counts.FormationJobsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_formation_jobs WHERE state IN ('succeeded','skipped','dead') AND julianday(updated_at) <= julianday(?) AND (extraction_payload != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL) ORDER BY id LIMIT ?) UPDATE memory_formation_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
+	if counts.FormationJobsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND state IN ('succeeded','skipped','dead') AND julianday(updated_at) <= julianday(?) AND (extraction_payload != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL) ORDER BY id LIMIT ?) UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.CompactionJobsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM session_compaction_jobs WHERE state IN ('succeeded','skipped','dead') AND julianday(updated_at) <= julianday(?) AND (artifact_payload != '' OR last_error_message != '') ORDER BY id LIMIT ?) UPDATE session_compaction_jobs SET artifact_payload = '', last_error_message = '' WHERE id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
+	if counts.CompactionJobsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND state IN ('succeeded','skipped','dead') AND julianday(updated_at) <= julianday(?) AND (artifact_payload != '' OR last_error_message != '') ORDER BY id LIMIT ?) UPDATE durable_jobs SET artifact_payload = '', last_error_message = '' WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
 		return counts, err
 	}
 	linkedJobsRedacted, linkedJobsErr := execAffected(ctx, tx, `WITH due AS (
-		SELECT jobs.id FROM memory_formation_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
-		WHERE julianday(candidate.created_at) <= julianday(?) AND candidate.state IN ('proposed','pending_confirmation','rejected')
+		SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
+		WHERE jobs.job_kind = 'memory_formation' AND julianday(candidate.created_at) <= julianday(?) AND candidate.state IN ('proposed','pending_confirmation','rejected')
 			AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL)
 		ORDER BY jobs.id LIMIT ?
-	) UPDATE memory_formation_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT id FROM due)`, candidateCutoff, batch)
+	) UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM due)`, candidateCutoff, batch)
 	if linkedJobsErr != nil {
 		return counts, linkedJobsErr
 	}
@@ -152,17 +151,17 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if counts.EvidenceRowsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT evidence.id FROM memory_evidence evidence LEFT JOIN memory_candidates candidate ON candidate.id = evidence.candidate_id WHERE (evidence.content != '' OR evidence.correlation_key != '' OR evidence.source_request_id != '' OR evidence.source_session_id != '' OR evidence.source_turn_id IS NOT NULL) AND (julianday(evidence.created_at) <= julianday(?) OR (candidate.statement = '' AND candidate.state = 'rejected')) AND NOT EXISTS (SELECT 1 FROM memory_entries memory WHERE memory.canonical_user_id = evidence.canonical_user_id AND memory.status = 'active' AND memory.approval_state = 'approved' AND (memory.id = evidence.memory_id OR memory.candidate_id = evidence.candidate_id OR memory.id = candidate.published_memory_id)) ORDER BY evidence.id LIMIT ?) UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.EventsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_events WHERE julianday(created_at) <= julianday(?) AND (metadata != '' OR request_id != '' OR session_id != '') ORDER BY id LIMIT ?) UPDATE memory_events SET metadata = '', request_id = '', session_id = '' WHERE id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
+	if counts.EventsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_events WHERE event_kind = 'lifecycle' AND julianday(created_at) <= julianday(?) AND (metadata != '' OR request_id != '' OR session_id != '') ORDER BY id LIMIT ?) UPDATE memory_events SET metadata = '', request_id = '', session_id = '' WHERE event_kind = 'lifecycle' AND id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
 		return counts, err
 	}
 	if counts.PrivacyChallengesExpired, err = execAffected(ctx, tx, `WITH due AS (SELECT operation_id FROM privacy_operations WHERE status = 'pending' AND julianday(challenge_expires_at) <= julianday(?) ORDER BY julianday(challenge_expires_at), operation_id LIMIT ?) UPDATE privacy_operations SET status = 'expired', target_user_id = NULL, challenge_hash = '', challenge_expires_at = NULL, completed_at = ?, updated_at = ?, last_error_code = 'expired' WHERE operation_id IN (SELECT operation_id FROM due)`, nowText, batch, nowText, nowText); err != nil {
 		return counts, err
 	}
 
-	if counts.EventTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_events WHERE id IN (SELECT id FROM memory_events WHERE redacted_at IS NOT NULL AND julianday(redacted_at) <= julianday(?) AND metadata = '' AND request_id = '' AND session_id = '' ORDER BY id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
+	if counts.EventTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_events WHERE event_kind = 'lifecycle' AND id IN (SELECT id FROM memory_events WHERE event_kind = 'lifecycle' AND redacted_at IS NOT NULL AND julianday(redacted_at) <= julianday(?) AND metadata = '' AND request_id = '' AND session_id = '' ORDER BY id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.AuditTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_formation_audit WHERE id IN (SELECT id FROM memory_formation_audit WHERE redacted_at IS NOT NULL AND julianday(redacted_at) <= julianday(?) ORDER BY id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
+	if counts.AuditTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_events WHERE event_kind = 'formation_audit' AND id IN (SELECT id FROM memory_events WHERE event_kind = 'formation_audit' AND redacted_at IS NOT NULL AND julianday(redacted_at) <= julianday(?) ORDER BY id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
 	if counts.CandidateTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_candidates WHERE id IN (SELECT candidate.id FROM memory_candidates candidate WHERE candidate.statement = '' AND julianday(candidate.updated_at) <= julianday(?) AND NOT EXISTS (SELECT 1 FROM memory_entries memory WHERE memory.candidate_id = candidate.id) AND NOT EXISTS (SELECT 1 FROM memory_formation_audit audit WHERE audit.candidate_id = candidate.id) ORDER BY candidate.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
@@ -174,13 +173,13 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if counts.PrivacyTombstones, err = execAffected(ctx, tx, `DELETE FROM privacy_operations WHERE operation_id IN (SELECT operation_id FROM privacy_operations WHERE status IN ('completed','failed','expired') AND julianday(updated_at) <= julianday(?) ORDER BY julianday(updated_at), operation_id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.InvalidationTombstones, err = execAffected(ctx, tx, `DELETE FROM privacy_invalidation_events WHERE id IN (SELECT id FROM privacy_invalidation_events WHERE state = 'completed' AND external_identities = '[]' AND session_ids = '[]' AND julianday(completed_at) <= julianday(?) ORDER BY julianday(completed_at), id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
+	if counts.InvalidationTombstones, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND state = 'succeeded' AND external_identities = '[]' AND session_ids = '[]' AND julianday(completed_at) <= julianday(?) ORDER BY julianday(completed_at), id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.FormationJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_formation_jobs WHERE id IN (SELECT id FROM memory_formation_jobs WHERE ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) AND extraction_payload = '' AND source_request_id = '' AND source_session_id = '' AND source_turn_id IS NULL ORDER BY id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch); err != nil {
+	if counts.FormationJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) AND extraction_payload = '' AND source_request_id = '' AND source_session_id = '' AND source_turn_id IS NULL ORDER BY id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch); err != nil {
 		return counts, err
 	}
-	if counts.CompactionJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM session_compaction_jobs WHERE id IN (SELECT id FROM session_compaction_jobs WHERE ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) AND artifact_payload = '' AND last_error_message = '' ORDER BY id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch); err != nil {
+	if counts.CompactionJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) AND artifact_payload = '' AND last_error_message = '' ORDER BY id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch); err != nil {
 		return counts, err
 	}
 	if counts.ChallengesDeleted, err = execAffected(ctx, tx, `DELETE FROM account_link_challenges WHERE id IN (SELECT id FROM account_link_challenges WHERE julianday(expires_at) <= julianday(?) ORDER BY julianday(expires_at), id LIMIT ?)`, formatTime(now.Add(-policy.AccountChallengeGrace)), batch); err != nil {
@@ -259,17 +258,11 @@ func maintenanceForeignKeyCheckDB(ctx context.Context, db *sql.DB) error {
 }
 
 func (s *Store) startMaintenanceRun(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.sql.ExecContext(ctx, `INSERT INTO maintenance_runs(run_type, state, started_at) VALUES ('periodic', 'running', ?)`, formatTime(now))
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
+	return 0, nil
 }
 
 func (s *Store) finishMaintenanceRun(ctx context.Context, id int64, state, code string, counts MaintenanceCounts, completed time.Time) error {
-	metadata, _ := json.Marshal(counts)
-	_, err := s.sql.ExecContext(ctx, `UPDATE maintenance_runs SET state = ?, completed_at = ?, rows_changed = ?, last_error_code = ?, metadata = ? WHERE id = ?`, state, formatTime(completed), counts.Changed(), code, string(metadata), id)
-	return err
+	return nil
 }
 
 func (s *Store) databaseHygiene(ctx context.Context, now time.Time, policy config.RetentionPolicy, counts *MaintenanceCounts) error {
@@ -285,24 +278,18 @@ func (s *Store) databaseHygiene(ctx context.Context, now time.Time, policy confi
 			return fmt.Errorf("incremental vacuum: %w", err)
 		}
 	}
-	var lastOptimize sql.NullString
-	err := s.sql.QueryRowContext(ctx, `SELECT MAX(completed_at) FROM maintenance_runs WHERE run_type = 'database_optimize' AND state = 'completed'`).Scan(&lastOptimize)
-	if err != nil {
-		return err
-	}
-	if lastOptimize.Valid && parseTime(lastOptimize.String).After(now.Add(-policy.DatabaseOptimizeInterval)) {
+	s.mutationMu.Lock()
+	lastOptimize := s.lastOptimizeAt
+	s.mutationMu.Unlock()
+	if lastOptimize.After(now.Add(-policy.DatabaseOptimizeInterval)) {
 		return nil
 	}
-	result, err := s.sql.ExecContext(ctx, `INSERT INTO maintenance_runs(run_type, state, started_at) VALUES ('database_optimize', 'running', ?)`, formatTime(now))
-	if err != nil {
-		return err
-	}
-	id, _ := result.LastInsertId()
 	if _, err := s.sql.ExecContext(ctx, `PRAGMA optimize`); err != nil {
-		_, _ = s.sql.ExecContext(context.Background(), `UPDATE maintenance_runs SET state = 'failed', completed_at = ?, last_error_code = 'optimize_failed' WHERE id = ?`, formatTime(time.Now().UTC()), id)
 		return fmt.Errorf("optimize database: %w", err)
 	}
-	_, err = s.sql.ExecContext(ctx, `UPDATE maintenance_runs SET state = 'completed', completed_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), id)
-	counts.OptimizeRun = err == nil
-	return err
+	s.mutationMu.Lock()
+	s.lastOptimizeAt = now
+	s.mutationMu.Unlock()
+	counts.OptimizeRun = true
+	return nil
 }

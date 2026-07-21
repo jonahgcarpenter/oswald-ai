@@ -19,11 +19,6 @@ func (d *DB) initializeSessionTurnsFTS5() error {
 	if err != nil {
 		return classifyFTSError("create session transcript FTS5 index", err)
 	}
-	if _, err := tx.Exec(`
-INSERT INTO schema_migrations(name, applied_at) VALUES (?, datetime('now'))
-ON CONFLICT(name) DO NOTHING`, sessionTurnsFTSMigration); err != nil {
-		return fmt.Errorf("record session transcript FTS5 migration: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit session transcript FTS5 initialization: %w", err)
 	}
@@ -38,10 +33,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_turns_fts USING fts5(
 	user_text,
 	assistant_text
 );
-
-DROP TRIGGER IF EXISTS session_turns_fts_insert;
-DROP TRIGGER IF EXISTS session_turns_fts_delete;
-DROP TRIGGER IF EXISTS session_turns_fts_update;
 `
 
 func applySessionTurnsFTSMigration(ctx context.Context, conn *sql.Conn) error {

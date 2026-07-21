@@ -956,7 +956,7 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	}
 	soulStore := soul.NewStore(soulPath)
 	chat := &imFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, nil, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService()

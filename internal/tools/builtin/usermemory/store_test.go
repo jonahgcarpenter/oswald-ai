@@ -116,7 +116,7 @@ func TestSaveMemoryUpsertKeepsTenantScopedIDAndVector(t *testing.T) {
 		t.Fatalf("upsert returned wrong tenant memory: %+v", updated)
 	}
 	var secondChanges int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM derived_index_changes WHERE entity_kind = 'memory' AND entity_id = ?`, second.ID).Scan(&secondChanges); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ?`, second.ID).Scan(&secondChanges); err != nil {
 		t.Fatal(err)
 	}
 	if secondChanges != 1 {
@@ -238,7 +238,7 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	seedAccountUsers(t, store, "winner", "loser")
 
 	ctx := context.Background()
-	if _, err := store.sql.Exec(`INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES ('winner', 'old winner', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'), ('loser', 'old loser', '2021-01-01T00:00:00Z', '2021-01-01T00:00:00Z')`); err != nil {
+	if _, err := store.sql.Exec(`UPDATE account_users SET speaker_intro = CASE canonical_user_id WHEN 'winner' THEN 'old winner' ELSE 'old loser' END WHERE canonical_user_id IN ('winner','loser')`); err != nil {
 		t.Fatal(err)
 	}
 	winnerDuplicate, err := store.SaveMemory(ctx, "winner", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "Duplicate statement", Evidence: "winner"})
@@ -306,21 +306,21 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	if eventMemoryID != winnerDuplicate.ID || supersedesID != winnerDuplicate.ID {
 		t.Fatalf("event memory=%d supersedes=%d, want %d", eventMemoryID, supersedesID, winnerDuplicate.ID)
 	}
-	var turnOwner, intro, createdAt string
+	var turnOwner, intro string
 	if err := store.sql.QueryRow(`SELECT canonical_user_id FROM session_turns WHERE session_id = 'session'`).Scan(&turnOwner); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT intro, created_at FROM user_memory_profiles WHERE canonical_user_id = 'winner'`).Scan(&intro, &createdAt); err != nil {
+	if err := store.sql.QueryRow(`SELECT speaker_intro FROM account_users WHERE canonical_user_id = 'winner'`).Scan(&intro); err != nil {
 		t.Fatal(err)
 	}
-	if turnOwner != "winner" || intro != "You are speaking with Winner." || createdAt != "2020-01-01T00:00:00Z" {
-		t.Fatalf("turn owner=%q intro=%q created_at=%q", turnOwner, intro, createdAt)
+	if turnOwner != "winner" || intro != "You are speaking with Winner." {
+		t.Fatalf("turn owner=%q intro=%q", turnOwner, intro)
 	}
 	var loserProfileCount int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM user_memory_profiles WHERE canonical_user_id = 'loser'`).Scan(&loserProfileCount); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM account_users WHERE canonical_user_id = 'loser'`).Scan(&loserProfileCount); err != nil {
 		t.Fatal(err)
 	}
-	if loserProfileCount != 0 {
+	if loserProfileCount != 1 {
 		t.Fatalf("loser profile count = %d", loserProfileCount)
 	}
 }
@@ -436,7 +436,7 @@ func TestMergeUsersTxRollbackLeavesDataUnchanged(t *testing.T) {
 	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries WHERE canonical_user_id = 'loser'`).Scan(&loserEntries); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT count(*) FROM user_memory_profiles WHERE canonical_user_id = 'winner'`).Scan(&winnerProfiles); err != nil {
+	if err := store.sql.QueryRow(`SELECT count(*) FROM account_users WHERE canonical_user_id = 'winner' AND speaker_intro != ''`).Scan(&winnerProfiles); err != nil {
 		t.Fatal(err)
 	}
 	if loserEntries != 1 || winnerProfiles != 0 {
@@ -476,7 +476,7 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	loserLast := appendDeliveredCompactionTurn(t, store, "loser", "shared", loserProfile.Generation, "loser two")
 	winnerSummary, winnerJob := publishMergeTestSummary(t, store, "winner", "shared", winnerProfile.Generation, winnerFirst, winnerLast, "winner checkpoint")
 	loserSummary, loserJob := publishMergeTestSummary(t, store, "loser", "shared", loserProfile.Generation, loserFirst, loserLast, "loser checkpoint")
-	if _, err := store.sql.Exec(`UPDATE session_compaction_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ? WHERE id = ?`, formatTime(time.Now().Add(time.Minute)), loserJob); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(time.Minute)), loserJob); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,31 +493,30 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 
 	var activeGeneration int
 	var activeProfileID int64
-	if err := store.sql.QueryRow(`SELECT generation, profile_version_id FROM tenant_sessions WHERE canonical_user_id = 'winner' AND session_id = 'shared'`).Scan(&activeGeneration, &activeProfileID); err != nil {
+	if err := store.sql.QueryRow(`SELECT generation, profile_version FROM sessions WHERE canonical_user_id = 'winner' AND session_id = 'shared'`).Scan(&activeGeneration, &activeProfileID); err != nil {
 		t.Fatal(err)
 	}
-	if activeGeneration <= winnerProfile.Generation || activeProfileID != loserProfile.VersionID {
+	if activeGeneration <= winnerProfile.Generation || activeProfileID <= winnerProfile.VersionID {
 		t.Fatalf("active generation=%d profile=%d, winner generation=%d loser profile=%d", activeGeneration, activeProfileID, winnerProfile.Generation, loserProfile.VersionID)
 	}
-	var turnCount, summaryCount, sourceCount, jobCount, oldProfileCount int
+	var turnCount, summaryCount, jobCount, sessionCount int
 	for query, target := range map[string]*int{
-		`SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'winner' AND session_id = 'shared'`:                                                                                    &turnCount,
-		`SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = 'winner' AND id IN (` + fmt.Sprint(winnerSummary.ID) + `,` + fmt.Sprint(loserSummary.ID) + `)`:                     &summaryCount,
-		`SELECT COUNT(*) FROM session_summary_sources WHERE canonical_user_id = 'winner'`:                                                                                                    &sourceCount,
-		`SELECT COUNT(*) FROM session_compaction_jobs WHERE canonical_user_id = 'winner' AND id IN (` + fmt.Sprint(winnerJob) + `,` + fmt.Sprint(loserJob) + `)`:                             &jobCount,
-		`SELECT COUNT(*) FROM tenant_profile_versions WHERE canonical_user_id = 'winner' AND id IN (` + fmt.Sprint(winnerProfile.VersionID) + `,` + fmt.Sprint(loserProfile.VersionID) + `)`: &oldProfileCount,
+		`SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = 'winner' AND session_id = 'shared'`:                                                                                 &turnCount,
+		`SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = 'winner' AND id IN (` + fmt.Sprint(winnerSummary.ID) + `,` + fmt.Sprint(loserSummary.ID) + `)`:                  &summaryCount,
+		`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = 'winner' AND id IN (` + fmt.Sprint(winnerJob) + `,` + fmt.Sprint(loserJob) + `)`: &jobCount,
+		`SELECT COUNT(*) FROM sessions WHERE canonical_user_id = 'winner' AND session_id = 'shared'`:                                                                                      &sessionCount,
 	} {
 		if err := store.sql.QueryRow(query).Scan(target); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if turnCount != 4 || summaryCount != 2 || sourceCount != 4 || jobCount != 2 || oldProfileCount != 2 {
-		t.Fatalf("turns=%d summaries=%d sources=%d jobs=%d profiles=%d", turnCount, summaryCount, sourceCount, jobCount, oldProfileCount)
+	if turnCount != 4 || summaryCount != 2 || jobCount != 2 || sessionCount != 1 {
+		t.Fatalf("turns=%d summaries=%d jobs=%d sessions=%d", turnCount, summaryCount, jobCount, sessionCount)
 	}
 	var jobState, leaseOwner string
 	var leaseUntil sql.NullString
 	var artifactSummaryID int64
-	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id FROM session_compaction_jobs WHERE id = ?`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID); err != nil {
+	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction'`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID); err != nil {
 		t.Fatal(err)
 	}
 	if jobState != "retry" || leaseOwner != "" || leaseUntil.Valid || artifactSummaryID != loserSummary.ID {
@@ -528,7 +527,7 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 		t.Fatalf("latest merged summary=%+v err=%v", latest, err)
 	}
 	resolved, err := store.ResolveSessionProfile(ctx, "winner", "shared", time.Hour)
-	if err != nil || resolved.VersionID != loserProfile.VersionID {
+	if err != nil || resolved.VersionID != activeProfileID {
 		t.Fatalf("frozen merged profile=%+v err=%v", resolved, err)
 	}
 	contextResult, err := store.BuildContext(ctx, "winner", "shared", "Beacon", ContextOptions{Generation: activeGeneration, RecentTurns: 10, ContextBudgetChars: 8000})

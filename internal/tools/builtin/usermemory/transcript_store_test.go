@@ -75,7 +75,7 @@ func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T)
 	seedAccountUsers(t, store, "user-1")
 	generation := bindTranscriptTestSession(t, store, "user-1", "session-1")
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "before reset marker", "before reset reply", true, time.Hour)
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET generation = generation + 1 WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET generation = generation + 1 WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,7 +84,7 @@ func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T)
 	if err != nil || len(results) != 0 {
 		t.Fatalf("stale generation results=%+v err=%v", results, err)
 	}
-	if _, err := store.sql.Exec(`UPDATE tenant_sessions SET expires_at = ? WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	results, err = store.SearchTranscript(context.Background(), "user-1", "session-1", generation+1, "marker", 5)

@@ -16,7 +16,7 @@ func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	for _, name := range reg.Names() {
@@ -37,7 +37,7 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler("time.current") {
@@ -62,7 +62,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler(toolnames.SessionTranscriptSearch) {
@@ -86,7 +86,7 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range reg.BuiltinCatalog() {
@@ -107,7 +107,7 @@ func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	foundVisible := false
@@ -139,7 +139,7 @@ func TestRegisterDoesNotAdvertiseUnimplementedGlobalMemoryTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	advertised := map[string]bool{}
@@ -159,7 +159,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]bool{

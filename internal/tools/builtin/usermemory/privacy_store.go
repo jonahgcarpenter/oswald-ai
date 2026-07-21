@@ -65,7 +65,7 @@ type PrivacyInvalidationEvent struct {
 
 // PrivacySessionIDs returns all session identifiers currently associated with a user.
 func (s *Store) PrivacySessionIDs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := s.sql.QueryContext(ctx, `SELECT session_id FROM tenant_session_generations WHERE canonical_user_id = ? UNION SELECT session_id FROM tenant_sessions WHERE canonical_user_id = ? ORDER BY 1`, userID, userID)
+	rows, err := s.sql.QueryContext(ctx, `SELECT session_id FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (s *Store) InspectPrivacy(ctx context.Context, userID, section string, page
 	queries := []struct{ section, query string }{
 		{"memories", `SELECT CAST(id AS TEXT), status, '', 0 FROM memory_entries WHERE canonical_user_id = ?`},
 		{"candidates", `SELECT CAST(id AS TEXT), CASE WHEN statement = '' AND decision_reason = 'privacy_delete' THEN 'deleted' ELSE state END, source_session_id, source_session_generation FROM memory_candidates WHERE canonical_user_id = ?`},
-		{"sessions", `SELECT session_id || ':' || generation, 'active', session_id, generation FROM tenant_sessions WHERE canonical_user_id = ?`},
+		{"sessions", `SELECT session_id || ':' || generation, CASE WHEN is_active = 1 THEN 'active' ELSE 'inactive' END, session_id, generation FROM sessions WHERE canonical_user_id = ?`},
 	}
 	for _, item := range queries {
 		if section != "all" && section != item.section {
@@ -313,17 +313,17 @@ func (s *Store) DeleteSessionPrivacy(ctx context.Context, userID, actorHash, ses
 			return err
 		}
 		err = tx.QueryRowContext(ctx, `
-SELECT generation FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ?
+SELECT generation FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND is_active = 1
 UNION ALL
 SELECT generation FROM (
 	SELECT MAX(generation) AS generation FROM (
 		SELECT session_generation AS generation FROM session_turns WHERE canonical_user_id = ? AND session_id = ?
 		UNION ALL SELECT session_generation FROM session_summaries WHERE canonical_user_id = ? AND session_id = ?
-		UNION ALL SELECT session_generation FROM session_compaction_jobs WHERE canonical_user_id = ? AND session_id = ?
+		UNION ALL SELECT session_generation FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ?
 	)
 ) artifacts
 WHERE generation IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ?
+	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND is_active = 1
 )
 LIMIT 1`, userID, sessionID, userID, sessionID, userID, sessionID, userID, sessionID, userID, sessionID).Scan(&generation)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -437,29 +437,21 @@ func (s *Store) ExportPrivacy(ctx context.Context, userID string, exportedAt tim
 		name, query string
 		args        []any
 	}{
-		{"user", `SELECT canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason, lifecycle_state FROM account_users WHERE canonical_user_id = ?`, []any{userID}},
+		{"user", `SELECT canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason, lifecycle_state, speaker_intro FROM account_users WHERE canonical_user_id = ?`, []any{userID}},
 		{"linked_accounts", `SELECT gateway, identifier, display_name, linked_at, verified FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, []any{userID}},
 		{"websocket_clients", `SELECT client_id, websocket_identifier, client_name, token_version, is_bootstrap, created_at, last_used_at, refresh_expires_at, revoked_at FROM websocket_clients WHERE canonical_user_id = ? ORDER BY created_at, client_id`, []any{userID}},
 		{"memories", `SELECT * FROM memory_entries WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"memory_profile", `SELECT * FROM user_memory_profiles WHERE canonical_user_id = ?`, []any{userID}},
-		{"memory_events", `SELECT * FROM memory_events WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"memory_events", `SELECT * FROM memory_events WHERE event_kind = 'lifecycle' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"candidates", `SELECT * FROM memory_candidates WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"evidence", `SELECT * FROM memory_evidence WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"relations", `SELECT * FROM memory_relations WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"confirmation_presentations", `SELECT * FROM memory_confirmation_presentations WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"formation_jobs", `SELECT * FROM memory_formation_jobs WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"formation_jobs", `SELECT * FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"audit", `SELECT * FROM memory_formation_audit WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"profile_versions", `SELECT * FROM tenant_profile_versions WHERE canonical_user_id = ? ORDER BY version, id`, []any{userID}},
-		{"profile_facts", `SELECT facts.* FROM tenant_profile_version_facts facts JOIN tenant_profile_versions profiles ON profiles.id = facts.profile_version_id WHERE profiles.canonical_user_id = ? ORDER BY facts.profile_version_id, facts.ordinal`, []any{userID}},
-		{"session_bindings", `SELECT * FROM tenant_sessions WHERE canonical_user_id = ? ORDER BY session_id`, []any{userID}},
-		{"profile_version_counters", `SELECT * FROM tenant_profile_version_counters WHERE canonical_user_id = ? ORDER BY canonical_user_id`, []any{userID}},
-		{"session_generations", `SELECT * FROM tenant_session_generations WHERE canonical_user_id = ? ORDER BY session_id`, []any{userID}},
+		{"sessions", `SELECT * FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, []any{userID}},
 		{"session_turns", `SELECT * FROM session_turns WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
 		{"session_summaries", `SELECT * FROM session_summaries WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
-		{"summary_sources", `SELECT sources.* FROM session_summary_sources sources WHERE sources.canonical_user_id = ? ORDER BY sources.summary_id, sources.ordinal`, []any{userID}},
-		{"compaction_jobs", `SELECT * FROM session_compaction_jobs WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"compaction_jobs", `SELECT * FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"privacy_operations", `SELECT operation_id, operation_type, status, created_at, updated_at, started_at, completed_at, last_error_code FROM privacy_operations WHERE target_user_id = ? ORDER BY created_at, operation_id`, []any{userID}},
-		{"derived_index_changes", `SELECT sequence, entity_kind, entity_id, operation, state, attempt_count, created_at, updated_at, completed_at, last_error_code FROM derived_index_changes WHERE canonical_user_id = ? ORDER BY sequence`, []any{userID}},
+		{"derived_index_changes", `SELECT id, entity_kind, entity_id, operation, state, attempt_count, created_at, updated_at, completed_at, last_error_code FROM durable_jobs WHERE job_kind = 'derived_index' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"account_link_challenges", `SELECT id, initiator_user_id, initiator_gateway, initiator_identifier, created_at, expires_at, consumed_at, consumed_by_user_id, consumed_gateway, consumed_identifier, result_user_id, invalidated_at, invalidated_by_user_id, invalidated_reason FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ? ORDER BY created_at, id`, []any{userID, userID, userID, userID}},
 		{"mcp_servers", `SELECT id, scope, name, type, transport, enabled, created_at, updated_at, '[redacted]' AS endpoint FROM mcp_servers WHERE scope = 'user' AND owner_user_id = ? ORDER BY name, id`, []any{userID}},
 		{"derived_index_health", `SELECT index_kind, provider, model, dimension, schema_version, revision, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions ORDER BY index_kind, revision`, nil},
@@ -498,11 +490,11 @@ SELECT
 	COALESCE((SELECT SUM(length(statement) + length(evidence)) FROM memory_entries WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(statement) + length(evidence_summary) + length(content_context)) FROM memory_candidates WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(content)) FROM memory_evidence WHERE canonical_user_id = ?), 0) +
-	COALESCE((SELECT SUM(length(extraction_payload)) FROM memory_formation_jobs WHERE canonical_user_id = ?), 0) +
-	COALESCE((SELECT SUM(length(metadata)) FROM memory_formation_audit WHERE canonical_user_id = ?), 0) +
+	COALESCE((SELECT SUM(length(extraction_payload)) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ?), 0) +
+	COALESCE((SELECT SUM(length(metadata)) FROM memory_events WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(user_text) + length(assistant_text) + length(tool_names)) FROM session_turns WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(narrative) + length(open_tasks) + length(commitments) + length(entities) + length(decisions) + length(topic_tags)) FROM session_summaries WHERE canonical_user_id = ?), 0) +
-	COALESCE((SELECT SUM(length(artifact_payload)) FROM session_compaction_jobs WHERE canonical_user_id = ?), 0)
+	COALESCE((SELECT SUM(length(artifact_payload)) FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?), 0)
 `, userID, userID, userID, userID, userID, userID, userID, userID).Scan(&estimated)
 	if err != nil {
 		return fmt.Errorf("estimate privacy export size: %w", err)
@@ -586,9 +578,6 @@ func scrubMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int6
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE canonical_user_id = ? AND memory_id = ?`, userID, memoryID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_relations WHERE canonical_user_id = ? AND (source_memory_id = ? OR target_memory_id = ?)`, userID, memoryID, memoryID); err != nil {
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence = '', status = 'deleted', profile_approved = 0, embedding_model = '', embedding_dim = 0, candidate_id = NULL, source_session_id = '', source_request_id = '', source_turn_id = NULL, valid_until = ?, invalidated_at = ?, invalidation_reason = 'privacy_delete', erased_at = ?, erasure_reason = 'privacy_delete', erasure_request_id = ?, lifecycle_request_id = ?, forgotten_at = NULL, hard_delete_after = NULL, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, nowText, requestID, requestID, nowText, userID, memoryID); err != nil {
 		return err
 	}
@@ -603,16 +592,10 @@ func scrubCandidateTx(ctx context.Context, tx *sql.Tx, userID string, candidateI
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE canonical_user_id = ? AND candidate_id = ?`, userID, candidateID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE canonical_user_id = ? AND source_turn_id IN (SELECT source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND id = ?)`, userID, userID, candidateID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id IN (SELECT source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND id = ?)`, userID, userID, candidateID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_audit SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE canonical_user_id = ? AND candidate_id = ?`, nowText, userID, candidateID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_confirmation_presentations WHERE canonical_user_id = ? AND candidate_id = ?`, userID, candidateID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_relations WHERE canonical_user_id = ? AND (source_candidate_id = ? OR target_candidate_id = ?)`, userID, candidateID, candidateID); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected', source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '', confirmation_session_id = '', confirmation_request_id = '', published_memory_id = NULL, supersedes_memory_id = NULL, decision_reason = 'privacy_delete', decided_at = ?, decided_by = 'privacy', updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, candidateID)
@@ -620,15 +603,7 @@ func scrubCandidateTx(ctx context.Context, tx *sql.Tx, userID string, candidateI
 }
 
 func deleteProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64) error {
-	profile, err := refreshProfileTx(ctx, tx, userID, time.Now().UTC())
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tenant_sessions SET profile_version_id = ? WHERE canonical_user_id = ? AND profile_version_id IN (SELECT profile_version_id FROM tenant_profile_version_facts WHERE source_memory_id = ?)`, profile.VersionID, userID, memoryID); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM tenant_profile_versions WHERE canonical_user_id = ? AND id != ? AND id IN (SELECT profile_version_id FROM tenant_profile_version_facts WHERE source_memory_id = ?)`, userID, profile.VersionID, memoryID)
-	return err
+	return rebindProfileCopiesTx(ctx, tx, userID, memoryID, time.Now().UTC())
 }
 
 func deleteSourceExchangeTx(ctx context.Context, tx *sql.Tx, userID string, turnID int64, token string) error {
@@ -650,15 +625,14 @@ func deleteSessionGenerationTx(ctx context.Context, tx *sql.Tx, userID, sessionI
 	if err := deleteSessionTurnsTx(ctx, tx, userID, sessionID, generation, ids, token); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ?`, userID, sessionID, generation); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET is_active = 0, generation = generation + 1 WHERE canonical_user_id = ? AND session_id = ? AND generation = ?`, userID, sessionID, generation); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO tenant_session_generations(canonical_user_id, session_id, generation) VALUES (?, ?, ?) ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET generation = MAX(generation, excluded.generation)`, userID, sessionID, generation+1)
-	return err
+	return nil
 }
 
 func deleteSessionTurnsTx(ctx context.Context, tx *sql.Tx, userID, sessionID string, generation int, ids []int64, token string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM session_compaction_jobs WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?`, userID, sessionID, generation); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?`, userID, sessionID, generation); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?`, userID, sessionID, generation); err != nil {
@@ -674,7 +648,7 @@ func deleteSessionTurnsTx(ctx context.Context, tx *sql.Tx, userID, sessionID str
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET source_turn_id = NULL WHERE canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_jobs SET source_turn_id = NULL, extraction_payload = '' WHERE canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET source_turn_id = NULL, extraction_payload = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
 			return err
 		}
 	}
@@ -701,10 +675,7 @@ func deleteAllMemoriesTx(ctx context.Context, tx *sql.Tx, userID, requestID stri
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET request_id = '', session_id = '', metadata = '' WHERE canonical_user_id = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_confirmation_presentations WHERE canonical_user_id = ?`, userID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_formation_jobs WHERE canonical_user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ?`, userID); err != nil {
 		return err
 	}
 	ids, err := privacyIDsTx(ctx, tx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? ORDER BY id`, userID)
@@ -730,15 +701,7 @@ func deleteAllMemoriesTx(ctx context.Context, tx *sql.Tx, userID, requestID stri
 			return err
 		}
 	}
-	profile, err := refreshProfileTx(ctx, tx, userID, now)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tenant_sessions SET profile_version_id = ? WHERE canonical_user_id = ?`, profile.VersionID, userID); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM tenant_profile_versions WHERE canonical_user_id = ? AND id != ?`, userID, profile.VersionID)
-	return err
+	return rebindProfileCopiesTx(ctx, tx, userID, 0, now)
 }
 
 func eraseUserTx(ctx context.Context, tx *sql.Tx, userID, operationID string, now time.Time) ([]string, []string, int, error) {
@@ -776,7 +739,7 @@ func eraseUserTx(ctx context.Context, tx *sql.Tx, userID, operationID string, no
 	if err := clientRows.Close(); err != nil {
 		return nil, nil, 0, err
 	}
-	sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM tenant_session_generations WHERE canonical_user_id = ? UNION SELECT session_id FROM tenant_sessions WHERE canonical_user_id = ? ORDER BY 1`, userID, userID)
+	sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, userID)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -797,7 +760,7 @@ func eraseUserTx(ctx context.Context, tx *sql.Tx, userID, operationID string, no
 	if err := deleteDerivedRowsTx(ctx, tx, "all", nil, userID); err != nil {
 		return nil, nil, 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM derived_index_changes WHERE canonical_user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'derived_index' AND canonical_user_id = ?`, userID); err != nil {
 		return nil, nil, 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_formation_audit WHERE canonical_user_id = ?`, userID); err != nil {
@@ -985,7 +948,7 @@ func privacyInvalidationScopeTx(ctx context.Context, tx *sql.Tx, userID string) 
 	if err != nil {
 		return nil, nil, err
 	}
-	sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM tenant_session_generations WHERE canonical_user_id = ? UNION SELECT session_id FROM tenant_sessions WHERE canonical_user_id = ? ORDER BY 1`, userID, userID)
+	sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1036,7 +999,7 @@ func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID s
 		// initiating WebSocket before that response is written.
 		availableAt = now.Add(privacyCloseInvalidationDelay)
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO privacy_invalidation_events(idempotency_key, operation_id, external_identities, session_ids, close_connections, state, attempts, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING`, operationID, operationID, string(externalJSON), string(sessionJSON), closeValue, formatTime(availableAt), nowText, nowText)
+	result, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, privacy_operation_id, external_identities, session_ids, close_connections, state, attempt_count, available_at, created_at, updated_at) VALUES ('privacy_invalidation', ?, NULL, ?, ?, ?, ?, 'queued', 0, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, operationID, operationID, string(externalJSON), string(sessionJSON), closeValue, formatTime(availableAt), nowText, nowText)
 	if err != nil {
 		return err
 	}
@@ -1045,13 +1008,13 @@ func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID s
 	}
 	var storedOperation, storedExternal, storedSessions, state string
 	var storedClose int
-	if err := tx.QueryRowContext(ctx, `SELECT operation_id, external_identities, session_ids, close_connections, state FROM privacy_invalidation_events WHERE idempotency_key = ?`, operationID).Scan(&storedOperation, &storedExternal, &storedSessions, &storedClose, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT privacy_operation_id, external_identities, session_ids, close_connections, state FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND idempotency_key = ?`, operationID).Scan(&storedOperation, &storedExternal, &storedSessions, &storedClose, &state); err != nil {
 		return err
 	}
 	if storedOperation != operationID || storedClose != closeValue {
 		return fmt.Errorf("privacy invalidation idempotency payload mismatch")
 	}
-	if state != "completed" && (storedExternal != string(externalJSON) || storedSessions != string(sessionJSON)) {
+	if state != "succeeded" && (storedExternal != string(externalJSON) || storedSessions != string(sessionJSON)) {
 		return fmt.Errorf("privacy invalidation idempotency payload mismatch")
 	}
 	return nil
@@ -1060,7 +1023,7 @@ func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID s
 // ReconcilePrivacyInvalidationLeases makes expired work available after a crash.
 func (s *Store) ReconcilePrivacyInvalidationLeases(ctx context.Context, now time.Time) (int64, error) {
 	nowText := formatTime(now.UTC())
-	result, err := s.sql.ExecContext(ctx, `UPDATE privacy_invalidation_events SET state = 'failed', lease_expires_at = NULL, available_at = ?, updated_at = ?, last_error_code = 'lease_expired' WHERE state = 'processing' AND julianday(lease_expires_at) <= julianday(?)`, nowText, nowText, nowText)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', lease_until = NULL, available_at = ?, updated_at = ?, last_error_code = 'lease_expired' WHERE job_kind = 'privacy_invalidation' AND state = 'running' AND julianday(lease_until) <= julianday(?)`, nowText, nowText, nowText)
 	if err != nil {
 		return 0, err
 	}
@@ -1082,14 +1045,14 @@ func (s *Store) ClaimPrivacyInvalidation(ctx context.Context, now time.Time, lea
 	defer tx.Rollback() // nolint:errcheck
 	var event PrivacyInvalidationEvent
 	var externalJSON, sessionJSON string
-	err = tx.QueryRowContext(ctx, `SELECT id, operation_id, external_identities, session_ids, close_connections, attempts FROM privacy_invalidation_events WHERE state IN ('pending','failed') AND julianday(available_at) <= julianday(?) ORDER BY julianday(available_at), id LIMIT 1`, formatTime(now.UTC())).Scan(&event.ID, &event.OperationID, &externalJSON, &sessionJSON, &event.CloseConnections, &event.Attempts)
+	err = tx.QueryRowContext(ctx, `SELECT id, privacy_operation_id, external_identities, session_ids, close_connections, attempt_count FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND state IN ('queued','retry') AND julianday(available_at) <= julianday(?) ORDER BY julianday(available_at), id LIMIT 1`, formatTime(now.UTC())).Scan(&event.ID, &event.OperationID, &externalJSON, &sessionJSON, &event.CloseConnections, &event.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE privacy_invalidation_events SET state = 'processing', attempts = attempts + 1, lease_expires_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND state IN ('pending','failed')`, formatTime(now.UTC().Add(lease)), formatTime(now.UTC()), event.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, lease_until = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state IN ('queued','retry')`, formatTime(now.UTC().Add(lease)), formatTime(now.UTC()), event.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1114,7 +1077,7 @@ func (s *Store) RetryPrivacyInvalidation(ctx context.Context, id int64, availabl
 	if strings.TrimSpace(errorCode) == "" {
 		errorCode = "publish_failed"
 	}
-	result, err := s.sql.ExecContext(ctx, `UPDATE privacy_invalidation_events SET state = 'failed', available_at = ?, lease_expires_at = NULL, updated_at = ?, last_error_code = ? WHERE id = ? AND state = 'processing'`, formatTime(availableAt.UTC()), formatTime(now.UTC()), errorCode, id)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_until = NULL, updated_at = ?, last_error_code = ? WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running'`, formatTime(availableAt.UTC()), formatTime(now.UTC()), errorCode, id)
 	if err != nil {
 		return err
 	}
@@ -1126,7 +1089,7 @@ func (s *Store) RetryPrivacyInvalidation(ctx context.Context, id int64, availabl
 
 // CompletePrivacyInvalidation atomically completes an event and scrubs its payload.
 func (s *Store) CompletePrivacyInvalidation(ctx context.Context, id int64, now time.Time) error {
-	result, err := s.sql.ExecContext(ctx, `UPDATE privacy_invalidation_events SET external_identities = '[]', session_ids = '[]', state = 'completed', lease_expires_at = NULL, completed_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND state = 'processing'`, formatTime(now.UTC()), formatTime(now.UTC()), id)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET external_identities = '[]', session_ids = '[]', state = 'succeeded', lease_until = NULL, completed_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running'`, formatTime(now.UTC()), formatTime(now.UTC()), id)
 	if err != nil {
 		return err
 	}

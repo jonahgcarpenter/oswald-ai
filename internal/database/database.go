@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,22 @@ func (d *DB) initialize() error {
 	}
 	if err := d.runSchemaMigrations(context.Background(), orderedMigrations()); err != nil {
 		return err
+	}
+	for _, capability := range []struct {
+		name       string
+		initialize func() error
+	}{
+		{name: "memory_fts", initialize: d.initializeMemoryFTS5},
+		{name: "session_turns_fts", initialize: d.initializeSessionTurnsFTS5},
+	} {
+		if err := capability.initialize(); err != nil {
+			if !errors.Is(err, ErrFTS5Unavailable) {
+				return err
+			}
+			if d.log != nil {
+				d.log.Server("database.migrations").Warn("database.schema.optional_unavailable", "optional database schema capability unavailable", config.F("status", "degraded"), config.F("capability", capability.name), config.ErrorField(err))
+			}
+		}
 	}
 	return nil
 }

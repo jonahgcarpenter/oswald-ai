@@ -430,18 +430,22 @@ func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *te
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
-	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "older unrelated", "old a", nil, time.Hour); err != nil {
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", "older relevant", "old b", nil, time.Hour); err != nil {
+	if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, "older unrelated", "old a", nil, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, "older relevant", "old b", nil, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for _, text := range []string{"recent one", "recent two", "recent three", "recent four"} {
-		if err := store.AppendSessionTurn(context.Background(), "session-1", "user-1", text, "recent answer", nil, time.Hour); err != nil {
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, text, "recent answer", nil, time.Hour); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err := processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
+	_, err = processAgent(agent, "req-1", "websocket", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -741,7 +745,11 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
-	if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "prior question", "prior answer", []string{"home.turn_on", "home.tools", "web.search"}, time.Hour); err != nil {
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-mcp", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendSessionTurnForGeneration(context.Background(), "session-mcp", "user-1", profile.Generation, "prior question", "prior answer", []string{"home.turn_on", "home.tools", "web.search"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 
@@ -848,7 +856,26 @@ func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
 	}
 }
 
-func TestAgentKeepsDefaultVisibleDeploymentMemoryAfterGlobalMCPResult(t *testing.T) {
+func TestProcessLoadsGlobalMemoryFromIndependentProvider(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	defer store.Close()
+	agent.globalMemory = fakeGlobalMemoryPromptProvider{prompt: `<global_memory authority="lower">global memory fact</global_memory>`}
+	if _, err := processAgent(agent, "request", "websocket", "session", "user-1", "User", "hello", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != 1 || !messagesContain(requests[0].Messages, "global memory fact") {
+		t.Fatalf("global memory prompt missing: %+v", requests)
+	}
+	for _, message := range requests[0].Messages {
+		if strings.Contains(strings.ToLower(message.Content), "deployment_memory") {
+			t.Fatalf("stale global memory vocabulary in prompt: %q", message.Content)
+		}
+	}
+}
+
+func TestAgentKeepsDefaultVisibleGlobalMemoryAfterGlobalMCPResult(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("discover", "home.tools", nil),
 		toolCallResponse("global-call", "home.turn_on", map[string]interface{}{"entity": "light"}),
@@ -870,7 +897,7 @@ func TestAgentKeepsDefaultVisibleDeploymentMemoryAfterGlobalMCPResult(t *testing
 	}
 	for i, request := range requests {
 		if !requestHasTool(request, toolnames.GlobalMemorySave) {
-			t.Fatalf("deployment proposal missing from request %d: %+v", i, toolNames(request))
+			t.Fatalf("global memory proposal missing from request %d: %+v", i, toolNames(request))
 		}
 	}
 }
@@ -888,6 +915,15 @@ type fakeChatter struct {
 type fakeChatOutcome struct {
 	response *llm.ChatResponse
 	err      error
+}
+
+type fakeGlobalMemoryPromptProvider struct {
+	prompt string
+	err    error
+}
+
+func (f fakeGlobalMemoryPromptProvider) GlobalMemoryPrompt(context.Context) (string, error) {
+	return f.prompt, f.err
 }
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
@@ -1047,7 +1083,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, nil, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	return agent, userStore, soulPath
 }
 

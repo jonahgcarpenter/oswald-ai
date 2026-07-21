@@ -238,6 +238,7 @@ type Agent struct {
 	model                 string
 	soul                  *soul.Store
 	userMemory            *usermemory.Store
+	globalMemory          GlobalMemoryPromptProvider
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
@@ -251,15 +252,21 @@ type MCPProvider interface {
 	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
 }
 
+// GlobalMemoryPromptProvider renders active global memory for the model prompt.
+type GlobalMemoryPromptProvider interface {
+	GlobalMemoryPrompt(context.Context) (string, error)
+}
+
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, prompt budget, tool failure retry budget,
-// and logger.
+// soul store, SQLite user memory store, global-memory prompt provider, prompt
+// budget, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
 	model string,
 	soul *soul.Store,
 	userMemory *usermemory.Store,
+	globalMemory GlobalMemoryPromptProvider,
 	budget promptbudget.ContextBudget,
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
@@ -278,6 +285,7 @@ func NewAgent(
 		model:                 model,
 		soul:                  soul,
 		userMemory:            userMemory,
+		globalMemory:          globalMemory,
 		maxToolFailureRetries: maxToolFailureRetries,
 		requestTimeout:        requestTimeout,
 		log:                   log,
@@ -526,11 +534,13 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				)
 			}
 		}
-		deploymentMemory, err := a.userMemory.DeploymentMemoryPrompt(ctx)
+	}
+	if a.globalMemory != nil {
+		globalMemory, err := a.globalMemory.GlobalMemoryPrompt(ctx)
 		if err != nil {
-			reqLog.Warn("agent.deployment_memory.load_failed", "failed to load deployment memory", config.F("status", "degraded"), config.ErrorField(err))
-		} else if deploymentMemory != "" {
-			profileContent = strings.TrimSpace(deploymentMemory + "\n\n" + profileContent)
+			reqLog.Warn("agent.global_memory.load_failed", "failed to load global memory", config.F("status", "degraded"), config.ErrorField(err))
+		} else if globalMemory != "" {
+			profileContent = strings.TrimSpace(globalMemory + "\n\n" + profileContent)
 		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
@@ -544,12 +554,12 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		var recallStats usermemory.RecallStats
 		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, usermemory.RecallRequest{TopK: automaticRecallTopK})
 		if recallStats.LexicalError != nil {
-			reqLog.Warn("agent.memory.recall.lexical_degraded", "durable memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
+			reqLog.Warn("agent.user_memory.recall.lexical_degraded", "user-memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
 		}
 		if recallStats.SemanticError != nil {
-			reqLog.Warn("agent.memory.recall.semantic_degraded", "durable memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
+			reqLog.Warn("agent.user_memory.recall.semantic_degraded", "user-memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
 		}
-		reqLog.Debug("agent.memory.recall.complete", "completed durable memory recall",
+		reqLog.Debug("agent.user_memory.recall.complete", "completed user-memory recall",
 			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
 			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
 			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
@@ -575,7 +585,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		}
 		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
-			reqLog.Warn("agent.memory.context.failed", "failed to build retrieved memory context", config.F("status", "degraded"), config.ErrorField(err))
+			reqLog.Warn("agent.session_memory.context.failed", "failed to build session-memory context", config.F("status", "degraded"), config.ErrorField(err))
 			recentTurns = nil
 		} else {
 			toolTurnCount := len(recentTurns)
@@ -586,7 +596,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				recentToolNames = append(recentToolNames, turn.ToolNames...)
 			}
 			recentToolNames = uniqueToolNames(recentToolNames)
-			reqLog.Debug("agent.memory.context.loaded", "loaded retrieved memory context",
+			reqLog.Debug("agent.session_memory.context.loaded", "loaded session-memory context",
 				config.F("candidate_turn_count", len(recentTurns)),
 			)
 		}
@@ -941,7 +951,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		var err error
 		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResult(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL)
 		if err != nil {
-			reqLog.Warn("agent.memory.session_write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
+			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
 

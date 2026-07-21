@@ -229,7 +229,7 @@ func TestForgetHandlerDeactivatesExactMemoryWithGrace(t *testing.T) {
 	if recalled, _ := store.Recall(ctx, "usr_1", "purple", RecallRequest{TopK: 5}); len(recalled) != 0 {
 		t.Fatalf("recall after forget=%+v", recalled)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM tenant_profile_version_facts WHERE source_memory_id = ?`, 0, entry.ID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?`, 0, entry.ID)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE id = ?`, 1, turn.ID)
 
 	owner = withUserText(principalContext("usr_1", "alice"), "Remove that memory, please.")

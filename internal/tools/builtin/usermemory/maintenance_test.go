@@ -281,13 +281,16 @@ func TestMaintenanceSweepRedactsAndPrunesRetentionArtifacts(t *testing.T) {
 	}
 	_, err = store.sql.Exec(`
 INSERT INTO memory_formation_audit(canonical_user_id,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata) VALUES ('user','audit','formed','request','session','system','actor',?, 'sensitive');
-INSERT INTO memory_formation_jobs(canonical_user_id,idempotency_key,job_type,state,source_request_id,source_session_id,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('user','job','extract','succeeded','request','session','payload',?,?,?,?);
-INSERT INTO session_compaction_jobs(canonical_user_id,session_id,session_generation,covered_from_turn_id,covered_through_turn_id,state,artifact_payload,available_at,completed_at,last_error_message,created_at,updated_at) VALUES ('user','old-session',?,?,?,'succeeded','artifact',?,?,'message',?,?);
+INSERT INTO durable_jobs(job_kind,canonical_user_id,idempotency_key,job_type,state,source_request_id,source_session_id,source_session_generation,source_turn_id,extractor_version,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('memory_formation','user','job','extract','succeeded','request','session',?,?,'test-v1','payload',?,?,?,?);
+INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,session_id,session_generation,covered_from_turn_id,covered_through_turn_id,state,artifact_payload,available_at,completed_at,last_error_message,created_at,updated_at) VALUES ('session_compaction','compaction-job','user','old-session',?,?,?,'succeeded','artifact',?,?,'message',?,?);
 INSERT INTO memory_events(canonical_user_id,event_type,request_id,session_id,created_at,metadata) VALUES ('user','deleted','request','session',?,'metadata');
 INSERT INTO account_link_challenges(id,code_hash,initiator_user_id,initiator_gateway,initiator_identifier,created_at,expires_at) VALUES ('challenge','code','user','discord','external',?,?);
 INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_user_id,target_hash,operation_type,target_digest,status,created_at,updated_at,completed_at) VALUES ('operation','operation',?,'user',?,'export_user',?,'completed',?,?,?);
-`, old, old, old, old, old, profile.Generation, turn.ID, turn.ID, old, old, old, old, old, old, formatTime(now.Add(-2*time.Hour)), hash, hash, hash, old, old, old)
+`, old, profile.Generation, turn.ID, old, old, old, old, profile.Generation, turn.ID, turn.ID, old, old, old, old, old, old, formatTime(now.Add(-2*time.Hour)), hash, hash, hash, old, old, old)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`INSERT INTO memory_formation_audit(canonical_user_id,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata,content_expires_at) VALUES ('user','future-audit','formed','future-request','future-session','system','actor',?,'future-sensitive',?)`, old, formatTime(now.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := store.MaintenanceSweep(ctx, now, policy)
@@ -303,6 +306,12 @@ INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_us
 	}
 	if metadata != "" || requestID != "" || actorID != "" {
 		t.Fatalf("audit content retained: %q %q %q", metadata, requestID, actorID)
+	}
+	if err := store.sql.QueryRow(`SELECT metadata, request_id FROM memory_formation_audit WHERE idempotency_key = 'future-audit'`).Scan(&metadata, &requestID); err != nil {
+		t.Fatal(err)
+	}
+	if metadata != "future-sensitive" || requestID != "future-request" {
+		t.Fatalf("future audit was redacted early: %q %q", metadata, requestID)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM account_link_challenges WHERE id = 'challenge'`, 0)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM privacy_operations WHERE operation_id = 'operation'`, 0)

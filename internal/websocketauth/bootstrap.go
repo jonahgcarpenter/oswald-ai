@@ -61,7 +61,7 @@ func (s *Store) EnsureBootstrap(ctx context.Context) (*BootstrapCredentials, err
 		if _, err := tx.ExecContext(ctx, `INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, linked_at, verified) VALUES ('websocket', ?, ?, 'Bootstrap Administrator', ?, 1)`, newIdentifier, newUserID, now); err != nil {
 			return fmt.Errorf("create websocket bootstrap identity: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, 'You are speaking with Bootstrap Administrator.', ?, ?)`, newUserID, now, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = 'You are speaking with Bootstrap Administrator.', updated_at = ? WHERE canonical_user_id = ?`, now, newUserID); err != nil {
 			return fmt.Errorf("create websocket bootstrap profile: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO websocket_clients (client_id, canonical_user_id, websocket_identifier, client_name, token_version, is_bootstrap, created_at, last_used_at) VALUES (?, ?, ?, 'Bootstrap Administrator', 1, 1, ?, ?)`, newClientID, newUserID, newIdentifier, now, now); err != nil {
