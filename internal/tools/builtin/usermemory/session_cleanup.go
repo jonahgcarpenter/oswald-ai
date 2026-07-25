@@ -104,7 +104,7 @@ WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELE
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (
 		SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
-		WHERE jobs.job_kind = 'memory_formation' AND (candidate.state IN ('proposed', 'pending_confirmation', 'rejected') OR (candidate.state = 'approved' AND candidate.published_memory_id IS NULL))
+		WHERE jobs.job_kind = 'memory_formation' AND (candidate.state IN ('proposed', 'rejected') OR (candidate.state = 'approved' AND candidate.published_memory_id IS NULL))
 			AND ((candidate.expires_at IS NOT NULL AND candidate.expires_at <= ?) OR candidate.created_at <= ?)
 			AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL)
 		ORDER BY jobs.id LIMIT ?)`, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch); err != nil {
@@ -116,9 +116,9 @@ SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id
 	source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '',
 	confirmation_session_id = '', confirmation_request_id = '', decision_reason = 'candidate_retention_expired',
 	decided_at = ?, decided_by = 'retention', updated_at = ?
-WHERE (state IN ('proposed', 'pending_confirmation', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL))
+WHERE (state IN ('proposed', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL))
 	AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
-	AND id IN (SELECT id FROM memory_candidates WHERE (state IN ('proposed', 'pending_confirmation', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL)) AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
+	AND id IN (SELECT id FROM memory_candidates WHERE (state IN ('proposed', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL)) AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
 		AND (statement != '' OR evidence_summary != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL OR extraction_model != '' OR explicit_tool_source != '' OR confirmation_session_id != '' OR confirmation_request_id != '') ORDER BY id LIMIT ?)
 `, nowText, nowText, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch)
 	if err != nil {

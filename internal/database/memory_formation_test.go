@@ -48,8 +48,20 @@ func TestMemoryFormationStateAndIdempotencyConstraints(t *testing.T) {
 	insertFormationUser(t, db, "user-b")
 	turnID := insertFormationTurn(t, db, "user-a", "session-a")
 
-	for i, state := range []string{"proposed", "pending_confirmation", "approved", "rejected"} {
+	for i, state := range []string{"proposed", "approved", "rejected"} {
 		insertFormationCandidate(t, db, "user-a", fmt.Sprintf("candidate-%d", i), state)
+	}
+	if _, err := db.SQL().Exec(candidateInsertSQL,
+		"user-a", "legacy-candidate", "pending_confirmation", "Legacy candidate", "legacy candidate", formationTestTime, formationTestTime,
+	); err == nil {
+		t.Fatal("expected legacy pending_confirmation candidate state to fail")
+	}
+	if _, err := db.SQL().Exec(`
+INSERT INTO memory_entries (
+	canonical_user_id, scope, category, statement, statement_key, evidence,
+	approval_state, created_at, updated_at
+) VALUES ('user-a', 'long_term', 'notes', 'Legacy memory.', 'legacy memory.', 'Legacy evidence.', 'pending_confirmation', ?, ?)`, formationTestTime, formationTestTime); err == nil {
+		t.Fatal("expected legacy pending_confirmation memory approval state to fail")
 	}
 	if _, err := db.SQL().Exec(candidateInsertSQL,
 		"user-a", "invalid-candidate", "active", "Invalid candidate", "invalid candidate", formationTestTime, formationTestTime,
