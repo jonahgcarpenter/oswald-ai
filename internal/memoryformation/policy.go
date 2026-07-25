@@ -80,7 +80,7 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		if !hasMeaningfulDirectEvidence(out.Evidence) {
 			return disallow(out, "user-statement evidence lacks a meaningful first-person fact"), nil
 		}
-		if hasUnsafeFactualFraming(out.Evidence) || hasUnsafeFactualFraming(evidenceContext) {
+		if hasUnsafeFactualFraming(out.Evidence) || hasUnsafeFactualFramingWithQuestion(evidenceContext, isIndependentQuestionEvidence(evidenceContext, out.Evidence)) {
 			return disallow(out, "interrogative, negative, obsolete, or uncertain evidence is not a direct user fact"), nil
 		}
 		if isQuotedOrReported(out.Evidence) || isQuotedOrReported(evidenceContext) {
@@ -99,7 +99,13 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 			return disallow(out, "direct fact statement must be a concise third-person user statement"), nil
 		}
 		if !directStatementGrounded(out.Statement, out.Evidence, in.Category) {
-			return disallow(out, "direct fact statement is not lexically grounded in exact evidence"), nil
+			if hasCompetingDirectFacts(out.Evidence) {
+				return disallow(out, "direct fact statement is not lexically grounded in unambiguous exact evidence"), nil
+			}
+			out.Statement = directEvidenceStatement(out.Evidence)
+			if strings.TrimSpace(in.ClaimValue) == "" {
+				out.ClaimSlot, out.ClaimValue, out.ClaimKey = normalizeClaimIdentity(in.Category, in.ClaimSlot, "", out.Statement)
+			}
 		}
 	}
 	if in.Provenance == ProvenanceModelInference {
@@ -124,14 +130,16 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	if strings.TrimSpace(claimGroundingValue) == "" {
 		claimGroundingValue = out.ClaimValue
 	}
-	if !claimValueGrounded(claimGroundingValue, out.Statement, out.Evidence) {
-		return disallow(out, "claim value is not lexically grounded in statement or evidence"), nil
+	claimGroundingText := out.Statement + " " + out.Evidence
+	claimGroundingReason := "claim value is not lexically grounded in statement or evidence"
+	if in.Provenance == ProvenanceUserStatement {
+		claimGroundingText = out.Evidence
+		claimGroundingReason = "claim value is not lexically grounded in exact evidence"
+	}
+	if !claimValueGrounded(claimGroundingValue, claimGroundingText) {
+		return disallow(out, claimGroundingReason), nil
 	}
 	out.Sensitivity = maxSensitivity(out.Sensitivity, ClassifySensitivity(out.Statement+" "+out.Evidence, out.Category))
-	if in.Mode == ModePreCompactionExtraction {
-		out.Reason = "pre-compaction extraction remains proposed"
-		return out, nil
-	}
 	if in.Mode == ModeExplicitRemember {
 		remembered, ok := ParseExplicitRemember(in.SourceUserText)
 		if !ok || !strings.Contains(normalizeText(remembered), out.Evidence) {
@@ -301,6 +309,42 @@ func uniqueEvidenceContext(source, evidence string) (string, bool) {
 	return strings.TrimSpace(string(sourceRunes[start:end])), true
 }
 
+func isIndependentQuestionEvidence(context, evidence string) bool {
+	if !strings.ContainsAny(context, "?？") || strings.ContainsAny(evidence, "?？") {
+		return false
+	}
+	contextRunes, evidenceRunes := []rune(context), []rune(evidence)
+	starts := runeSubsliceIndexes(contextRunes, evidenceRunes)
+	if len(starts) != 1 {
+		return false
+	}
+	start := starts[0]
+	if start == 0 {
+		suffix := strings.TrimSpace(string(contextRunes[len(evidenceRunes):]))
+		if suffix == "" {
+			return false
+		}
+		first, _ := utf8.DecodeRuneInString(suffix)
+		switch first {
+		case ',', ';', ':', '—', '–':
+			return true
+		default:
+			return false
+		}
+	}
+	prefix := strings.TrimSpace(string(contextRunes[:start]))
+	if prefix == "" {
+		return true
+	}
+	last, _ := utf8.DecodeLastRuneInString(prefix)
+	switch last {
+	case ',', ';', ':', '—', '–':
+		return true
+	default:
+		return false
+	}
+}
+
 func runeSubsliceIndexes(value, target []rune) []int {
 	if len(target) == 0 || len(target) > len(value) {
 		return nil
@@ -401,6 +445,20 @@ func directStatementGrounded(statement, evidence string, category Category) bool
 		}
 	}
 	return true
+}
+
+func directEvidenceStatement(evidence string) string {
+	return "The user: " + evidence
+}
+
+func hasCompetingDirectFacts(evidence string) bool {
+	words := contentWords(evidence)
+	for _, marker := range [][]string{{"over"}, {"instead", "of"}, {"rather", "than"}, {"versus"}, {"vs"}, {"and"}, {"or"}} {
+		if containsWordSequence(words, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func orderedFormationTokens(value string, relationshipNameAlias bool) []string {
@@ -773,12 +831,12 @@ func isPacmanArchMapping(source, statement, claimValue string) bool {
 	return sourcePacman && packageFocused && statementPacman && statementArch && claimArch && (isUserCenteredInferenceSource(source) || generalQuery)
 }
 
-func claimValueGrounded(claimValue, statement, evidence string) bool {
+func claimValueGrounded(claimValue, groundingText string) bool {
 	claimTokens := formationTokens(strings.ReplaceAll(claimValue, "_", " "))
 	if len(claimTokens) == 0 {
 		return true
 	}
-	grounding := formationTokens(statement + " " + evidence)
+	grounding := formationTokens(groundingText)
 	for token := range claimTokens {
 		if _, ok := grounding[token]; !ok {
 			return false
@@ -956,6 +1014,7 @@ func approveShortTerm(out CandidateOutput) CandidateOutput {
 }
 
 func disallow(out CandidateOutput, reason string) CandidateOutput {
+	out.Approval = ApprovalRejected
 	out.Decision = DecisionDisallowed
 	out.Reason = reason
 	return out

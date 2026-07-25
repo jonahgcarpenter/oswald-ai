@@ -43,6 +43,7 @@ type MemorySaveOutcome struct {
 	InputIndex  int
 	CandidateID int64
 	State       string
+	Lifecycle   string
 	Reason      string
 	Err         error
 	Operational bool
@@ -143,7 +144,11 @@ func (s *Store) SubmitMemorySaveBatch(ctx context.Context, userID, sourceText st
 			outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, Err: err, Operational: true})
 			continue
 		}
-		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, Reason: candidate.DecisionReason})
+		reason := candidate.DecisionReason
+		if candidate.LifecycleState == "blocked_conflict" {
+			reason = candidate.LifecycleReason
+		}
+		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, Lifecycle: candidate.LifecycleState, Reason: reason})
 	}
 	return outcomes
 }

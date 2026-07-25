@@ -19,6 +19,7 @@ func TestMemoryFormationFreshSchema(t *testing.T) {
 	}
 	for _, index := range []string{
 		"idx_memory_candidates_state",
+		"idx_memory_candidates_lifecycle",
 		"idx_memory_candidates_statement",
 		"idx_memory_evidence_candidate",
 		"idx_durable_jobs_ready",
@@ -26,6 +27,9 @@ func TestMemoryFormationFreshSchema(t *testing.T) {
 		"idx_memory_entries_candidate",
 	} {
 		assertSchemaObject(t, db, "index", index)
+	}
+	for _, column := range []string{"lifecycle_state", "lifecycle_reason", "lifecycle_updated_at"} {
+		assertTableColumn(t, db, "memory_candidates", column)
 	}
 	assertSchemaObject(t, db, "view", "memory_formation_audit")
 	for _, trigger := range []string{"memory_formation_audit_update", "memory_formation_audit_delete"} {
@@ -67,6 +71,9 @@ INSERT INTO memory_entries (
 		"user-a", "invalid-candidate", "active", "Invalid candidate", "invalid candidate", formationTestTime, formationTestTime,
 	); err == nil {
 		t.Fatal("expected invalid candidate state to fail")
+	}
+	if _, err := db.SQL().Exec(`UPDATE memory_candidates SET lifecycle_state = 'invalid' WHERE canonical_user_id = 'user-a' LIMIT 1`); err == nil {
+		t.Fatal("expected invalid candidate lifecycle state to fail")
 	}
 	if _, err := db.SQL().Exec(candidateInsertSQL,
 		"user-a", "candidate-0", "proposed", "Duplicate candidate", "duplicate candidate", formationTestTime, formationTestTime,

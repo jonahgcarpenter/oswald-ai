@@ -50,6 +50,7 @@ type Approval string
 const (
 	ApprovalProposed Approval = "proposed"
 	ApprovalApproved Approval = "approved"
+	ApprovalRejected Approval = "rejected"
 )
 
 // PolicyDecision is the action allowed by formation policy.

@@ -93,10 +93,10 @@ WHERE id IN (SELECT id FROM memory_evidence WHERE canonical_user_id IN (SELECT c
 		OR candidate_id IN (SELECT candidate_id FROM memory_entries WHERE status = 'expired' AND candidate_id IS NOT NULL))
 	AND (content != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL) ORDER BY id LIMIT ?);
 UPDATE memory_candidates
-SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected',
+SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '',
 	source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '',
-	confirmation_session_id = '', confirmation_request_id = '', decision_reason = 'published_memory_expired',
-	decided_at = ?, decided_by = 'retention', updated_at = ?
+	confirmation_session_id = '', confirmation_request_id = '', lifecycle_state = 'redacted', lifecycle_reason = 'published_memory_expired',
+	lifecycle_updated_at = ?, updated_at = ?
 WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
 	AND (statement != '' OR evidence_summary != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL OR extraction_model != '' OR explicit_tool_source != '' OR confirmation_session_id != '' OR confirmation_request_id != '') ORDER BY id LIMIT ?);
 `, batch, batch, nowText, nowText, batch); err != nil {
@@ -104,7 +104,7 @@ WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELE
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (
 		SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
-		WHERE jobs.job_kind = 'memory_formation' AND (candidate.state IN ('proposed', 'rejected') OR (candidate.state = 'approved' AND candidate.published_memory_id IS NULL))
+		WHERE jobs.job_kind = 'memory_formation' AND candidate.lifecycle_state IN ('retained','pending_publication','blocked_conflict','expired','deleted','redacted')
 			AND ((candidate.expires_at IS NOT NULL AND candidate.expires_at <= ?) OR candidate.created_at <= ?)
 			AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL)
 		ORDER BY jobs.id LIMIT ?)`, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch); err != nil {
@@ -112,25 +112,27 @@ WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELE
 	}
 	result, err = tx.ExecContext(ctx, `
 UPDATE memory_candidates
-SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected',
+SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '',
 	source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '',
-	confirmation_session_id = '', confirmation_request_id = '', decision_reason = 'candidate_retention_expired',
-	decided_at = ?, decided_by = 'retention', updated_at = ?
-WHERE (state IN ('proposed', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL))
+	confirmation_session_id = '', confirmation_request_id = '',
+	lifecycle_state = CASE WHEN lifecycle_state = 'pending_publication' AND expires_at IS NOT NULL AND expires_at <= ? THEN 'expired' ELSE 'redacted' END,
+	lifecycle_reason = CASE WHEN lifecycle_state = 'pending_publication' AND expires_at IS NOT NULL AND expires_at <= ? THEN 'candidate_expired_before_publication' ELSE 'candidate_retention_expired' END,
+	lifecycle_updated_at = ?, updated_at = ?
+WHERE lifecycle_state IN ('retained','pending_publication','blocked_conflict','expired')
 	AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
-	AND id IN (SELECT id FROM memory_candidates WHERE (state IN ('proposed', 'rejected') OR (state = 'approved' AND published_memory_id IS NULL)) AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
+	AND id IN (SELECT id FROM memory_candidates WHERE lifecycle_state IN ('retained','pending_publication','blocked_conflict','expired') AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
 		AND (statement != '' OR evidence_summary != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL OR extraction_model != '' OR explicit_tool_source != '' OR confirmation_session_id != '' OR confirmation_request_id != '') ORDER BY id LIMIT ?)
-`, nowText, nowText, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch)
+`, nowText, nowText, nowText, nowText, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch)
 	if err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase expired memory candidates: %w", err)
 	}
 	if counts.CandidatesErased, err = result.RowsAffected(); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("count erased memory candidates: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT evidence.id FROM memory_evidence evidence JOIN memory_candidates candidate ON candidate.id = evidence.candidate_id WHERE candidate.statement = '' AND candidate.state = 'rejected' AND (evidence.content != '' OR evidence.correlation_key != '' OR evidence.source_request_id != '' OR evidence.source_session_id != '' OR evidence.source_turn_id IS NOT NULL) ORDER BY evidence.id LIMIT ?)`, batch); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE id IN (SELECT evidence.id FROM memory_evidence evidence JOIN memory_candidates candidate ON candidate.id = evidence.candidate_id WHERE candidate.statement = '' AND candidate.lifecycle_state IN ('expired','deleted','redacted') AND (evidence.content != '' OR evidence.correlation_key != '' OR evidence.source_request_id != '' OR evidence.source_session_id != '' OR evidence.source_turn_id IS NOT NULL) ORDER BY evidence.id LIMIT ?)`, batch); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase expired candidate evidence: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id WHERE jobs.job_kind = 'memory_formation' AND candidate.statement = '' AND candidate.state = 'rejected' AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL) ORDER BY jobs.id LIMIT ?)`, batch); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id WHERE jobs.job_kind = 'memory_formation' AND candidate.statement = '' AND candidate.lifecycle_state IN ('expired','deleted','redacted') AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL) ORDER BY jobs.id LIMIT ?)`, batch); err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("erase retained formation artifacts: %w", err)
 	}
 	result, err = tx.ExecContext(ctx, `

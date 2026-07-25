@@ -31,16 +31,15 @@ type LowPriorityGate interface {
 
 // Service owns the durable post-turn formation worker.
 type Service struct {
-	store             *usermemory.Store
-	extractor         Extractor
-	log               *config.Logger
-	model             string
-	jobLease          time.Duration
-	extractionEnabled bool
-	gate              LowPriorityGate
-	notify            chan struct{}
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
+	store     *usermemory.Store
+	extractor Extractor
+	log       *config.Logger
+	model     string
+	jobLease  time.Duration
+	gate      LowPriorityGate
+	notify    chan struct{}
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
 }
 
 // NewService creates a serialized formation worker.
@@ -49,12 +48,7 @@ func NewService(store *usermemory.Store, extractor Extractor, model string, log 
 	if len(providerTimeout) > 0 && providerTimeout[0] > 0 && providerTimeout[0]+30*time.Second > jobLease {
 		jobLease = providerTimeout[0] + 30*time.Second
 	}
-	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, extractionEnabled: true, log: log, notify: make(chan struct{}, 1)}
-}
-
-// SetBackgroundExtractionEnabled controls only the secondary model call.
-func (s *Service) SetBackgroundExtractionEnabled(enabled bool) {
-	s.extractionEnabled = enabled
+	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, log: log, notify: make(chan struct{}, 1)}
 }
 
 // SetLowPriorityGate makes extraction yield to foreground model work.
@@ -206,7 +200,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if loadErr != nil {
 			return loadErr
 		}
-		if candidate.State == "approved" && candidate.PublishedMemoryID == 0 {
+		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" && candidate.PublishedMemoryID == 0 {
 			if _, publishErr := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); publishErr != nil {
 				return publishErr
 			}
@@ -214,45 +208,43 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		}
 	}
 	extracted := usermemory.MemorySaveBatch{}
-	if s.extractionEnabled {
-		artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
-		if artifactErr != nil {
-			return artifactErr
+	artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
+	if artifactErr != nil {
+		return artifactErr
+	}
+	if artifact != "" {
+		if err := json.Unmarshal([]byte(artifact), &extracted); err != nil {
+			return fmt.Errorf("decode persisted memory formation artifact: %w", err)
 		}
-		if artifact != "" {
-			if err := json.Unmarshal([]byte(artifact), &extracted); err != nil {
-				return fmt.Errorf("decode persisted memory formation artifact: %w", err)
-			}
-		} else if s.extractor != nil {
-			extractParent := ctx
-			release := func() {}
-			if s.gate != nil {
-				var acquired bool
-				extractParent, release, acquired = s.gate.TryAcquireLowPriority(ctx)
-				if !acquired {
-					return errBackgroundPreempted
-				}
-			}
-			defer release()
-			extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
-			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
-			extracted, err = s.extractor.Extract(extractCtx, turn)
-			wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
-			release()
-			release = func() {}
-			if wasPreempted {
+	} else if s.extractor != nil {
+		extractParent := ctx
+		release := func() {}
+		if s.gate != nil {
+			var acquired bool
+			extractParent, release, acquired = s.gate.TryAcquireLowPriority(ctx)
+			if !acquired {
 				return errBackgroundPreempted
 			}
-			if err != nil {
-				return err
-			}
-			payload, err := json.Marshal(extracted)
-			if err != nil {
-				return err
-			}
-			if err := s.store.SaveFormationJobArtifact(ctx, job, string(payload)); err != nil {
-				return err
-			}
+		}
+		defer release()
+		extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
+		extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+		extracted, err = s.extractor.Extract(extractCtx, turn)
+		wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
+		release()
+		release = func() {}
+		if wasPreempted {
+			return errBackgroundPreempted
+		}
+		if err != nil {
+			return err
+		}
+		payload, err := json.Marshal(extracted)
+		if err != nil {
+			return err
+		}
+		if err := s.store.SaveFormationJobArtifact(ctx, job, string(payload)); err != nil {
+			return err
 		}
 	}
 	candidateIDs := make([]int64, 0, len(explicitIDs)+len(extracted.Memories))
@@ -284,7 +276,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if err != nil {
 			return err
 		}
-		if candidate.State == "approved" && candidate.PublishedMemoryID == 0 {
+		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" && candidate.PublishedMemoryID == 0 {
 			if _, err := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); err != nil {
 				return err
 			}

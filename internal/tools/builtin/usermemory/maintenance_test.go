@@ -149,6 +149,7 @@ func TestMaintenanceSweepDoesNotStarveLaterCandidateBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND statement = ''`, 2)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND lifecycle_state = 'redacted' AND decision_reason != 'candidate_retention_expired'`, 2)
 }
 
 func TestMaintenancePreservesEvidenceForActivePublishedMemory(t *testing.T) {

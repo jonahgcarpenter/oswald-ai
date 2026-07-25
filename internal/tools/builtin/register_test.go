@@ -80,7 +80,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	t.Fatalf("%s schema was not loaded", toolnames.SessionTranscriptSearch)
 }
 
-func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
+func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -89,41 +89,15 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != toolnames.UserMemoryForget {
-			continue
+	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
+		if _, ok := reg.LLMTool(name); !ok || !reg.HasHandler(name) {
+			t.Fatalf("retrieval tool is unavailable: %s", name)
 		}
-		if len(entry.Parameters) != 1 || entry.Parameters[0].Name != "memory_id" || entry.Parameters[0].Type != "integer" || !entry.Parameters[0].Required {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.UserMemoryForget, entry.Parameters)
+	}
+	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemoryForget} {
+		if _, ok := reg.LLMTool(name); ok || reg.HasHandler(name) {
+			t.Fatalf("user mutation tool remains available: %s", name)
 		}
-		return
-	}
-	t.Fatalf("%s schema was not loaded", toolnames.UserMemoryForget)
-}
-
-func TestRegisterMemorySaveRequiresClaimIdentity(t *testing.T) {
-	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
-		t.Fatal(err)
-	}
-	tool, ok := reg.LLMTool(toolnames.UserMemorySave)
-	if !ok {
-		t.Fatalf("%s schema was not loaded", toolnames.UserMemorySave)
-	}
-	memories := tool.Function.Parameters.Properties["memories"]
-	if memories.Type != "array" || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 {
-		t.Fatalf("unexpected memories schema: %+v", memories)
-	}
-	required := map[string]bool{}
-	for _, name := range memories.Items.Required {
-		required[name] = true
-	}
-	if !required["claim_slot"] || !required["claim_value"] {
-		t.Fatalf("missing nested claim identity requirements: %+v", memories.Items.Required)
 	}
 }
 
@@ -191,10 +165,8 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	want := map[string]bool{
 		"web.search":                      true,
 		"time.current":                    true,
-		toolnames.UserMemorySave:          true,
 		toolnames.UserMemorySearch:        true,
 		toolnames.UserMemoryList:          true,
-		toolnames.UserMemoryForget:        true,
 		toolnames.GlobalMemorySave:        true,
 		toolnames.SessionTranscriptSearch: true,
 	}

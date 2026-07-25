@@ -25,47 +25,19 @@ import (
 )
 
 const (
-	sessionHistoryCandidateLimit   = 100
-	sessionSummaryMinimumTail      = 8
-	recentToolExposureTurns        = 4
-	automaticRecallTopK            = 4
-	automaticRecallCharLimit       = 2000
-	sessionTurnTTL                 = 24 * time.Hour
-	emptyResponseRetryPrompt       = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
-	emptyResponseFallback          = "I blanked on the actual answer. Try again and I'll take another shot."
-	imageSizeFallback              = "Your image is too big. Crop it and try again."
-	maxImageModelAttempts          = 5
-	imageRetryScale                = 0.75
-	imageInitialScaleMaxEdge       = 1920
-	maxMemorySaveCorrectiveRetries = 1
-	memorySaveFailureGuard         = "Runtime memory status: one or more user_memory_save items remain rejected or not approved. Only items explicitly reported as accepted were staged. Do not state or imply that any other memory was saved."
+	sessionHistoryCandidateLimit = 100
+	sessionSummaryMinimumTail    = 8
+	recentToolExposureTurns      = 4
+	automaticRecallTopK          = 4
+	automaticRecallCharLimit     = 2000
+	sessionTurnTTL               = 24 * time.Hour
+	emptyResponseRetryPrompt     = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseFallback        = "I blanked on the actual answer. Try again and I'll take another shot."
+	imageSizeFallback            = "Your image is too big. Crop it and try again."
+	maxImageModelAttempts        = 5
+	imageRetryScale              = 0.75
+	imageInitialScaleMaxEdge     = 1920
 )
-
-type memorySaveResultSummary struct {
-	AcceptedCount int `json:"accepted_count"`
-	RejectedCount int `json:"rejected_count"`
-	Results       []struct {
-		Retryable bool `json:"retryable"`
-	} `json:"results"`
-}
-
-func parseMemorySaveResult(content string) (memorySaveResultSummary, bool) {
-	var result memorySaveResultSummary
-	if err := json.Unmarshal([]byte(content), &result); err != nil {
-		return memorySaveResultSummary{}, false
-	}
-	return result, true
-}
-
-func (r memorySaveResultSummary) retryableCount() int {
-	count := 0
-	for _, item := range r.Results {
-		if item.Retryable {
-			count++
-		}
-	}
-	return count
-}
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
 type StreamChunkType string
@@ -114,12 +86,9 @@ type ToolStreamPayload struct {
 
 // ToolStreamUserMemoryPayload contains structured user-memory tool details.
 type ToolStreamUserMemoryPayload struct {
-	Action      string                    `json:"action,omitempty"`
-	MemoryCount int                       `json:"memory_count,omitempty"`
-	Category    string                    `json:"category,omitempty"`
-	Statement   string                    `json:"statement,omitempty"`
-	Evidence    string                    `json:"evidence,omitempty"`
-	Content     *usermemory.ParsedContent `json:"content,omitempty"`
+	Action   string                    `json:"action,omitempty"`
+	Category string                    `json:"category,omitempty"`
+	Content  *usermemory.ParsedContent `json:"content,omitempty"`
 }
 
 // ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
@@ -148,7 +117,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web.search" {
 		switch toolName {
-		case toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.UserMemoryForget:
+		case toolnames.UserMemorySearch, toolnames.UserMemoryList:
 			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
 		case toolnames.GlobalMemorySave:
 			payload.GlobalMemory = globalMemoryStreamPayload(args)
@@ -177,32 +146,8 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 func userMemoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamUserMemoryPayload {
 	payload := &ToolStreamUserMemoryPayload{Action: userMemoryToolAction(toolName)}
-	if payload.Action == "save" {
-		if memories, ok := args["memories"].([]interface{}); ok {
-			payload.MemoryCount = len(memories)
-			if len(memories) > 0 {
-				if first, ok := memories[0].(map[string]interface{}); ok {
-					if category, ok := first["category"].(string); ok {
-						payload.Category = strings.TrimSpace(strings.ToLower(category))
-					}
-					if statement, ok := first["statement"].(string); ok {
-						payload.Statement = strings.TrimSpace(statement)
-					}
-					if evidence, ok := first["evidence"].(string); ok {
-						payload.Evidence = strings.TrimSpace(evidence)
-					}
-				}
-			}
-		}
-	}
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
-	}
-	if statement, ok := args["statement"].(string); ok {
-		payload.Statement = strings.TrimSpace(statement)
-	}
-	if evidence, ok := args["evidence"].(string); ok {
-		payload.Evidence = strings.TrimSpace(evidence)
 	}
 	if isError {
 		return payload
@@ -218,14 +163,10 @@ func userMemoryStreamPayload(toolName string, args map[string]interface{}, resul
 
 func userMemoryToolAction(toolName string) string {
 	switch toolName {
-	case toolnames.UserMemorySave:
-		return "save"
 	case toolnames.UserMemorySearch:
 		return "search"
 	case toolnames.UserMemoryList:
 		return "list"
-	case toolnames.UserMemoryForget:
-		return "forget"
 	}
 	return ""
 }
@@ -726,8 +667,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	toolFailureBudgetExhausted := false
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
-	memorySaveRetryPending := false
-	memorySaveRetryAttempts := 0
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
@@ -740,30 +679,13 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		req.Messages = messages
 		req.Tools = a.toolsForRequest(ctx, request.Principal, toolExposure)
 		req.ToolChoice = nil
-		forcedMemoryRetry := false
-		if memorySaveRetryPending {
-			memorySaveRetryPending = false
-			if memoryTool, ok := a.registry.LLMTool(toolnames.UserMemorySave); ok {
-				req.Tools = []llm.Tool{memoryTool}
-				req.ToolChoice = &llm.ToolChoice{Type: "function", Function: llm.ToolChoiceFunction{Name: toolnames.UserMemorySave}}
-				memorySaveRetryAttempts++
-				forcedMemoryRetry = true
-			} else {
-				messages = append(messages, llm.ChatMessage{Role: "system", Content: memorySaveFailureGuard})
-				req.Messages = messages
-			}
-		}
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),
 			config.F("tool_count", len(req.Tools)),
 		)
 
-		iterationCallback := chatCallback
-		if forcedMemoryRetry {
-			iterationCallback = nil
-		}
-		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, iterationCallback, reqLog)
+		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 		if err != nil {
 			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
 			if imageRetriesExhausted {
@@ -780,7 +702,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 					config.F("retry_attempt", 1),
 					config.F("status", "retry"),
 				)
-				resp, err = a.chatClient.Chat(ctx, req, iterationCallback)
+				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
 				if err == nil {
 					reqLog.Warn("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
@@ -831,11 +753,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
-			if forcedMemoryRetry {
-				messages = append(messages, llm.ChatMessage{Role: "system", Content: memorySaveFailureGuard})
-				reqLog.Warn("agent.tool.user_memory.corrective_retry_missing", "forced user-memory corrective retry returned no tool call", config.F("iteration", iteration), config.F("status", "degraded"))
-				continue
-			}
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration), config.F("status", "ok"))
 			break
 		}
@@ -846,7 +763,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		// Execute each tool call and inject the results as tool response messages.
 		// NOTE: Most models only emit one tool call at a time, but we handle
 		// multiple to be safe.
-		memorySaveGuardNeeded := false
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
@@ -866,13 +782,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 
 			var toolContent string
 
-			var result mcp.ExecutionResult
-			var execErr error
-			if forcedMemoryRetry && toolName != toolnames.UserMemorySave {
-				execErr = fmt.Errorf("corrective memory retry may only call %s", toolnames.UserMemorySave)
-			} else {
-				result, execErr = a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
-			}
+			result, execErr := a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
 			if execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				consecutiveToolFailures++
@@ -905,20 +815,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
-				if toolName == toolnames.UserMemorySave {
-					if summary, ok := parseMemorySaveResult(toolContent); ok && summary.RejectedCount > 0 {
-						retryableCount := summary.retryableCount()
-						if retryableCount > 0 && memorySaveRetryAttempts < maxMemorySaveCorrectiveRetries {
-							memorySaveRetryPending = true
-							reqLog.Info("agent.tool.user_memory.corrective_retry_scheduled", "scheduled corrective user-memory tool retry", config.F("iteration", iteration), config.F("retryable_count", retryableCount), config.F("retry_attempt", memorySaveRetryAttempts+1), config.F("status", "retry"))
-						} else {
-							memorySaveGuardNeeded = true
-						}
-					}
-				}
-			}
-			if forcedMemoryRetry && execErr != nil {
-				memorySaveGuardNeeded = true
 			}
 			toolExecutionCount++
 			if streamCallback != nil {
@@ -941,10 +837,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				break
 			}
 		}
-		if memorySaveGuardNeeded {
-			messages = append(messages, llm.ChatMessage{Role: "system", Content: memorySaveFailureGuard})
-		}
-
 		if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
 			break
 		}

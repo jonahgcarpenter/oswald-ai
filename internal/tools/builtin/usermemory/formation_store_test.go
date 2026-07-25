@@ -24,6 +24,9 @@ func TestFormationCandidatePublicationIsIdempotentAndTraceable(t *testing.T) {
 	if err != nil || !created || candidate.State != "approved" {
 		t.Fatalf("propose candidate=%+v created=%v err=%v", candidate, created, err)
 	}
+	if candidate.LifecycleState != "pending_publication" || candidate.LifecycleUpdatedAt.IsZero() {
+		t.Fatalf("initial candidate lifecycle=%+v", candidate)
+	}
 	duplicate, created, err := store.ProposeCandidate(ctx, "user-1", proposal)
 	if err != nil || created || duplicate.ID != candidate.ID {
 		t.Fatalf("idempotent proposal=%+v created=%v err=%v", duplicate, created, err)
@@ -35,6 +38,10 @@ func TestFormationCandidatePublicationIsIdempotentAndTraceable(t *testing.T) {
 	again, err := store.PublishCandidate(ctx, "user-1", candidate.ID)
 	if err != nil || again.ID != memory.ID {
 		t.Fatalf("idempotent publication=%+v err=%v", again, err)
+	}
+	publishedCandidate, err := store.LoadCandidate(ctx, "user-1", candidate.ID)
+	if err != nil || publishedCandidate.State != "approved" || publishedCandidate.LifecycleState != "published" || publishedCandidate.LifecycleReason != "publication_succeeded" {
+		t.Fatalf("published candidate=%+v err=%v", publishedCandidate, err)
 	}
 	var approval, provenance, authority, mode, sensitivity string
 	var candidateID int64
@@ -74,7 +81,7 @@ func TestFormationPublicationRollbackKeepsOldMemoryActive(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := store.sql.Exec(`UPDATE memory_candidates SET state = 'approved' WHERE id = ?`, candidate.ID); err != nil {
+			if _, err := store.sql.Exec(`UPDATE memory_candidates SET state = 'approved', lifecycle_state = 'pending_publication' WHERE id = ?`, candidate.ID); err != nil {
 				t.Fatal(err)
 			}
 			store.formationFailpoint = func(current string) error {
@@ -106,6 +113,27 @@ func TestFormationPublicationRollbackKeepsOldMemoryActive(t *testing.T) {
 				t.Fatalf("candidate after rollback=%+v err=%v", loaded, err)
 			}
 		})
+	}
+}
+
+func TestCandidateExpiryPreservesPolicyDecision(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: output, IdempotencyKey: "expires-before-publication"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET expires_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCandidate(context.Background(), "user-1", candidate.ID); err == nil {
+		t.Fatal("expired candidate published")
+	}
+	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || loaded.State != "approved" || loaded.PolicyDecision != candidate.PolicyDecision || loaded.DecisionReason != candidate.DecisionReason || loaded.LifecycleState != "expired" {
+		t.Fatalf("expired candidate=%+v err=%v", loaded, err)
 	}
 }
 
@@ -282,7 +310,7 @@ func TestExpiredPublishedMemoryErasesCandidateEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.ClaimSlot != "" || loaded.ClaimValue != "" || loaded.State != "rejected" {
+	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.ClaimSlot != "" || loaded.ClaimValue != "" || loaded.State != "approved" || loaded.LifecycleState != "redacted" {
 		t.Fatalf("expired candidate=%+v err=%v", loaded, err)
 	}
 	canonical, err := store.EntryByID(memory.ID)
@@ -455,7 +483,7 @@ func TestWeakInferenceCannotSupersedeDirectClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inferredCandidate.SupersedesMemoryID != 0 || inferredCandidate.State != "proposed" {
+	if inferredCandidate.SupersedesMemoryID != 0 || inferredCandidate.State != "approved" || inferredCandidate.LifecycleState != "blocked_conflict" {
 		t.Fatalf("weak inference targeted direct memory: %+v", inferredCandidate)
 	}
 	if _, err := store.PublishCandidate(ctx, "user-1", inferredCandidate.ID); err == nil {
@@ -469,7 +497,7 @@ func TestWeakInferenceCannotSupersedeDirectClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if explicitTargetCandidate.State != "proposed" || explicitTargetCandidate.SupersedesMemoryID != 0 {
+	if explicitTargetCandidate.State != "approved" || explicitTargetCandidate.LifecycleState != "blocked_conflict" || explicitTargetCandidate.SupersedesMemoryID != 0 {
 		t.Fatalf("weak extractor supersession bypassed authority: %+v", explicitTargetCandidate)
 	}
 }
@@ -502,7 +530,7 @@ func TestForgetAllErasesUnpublishedCandidateContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.State != "rejected" {
+	if err != nil || loaded.Statement != "" || loaded.Evidence != "" || loaded.State != "approved" || loaded.LifecycleState != "deleted" {
 		t.Fatalf("forgotten candidate=%+v err=%v", loaded, err)
 	}
 	artifact, err := store.FormationJobArtifact(context.Background(), job)
@@ -635,7 +663,7 @@ func TestSameTurnReconciliationPromotesApprovedAndDoesNotDoubleCountPublishedEvi
 	}
 	approved := evaluatedClaimCandidate(t, "I prefer concise replies.", "The user prefers concise replies.", memoryformation.CategoryCommunicationPreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.95, "communication.reply_style", "concise")
 	merged, created, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: approved, IdempotencyKey: "approved-second", Source: FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, ToolName: "user_memory_save"}})
-	if err != nil || created || merged.ID != first.ID || merged.State != "approved" || merged.Confidence != 0.95 || merged.ExplicitToolSource == "" {
+	if err != nil || created || merged.ID != first.ID || merged.State != "approved" || merged.LifecycleState != "pending_publication" || merged.Confidence != 0.95 || merged.ExplicitToolSource == "" {
 		t.Fatalf("merged=%+v created=%v err=%v", merged, created, err)
 	}
 	memory, err := store.PublishCandidate(context.Background(), "user-1", merged.ID)
@@ -649,6 +677,26 @@ func TestSameTurnReconciliationPromotesApprovedAndDoesNotDoubleCountPublishedEvi
 	loaded, err := store.EntryByID(memory.ID)
 	if err != nil || loaded.EvidenceCount != 1 || loaded.Confidence != 0.95 {
 		t.Fatalf("memory=%+v err=%v", loaded, err)
+	}
+}
+
+func TestSameTurnReconciliationReplacesRejectedPolicyAtEqualEvidenceStrength(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	turnID := seedFormationTurn(t, store, "user-1", "session", "I prefer concise replies.")
+	approved := evaluatedClaimCandidate(t, "I prefer concise replies.", "The user prefers concise replies.", memoryformation.CategoryCommunicationPreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.9, "communication.reply_style", "concise")
+	rejected := approved
+	rejected.Approval = memoryformation.ApprovalRejected
+	rejected.Decision = memoryformation.DecisionDisallowed
+	rejected.Reason = "earlier extraction was policy-unsound"
+	first, created, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: rejected, IdempotencyKey: "rejected-first", Source: FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID}})
+	if err != nil || !created || first.State != "rejected" || first.LifecycleState != "retained" {
+		t.Fatalf("first=%+v created=%v err=%v", first, created, err)
+	}
+	merged, created, err := store.ProposeCandidate(context.Background(), "user-1", CandidateProposal{Output: approved, IdempotencyKey: "approved-equal", Source: FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID}})
+	if err != nil || created || merged.ID != first.ID || merged.State != "approved" || merged.LifecycleState != "pending_publication" || merged.PolicyDecision != string(memoryformation.DecisionAutomatic) {
+		t.Fatalf("merged=%+v created=%v err=%v", merged, created, err)
 	}
 }
 

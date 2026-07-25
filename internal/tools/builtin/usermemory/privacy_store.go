@@ -105,7 +105,7 @@ func (s *Store) InspectPrivacy(ctx context.Context, userID, section string, page
 	var items []PrivacyItem
 	queries := []struct{ section, query string }{
 		{"memories", `SELECT CAST(id AS TEXT), status, '', 0 FROM memory_entries WHERE canonical_user_id = ?`},
-		{"candidates", `SELECT CAST(id AS TEXT), CASE WHEN statement = '' AND decision_reason = 'privacy_delete' THEN 'deleted' ELSE state END, source_session_id, source_session_generation FROM memory_candidates WHERE canonical_user_id = ?`},
+		{"candidates", `SELECT CAST(id AS TEXT), lifecycle_state, source_session_id, source_session_generation FROM memory_candidates WHERE canonical_user_id = ?`},
 		{"sessions", `SELECT session_id || ':' || generation, CASE WHEN is_active = 1 THEN 'active' ELSE 'inactive' END, session_id, generation FROM sessions WHERE canonical_user_id = ?`},
 	}
 	for _, item := range queries {
@@ -246,7 +246,7 @@ func (s *Store) DeleteMemory(ctx context.Context, userID, actorHash string, memo
 	return status, err
 }
 
-// DeleteCandidate scrubs one proposal and leaves a content-free rejected tombstone.
+// DeleteCandidate scrubs one proposal and leaves a content-free lifecycle tombstone.
 func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, candidateID int64, requestID string, now time.Time) error {
 	if candidateID <= 0 {
 		return fmt.Errorf("candidate id must be positive")
@@ -598,7 +598,7 @@ func scrubCandidateTx(ctx context.Context, tx *sql.Tx, userID string, candidateI
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_audit SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE canonical_user_id = ? AND candidate_id = ?`, nowText, userID, candidateID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected', source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '', confirmation_session_id = '', confirmation_request_id = '', published_memory_id = NULL, supersedes_memory_id = NULL, decision_reason = 'privacy_delete', decided_at = ?, decided_by = 'privacy', updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, candidateID)
+	_, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence_summary = '', source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '', confirmation_session_id = '', confirmation_request_id = '', published_memory_id = NULL, supersedes_memory_id = NULL, lifecycle_state = 'deleted', lifecycle_reason = 'privacy_delete', lifecycle_updated_at = ?, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, candidateID)
 	return err
 }
 

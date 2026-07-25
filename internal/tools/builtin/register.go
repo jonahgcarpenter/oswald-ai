@@ -27,11 +27,6 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", "time.current"))
 
-	if err := reg.RegisterHandler(toolnames.UserMemorySave, registry.Handler(usermemory.NewSaveHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySave, err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySave), config.F("path", config.DefaultAccountLinkPath))
-
 	if err := reg.RegisterHandler(toolnames.UserMemorySearch, registry.Handler(usermemory.NewSearchHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySearch, err)
 	}
@@ -41,11 +36,6 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemoryList, err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemoryList), config.F("path", config.DefaultAccountLinkPath))
-
-	if err := reg.RegisterHandler(toolnames.UserMemoryForget, registry.Handler(usermemory.NewForgetHandler(userMemStore, cfg.RetentionPolicy, log))); err != nil {
-		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemoryForget, err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemoryForget), config.F("path", config.DefaultAccountLinkPath))
 
 	if err := reg.RegisterHandler(toolnames.SessionTranscriptSearch, registry.Handler(usermemory.NewTranscriptSearchHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.SessionTranscriptSearch, err)

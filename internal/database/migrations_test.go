@@ -156,7 +156,7 @@ func TestCompactV4CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 19, "index": 57, "trigger": 28, "view": 1} {
+	for objectType, want := range map[string]int{"table": 19, "index": 58, "trigger": 28, "view": 1} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

@@ -51,6 +51,7 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 			SourceTurnID: first.ID, Statement: "The user is working on Atlas.", Evidence: first.UserText,
 			Scope: "long_term", Category: "projects", Context: "direct_assertion",
 			Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4,
+			ClaimSlot: "project.name", ClaimValue: "Atlas",
 		}},
 	}, nil
 }
@@ -126,8 +127,38 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 		t.Fatalf("incremental tail=%d err=%v", len(tail), err)
 	}
 	active, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(active) != 0 {
-		t.Fatalf("pre-compaction candidate became active: %+v err=%v", active, err)
+	if err != nil || len(active) != 1 || active[0].ClaimSlot != "project.name" {
+		t.Fatalf("pre-compaction candidate was not unified and published: %+v err=%v", active, err)
+	}
+}
+
+func TestEvaluateCompactionCandidateLifecycleThresholdAndSoundness(t *testing.T) {
+	turn := usermemory.SessionTurn{ID: 7, UserText: "I work on Atlas."}
+	base := usermemory.CompactionCandidateArtifact{
+		SourceTurnID: 7, Statement: "The user works on Atlas.", Evidence: "I work on Atlas.",
+		Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement",
+		Sensitivity: "low", Importance: 4, ClaimSlot: "project.name", ClaimValue: "Atlas",
+	}
+	below := base
+	below.Confidence = 0.349
+	evaluated, err := evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{below})
+	if err != nil || evaluated[0].output.Approval != "proposed" {
+		t.Fatalf("below-threshold evaluation=%+v err=%v", evaluated, err)
+	}
+	atThreshold := base
+	atThreshold.Confidence = 0.35
+	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{atThreshold})
+	if err != nil || evaluated[0].output.Approval != "approved" || evaluated[0].output.ClaimSlot != "project.name" || evaluated[0].output.ClaimValue != "atlas" {
+		t.Fatalf("at-threshold evaluation=%+v err=%v", evaluated, err)
+	}
+	unsound := base
+	unsound.Confidence = 0.99
+	unsound.Evidence = "My coworker works on Atlas."
+	unsound.Statement = "The user works on Atlas."
+	turn.UserText = unsound.Evidence
+	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{unsound})
+	if err != nil || evaluated[0].output.Approval == "approved" {
+		t.Fatalf("unsound high-confidence evaluation=%+v err=%v", evaluated, err)
 	}
 }
 

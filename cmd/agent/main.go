@@ -21,12 +21,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/maintenanceruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -143,13 +143,11 @@ func main() {
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
-	memorySaveTool, ok := toolRegistry.LLMTool(toolnames.UserMemorySave)
-	if !ok {
-		log.Fatal("app.tools.memory_save_missing", "user memory save tool schema is unavailable")
+	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel)
+	if err != nil {
+		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
 	}
-	formationService := formationruntime.NewService(userMemStore, formationruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, memorySaveTool), cfg.LLMGatewayModel, rootLog, cfg.LLMGatewayTimeout)
-	formationService.SetBackgroundExtractionEnabled(cfg.BackgroundMemoryExtractionEnabled)
-	log.Info("app.memory_background_extraction.configured", "configured background user-memory extraction", config.F("is_enabled", cfg.BackgroundMemoryExtractionEnabled))
+	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog, cfg.LLMGatewayTimeout)
 	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, budget, cfg.LLMGatewayTimeout, rootLog)
 
 	if cfg.LLMGatewayEmbeddingModel != "" {

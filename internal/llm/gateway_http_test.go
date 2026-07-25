@@ -73,15 +73,22 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 		if memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
 			t.Fatalf("item additionalProperties was not false: %+v", memories.Items)
 		}
+		importance := memories.Items.Properties["importance"]
+		if importance.Minimum == nil || importance.Maximum == nil || *importance.Minimum != 1 || *importance.Maximum != 5 {
+			t.Fatalf("importance range was not serialized: %+v", importance)
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
 	}))
 	defer server.Close()
 
 	maximum := 5
+	minimumImportance, maximumImportance := 1.0, 5.0
 	additional := false
 	tool := Tool{Type: "function", Function: ToolDefinition{Name: "user_memory_save", Parameters: ToolParameters{
 		Type: "object", Properties: map[string]ToolParameterProperty{"memories": {
-			Type: "array", MaxItems: &maximum, Items: &ToolParameterProperty{Type: "object", AdditionalProperties: &additional},
+			Type: "array", MaxItems: &maximum, Items: &ToolParameterProperty{Type: "object", AdditionalProperties: &additional, Properties: map[string]ToolParameterProperty{
+				"importance": {Type: "integer", Minimum: &minimumImportance, Maximum: &maximumImportance},
+			}},
 		}},
 	}}}
 	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))

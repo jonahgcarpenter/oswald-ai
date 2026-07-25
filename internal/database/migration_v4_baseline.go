@@ -103,6 +103,9 @@ CREATE TABLE memory_candidates (
 	canonical_user_id TEXT NOT NULL,
 	idempotency_key TEXT NOT NULL,
 	state TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed', 'approved', 'rejected')),
+	lifecycle_state TEXT NOT NULL DEFAULT 'retained' CHECK (lifecycle_state IN ('retained', 'pending_publication', 'published', 'blocked_conflict', 'expired', 'deleted', 'redacted')),
+	lifecycle_reason TEXT NOT NULL DEFAULT '',
+	lifecycle_updated_at TEXT NOT NULL DEFAULT '',
 	scope TEXT NOT NULL CHECK (scope IN ('short_term', 'long_term')),
 	category TEXT NOT NULL CHECK (category IN ('identity', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
 	statement TEXT NOT NULL,
@@ -146,6 +149,7 @@ CREATE TABLE memory_candidates (
 	UNIQUE (canonical_user_id, id)
 );
 CREATE INDEX idx_memory_candidates_state ON memory_candidates(canonical_user_id, state, created_at);
+CREATE INDEX idx_memory_candidates_lifecycle ON memory_candidates(canonical_user_id, lifecycle_state, lifecycle_updated_at);
 CREATE INDEX idx_memory_candidates_statement ON memory_candidates(canonical_user_id, scope, statement_key);
 CREATE INDEX idx_memory_candidates_source_turn ON memory_candidates(canonical_user_id, source_turn_id);
 CREATE INDEX idx_memory_candidates_claim_key ON memory_candidates(canonical_user_id, scope, claim_key);

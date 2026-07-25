@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
@@ -188,6 +189,61 @@ func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 	}
 }
 
+func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
+	store := formationTestStore(t)
+	activeOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "I prefer tea.", Statement: "The user prefers tea.", Evidence: "I prefer tea.",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction,
+		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences,
+		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
+		ClaimSlot: "preference.drink", ClaimValue: "tea",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeCandidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: activeOutput, IdempotencyKey: "active-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishCandidate(context.Background(), "user-1", activeCandidate.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	turnID := formationTestTurn(t, store, "I prefer coffee.")
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
+		Statement: "The user prefers coffee.", Evidence: "I prefer coffee.", Scope: "long_term",
+		Category: "durable_preferences", Context: "direct_assertion", Provenance: "user_statement",
+		Sensitivity: "low", Confidence: 0.9, Importance: 4,
+		ClaimSlot: "preference.drink", ClaimValue: "coffee",
+	}}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "blocked", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "succeeded" || extractor.calls != 1 {
+		t.Fatalf("state=%q extractor_calls=%d err=%v", state, extractor.calls, err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 1 || memories[0].ClaimValue != "tea" {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+	page, err := store.InspectPrivacy(context.Background(), "user-1", "candidates", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundBlocked := false
+	for _, item := range page.Items {
+		foundBlocked = foundBlocked || item.State == "blocked_conflict"
+	}
+	if !foundBlocked {
+		t.Fatalf("blocked candidate missing from lifecycle inspection: %+v", page.Items)
+	}
+}
+
 func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "I use Go")
@@ -255,24 +311,6 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 	}
 }
 
-func TestServiceCanDisableOnlyBackgroundExtraction(t *testing.T) {
-	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go")
-	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{Statement: "The user uses Go.", Evidence: "I use Go", Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4, ClaimSlot: "project.language", ClaimValue: "Go"}}}
-	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
-	service.SetBackgroundExtractionEnabled(false)
-	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "disabled", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	service.drain(context.Background())
-	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
-	memories, listErr := store.ListMemories("user-1", "", "", 10)
-	if err != nil || listErr != nil || state != "succeeded" || extractor.calls != 0 || len(memories) != 0 {
-		t.Fatalf("state=%q calls=%d memories=%+v state_err=%v list_err=%v", state, extractor.calls, memories, err, listErr)
-	}
-}
-
 func TestServicePublishesExplicitToolCandidateAfterTurnPersistence(t *testing.T) {
 	store := formationTestStore(t)
 	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
@@ -299,7 +337,6 @@ func TestServicePublishesExplicitToolCandidateAfterTurnPersistence(t *testing.T)
 		t.Fatal(err)
 	}
 	service := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError))
-	service.SetBackgroundExtractionEnabled(false)
 	if err := service.process(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
@@ -402,38 +439,11 @@ func TestServiceRejectsStaleLeaseBeforeExplicitAttachment(t *testing.T) {
 	}
 }
 
-func TestLLMExtractorParsesStrictJSON(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user uses Go.","evidence":"I use Go","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes_statement":"","claim_slot":"project.language","claim_value":"go"}]}`}
-	extractor := NewLLMExtractor(client, "model", memorySaveTestTool())
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got.Memories) != 1 || got.Memories[0].Evidence != "I use Go" || got.Memories[0].ClaimSlot != "project.language" {
-		t.Fatalf("extracted=%+v err=%v", got, err)
-	}
-	if len(client.request.Tools) != 1 || client.request.ToolChoice == nil || client.request.ToolChoice.Function.Name != toolnames.UserMemorySave {
-		t.Fatalf("request did not force the memory save tool: %+v", client.request)
-	}
-	prompt := client.request.Messages[0].Content
-	for _, required := range []string{"smallest unambiguous exact quote", "Inference evidence must be the complete user turn", "stable category-compatible dotted claim slots"} {
-		if !strings.Contains(prompt, required) {
-			t.Fatalf("extractor policy prompt missing %q", required)
-		}
-	}
-}
-
-func TestLLMExtractorDiscardsMalformedCandidateWithoutFailingArtifact(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
-	extractor := NewLLMExtractor(client, "model", memorySaveTestTool())
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "You actually are on v3.2.0 not 1.0"})
-	if err != nil || len(got.Memories) != 0 || client.calls != 1 {
-		t.Fatalf("extracted=%+v calls=%d err=%v", got, client.calls, err)
-	}
-}
-
 func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
-	service := NewService(store, NewLLMExtractor(client, "model", memorySaveTestTool()), "model", config.NewLogger(config.LevelError))
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
 	if err != nil {
 		t.Fatal(err)
@@ -449,12 +459,23 @@ func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestLLMExtractorPreservesValidCandidatesBesideMalformedCandidates(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user uses Rust.","evidence":"I use Rust","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes_statement":""},{"statement":"The user uses Go.","evidence":"I use Go","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes_statement":"","claim_slot":"project.language","claim_value":"go"}]}`}
-	extractor := NewLLMExtractor(client, "model", memorySaveTestTool())
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got.Memories) != 1 || got.Memories[0].Statement != "The user uses Go." {
-		t.Fatalf("extracted=%+v err=%v", got, err)
+func TestServiceDoesNotRetryPolicyRejectedCandidate(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "My name is Jonah")
+	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user's name is Jonah.","evidence":"My name is Jonah","scope":"long_term","category":"identity","context":"direct_assertion","provenance":"user_statement","sensitivity":"identity_or_contact","confidence":1,"importance":3,"ttl_days":0,"supersedes_statement":"","claim_slot":"identity_name","claim_value":"jonah"}]}`}
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "rejected", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "succeeded" || client.calls != 1 {
+		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 }
 
@@ -469,7 +490,7 @@ func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandida
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := `{"memories":[{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0},{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"claim_slot":"project.language","claim_value":"go"}]}`
+	artifact := `{"memories":[{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"claim_slot":"project.language","claim_value":"go"}]}`
 	if err := store.SaveFormationJobArtifact(context.Background(), job, artifact); err != nil {
 		t.Fatal(err)
 	}
@@ -482,11 +503,11 @@ func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandida
 	}
 }
 
-func TestServiceSkipsPermanentExtractionFailureWithoutRetry(t *testing.T) {
+func TestServiceSkipsMalformedOuterArgumentsWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "Nothing to retain")
 	client := &fakeExtractionChatter{content: `[{"statement":"wrong top-level shape"}]`}
-	service := NewService(store, NewLLMExtractor(client, "model", memorySaveTestTool()), "model", config.NewLogger(config.LevelError))
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
 	if err != nil {
 		t.Fatal(err)
@@ -495,22 +516,6 @@ func TestServiceSkipsPermanentExtractionFailureWithoutRetry(t *testing.T) {
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
 	if err != nil || state != "skipped" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
-	}
-}
-
-func TestLLMExtractorRejectsPermanentProviderRequestError(t *testing.T) {
-	client := &fakeExtractionChatter{err: &llm.ChatHTTPError{StatusCode: 400, Body: "unsupported response format"}}
-	_, err := NewLLMExtractor(client, "model", memorySaveTestTool()).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if !errors.Is(err, errPermanentExtraction) {
-		t.Fatalf("error = %v, want permanent extraction failure", err)
-	}
-}
-
-func TestLLMExtractorLeavesTransientProviderErrorRetryable(t *testing.T) {
-	client := &fakeExtractionChatter{err: &llm.ChatHTTPError{StatusCode: 503, Body: "unavailable"}}
-	_, err := NewLLMExtractor(client, "model", memorySaveTestTool()).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err == nil || errors.Is(err, errPermanentExtraction) || errorCode(err) != "transient_provider" {
-		t.Fatalf("error = %v, code = %q", err, errorCode(err))
 	}
 }
 
@@ -547,8 +552,13 @@ func (f *fakeExtractionChatter) Chat(_ context.Context, request llm.ChatRequest,
 	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: arguments}}}}}, nil
 }
 
-func memorySaveTestTool() llm.Tool {
-	return llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: toolnames.UserMemorySave, Parameters: llm.ToolParameters{Type: "object"}}}
+func newTestLLMExtractor(t *testing.T, client llm.Chatter) *memoryextractor.LLMExtractor {
+	t.Helper()
+	extractor, err := memoryextractor.NewLLMExtractor(client, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return extractor
 }
 
 func memoryBatchArgs(item map[string]interface{}) map[string]interface{} {

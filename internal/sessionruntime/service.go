@@ -342,13 +342,22 @@ func (s *Service) stageCandidates(ctx context.Context, job usermemory.SessionCom
 		raw, turn, output := artifact.Candidates[i], item.turn, item.output
 		encoded, _ := json.Marshal(raw)
 		sum := sha256.Sum256(append([]byte(fmt.Sprintf("%d:%d:%d:", job.ID, job.CoveredFromTurnID, job.CoveredThroughTurnID)), encoded...))
-		_, _, err = s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
+		candidate, _, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
 			Output: output, IdempotencyKey: "compact:" + hex.EncodeToString(sum[:]),
-			Source:        usermemory.FormationSource{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: turn.ID, Model: s.model, ExtractorVersion: SummaryGeneratorVersion},
-			CompactionJob: &job,
+			Source:              usermemory.FormationSource{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: turn.ID, Model: s.model, ExtractorVersion: SummaryGeneratorVersion},
+			SupersedesStatement: raw.Supersedes,
+			CompactionJob:       &job,
 		})
 		if err != nil {
 			return err
+		}
+		if candidate.PublishedMemoryID > 0 {
+			continue
+		}
+		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" {
+			if _, err := s.store.PublishCandidateForCompaction(ctx, job, candidate.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -370,7 +379,7 @@ func evaluateCompactionCandidates(turns []usermemory.SessionTurn, candidates []u
 		if !ok {
 			return nil, fmt.Errorf("compaction candidate source turn %d is outside newly covered range", raw.SourceTurnID)
 		}
-		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: turn.UserText, Statement: raw.Statement, Evidence: raw.Evidence, Provenance: memoryformation.Provenance(raw.Provenance), ClaimedAuthority: memoryformation.AuthorityModel, Sensitivity: memoryformation.Sensitivity(raw.Sensitivity), Mode: memoryformation.ModePreCompactionExtraction, Scope: memoryformation.Scope(raw.Scope), Category: memoryformation.Category(raw.Category), Context: memoryformation.ContentContext(raw.Context), Confidence: raw.Confidence, Importance: raw.Importance, TTL: time.Duration(raw.TTLDays) * 24 * time.Hour})
+		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: turn.UserText, Statement: raw.Statement, Evidence: raw.Evidence, Provenance: memoryformation.Provenance(raw.Provenance), ClaimedAuthority: memoryformation.AuthorityModel, Sensitivity: memoryformation.Sensitivity(raw.Sensitivity), Mode: memoryformation.ModePreCompactionExtraction, Scope: memoryformation.Scope(raw.Scope), Category: memoryformation.Category(raw.Category), Context: memoryformation.ContentContext(raw.Context), Confidence: raw.Confidence, Importance: raw.Importance, TTL: time.Duration(raw.TTLDays) * 24 * time.Hour, ClaimSlot: raw.ClaimSlot, ClaimValue: raw.ClaimValue})
 		if err != nil {
 			return nil, err
 		}

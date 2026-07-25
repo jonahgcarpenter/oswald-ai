@@ -35,6 +35,110 @@ func TestEvaluateActiveConfidenceFloor(t *testing.T) {
 	}
 }
 
+func TestEvaluatePolicyUnsoundIsRejectedRegardlessOfConfidence(t *testing.T) {
+	for _, confidence := range []float64{0.1, 0.95} {
+		in := validCandidate()
+		in.Confidence = confidence
+		in.SourceUserText = "If I move, I prefer dark mode."
+		in.Evidence = in.SourceUserText
+
+		got, err := Evaluate(in)
+		if err != nil {
+			t.Fatalf("confidence=%v Evaluate() error = %v", confidence, err)
+		}
+		if got.Decision != DecisionDisallowed || got.Approval != ApprovalRejected {
+			t.Fatalf("confidence=%v decision/approval = %s/%s, want %s/%s; output=%+v", confidence, got.Decision, got.Approval, DecisionDisallowed, ApprovalRejected, got)
+		}
+	}
+}
+
+func TestEvaluatePreCompactionUsesConfidenceThreshold(t *testing.T) {
+	for _, tt := range []struct {
+		confidence   float64
+		wantDecision PolicyDecision
+		wantApproval Approval
+	}{
+		{confidence: 0.349999, wantDecision: DecisionProposed, wantApproval: ApprovalProposed},
+		{confidence: 0.35, wantDecision: DecisionAutomatic, wantApproval: ApprovalApproved},
+	} {
+		in := validCandidate()
+		in.Mode = ModePreCompactionExtraction
+		in.Confidence = tt.confidence
+
+		got, err := Evaluate(in)
+		if err != nil {
+			t.Fatalf("confidence=%v Evaluate() error = %v", tt.confidence, err)
+		}
+		if got.Decision != tt.wantDecision || got.Approval != tt.wantApproval {
+			t.Fatalf("confidence=%v decision/approval = %s/%s, want %s/%s; output=%+v", tt.confidence, got.Decision, got.Approval, tt.wantDecision, tt.wantApproval, got)
+		}
+	}
+}
+
+func TestEvaluateDirectParaphraseFallsBackToExactEvidence(t *testing.T) {
+	in := validCandidate()
+	in.SourceUserText = "I enjoy dark mode."
+	in.Evidence = in.SourceUserText
+	in.Statement = "The user prefers dark mode."
+
+	got, err := Evaluate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != DecisionAutomatic || got.Approval != ApprovalApproved {
+		t.Fatalf("paraphrase fallback was not approved: %+v", got)
+	}
+	if got.Statement != "The user: I enjoy dark mode." {
+		t.Fatalf("fallback statement = %q, want exact-evidence wrapper", got.Statement)
+	}
+	if strings.Contains(got.ClaimValue, "prefer") {
+		t.Fatalf("fallback retained model-selected claim identity: %+v", got)
+	}
+}
+
+func TestEvaluateDirectFallbackRejectsInventedClaimValue(t *testing.T) {
+	in := validCandidate()
+	in.SourceUserText = "I enjoy dark mode."
+	in.Evidence = in.SourceUserText
+	in.Statement = "The user prefers light mode."
+	in.ClaimSlot = "preference.display_mode"
+	in.ClaimValue = "light_mode"
+
+	got, err := Evaluate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decision != DecisionDisallowed || got.Approval != ApprovalRejected || !strings.Contains(got.Reason, "exact evidence") {
+		t.Fatalf("invented claim value was not rejected: %+v", got)
+	}
+}
+
+func TestEvaluateDirectFallbackRejectsCompetingFactSelection(t *testing.T) {
+	for _, tt := range []struct {
+		evidence   string
+		statement  string
+		claimValue string
+	}{
+		{evidence: "I prefer tea over coffee.", statement: "The user prefers coffee.", claimValue: "coffee"},
+		{evidence: "I prefer tea and coffee.", statement: "The user prefers tea.", claimValue: "tea"},
+	} {
+		in := validCandidate()
+		in.SourceUserText = tt.evidence
+		in.Evidence = tt.evidence
+		in.Statement = tt.statement
+		in.ClaimSlot = "preference.drink"
+		in.ClaimValue = tt.claimValue
+
+		got, err := Evaluate(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Decision != DecisionDisallowed || got.Approval != ApprovalRejected {
+			t.Fatalf("competing fact selection was not rejected: input=%+v output=%+v", tt, got)
+		}
+	}
+}
+
 func TestEvaluateWholeTurnDirectAndModelInferenceApprove(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -150,7 +254,7 @@ func TestEvaluateAllSensitivitiesRetainClassificationAndActivate(t *testing.T) {
 			}
 			wantApproval := ApprovalApproved
 			if tt.wantDecision == DecisionDisallowed {
-				wantApproval = ApprovalProposed
+				wantApproval = ApprovalRejected
 			}
 			if got.Decision != tt.wantDecision || got.Approval != wantApproval {
 				t.Fatalf("Evaluate() decision/approval = %s/%s, want %s/%s; output=%+v", got.Decision, got.Approval, tt.wantDecision, wantApproval, got)
@@ -209,8 +313,8 @@ func TestEvaluateDisallowedSourcesAndContexts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Evaluate() error = %v", err)
 			}
-			if got.Decision != DecisionDisallowed || got.Approval != ApprovalProposed {
-				t.Fatalf("Evaluate() decision/approval = %s/%s, want %s/%s; output=%+v", got.Decision, got.Approval, DecisionDisallowed, ApprovalProposed, got)
+			if got.Decision != DecisionDisallowed || got.Approval != ApprovalRejected {
+				t.Fatalf("Evaluate() decision/approval = %s/%s, want %s/%s; output=%+v", got.Decision, got.Approval, DecisionDisallowed, ApprovalRejected, got)
 			}
 		})
 	}
@@ -284,9 +388,6 @@ func TestEvaluateRejectsReversedUncertainAndNonInitialDirectEvidenceInEveryMode(
 		}
 		got, err := Evaluate(in)
 		want := DecisionAutomatic
-		if mode == ModePreCompactionExtraction {
-			want = DecisionProposed
-		}
 		if err != nil || got.Decision != want {
 			t.Fatalf("positive mode=%s output=%+v err=%v", mode, got, err)
 		}
@@ -547,7 +648,7 @@ func TestEvaluateInferenceRequiresCautiousQualification(t *testing.T) {
 	}
 }
 
-func TestEvaluatePartialDirectTurnActivatesButInferenceAndPreCompactionRemainProposed(t *testing.T) {
+func TestEvaluatePartialDirectTurnAndPreCompactionFollowPolicy(t *testing.T) {
 	tests := []struct {
 		name         string
 		mutate       func(*CandidateInput)
@@ -561,15 +662,15 @@ func TestEvaluatePartialDirectTurnActivatesButInferenceAndPreCompactionRemainPro
 			in.SourceUserText = "I prefer dark mode. Please update this screen."
 			in.Statement = "The user may prefer dark mode."
 			in.Provenance = ProvenanceModelInference
-		}, wantDecision: DecisionDisallowed, wantApproval: ApprovalProposed},
+		}, wantDecision: DecisionDisallowed, wantApproval: ApprovalRejected},
 		{name: "pre-compaction direct", mutate: func(in *CandidateInput) {
 			in.Mode = ModePreCompactionExtraction
-		}, wantDecision: DecisionProposed, wantApproval: ApprovalProposed},
+		}, wantDecision: DecisionAutomatic, wantApproval: ApprovalApproved},
 		{name: "pre-compaction inferred", mutate: func(in *CandidateInput) {
 			in.Mode = ModePreCompactionExtraction
 			in.Statement = "The user may prefer dark mode."
 			in.Provenance = ProvenanceModelInference
-		}, wantDecision: DecisionProposed, wantApproval: ApprovalProposed},
+		}, wantDecision: DecisionInferredActive, wantApproval: ApprovalApproved},
 	}
 
 	for _, tt := range tests {
@@ -604,6 +705,35 @@ func TestEvaluateDirectCreatorPhraseAndIdentityImportance(t *testing.T) {
 	}
 }
 
+func TestEvaluateApprovesCurrentExtractedFacts(t *testing.T) {
+	tests := []CandidateInput{
+		{SourceUserText: "Hello Oswald, My name is Jonah and I am your creator", Statement: "The user's name is Jonah.", Evidence: "My name is Jonah", Provenance: ProvenanceUserStatement, ClaimedAuthority: AuthorityUserDirect, Sensitivity: SensitivityIdentityOrContact, Mode: ModeAutomaticExtraction, Scope: ScopeLongTerm, Category: CategoryIdentity, Context: ContextDirectAssertion, Confidence: 1, Importance: 3, ClaimSlot: "identity.name", ClaimValue: "jonah"},
+		{SourceUserText: "Hello Oswald, My name is Jonah and I am your creator", Statement: "The user is Oswald's creator.", Evidence: "I am your creator", Provenance: ProvenanceUserStatement, ClaimedAuthority: AuthorityUserDirect, Sensitivity: SensitivityIdentityOrContact, Mode: ModeAutomaticExtraction, Scope: ScopeLongTerm, Category: CategoryIdentity, Context: ContextDirectAssertion, Confidence: 1, Importance: 3, ClaimSlot: "identity.role", ClaimValue: "oswald_s_creator"},
+		{SourceUserText: "What do you think of the New York Giants this season, I am big fan of Jaxson Dart?", Statement: "The user is a big fan of Jaxson Dart.", Evidence: "I am big fan of Jaxson Dart", Provenance: ProvenanceUserStatement, ClaimedAuthority: AuthorityUserDirect, Sensitivity: SensitivityLow, Mode: ModeAutomaticExtraction, Scope: ScopeLongTerm, Category: CategoryDurablePreferences, Context: ContextDirectAssertion, Confidence: 0.95, Importance: 3, ClaimSlot: "preference.favorite_athlete", ClaimValue: "jaxson_dart"},
+	}
+	for _, in := range tests {
+		got, err := Evaluate(in)
+		if err != nil || got.Decision != DecisionAutomatic || got.Approval != ApprovalApproved {
+			t.Fatalf("statement=%q output=%+v err=%v", in.Statement, got, err)
+		}
+	}
+}
+
+func TestEvaluateQuestionContextRequiresIndependentEvidenceClause(t *testing.T) {
+	for _, source := range []string{"I prefer tea?", "Do I prefer tea?", "Is it true that I prefer tea?"} {
+		in := validCandidate()
+		in.SourceUserText = source
+		in.Evidence = "I prefer tea"
+		in.Statement = "The user prefers tea."
+		in.ClaimSlot = "preference.drink"
+		in.ClaimValue = "tea"
+		got, err := Evaluate(in)
+		if err != nil || got.Decision != DecisionDisallowed {
+			t.Fatalf("source=%q output=%+v err=%v", source, got, err)
+		}
+	}
+}
+
 func TestEvaluateRejectsGenericPartialEvidenceWithoutFirstPerson(t *testing.T) {
 	in := validCandidate()
 	in.SourceUserText = "Prefers tea. Please update the profile."
@@ -614,7 +744,7 @@ func TestEvaluateRejectsGenericPartialEvidenceWithoutFirstPerson(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Decision != DecisionDisallowed || got.Approval != ApprovalProposed {
+	if got.Decision != DecisionDisallowed || got.Approval != ApprovalRejected {
 		t.Fatalf("generic evidence was accepted: %+v", got)
 	}
 }

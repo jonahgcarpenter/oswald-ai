@@ -113,6 +113,9 @@ type CompactionCandidateArtifact struct {
 	Confidence   float64 `json:"confidence"`
 	Importance   int     `json:"importance"`
 	TTLDays      int     `json:"ttl_days"`
+	Supersedes   string  `json:"supersedes"`
+	ClaimSlot    string  `json:"claim_slot"`
+	ClaimValue   string  `json:"claim_value"`
 }
 
 // SessionCompactionTurns gives a planner chronological delivered turns and the
@@ -839,10 +842,13 @@ func encodeSummaryArtifact(artifact SummaryArtifact) (string, SummaryArtifact, e
 		candidate.Context = strings.TrimSpace(candidate.Context)
 		candidate.Provenance = strings.TrimSpace(candidate.Provenance)
 		candidate.Sensitivity = strings.TrimSpace(candidate.Sensitivity)
-		if candidate.SourceTurnID <= 0 || candidate.Statement == "" || candidate.Evidence == "" {
+		candidate.Supersedes = strings.TrimSpace(candidate.Supersedes)
+		candidate.ClaimSlot = strings.TrimSpace(candidate.ClaimSlot)
+		candidate.ClaimValue = strings.TrimSpace(candidate.ClaimValue)
+		if candidate.SourceTurnID <= 0 || candidate.Statement == "" || candidate.Evidence == "" || candidate.ClaimSlot == "" || candidate.ClaimValue == "" {
 			return "", SummaryArtifact{}, fmt.Errorf("session compaction artifact candidate %d is incomplete", i)
 		}
-		if len([]rune(candidate.Statement)) > maxSummaryCandidateRunes || len([]rune(candidate.Evidence)) > maxSummaryCandidateRunes {
+		if len([]rune(candidate.Statement)) > maxSummaryCandidateRunes || len([]rune(candidate.Evidence)) > maxSummaryCandidateRunes || len([]rune(candidate.Supersedes)) > maxSummaryCandidateRunes || len([]rune(candidate.ClaimSlot)) > maxSummaryCandidateRunes || len([]rune(candidate.ClaimValue)) > maxSummaryCandidateRunes {
 			return "", SummaryArtifact{}, fmt.Errorf("session compaction artifact candidate %d text exceeds %d runes", i, maxSummaryCandidateRunes)
 		}
 	}

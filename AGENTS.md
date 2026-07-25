@@ -5,14 +5,12 @@ This file is the internal technical reference for how Oswald AI works today. `RE
 ## Project Overview
 
 Oswald AI is a Go application built around a single LLM gateway-backed agent loop. SQLite and sqlite-vec use CGO-backed libraries, and Discord GIFV extraction optionally invokes external `ffmpeg` and `ffprobe` executables.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with eight builtin model tools:
+It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin model tools:
 
 - `web.search`
 - `time.current`
-- `user_memory_save`
 - `user_memory_search`
 - `user_memory_list`
-- `user_memory_forget`
 - `session_transcript_search`
 - `global_memory_save`
 
@@ -38,19 +36,20 @@ Current layers:
 8. `internal/routing/` — shared gateway routing policy and reply-context prompt construction
 9. `internal/broker/` — request queue and worker pool
 10. `internal/memoryformation/` — pure evidence validation, sensitivity classification, and activation policy
-11. `internal/formationruntime/` — durable serialized fallback extraction and retry worker
-12. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
-13. `internal/agent/` — iterative tool-calling agent loop
-14. `internal/soul/` — read-only operator-managed system-prompt loader
-15. `internal/promptbudget/` — model context budget and prompt token estimates
-16. `internal/tools/` — tool registry, builtin handlers, and schema loading
-17. `internal/mcp/` — MCP client sessions and discovered tools
-18. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
-19. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
-20. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
-21. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
-22. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
-23. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
+11. `internal/memoryextractor/` — private background user-memory model call, schema, and decoding
+12. `internal/formationruntime/` — durable serialized fallback extraction and retry worker
+13. `internal/sessionruntime/` — durable proactive session-compaction planning, extraction, and serialized retry worker
+14. `internal/agent/` — iterative tool-calling agent loop
+15. `internal/soul/` — read-only operator-managed system-prompt loader
+16. `internal/promptbudget/` — model context budget and prompt token estimates
+17. `internal/tools/` — tool registry, builtin handlers, and schema loading
+18. `internal/mcp/` — MCP client sessions and discovered tools
+19. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
+20. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
+21. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
+22. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
+23. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
+24. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
 
 ## Startup Flow
 
@@ -67,7 +66,7 @@ Current layers:
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
 11. Create the command service, including `/privacy`, `/client`, and `/bootstrap`
-12. Load builtin tool schemas from `data/tools/*.md`, register the eight builtin handlers, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
 14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
 15. Start each gateway in its own goroutine
@@ -209,34 +208,33 @@ Oswald keeps four distinct memory layers.
 ### Persistent User Memory
 
 - Stored in `data/database/oswald.db`; the speaker intro lives on `account_users` and durable user facts remain tenant-owned memory claims
-- Managed by the `user_memory_*` tools
+- Retrieved by `user_memory_search` and `user_memory_list`; mutation is owned by background formation and authenticated privacy commands rather than primary-agent tools
 - Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Eligible approved long-term identity, communication preference, durable preference, and environment facts are compiled into a deterministic profile capped at 2000 bytes
-- Canonical memory publication occurs only from policy-approved candidates. Formation paths create proposed, approved, or rejected runtime candidates. `user_memory_save` accepts one batch of at most five direct or inferred candidates from the primary agent and stages each valid item independently for publication after delivery; explicit intent only supplies a deterministic confidence floor and never bypasses grounding, threshold, authority, temporary-state, or supersession policy
+- Canonical memory publication occurs only from policy-approved background candidates. The primary agent has no user-memory mutation tools. Exact explicit remember wording still supplies a deterministic confidence floor to background evaluation but never bypasses grounding, threshold, authority, temporary-state, or supersession policy
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
-- New durable facts pass through candidate states (`proposed`, `approved`, or `rejected`) before approved publication into the memory lifecycle (`active`, `superseded`, `expired`, or `deleted`); supersession fields and audit events replace a general relation graph
+- Candidate policy state is semantic: `proposed` means sound but below confidence `0.35`, `approved` means sound at or above that threshold, and `rejected` means unsound regardless of confidence. Separate candidate lifecycle state records retention, pending publication, publication, blocked conflicts, expiry, privacy deletion, and redaction. Published memories independently use the `active`, `superseded`, `expired`, `deleted`, and `forgotten` lifecycle
 - While retained as content-bearing canonical state, every published memory records exact evidence, source request/session/turn, provenance, source authority, formation mode, sensitivity, and approval metadata. Privacy deletion, forget-grace expiry, and retention may later scrub or remove content and linked source exchanges
-- The serialized post-delivery fallback exposes only the same `user_memory_save` batch schema and forces one tool call containing at most five candidates. It independently extracts all eligible facts and relies on same-turn reconciliation to discard or reinforce candidates already submitted by the primary agent. Invalid outer arguments, unknown fields, excessive candidate count, and non-retryable provider 4xx responses are terminally skipped; malformed individual entries and candidates rejected by deterministic policy are dropped independently
-- Foreground `user_memory_save` returns indexed JSON outcomes with exact policy reasons. When any rejected item is correctable, the primary loop permits one forced corrective call with only `user_memory_save` exposed; unresolved items add a trusted runtime status instruction that forbids claiming they were saved. Corrected retries use evidence- and claim-aware idempotency, rejected attempts do not consume the five-approved-candidate limit, and a separate ten-attempt ceiling bounds retry amplification
-- Formation jobs use exact-token leases of at least five minutes, extended to the provider timeout plus 30 seconds when longer, and idempotency keys. They receive up to five immediate attempts and at most three delayed redrives only when the stored error code is explicitly transient. Foreground preemption durably defers work without consuming this retry budget. Attach, save, proposal, publication, and completion require a transactionally checked live lease; retry and terminal skip may release a naturally expired lease only while its exact token remains stored. Startup reconciliation backfills missing jobs only for formation-eligible turns created during the previous 24 hours
-- Unambiguous exact first-person evidence spans from longer turns and whole-turn direct statements become active when confidence is at least `0.35`; evidence must begin with a first-person marker and express a positive, current, non-modal fact. Meaningful canonical statement tokens must match the ordered factual tokens of the smallest exact evidence span, and every claim-value token must be grounded in statement/evidence. Rune-safe deterministic checks include quote state and the evidence's containing sentence context without splitting common abbreviations or decimals. Direct identity facts receive deterministic minimum importance `3`. Quoted/reported, interrogative, negative, obsolete, hypothetical/conditional, third-party-centered, publicly attributed, and instruction/policy/capability-like text fails closed in every mode. User-centered relationship identity is eligible only with explicit `is named`/`name is` grammar and a compatible relationship name/identity slot. Model inference remains whole-turn-only, must use a positive declarative source, begin with a governing cautious qualification, retain bounded statement-to-source lexical relevance, and pre-compaction extraction remains proposal-only
+- The serialized post-delivery extractor in `internal/memoryextractor/` exposes one private `user_memory_save`-shaped schema and forces one call containing at most five candidates. This schema is not loaded into the primary tool registry. Its prompt enumerates exact dotted claim-slot namespaces. Valid siblings are evaluated independently, malformed items are dropped, policy-rejected candidates are retained without a corrective model call, and the first decoded batch is persisted for idempotent replay. Non-retryable provider 4xx responses remain terminally skipped
+- Formation jobs use exact-token leases of at least five minutes, extended to the provider timeout plus 30 seconds when longer, and idempotency keys. They receive up to five immediate operational attempts and at most three delayed redrives only when the stored error code is explicitly transient; these retries recover calls that did not produce a persisted extractor batch and never ask the model to correct a policy result. Foreground preemption durably defers work without consuming this retry budget. Attach, save, proposal, publication, and completion require a transactionally checked live lease; retry and terminal skip may release a naturally expired lease only while its exact token remains stored. Startup reconciliation backfills missing jobs only for formation-eligible turns created during the previous 24 hours
+- Unambiguous exact first-person evidence spans from longer turns and whole-turn direct statements become active when confidence is at least `0.35`; evidence must begin with a first-person marker and express a positive, current, non-modal fact. A lexically grounded canonical statement is retained. If only that model paraphrase check fails, policy substitutes a deterministic exact-evidence wrapper while grounding direct claim values against evidence alone; competing or ambiguous facts still fail closed. Rune-safe checks include quote state and containing-sentence context without splitting common abbreviations or decimals. A positive independent evidence clause may remain eligible when surrounding text asks a question, while an interrogative evidence clause remains ineligible. Direct identity facts receive deterministic minimum importance `3`. Quoted/reported, negative, obsolete, hypothetical/conditional, third-party-centered, publicly attributed, and instruction/policy/capability-like text fails closed in every mode. User-centered relationship identity requires explicit `is named`/`name is` grammar and a compatible relationship name/identity slot. Model inference remains whole-turn-only, positive, cautious, user-centered, and lexically relevant
 - Model inference uses exact whole-turn evidence but may express a cautious implication not lexically present in the turn. Third-party, public, tool-derived, quoted, hypothetical, and instruction-like content remains disallowed
 - Stable category-compatible claim slot/value identity consolidates supporting turns into one memory. Equivalent explicit-tool and automatic candidates from the same source turn and exact evidence reconcile only through equal claim or statement identity and never double-count; independent facts remain distinct. Independent evidence combines confidence using bounded noisy-OR; correlated same-session inferred evidence is discounted, retries are idempotent, and stronger direct evidence upgrades authority without losing prior evidence
 - Inferred memories are active only for confidence-tiered query-relevant recall and are explicitly labeled `uncertain_inference`; they cannot enter a tenant profile until direct evidence upgrades source authority
-- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Every `user_memory_save` item remains source-turn-fenced, requires stable `claim_slot`/`claim_value`, and corrections supersede atomically only when ordinary authority and confidence comparison permits
+- Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Every extracted candidate remains source-turn-fenced, requires stable `claim_slot`/`claim_value`, and corrections supersede atomically only when ordinary authority and confidence comparison permits
 - Conflicting claim values use monotonic authority and confidence: stronger evidence may supersede a weaker active claim, while weak inference cannot replace a stronger direct fact
 - Canonical publication, supersession, evidence, audit history, profile advancement, and a durable derived-index outbox entry commit in one SQLite transaction; FTS/vector tables are derived asynchronously rather than part of canonical publication
-- `user_memory_forget` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
+- `/privacy forget-memory` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and source authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
-- `user_memory_search` uses the same hybrid engine with a larger output cap for deeper investigation; `user_memory_list`, `user_memory_save`, and `user_memory_forget` remain model-directed tools
-- Every `user_memory_*` handler and `session_transcript_search` requires a valid authenticated request principal and derives ownership from its canonical user
+- `user_memory_search` uses the same hybrid engine with a larger output cap for deeper investigation; `user_memory_search`, `user_memory_list`, and `session_transcript_search` are the model-directed user-memory retrieval tools
+- Every model-visible user-memory handler and `session_transcript_search` requires a valid authenticated request principal and derives ownership from its canonical user
 - Addressed ordinary group turns continue to use the authenticated sender's private memory by explicit product decision; group chats do not create a shared memory tenant
 
 ### Canonical and Derived State
@@ -307,7 +305,7 @@ Retention configuration uses positive Go durations and a positive batch size:
 | `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h` | Minimum interval between `PRAGMA optimize` runs. |
 | `MEMORY_MAINTENANCE_BATCH_SIZE` | `100` | Per-category row bound for one sweep. |
 
-`MEMORY_BACKGROUND_EXTRACTION_ENABLED` defaults to `true`. When enabled, fallback memory extraction and session-compaction model calls share one broker-owned low-priority permit: they run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget. Disabling fallback extraction does not disable primary-agent `user_memory_save` calls or delivery-gated publication.
+Fallback memory extraction and session-compaction model calls are always enabled and share one broker-owned low-priority permit. They run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget.
 
 Startup rejects non-positive values. Tombstone retention must be at least content-bearing retention, dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
 
@@ -330,7 +328,7 @@ SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NO
 - Compaction does not delete covered turns. Delivered transcripts normally remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable, except when privacy operations or forgotten-memory grace expiry scrub linked source exchanges
 - `session_transcript_search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
 - Transcript search is intentionally current-session and active-generation only; it is separate from `user_memory_search`, which searches stable durable user facts
-- Before publishing a checkpoint, the same model artifact may identify source-turn-specific durable-memory candidates from exact user evidence. These pre-compaction candidates are staged idempotently as proposals only and never directly activate memory
+- Before publishing a checkpoint, the same model artifact may identify source-turn-specific durable-memory candidates with full claim identity from exact user evidence. They use the same soundness and confidence policy as post-delivery extraction; approved candidates publish only under the exact live compaction lease and delivered active-generation source-turn fence
 - Recent completed exchanges newer than the latest summary boundary are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
 - Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
 - Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and periodic maintenance at `MEMORY_MAINTENANCE_INTERVAL` remove expired artifacts, while privacy operations may remove linked source exchanges earlier
@@ -498,13 +496,11 @@ Current builtin tools:
 
 - `web.search` — SearXNG-backed search
 - `time.current` — authoritative current date and time in a requested IANA timezone
-- `user_memory_save` — stage a bounded batch of grounded direct or inferred facts about the authenticated current user; explicit requests receive the deterministic explicit-confidence floor
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
-- `user_memory_forget` — remove stored user facts
 - `session_transcript_search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
 - `global_memory_save` — stage an exact evidence-backed global fact from a successful global MCP result, or from the current authenticated administrator's direct statement
-An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `session_transcript_search`; deeper durable retrieval and all user-memory mutation remain model-directed through `user_memory_search`, `user_memory_list`, `user_memory_save`, and `user_memory_forget`.
+An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `session_transcript_search`; deeper durable retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
@@ -891,7 +887,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - The gateway interface has no graceful stop method; gateway listeners remain active until process exit after worker shutdown begins
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Only eight builtin model tools ship locally; `global_memory_save` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Only six builtin model tools ship locally; `global_memory_save` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
 - Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication

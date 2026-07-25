@@ -1012,8 +1012,8 @@ func eraseForgottenFormationTx(tx *sql.Tx, userID string, eraseAll bool) error {
 UPDATE memory_evidence SET content = '', correlation_key = '' WHERE canonical_user_id = ?;
 UPDATE durable_jobs SET extraction_payload = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
 UPDATE memory_candidates
-SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected',
-	decision_reason = 'user_forget_all', decided_at = ?, decided_by = 'user', updated_at = ?
+SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '',
+	lifecycle_state = 'deleted', lifecycle_reason = 'user_forget_all', lifecycle_updated_at = ?, updated_at = ?
 WHERE canonical_user_id = ?;
 `, userID, userID, now, now, userID); err != nil {
 			return fmt.Errorf("erase all tenant memory formation content: %w", err)
@@ -1041,8 +1041,8 @@ WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id
 );
 
 UPDATE memory_candidates
-SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '', state = 'rejected',
-	decision_reason = 'user_forget', decided_at = ?, decided_by = 'user', updated_at = ?
+SET statement = '', statement_key = 'erased:' || id, claim_key = 'erased:' || id, claim_slot = '', claim_value = '', evidence_summary = '',
+	lifecycle_state = 'deleted', lifecycle_reason = 'user_forget', lifecycle_updated_at = ?, updated_at = ?
 WHERE canonical_user_id = ? AND published_memory_id IN (
 	SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
 );

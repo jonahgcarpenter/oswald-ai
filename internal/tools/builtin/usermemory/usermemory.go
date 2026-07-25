@@ -60,7 +60,7 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 			if outcome.Operational {
 				return "", outcome.Err
 			}
-			if outcome.Err != nil || outcome.State != "approved" {
+			if outcome.Err != nil || outcome.State != "approved" || outcome.Lifecycle != "pending_publication" {
 				rejected++
 				reason := outcome.Reason
 				if outcome.Err != nil {
@@ -68,7 +68,7 @@ func NewSaveHandler(store *Store, log *config.Logger) func(ctx context.Context, 
 				}
 				retryable := outcome.Err != nil || outcome.State == "rejected"
 				status := "rejected"
-				if outcome.State == "proposed" {
+				if outcome.State == "proposed" || outcome.Lifecycle == "blocked_conflict" {
 					status = "not_approved"
 				}
 				results = append(results, memorySaveToolItemResult{Index: outcome.InputIndex, Status: status, CandidateID: outcome.CandidateID, Reason: reason, Retryable: retryable})
