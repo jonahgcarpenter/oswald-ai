@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -22,19 +23,20 @@ const (
 
 // Service serially applies durable index changes and builds shadow revisions.
 type Service struct {
-	store     *usermemory.Store
-	embedder  llm.Embedder
-	model     string
-	dimension int
-	log       *config.Logger
-	wake      chan struct{}
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	store       *usermemory.Store
+	globalStore *globalmemory.Store
+	embedder    llm.Embedder
+	model       string
+	dimension   int
+	log         *config.Logger
+	wake        chan struct{}
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // NewService creates a derived-index lifecycle service.
-func NewService(store *usermemory.Store, embedder llm.Embedder, model string, log *config.Logger) *Service {
-	return &Service{store: store, embedder: embedder, model: model, log: log, wake: make(chan struct{}, 1)}
+func NewService(store *usermemory.Store, globalStore *globalmemory.Store, embedder llm.Embedder, model string, log *config.Logger) *Service {
+	return &Service{store: store, globalStore: globalStore, embedder: embedder, model: model, log: log, wake: make(chan struct{}, 1)}
 }
 
 // Signal nonblockingly wakes the worker; startup and polling reconcile missed signals.
@@ -50,6 +52,9 @@ func (s *Service) Start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
 	s.store.SetDerivedIndexNotifier(s.Signal)
+	if s.globalStore != nil {
+		s.globalStore.SetDerivedIndexNotifier(s.Signal)
+	}
 	s.wg.Add(1)
 	go s.run(ctx)
 }
@@ -105,7 +110,15 @@ func (s *Service) cycle(ctx context.Context) {
 	}
 	s.ensureFTS(ctx, usermemory.IndexKindMemoryFTS)
 	s.ensureFTS(ctx, usermemory.IndexKindTranscriptFTS)
-	s.ensureVector(ctx)
+	s.ensureFTS(ctx, usermemory.IndexKindGlobalMemoryFTS)
+	if s.model != "" && s.embedder != nil {
+		if _, err := s.vectorDimension(ctx); err != nil {
+			s.warn("index.vector.probe_failed", "vector", err)
+		} else {
+			s.ensureVector(ctx, usermemory.IndexKindMemoryVector)
+			s.ensureVector(ctx, usermemory.IndexKindGlobalMemoryVector)
+		}
+	}
 	s.drain(ctx)
 }
 
@@ -129,8 +142,10 @@ func (s *Service) ensureFTS(ctx context.Context, kind string) {
 	started := time.Now()
 	if kind == usermemory.IndexKindMemoryFTS {
 		err = s.buildMemoryFTS(ctx, revision)
-	} else {
+	} else if kind == usermemory.IndexKindTranscriptFTS {
 		err = s.buildTranscriptFTS(ctx, revision)
+	} else {
+		err = s.buildGlobalMemory(ctx, revision)
 	}
 	if err == nil {
 		err = s.publishAfterDrain(ctx, revision)
@@ -144,38 +159,42 @@ func (s *Service) ensureFTS(ctx context.Context, kind string) {
 	s.health("index.rebuild.complete", live, live.ExpectedCount, live.IndexedCount, "ok", time.Since(started), nil)
 }
 
-func (s *Service) ensureVector(ctx context.Context) {
+func (s *Service) ensureVector(ctx context.Context, kind string) {
 	if s.model == "" || s.embedder == nil {
 		return
 	}
 	dimension, err := s.vectorDimension(ctx)
 	if err != nil {
-		s.warn("index.vector.probe_failed", usermemory.IndexKindMemoryVector, err)
+		s.warn("index.vector.probe_failed", kind, err)
 		return
 	}
-	live, liveErr := s.store.LiveIndexRevision(ctx, usermemory.IndexKindMemoryVector)
-	needsRebuild, healthErr := s.store.IndexRevisionNeedsRebuild(ctx, usermemory.IndexKindMemoryVector)
+	live, liveErr := s.store.LiveIndexRevision(ctx, kind)
+	needsRebuild, healthErr := s.store.IndexRevisionNeedsRebuild(ctx, kind)
 	if healthErr != nil && !errors.Is(healthErr, sql.ErrNoRows) {
-		s.warn("index.health.failed", usermemory.IndexKindMemoryVector, healthErr)
+		s.warn("index.health.failed", kind, healthErr)
 		return
 	}
 	if liveErr == nil && live.Model == s.model && live.Dimension == dimension && live.SchemaVersion >= 2 && !needsRebuild {
 		return
 	}
-	revision, err := s.store.BuildingIndexRevision(ctx, usermemory.IndexKindMemoryVector)
+	revision, err := s.store.BuildingIndexRevision(ctx, kind)
 	if err == nil && (revision.Model != s.model || revision.Dimension != dimension) {
 		_ = s.store.FailIndexRevision(ctx, revision.ID, "configuration_changed")
 		err = sql.ErrNoRows
 	}
 	if errors.Is(err, sql.ErrNoRows) {
-		revision, err = s.store.CreateIndexRevision(ctx, usermemory.IndexKindMemoryVector, "llm_gateway", s.model, dimension)
+		revision, err = s.store.CreateIndexRevision(ctx, kind, "llm_gateway", s.model, dimension)
 	}
 	if err != nil {
-		s.warn("index.rebuild.failed", usermemory.IndexKindMemoryVector, err)
+		s.warn("index.rebuild.failed", kind, err)
 		return
 	}
 	started := time.Now()
-	err = s.buildMemoryVector(ctx, revision)
+	if kind == usermemory.IndexKindMemoryVector {
+		err = s.buildMemoryVector(ctx, revision)
+	} else {
+		err = s.buildGlobalMemory(ctx, revision)
+	}
 	if err == nil {
 		err = s.publishAfterDrain(ctx, revision)
 	}
@@ -184,7 +203,7 @@ func (s *Service) ensureVector(ctx context.Context) {
 		s.health("index.rebuild.failed", revision, 0, 0, "failed", time.Since(started), err)
 		return
 	}
-	live, _ = s.store.LiveIndexRevision(ctx, usermemory.IndexKindMemoryVector)
+	live, _ = s.store.LiveIndexRevision(ctx, kind)
 	s.health("index.rebuild.complete", live, live.ExpectedCount, live.IndexedCount, "ok", time.Since(started), nil)
 }
 
@@ -235,6 +254,25 @@ func (s *Service) buildMemoryVector(ctx context.Context, revision usermemory.Der
 		}
 		for _, record := range records {
 			if err := s.writeCurrentMemory(ctx, revision, record); err != nil {
+				return err
+			}
+			after = record.ID
+		}
+		if len(records) < batchSize {
+			return nil
+		}
+	}
+}
+
+func (s *Service) buildGlobalMemory(ctx context.Context, revision usermemory.DerivedIndexRevision) error {
+	var after int64
+	for {
+		records, err := s.store.GlobalMemoryIndexRecords(ctx, after, batchSize)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if err := s.writeCurrentGlobalMemory(ctx, revision, record); err != nil {
 				return err
 			}
 			after = record.ID
@@ -309,6 +347,27 @@ func (s *Service) applyChange(ctx context.Context, change usermemory.DerivedInde
 		}
 		return nil
 	}
+	if change.EntityKind == "global_memory" {
+		for _, revision := range revisions {
+			if revision.Kind == usermemory.IndexKindGlobalMemoryVector && s.embedder == nil {
+				continue
+			}
+			record, recordErr := s.store.GlobalMemoryIndexRecordByID(ctx, change.EntityID)
+			if errors.Is(recordErr, sql.ErrNoRows) {
+				if err := s.store.DeleteGlobalMemoryIndexRecord(ctx, revision, change.EntityID); err != nil {
+					return err
+				}
+				continue
+			}
+			if recordErr != nil {
+				return recordErr
+			}
+			if err := s.writeCurrentGlobalMemory(ctx, revision, record); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, revision := range revisions {
 		record, recordErr := s.store.TranscriptIndexRecordByID(ctx, change.EntityID, change.UserID)
 		if errors.Is(recordErr, sql.ErrNoRows) {
@@ -362,6 +421,34 @@ func (s *Service) writeCurrentTranscript(ctx context.Context, revision usermemor
 			return err
 		}
 		record, err = s.store.TranscriptIndexRecordByID(ctx, record.ID, record.UserID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return usermemory.ErrStaleIndexRecord
+}
+
+func (s *Service) writeCurrentGlobalMemory(ctx context.Context, revision usermemory.DerivedIndexRevision, record usermemory.GlobalMemoryIndexRecord) error {
+	for attempt := 0; attempt < 3; attempt++ {
+		var vector []float64
+		if revision.Kind == usermemory.IndexKindGlobalMemoryVector {
+			var err error
+			vector, err = s.embed(ctx, revision.Model, record.Memory)
+			if err != nil {
+				return err
+			}
+			if len(vector) != revision.Dimension {
+				return fmt.Errorf("embedding dimension changed during build")
+			}
+		}
+		err := s.store.WriteGlobalMemoryIndexRecord(ctx, revision, record, vector)
+		if !errors.Is(err, usermemory.ErrStaleIndexRecord) {
+			return err
+		}
+		record, err = s.store.GlobalMemoryIndexRecordByID(ctx, record.ID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}

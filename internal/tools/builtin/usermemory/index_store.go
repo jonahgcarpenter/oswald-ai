@@ -12,12 +12,14 @@ import (
 
 // Derived index kinds persisted in derived_index_revisions.
 const (
-	IndexKindMemoryFTS     = "memory_fts"
-	IndexKindTranscriptFTS = "transcript_fts"
-	IndexKindMemoryVector  = "memory_vector"
+	IndexKindMemoryFTS          = "memory_fts"
+	IndexKindTranscriptFTS      = "transcript_fts"
+	IndexKindMemoryVector       = "memory_vector"
+	IndexKindGlobalMemoryFTS    = "global_memory_fts"
+	IndexKindGlobalMemoryVector = "global_memory_vector"
 )
 
-var generatedIndexTable = regexp.MustCompile(`^derived_index_(memory_fts|transcript_fts|memory_vector)_r[1-9][0-9]*$`)
+var generatedIndexTable = regexp.MustCompile(`^derived_index_(memory_fts|transcript_fts|memory_vector|global_memory_fts|global_memory_vector)_r[1-9][0-9]*$`)
 
 // ErrStaleIndexRecord reports that canonical state changed after an index
 // record was loaded. Callers should reload canonical state and retry.
@@ -49,6 +51,13 @@ type MemoryIndexRecord struct {
 	ID                                           int64
 	UserID, Scope, Category, Statement, Evidence string
 	Version                                      string
+}
+
+// GlobalMemoryIndexRecord is canonical content eligible for shared indexes.
+type GlobalMemoryIndexRecord struct {
+	ID      int64
+	Memory  string
+	Version string
 }
 
 // TranscriptIndexRecord is canonical content eligible for transcript search.
@@ -136,7 +145,7 @@ DROP TRIGGER IF EXISTS session_turns_fts_update;`); err != nil {
 }
 
 func providerForKind(kind string) string {
-	if kind == IndexKindMemoryVector {
+	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector {
 		return "llm_gateway"
 	}
 	return "sqlite_fts5"
@@ -171,10 +180,10 @@ func scanIndexRevision(row interface{ Scan(...any) error }) (DerivedIndexRevisio
 
 // CreateIndexRevision creates an empty internally named shadow table.
 func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model string, dimension int) (DerivedIndexRevision, error) {
-	if kind != IndexKindMemoryFTS && kind != IndexKindTranscriptFTS && kind != IndexKindMemoryVector {
+	if kind != IndexKindMemoryFTS && kind != IndexKindTranscriptFTS && kind != IndexKindMemoryVector && kind != IndexKindGlobalMemoryFTS && kind != IndexKindGlobalMemoryVector {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid derived index kind")
 	}
-	if kind == IndexKindMemoryVector && (provider != "llm_gateway" || strings.TrimSpace(model) == "" || dimension <= 0) {
+	if (kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector) && (provider != "llm_gateway" || strings.TrimSpace(model) == "" || dimension <= 0) {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid vector revision metadata")
 	}
 	tx, err := s.sql.BeginTx(ctx, nil)
@@ -195,12 +204,16 @@ func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model s
 		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(canonical_user_id, session_id, session_generation, user_text, assistant_text)`
 	} else if kind == IndexKindMemoryVector {
 		ddl = fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(canonical_user_id text, embedding_model text, canonical_version text, scope text, category text, embedding float[%d])`, table, dimension)
+	} else if kind == IndexKindGlobalMemoryFTS {
+		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(memory)`
+	} else if kind == IndexKindGlobalMemoryVector {
+		ddl = fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(embedding_model text, canonical_version text, embedding float[%d])`, table, dimension)
 	}
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return DerivedIndexRevision{}, fmt.Errorf("create derived index table: %w", err)
 	}
 	schemaVersion := 1
-	if kind == IndexKindMemoryVector {
+	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector {
 		schemaVersion = 2
 	}
 	now := formatTime(time.Now().UTC())
@@ -254,6 +267,27 @@ func (s *Store) ActiveMemoryIndexRecords(ctx context.Context, afterID int64, lim
 	return records, rows.Err()
 }
 
+// GlobalMemoryIndexRecords enumerates canonical shared memories.
+func (s *Store) GlobalMemoryIndexRecords(ctx context.Context, afterID int64, limit int) ([]GlobalMemoryIndexRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.sql.QueryContext(ctx, `SELECT id, memory, created_at FROM global_memories WHERE id > ? ORDER BY id LIMIT ?`, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []GlobalMemoryIndexRecord
+	for rows.Next() {
+		var record GlobalMemoryIndexRecord
+		if err := rows.Scan(&record.ID, &record.Memory, &record.Version); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 // DeliveredTranscriptIndexRecords enumerates delivered active-generation rows.
 func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int64, limit int) ([]TranscriptIndexRecord, error) {
 	if limit <= 0 {
@@ -279,6 +313,13 @@ func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int
 func (s *Store) MemoryIndexRecordByID(ctx context.Context, id int64, userID string) (MemoryIndexRecord, error) {
 	var record MemoryIndexRecord
 	err := s.sql.QueryRowContext(ctx, `SELECT entries.id, entries.canonical_user_id, entries.scope, entries.category, entries.statement, COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''), entries.updated_at FROM memory_entries entries WHERE entries.id = ? AND entries.canonical_user_id = ? AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?)`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.Scope, &record.Category, &record.Statement, &record.Evidence, &record.Version)
+	return record, err
+}
+
+// GlobalMemoryIndexRecordByID resolves current canonical shared content.
+func (s *Store) GlobalMemoryIndexRecordByID(ctx context.Context, id int64) (GlobalMemoryIndexRecord, error) {
+	var record GlobalMemoryIndexRecord
+	err := s.sql.QueryRowContext(ctx, `SELECT id, memory, created_at FROM global_memories WHERE id = ?`, id).Scan(&record.ID, &record.Memory, &record.Version)
 	return record, err
 }
 
@@ -386,6 +427,51 @@ func (s *Store) WriteTranscriptIndexRecord(ctx context.Context, revision Derived
 	return tx.Commit()
 }
 
+// WriteGlobalMemoryIndexRecord idempotently updates one shared-memory revision row.
+func (s *Store) WriteGlobalMemoryIndexRecord(ctx context.Context, revision DerivedIndexRevision, record GlobalMemoryIndexRecord, vector []float64) error {
+	if err := validateRevisionTable(revision.TableName); err != nil {
+		return err
+	}
+	if revision.Kind != IndexKindGlobalMemoryFTS && (revision.Kind != IndexKindGlobalMemoryVector || len(vector) != revision.Dimension) {
+		return fmt.Errorf("invalid global memory index write")
+	}
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // nolint:errcheck
+	var current GlobalMemoryIndexRecord
+	err = tx.QueryRowContext(ctx, `SELECT id, memory, created_at FROM global_memories WHERE id = ?`, record.ID).Scan(&current.ID, &current.Memory, &current.Version)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && current != record) {
+		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, record.ID); deleteErr != nil {
+			return deleteErr
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		return ErrStaleIndexRecord
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, record.ID); err != nil {
+		return err
+	}
+	if revision.Kind == IndexKindGlobalMemoryFTS {
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+revision.TableName+`(rowid, memory) VALUES (?, ?)`, record.ID, record.Memory)
+	} else {
+		serialized, serializeErr := serializeVector(vector)
+		if serializeErr != nil {
+			return serializeErr
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO `+revision.TableName+`(rowid, embedding_model, canonical_version, embedding) VALUES (?, ?, ?, ?)`, record.ID, revision.Model, record.Version, serialized)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // IndexRevisionNeedsRebuild reports whether the serving revision is unhealthy
 // or its physical table is missing.
 func (s *Store) IndexRevisionNeedsRebuild(ctx context.Context, kind string) (bool, error) {
@@ -420,11 +506,22 @@ func (s *Store) DeleteIndexRecord(ctx context.Context, revision DerivedIndexRevi
 	return err
 }
 
+// DeleteGlobalMemoryIndexRecord removes one shared row from a revision.
+func (s *Store) DeleteGlobalMemoryIndexRecord(ctx context.Context, revision DerivedIndexRevision, id int64) error {
+	if err := validateRevisionTable(revision.TableName); err != nil {
+		return err
+	}
+	_, err := s.sql.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, id)
+	return err
+}
+
 // WritableIndexRevisions returns live and building targets for a canonical kind.
 func (s *Store) WritableIndexRevisions(ctx context.Context, entityKind string) ([]DerivedIndexRevision, error) {
 	kinds := []string{IndexKindTranscriptFTS}
 	if entityKind == "memory" {
 		kinds = []string{IndexKindMemoryFTS, IndexKindMemoryVector}
+	} else if entityKind == "global_memory" {
+		kinds = []string{IndexKindGlobalMemoryFTS, IndexKindGlobalMemoryVector}
 	}
 	query := `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state IN ('live', 'building') AND index_kind IN (`
 	args := make([]any, 0, len(kinds))
@@ -464,10 +561,12 @@ func (s *Store) ClaimDerivedIndexChange(ctx context.Context, owner string, lease
 	}
 	defer tx.Rollback() // nolint:errcheck
 	var change DerivedIndexChange
-	err = tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, entity_kind, entity_id, operation, attempt_count FROM durable_jobs WHERE job_kind = 'derived_index' AND ((state IN ('queued', 'retry') AND available_at <= ?) OR (state = 'running' AND lease_until <= ?)) ORDER BY id LIMIT 1`, formatTime(now), formatTime(now)).Scan(&change.Sequence, &change.UserID, &change.EntityKind, &change.EntityID, &change.Operation, &change.AttemptCount)
+	var userID sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, entity_kind, entity_id, operation, attempt_count FROM durable_jobs WHERE job_kind = 'derived_index' AND ((state IN ('queued', 'retry') AND available_at <= ?) OR (state = 'running' AND lease_until <= ?)) ORDER BY id LIMIT 1`, formatTime(now), formatTime(now)).Scan(&change.Sequence, &userID, &change.EntityKind, &change.EntityID, &change.Operation, &change.AttemptCount)
 	if err != nil {
 		return DerivedIndexChange{}, err
 	}
+	change.UserID = userID.String
 	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'derived_index'`, owner, formatTime(now.Add(lease)), formatTime(now), change.Sequence)
 	if err != nil {
 		return DerivedIndexChange{}, err
@@ -508,7 +607,10 @@ SELECT 'derived_index', 'reconcile:memory:' || id || ':' || updated_at, canonica
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
 INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
 SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?
-ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
+SELECT 'derived_index', 'reconcile:global_memory:' || id || ':' || created_at, NULL, 'global_memory', id, 'upsert', ?, ?, ? FROM global_memories WHERE 1
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now, now, now, now)
 	return err
 }
 
@@ -527,7 +629,7 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 	if err := validateRevisionTable(revision.TableName); err != nil {
 		return DerivedIndexRevision{}, err
 	}
-	if revision.Kind == IndexKindMemoryVector {
+	if revision.Kind == IndexKindMemoryVector || revision.Kind == IndexKindGlobalMemoryVector {
 		var definition string
 		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, revision.TableName).Scan(&definition); err != nil {
 			return DerivedIndexRevision{}, err
@@ -538,17 +640,15 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 	}
 	expectedQuery, validJoin := canonicalValidationSQL(revision)
 	var expected, indexed, valid int64
-	if err := tx.QueryRowContext(ctx, expectedQuery, formatTime(time.Now().UTC())).Scan(&expected); err != nil {
+	nowText := formatTime(time.Now().UTC())
+	expectedArgs, validArgs := validationArgs(revision, nowText)
+	if err := tx.QueryRowContext(ctx, expectedQuery, expectedArgs...).Scan(&expected); err != nil {
 		return DerivedIndexRevision{}, err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+revision.TableName).Scan(&indexed); err != nil {
 		return DerivedIndexRevision{}, err
 	}
-	args := []any{formatTime(time.Now().UTC())}
-	if revision.Kind == IndexKindMemoryVector {
-		args = append(args, revision.Model)
-	}
-	if err := tx.QueryRowContext(ctx, validJoin, args...).Scan(&valid); err != nil {
+	if err := tx.QueryRowContext(ctx, validJoin, validArgs...).Scan(&valid); err != nil {
 		return DerivedIndexRevision{}, err
 	}
 	if expected != indexed || indexed != valid {
@@ -581,7 +681,29 @@ func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
 		expected = `SELECT COUNT(*) FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?`
 		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN session_turns turns ON turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ? AND idx.user_text = turns.user_text AND idx.assistant_text = turns.assistant_text`
 	}
+	if revision.Kind == IndexKindGlobalMemoryFTS {
+		expected = `SELECT COUNT(*) FROM global_memories`
+		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN global_memories memories ON memories.id = idx.rowid WHERE idx.memory = memories.memory`
+	}
+	if revision.Kind == IndexKindGlobalMemoryVector {
+		expected = `SELECT COUNT(*) FROM global_memories`
+		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN global_memories memories ON memories.id = idx.rowid WHERE idx.embedding_model = ? AND idx.canonical_version = memories.created_at`
+	}
 	return expected, valid
+}
+
+func validationArgs(revision DerivedIndexRevision, now string) ([]any, []any) {
+	if revision.Kind == IndexKindGlobalMemoryFTS {
+		return nil, nil
+	}
+	if revision.Kind == IndexKindGlobalMemoryVector {
+		return nil, []any{revision.Model}
+	}
+	valid := []any{now}
+	if revision.Kind == IndexKindMemoryVector {
+		valid = append(valid, revision.Model)
+	}
+	return []any{now}, valid
 }
 
 // FailIndexRevision records a failed shadow build without touching the live revision.
@@ -630,6 +752,12 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 		} else if revision.Kind == IndexKindTranscriptFTS {
 			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?) LIMIT ?)`
 			args = []any{nowText, batch}
+		} else if revision.Kind == IndexKindGlobalMemoryFTS {
+			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM global_memories memories WHERE memories.id = idx.rowid) LIMIT ?)`
+			args = []any{batch}
+		} else if revision.Kind == IndexKindGlobalMemoryVector {
+			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE idx.embedding_model != ? OR NOT EXISTS (SELECT 1 FROM global_memories memories WHERE memories.id = idx.rowid) LIMIT ?)`
+			args = []any{revision.Model, batch}
 		}
 		result, err := s.sql.ExecContext(ctx, deleteSQL, args...)
 		if err != nil {
@@ -644,7 +772,8 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 
 		expectedSQL, validSQL := canonicalValidationSQL(revision)
 		var expected, indexed, valid int64
-		if err := s.sql.QueryRowContext(ctx, expectedSQL, nowText).Scan(&expected); err != nil {
+		expectedArgs, validArgs := validationArgs(revision, nowText)
+		if err := s.sql.QueryRowContext(ctx, expectedSQL, expectedArgs...).Scan(&expected); err != nil {
 			return counts, err
 		}
 		if err := s.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+revision.TableName).Scan(&indexed); err != nil {
@@ -653,10 +782,6 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 			}
 			counts.RevisionsDegraded++
 			continue
-		}
-		validArgs := []any{nowText}
-		if revision.Kind == IndexKindMemoryVector {
-			validArgs = append(validArgs, revision.Model)
 		}
 		if err := s.sql.QueryRowContext(ctx, validSQL, validArgs...).Scan(&valid); err != nil {
 			if markErr := s.markLiveIndexUnhealthy(ctx, revision.ID, "physical_table_corrupt", nowText); markErr != nil {

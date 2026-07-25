@@ -64,6 +64,25 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 	}
 }
 
+func TestClaimGlobalDerivedIndexChangeAllowsNullCanonicalUser(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	ctx := context.Background()
+	if _, err := store.sql.Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('shared fact', 'key', datetime('now'))`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcileDerivedIndexChanges(ctx); err != nil {
+		t.Fatal(err)
+	}
+	change, err := store.ClaimDerivedIndexChange(ctx, "test", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.EntityKind != "global_memory" || change.UserID != "" || change.EntityID <= 0 {
+		t.Fatalf("global change=%+v", change)
+	}
+}
+
 func TestDeleteIndexRecordCannotCrossTenant(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))

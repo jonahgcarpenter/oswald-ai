@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -93,9 +92,8 @@ type ToolStreamUserMemoryPayload struct {
 
 // ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
 type ToolStreamGlobalMemoryPayload struct {
-	Action    string `json:"action,omitempty"`
-	Statement string `json:"statement,omitempty"`
-	Evidence  string `json:"evidence,omitempty"`
+	Action string `json:"action,omitempty"`
+	Query  string `json:"query,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -119,7 +117,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		switch toolName {
 		case toolnames.UserMemorySearch, toolnames.UserMemoryList:
 			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
-		case toolnames.GlobalMemorySave:
+		case toolnames.GlobalMemorySearch:
 			payload.GlobalMemory = globalMemoryStreamPayload(args)
 		}
 		return payload
@@ -172,12 +170,9 @@ func userMemoryToolAction(toolName string) string {
 }
 
 func globalMemoryStreamPayload(args map[string]interface{}) *ToolStreamGlobalMemoryPayload {
-	payload := &ToolStreamGlobalMemoryPayload{Action: "save"}
-	if statement, ok := args["statement"].(string); ok {
-		payload.Statement = strings.TrimSpace(statement)
-	}
-	if evidence, ok := args["evidence"].(string); ok {
-		payload.Evidence = strings.TrimSpace(evidence)
+	payload := &ToolStreamGlobalMemoryPayload{Action: "search"}
+	if query, ok := args["query"].(string); ok {
+		payload.Query = strings.TrimSpace(query)
 	}
 	return payload
 }
@@ -226,7 +221,6 @@ type Agent struct {
 	model                 string
 	soul                  *soul.Store
 	userMemory            *usermemory.Store
-	globalMemory          GlobalMemoryPromptProvider
 	maxToolFailureRetries int
 	requestTimeout        time.Duration
 	log                   *config.Logger
@@ -240,13 +234,8 @@ type MCPProvider interface {
 	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
 }
 
-// GlobalMemoryPromptProvider renders active global memory for the model prompt.
-type GlobalMemoryPromptProvider interface {
-	GlobalMemoryPrompt(context.Context) (string, error)
-}
-
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, global-memory prompt provider, prompt
+// soul store, SQLite user memory store, prompt
 // budget, tool failure retry budget, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
@@ -254,7 +243,6 @@ func NewAgent(
 	model string,
 	soul *soul.Store,
 	userMemory *usermemory.Store,
-	globalMemory GlobalMemoryPromptProvider,
 	budget promptbudget.ContextBudget,
 	maxToolFailureRetries int,
 	requestTimeout time.Duration,
@@ -273,7 +261,6 @@ func NewAgent(
 		model:                 model,
 		soul:                  soul,
 		userMemory:            userMemory,
-		globalMemory:          globalMemory,
 		maxToolFailureRetries: maxToolFailureRetries,
 		requestTimeout:        requestTimeout,
 		log:                   log,
@@ -521,14 +508,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 					config.F("status", "ok"),
 				)
 			}
-		}
-	}
-	if a.globalMemory != nil {
-		globalMemory, err := a.globalMemory.GlobalMemoryPrompt(ctx)
-		if err != nil {
-			reqLog.Warn("agent.global_memory.load_failed", "failed to load global memory", config.F("status", "degraded"), config.ErrorField(err))
-		} else if globalMemory != "" {
-			profileContent = strings.TrimSpace(globalMemory + "\n\n" + profileContent)
 		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
@@ -799,14 +778,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			} else {
 				consecutiveToolFailures = 0
 				toolContent = result.Content
-				if result.Scope == mcp.ScopeGlobal && !result.IsDiscovery {
-					arguments, _ := json.Marshal(tc.Function.Arguments)
-					toolExposure.RecordGlobalToolEvidence(requestctx.GlobalToolEvidence{
-						ToolCallID: toolCallID, ServerID: result.ServerID, ServerName: result.ServerName,
-						ToolName: result.ToolName, RemoteToolName: result.RemoteToolName,
-						ArgumentsJSON: string(arguments), Result: result.Content,
-					})
-				}
 				reqLog.Debug("agent.tool.success", "tool execution succeeded",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),

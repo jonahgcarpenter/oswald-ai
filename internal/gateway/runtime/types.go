@@ -22,14 +22,7 @@ type Dependencies struct {
 	Log          *config.Logger
 	Formation    FormationEnqueuer
 	Compaction   CompactionEnqueuer
-	GlobalMemory GlobalMemoryPublisher
 	PrivacyBus   *privacyruntime.Bus
-}
-
-// GlobalMemoryPublisher activates request-staged global facts after delivery.
-type GlobalMemoryPublisher interface {
-	PublishGlobalMemories(context.Context, string, string, int64) (int, error)
-	DiscardGlobalMemories(context.Context, string, string) error
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.

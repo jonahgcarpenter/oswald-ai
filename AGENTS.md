@@ -12,11 +12,11 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 - `user_memory_search`
 - `user_memory_list`
 - `session_transcript_search`
-- `global_memory_save`
+- `global_memory_search`
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Remote MCP tools are not filtered for read-only behavior.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/privacy`, `/client`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, and global MCP commands. Privacy operations are commands and are never exposed to the model as tools.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/privacy`, `/client`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Privacy and global-memory mutations are commands and are never exposed to the model as tools.
 
 Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -65,7 +65,7 @@ Current layers:
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Create the command service, including `/privacy`, `/client`, and `/bootstrap`
+11. Create the command service, including `/privacy`, `/client`, `/bootstrap`, and administrator global-memory management
 12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
 14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
@@ -181,7 +181,7 @@ Oswald keeps four distinct memory layers.
 | Layer                  | Storage                    | Purpose                                     | Mutable by agent |
 | ---------------------- | -------------------------- | ------------------------------------------- | ---------------- |
 | Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | No               |
-| Global memory          | SQLite `global_memory_claims` | Evidence-backed facts about Oswald shared across tenants | Yes |
+| Global memory          | SQLite `global_memories`   | Administrator-curated facts about Oswald shared across tenants | No |
 | Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart     | Yes              |
 | Session chat memory    | SQLite `session_turns`     | Conversation history for the active session | Implicitly       |
 
@@ -196,14 +196,13 @@ Oswald keeps four distinct memory layers.
 ### Global Memory
 
 - Global memory is factual lower-authority reference data, separate from soul policy and personality
-- A successful non-discovery tool call from any globally configured MCP server may become same-request evidence regardless of which tenant triggered it; user-scoped MCP results never qualify
-- `global_memory_save` is default-visible so authenticated administrators can cite direct statements; server-side checks otherwise require qualifying same-request global MCP evidence
-- A proposal must cite an exact normalized excerpt from either the identified same-request global MCP result or the current authenticated administrator's direct statement; the model judges whether the source concerns Oswald
-- Raw MCP results remain request-local. Canonical storage retains only selected evidence, SHA-256 argument/result digests, server/tool identity, confidence, claim identity, and non-user publication provenance
-- Claims remain staged until successful gateway delivery, then activate in place with the same stable claim ID. Failed delivery deletes the staged claim and evidence
-- Publication clears the initiating canonical user, request, session, and turn identifiers. Account deletion also discards any still-staged proposals before removing the account
-- Active facts are read fresh and injected for every tenant under an explicitly lower-authority block that cannot grant authorization, expose tools, or override policy
-- All globally configured MCP servers are part of this trust boundary. A malicious or irrelevant global result can still produce factual contamination because deployment relevance is model-judged; evidence provenance and claim supersession make such state inspectable and correctable but do not prove truth
+- Canonical rows live in the administrator-curated `global_memories` table; global memory is never learned automatically from MCP results, user prompts, or model tool calls
+- Administrators manage the store with `/global-memory add <memory text>`, `/global-memory list [page]`, and `/global-memory forget <id>`
+- Add stores the normalized memory text and rejects an exact normalized duplicate. Forget hard-deletes the canonical row and enqueues deletion from derived indexes; there is no staged, evidence-evolving, supersession, or post-delivery publication lifecycle
+- `global_memory_search` is the sole model-visible global-memory tool and requires a valid authenticated tenant principal. There are no model-visible global-memory add, save, list, or forget tools
+- Global memory is not injected into prompts automatically. The model calls `global_memory_search` when a request concerns Oswald's implementation, hardware, deployment, version, architecture, configuration, capabilities, or similar deployment facts
+- Search hybrid-ranks lexical FTS5 and semantic sqlite-vec results. Either channel may degrade independently; if neither derived channel is available, a bounded scan of canonical `global_memories` provides fallback results
+- Semantic retrieval is enabled only when `LLM_GATEWAY_EMBEDDING_MODEL` is configured. Without it, lexical retrieval and bounded canonical fallback remain available
 
 ### Persistent User Memory
 
@@ -239,8 +238,9 @@ Oswald keeps four distinct memory layers.
 
 ### Canonical and Derived State
 
-- Canonical account, memory, profile, candidate, audit, session, summary, job, privacy, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
-- FTS5 memory/transcript tables and sqlite-vec memory tables are rebuildable derived revisions; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
+- Canonical account, global-memory, user-memory, profile, candidate, audit, session, summary, job, privacy, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
+- FTS5 and sqlite-vec tables are rebuildable derived revisions. Index kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
+- Global-memory outbox rows use `entity_kind = 'global_memory'` and a `NULL` canonical user because the records are shared. Private memory and transcript outbox rows require a canonical user and remain tenant-fenced throughout indexing and retrieval
 - Startup bootstraps valid legacy index tables as revision one, removes legacy synchronization triggers, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
 - Canonical writes enqueue outbox changes transactionally. The serialized worker applies each change to all matching live and building revisions and retries stale canonical reads, leases, provider failures, and failed changes without weakening tenant predicates
 - Rebuilds create an internally named shadow table with kind, provider, model, dimension, schema version, and monotonically increasing revision metadata
@@ -499,8 +499,8 @@ Current builtin tools:
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
 - `session_transcript_search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
-- `global_memory_save` — stage an exact evidence-backed global fact from a successful global MCP result, or from the current authenticated administrator's direct statement
-An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable recall are injected automatically. Exact older details remain available through `session_transcript_search`; deeper durable retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
+- `global_memory_search` — search administrator-curated facts about Oswald for the authenticated tenant
+An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable user recall are injected automatically. Global memory is not automatically injected; the model calls `global_memory_search` for Oswald implementation, hardware, deployment, version, architecture, configuration, capability, and similar questions. Exact older session details remain available through `session_transcript_search`; deeper durable user retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
 Optional external tools:
@@ -509,8 +509,6 @@ Optional external tools:
 - MCP server configuration is optional, but the subsystem is initialized unconditionally and `MCP_CONFIG_ENCRYPTION_KEY` is required at startup
 - MCP-discovered tools are not included in the default LLM tool list; `<server>.tools` exposes returned matches for the current request, and eligible successful recent tools may be pre-exposed for continuity
 - Global MCP servers are visible to all users; user MCP servers are visible only to their owning canonical user
-- `global_memory_save` is default-visible. Successful global MCP results are eligible evidence for every authenticated user; an omitted tool-call ID is accepted only for exact current-message evidence from an authenticated administrator. Discovery results, user MCP results, and ordinary user text are ineligible
-- The final global-memory family reserves `global_memory_search`, `global_memory_list`, and `global_memory_forget`; they are not advertised until #84 supplies handlers and schemas
 
 ### Tool Registry
 
@@ -551,7 +549,7 @@ Notes:
 - `LLM_GATEWAY_VIRTUAL_KEY` can pass an optional gateway routing key when supported by the configured gateway
 - `MODEL_*` environment overrides take precedence over discovered model metadata and package defaults for prompt budgeting
 - `/v1/chat/completions` is used for normal requests, tool calling, and streaming
-- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic user-memory retrieval
+- `/v1/embeddings` is used when `LLM_GATEWAY_EMBEDDING_MODEL` is set for semantic user-memory and global-memory retrieval
 - The client maps between internal app types and the gateway's OpenAI-compatible wire format
 - Streaming responses accumulate both `thinking` and visible content
 - Current-turn images are sent to the LLM gateway as OpenAI-compatible image URL content blocks when provided by a gateway
@@ -887,7 +885,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - The gateway interface has no graceful stop method; gateway listeners remain active until process exit after worker shutdown begins
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Only six builtin model tools ship locally; `global_memory_save` is default-visible but enforces trusted global MCP or authenticated-administrator evidence server-side, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Only six builtin model tools ship locally; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
 - Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication

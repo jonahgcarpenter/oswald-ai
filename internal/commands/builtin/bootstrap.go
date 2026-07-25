@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	clientauthcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/clientauth"
+	globalmemorycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/globalmemory"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
 	privacycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/privacy"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
@@ -15,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	privacyservice "github.com/jonahgcarpenter/oswald-ai/internal/privacy"
+	globalmemorystore "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -48,6 +50,11 @@ func NewServiceWithPrivacy(users *accountlinking.Service, memory *usermemory.Sto
 
 // NewServiceWithPrivacyAndClientAuth creates the full command service.
 func NewServiceWithPrivacyAndClientAuth(users *accountlinking.Service, memory *usermemory.Store, privacyDeps PrivacyDeps, clientAuth ClientAuthDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	return NewServiceWithGlobalMemory(users, memory, nil, privacyDeps, clientAuth, optionalMCP...)
+}
+
+// NewServiceWithGlobalMemory creates the full command service including global-memory administration.
+func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemory.Store, globalMemory *globalmemorystore.Store, privacyDeps PrivacyDeps, clientAuth ClientAuthDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
 	if memory == nil {
 		return nil, fmt.Errorf("user memory store is required for built-in commands")
 	}
@@ -74,6 +81,9 @@ func NewServiceWithPrivacyAndClientAuth(users *accountlinking.Service, memory *u
 	}
 	for _, handler := range usermanagement.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler, Middleware: []commands.Middleware{commands.RequireAdmin(users)}})
+	}
+	if globalMemory != nil {
+		registrations = append(registrations, commands.Command{Handler: globalmemorycommands.New(globalMemory, privacyDeps.Logger), Middleware: []commands.Middleware{commands.RequireAdmin(users)}})
 	}
 	service, err := commands.NewServiceWithCommands(registrations...)
 	if err != nil {

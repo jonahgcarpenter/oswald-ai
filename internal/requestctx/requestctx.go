@@ -16,23 +16,9 @@ const (
 	toolExposeKey  contextKey = "tool_exposer"
 )
 
-// GlobalToolEvidence is one successful global MCP result available only during
-// the request that executed it.
-type GlobalToolEvidence struct {
-	ToolCallID     string
-	ServerID       string
-	ServerName     string
-	ToolName       string
-	RemoteToolName string
-	ArgumentsJSON  string
-	Result         string
-}
-
 // ToolExposer records tools that should become visible for the active request.
 type ToolExposer interface {
 	ExposeTools(names []string)
-	RecordGlobalToolEvidence(evidence GlobalToolEvidence)
-	GlobalToolEvidence(toolCallID string) (GlobalToolEvidence, bool)
 }
 
 // Metadata carries request-scoped fields needed by tools and provider logging.

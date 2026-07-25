@@ -94,7 +94,7 @@ func main() {
 	defer userMemStore.Close() // nolint:errcheck
 	userMemStore.SetRetentionPolicy(cfg.RetentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", config.DefaultAccountLinkPath))
-	globalMemStore, err := globalmemory.NewStore(config.DefaultAccountLinkPath, rootLog.Server("memory.global"))
+	globalMemStore, err := globalmemory.NewStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.global"))
 	if err != nil {
 		log.Fatal("app.memory_global.init_failed", "failed to initialize global memory store", config.ErrorField(err))
 	}
@@ -129,17 +129,17 @@ func main() {
 	if bootstrap != nil {
 		fmt.Fprintf(os.Stdout, "\nOswald first-run administrator bootstrap\n\nWebSocket access token (expires %s):\n%s\n\n1. Connect to ws://localhost:%s/ws with Authorization: Bearer <token>.\n2. On the permanent client, request a device code with POST /auth/device.\n3. From this bootstrap connection, run /bootstrap admin <code> <display_name>.\n4. Poll POST /auth/token on the permanent client, then connect with its access token.\n5. After the permanent administrator connects, delete temporary user %s with /deleteuser %s.\n\n", bootstrap.ExpiresAt.Format(time.RFC3339), bootstrap.AccessToken, cfg.Port, bootstrap.DefaultUserID, bootstrap.DefaultUserID)
 	}
-	indexService := indexruntime.NewService(userMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
+	indexService := indexruntime.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	indexService.Start(context.Background())
 	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	commandService, err := commandbuiltin.NewServiceWithPrivacyAndClientAuth(accountLinkService, userMemStore, commandbuiltin.PrivacyDeps{Policy: cfg.RetentionPolicy, Logger: rootLog.Server("privacy")}, commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, commandbuiltin.PrivacyDeps{Policy: cfg.RetentionPolicy, Logger: rootLog.Server("privacy")}, commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, accountLinkService, rootLog)
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, rootLog)
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
@@ -160,13 +160,12 @@ func main() {
 
 	privacyBus := privacyruntime.NewBus()
 	runtimeDeps := gatewayruntime.Dependencies{
-		Commands:     commandService,
-		Access:       accountLinkService,
-		Log:          rootLog,
-		Formation:    formationService,
-		Compaction:   compactionService,
-		GlobalMemory: globalMemStore,
-		PrivacyBus:   privacyBus,
+		Commands:   commandService,
+		Access:     accountLinkService,
+		Log:        rootLog,
+		Formation:  formationService,
+		Compaction: compactionService,
+		PrivacyBus: privacyBus,
 	}
 	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, webSocketAuth, runtimeDeps, rootLog)
 	if err != nil {
@@ -181,7 +180,6 @@ func main() {
 		cfg.LLMGatewayModel,
 		soulStore,
 		userMemStore,
-		globalMemStore,
 		budget,
 		cfg.MaxToolFailureRetries,
 		agentRequestTimeout,

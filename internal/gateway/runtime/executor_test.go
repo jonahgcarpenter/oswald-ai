@@ -217,31 +217,6 @@ func TestExecuteEnqueuesFormationOnlyAfterResponseDelivery(t *testing.T) {
 	}
 }
 
-func TestExecutePublishesGlobalMemoryOnlyAfterSuccessfulDelivery(t *testing.T) {
-	log := config.NewLogger(config.LevelError)
-	processor := responseRuntimeProcessor{response: &agent.AgentResponse{Model: "model", Response: "answer", SourceTurnID: 77}}
-	b := broker.NewBroker(processor, 1, log)
-	b.Start()
-	defer b.Shutdown()
-	responder := &fakeResponder{}
-	publisher := &fakeGlobalMemoryPublisher{responder: responder}
-	deps := Dependencies{Broker: b, Log: log, GlobalMemory: publisher}
-	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if !publisher.called || !publisher.responseDelivered || publisher.requestID != "req" || publisher.turnID != 77 {
-		t.Fatalf("publisher=%+v", publisher)
-	}
-	responder = &fakeResponder{sendErr: errors.New("offline")}
-	publisher = &fakeGlobalMemoryPublisher{responder: responder}
-	deps.GlobalMemory = publisher
-	Execute(Request{RequestID: "failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if publisher.called {
-		t.Fatal("global memory published after failed delivery")
-	}
-	if !publisher.discarded {
-		t.Fatal("undelivered global memory was not discarded")
-	}
-}
-
 func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	processor := responseRuntimeProcessor{response: &agent.AgentResponse{Model: "model", Response: "answer", SourceTurnID: 77, SessionGeneration: 3}}
@@ -491,29 +466,6 @@ type fakeCompactionEnqueuer struct {
 	source            usermemory.FormationSource
 }
 
-type fakeGlobalMemoryPublisher struct {
-	responder         *fakeResponder
-	called            bool
-	responseDelivered bool
-	userID            string
-	requestID         string
-	turnID            int64
-	discarded         bool
-}
-
-func (f *fakeGlobalMemoryPublisher) DiscardGlobalMemories(_ context.Context, userID, requestID string) error {
-	f.discarded = true
-	f.userID, f.requestID = userID, requestID
-	return nil
-}
-
-func (f *fakeGlobalMemoryPublisher) PublishGlobalMemories(_ context.Context, userID, requestID string, turnID int64) (int, error) {
-	f.called = true
-	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
-	f.userID, f.requestID, f.turnID = userID, requestID, turnID
-	return 1, nil
-}
-
 func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source usermemory.FormationSource) error {
 	f.enqueueCalled = true
 	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
@@ -590,7 +542,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	}
 	db.Close() // nolint:errcheck
 	memory := usermemory.NewStore(dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, nil, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService(pingHandler{})
