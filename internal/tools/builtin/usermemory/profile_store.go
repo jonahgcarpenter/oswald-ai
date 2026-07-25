@@ -203,8 +203,9 @@ func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.T
 		return SessionProfile{}, nil, fmt.Errorf("read tenant profile intro: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, category, statement, scope, status, profile_approved != 0, confidence, importance, expires_at, provenance_type, source_authority
-FROM memory_entries WHERE canonical_user_id = ? AND approval_state = 'approved'`, userID)
+SELECT id, category, statement, scope, status, provenance_type != 'model_inference', confidence, importance, expires_at, provenance_type,
+	CASE provenance_type WHEN 'user_statement' THEN 'user_direct' WHEN 'model_inference' THEN 'model' ELSE 'unknown' END
+FROM memory_entries WHERE canonical_user_id = ?`, userID)
 	if err != nil {
 		return SessionProfile{}, nil, fmt.Errorf("read tenant profile candidates: %w", err)
 	}

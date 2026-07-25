@@ -28,6 +28,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -66,8 +67,8 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 }
 
 func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
-	userPayload := toolStreamPayload(toolnames.UserMemorySave, map[string]interface{}{"statement": "The user prefers concise replies.", "evidence": "I prefer concise replies"}, "accepted", time.Millisecond, false)
-	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "save" || userPayload.GlobalMemory != nil {
+	userPayload := toolStreamPayload(toolnames.UserMemorySearch, map[string]interface{}{"query": "reply style"}, "No memories found.", time.Millisecond, false)
+	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "search" || userPayload.GlobalMemory != nil {
 		t.Fatalf("unexpected user memory payload: %+v", userPayload)
 	}
 	globalPayload := toolStreamPayload(toolnames.GlobalMemorySave, map[string]interface{}{"statement": "Oswald is written in Go.", "evidence": "language: Go"}, "accepted", time.Millisecond, false)
@@ -140,6 +141,29 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}
 	if len(turns) != 1 || strings.Join(turns[0].ToolNames, ",") != "test.lookup" {
 		t.Fatalf("successful tool annotation was not persisted: %+v", turns)
+	}
+}
+
+func TestProcessOffersRetrievalOnlyUserMemoryToolsAndGlobalSave(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := builtin.Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	if _, err := processAgent(agent, "retrieval-only", "websocket", "session", "user-1", "Display", "hello", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	request := primaryRequests(chat.requests)[0]
+	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySave} {
+		if !requestHasTool(request, name) {
+			t.Fatalf("expected tool missing from primary request: %s", name)
+		}
 	}
 }
 
@@ -571,9 +595,9 @@ func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 	if strings.Contains(messages[0].Content, "memory confirmation") || strings.Contains(messages[len(messages)-1].Content, "pending_memory_confirmation") || strings.Contains(messages[len(messages)-1].Content, "555-0100") {
 		t.Fatalf("pending confirmation was injected: %+v", messages)
 	}
-	unconfirmed, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || unconfirmed.PublishedMemoryID != 0 {
-		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unconfirmed, err)
+	unchanged, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || unchanged.PublicationStatus != "published" || unchanged.PublishedMemoryID != candidate.PublishedMemoryID {
+		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unchanged, err)
 	}
 }
 

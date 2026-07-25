@@ -258,7 +258,7 @@ func TestCanonicalSaveApprovesPreviouslyUnapprovedMemory(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
 	now := formatTime(time.Now())
-	if _, err := store.sql.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, created_at, updated_at, profile_approved) VALUES ('user', 'long_term', 'identity', 'The user is Ada.', 'the user is ada.', 'candidate', 1, 5, 'active', ?, ?, 0)`, now, now); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, provenance_type, claim_slot, claim_value) VALUES ('user', 'long_term', 'identity', 'The user is Ada.', 1, 5, 'active', ?, ?, 'model_inference', 'identity.name', 'ada')`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	before, err := store.ResolveSessionProfile(context.Background(), "user", "before", time.Hour)

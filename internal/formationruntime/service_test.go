@@ -2,6 +2,7 @@ package formationruntime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -11,29 +12,57 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 type fakeExtractor struct {
-	candidates []ExtractedCandidate
+	candidates []usermemory.MemorySaveItem
 	err        error
 	calls      int
 }
 
-func (f *fakeExtractor) Extract(context.Context, usermemory.StoredSessionTurn) ([]ExtractedCandidate, error) {
+type unavailableLowPriorityGate struct{}
+
+func (unavailableLowPriorityGate) TryAcquireLowPriority(context.Context) (context.Context, func(), bool) {
+	return nil, nil, false
+}
+
+type canceledLowPriorityGate struct{}
+
+func (canceledLowPriorityGate) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
+	ctx, cancel := context.WithCancel(parent)
+	cancel()
+	return ctx, func() {}, true
+}
+
+func TestFormationJobLeaseCoversProviderTimeout(t *testing.T) {
+	if formationJobLease < 5*time.Minute {
+		t.Fatalf("formation lease=%s want at least 5m", formationJobLease)
+	}
+}
+
+func TestFormationJobLeaseExtendsLongProviderTimeout(t *testing.T) {
+	service := NewService(nil, nil, "model", config.NewLogger(config.LevelError), 12*time.Minute)
+	if service.jobLease != 12*time.Minute+30*time.Second {
+		t.Fatalf("job lease=%s", service.jobLease)
+	}
+}
+
+func (f *fakeExtractor) Extract(context.Context, usermemory.StoredSessionTurn) (usermemory.MemorySaveBatch, error) {
 	f.calls++
-	return f.candidates, f.err
+	return usermemory.MemorySaveBatch{Memories: f.candidates}, f.err
 }
 
 func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "I use Go for project Atlas")
-	extractor := &fakeExtractor{candidates: []ExtractedCandidate{{
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user uses Go for project Atlas.", Evidence: "I use Go for project Atlas",
 		Scope: "long_term", Category: "projects", Context: "direct_assertion",
 		Provenance: "user_statement", Sensitivity: "low", Confidence: 0.95, Importance: 4,
+		ClaimSlot: "project.atlas_language", ClaimValue: "go",
 	}}}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	source := usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}
@@ -71,10 +100,11 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 func TestServicePublishesPartialDirectNameIntoNewSessionProfile(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "Before we continue, my name is Ada. What should we build?")
-	extractor := &fakeExtractor{candidates: []ExtractedCandidate{{
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user's name is Ada.", Evidence: "my name is Ada.",
 		Scope: "long_term", Category: "identity", Context: "direct_assertion",
 		Provenance: "user_statement", Sensitivity: "identity_or_contact", Confidence: 0.95, Importance: 1,
+		ClaimSlot: "identity.name", ClaimValue: "ada",
 	}}}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	_, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "name", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -93,17 +123,43 @@ func TestServicePublishesPartialDirectNameIntoNewSessionProfile(t *testing.T) {
 		t.Fatalf("identity memories=%+v err=%v", memories, err)
 	}
 	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "new-session", time.Hour)
-	if err != nil || !strings.Contains(profile.Content, "my name is Ada") {
+	if err != nil || !strings.Contains(profile.Content, "The user's name is Ada.") {
 		t.Fatalf("profile=%q err=%v", profile.Content, err)
+	}
+}
+
+func TestServicePublishesIndependentFactsFromLongTurn(t *testing.T) {
+	store := formationTestStore(t)
+	text := "My name is Ada. I use Fedora on my workstation. I prefer concise replies."
+	turnID := formationTestTurn(t, store, text)
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{
+		{Statement: "The user's name is Ada.", Evidence: "My name is Ada.", Scope: "long_term", Category: "identity", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "identity_or_contact", Confidence: 0.95, Importance: 3, ClaimSlot: "identity.name", ClaimValue: "Ada"},
+		{Statement: "The user uses Fedora on their workstation.", Evidence: "I use Fedora on my workstation.", Scope: "long_term", Category: "environment", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.95, Importance: 4, ClaimSlot: "environment.workstation_os", ClaimValue: "Fedora"},
+		{Statement: "The user prefers concise replies.", Evidence: "I prefer concise replies.", Scope: "long_term", Category: "communication_preferences", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4, ClaimSlot: "communication.reply_style", ClaimValue: "concise"},
+	}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	if _, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "long", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 3 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 }
 
 func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 	store := formationTestStore(t)
-	text := "what is the best pacman package for file management?"
+	text := "Considering pacman packages for file management."
 	turnID := formationTestTurn(t, store, text)
-	extractor := &fakeExtractor{candidates: []ExtractedCandidate{{
-		Statement: "The user may use or be evaluating a pacman-based Linux environment.", Evidence: text,
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
+		Statement: "The user may use or be evaluating a pacman-based Arch-family Linux environment.", Evidence: text,
 		Scope: "long_term", Category: "environment", Context: "direct_assertion",
 		Provenance: "model_inference", Sensitivity: "low", Confidence: 0.55, Importance: 3,
 		ClaimSlot: "environment.linux_distribution", ClaimValue: "arch_family",
@@ -125,8 +181,63 @@ func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 	memory := memories[0]
-	if memory.Confidence != 0.55 || memory.ProvenanceType != "model_inference" || memory.SourceAuthority != "model" || memory.ClaimKey != "environment.linux_distribution=arch_family" || memory.EvidenceCount != 1 {
+	if memory.Confidence != 0.55 || memory.ProvenanceType != "model_inference" || memory.SourceAuthority != "model" || memory.ClaimSlot != "environment.linux_distribution" || memory.ClaimValue != "arch_family" || memory.EvidenceCount != 1 {
 		t.Fatalf("uncertain memory=%+v", memory)
+	}
+}
+
+func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
+	store := formationTestStore(t)
+	activeOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "I prefer tea.", Statement: "The user prefers tea.", Evidence: "I prefer tea.",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAutomaticExtraction,
+		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences,
+		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
+		ClaimSlot: "preference.drink", ClaimValue: "tea",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeCandidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: activeOutput, IdempotencyKey: "active-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activeCandidate.PublicationStatus != "published" || activeCandidate.PublishedMemoryID == 0 {
+		t.Fatalf("active candidate was not atomically published: %+v", activeCandidate)
+	}
+
+	turnID := formationTestTurn(t, store, "I prefer coffee.")
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
+		Statement: "The user prefers coffee.", Evidence: "I prefer coffee.", Scope: "long_term",
+		Category: "durable_preferences", Context: "direct_assertion", Provenance: "user_statement",
+		Sensitivity: "low", Confidence: 0.9, Importance: 4,
+		ClaimSlot: "preference.drink", ClaimValue: "coffee",
+	}}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "blocked", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "succeeded" || extractor.calls != 1 {
+		t.Fatalf("state=%q extractor_calls=%d err=%v", state, extractor.calls, err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 1 || memories[0].ClaimValue != "tea" {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+	page, err := store.InspectPrivacy(context.Background(), "user-1", "candidates", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundBlocked := false
+	for _, item := range page.Items {
+		foundBlocked = foundBlocked || item.State == "approved/blocked_conflict"
+	}
+	if !foundBlocked {
+		t.Fatalf("blocked candidate missing from lifecycle inspection: %+v", page.Items)
 	}
 }
 
@@ -158,65 +269,42 @@ func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 	}
 }
 
-func TestServicePublishesExplicitToolCandidateAfterTurnPersistence(t *testing.T) {
+func TestServiceDefersExtractionWhileForegroundWorkIsBusy(t *testing.T) {
 	store := formationTestStore(t)
-	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
-		SourceUserText: "Remember that I prefer tea", Statement: "The user prefers tea.", Evidence: "I prefer tea",
-		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
-		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeExplicitRemember,
-		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences,
-		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
-	})
+	turnID := formationTestTurn(t, store, "I use Go")
+	extractor := &fakeExtractor{}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(unavailableLowPriorityGate{})
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "busy", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "explicit", Source: usermemory.FormationSource{RequestID: "req", SessionID: "session", ToolName: toolnames.UserMemorySave}})
-	if err != nil {
-		t.Fatal(err)
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "retry" || extractor.calls != 0 {
+		t.Fatalf("state=%q calls=%d err=%v", state, extractor.calls, err)
 	}
-	turnID := formationTestTurn(t, store, "Remember that I prefer tea")
-	_, err = store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
-	if err != nil {
+}
+
+func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "I use Go")
+	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{Statement: "The user uses Go.", Evidence: "I use Go", Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4, ClaimSlot: "project.language", ClaimValue: "Go"}}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(canceledLowPriorityGate{})
+	if _, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "preempt", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError))
-	if err := service.process(context.Background(), job); err != nil {
-		t.Fatal(err)
+	if err := service.process(context.Background(), job); !errors.Is(err, errBackgroundPreempted) {
+		t.Fatalf("process error=%v", err)
 	}
-	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.SourceTurnID != turnID || loaded.PublishedMemoryID == 0 {
-		t.Fatalf("explicit candidate=%+v err=%v", loaded, err)
-	}
-}
-
-func TestLLMExtractorParsesStrictJSON(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user uses Go.","evidence":"I use Go","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes_statement":"","claim_slot":"projects.language","claim_value":"go"}]}`}
-	extractor := NewLLMExtractor(client, "model")
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got) != 1 || got[0].Evidence != "I use Go" || got[0].ClaimSlot != "projects.language" {
-		t.Fatalf("extracted=%+v err=%v", got, err)
-	}
-	if client.request.Format != "json" {
-		t.Fatalf("request format = %q, want json", client.request.Format)
-	}
-	prompt := client.request.Messages[0].Content
-	for _, required := range []string{"smallest complete span", "part of a longer user prompt", "Inference evidence must be the complete user turn", "identity facts, including names, must have importance at least 3", `"I am your creator" is about the user`} {
-		if !strings.Contains(prompt, required) {
-			t.Fatalf("extractor policy prompt missing %q", required)
-		}
-	}
-}
-
-func TestLLMExtractorDiscardsMalformedCandidateWithoutFailingArtifact(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
-	extractor := NewLLMExtractor(client, "model")
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "You actually are on v3.2.0 not 1.0"})
-	if err != nil || len(got) != 0 || client.calls != 1 {
-		t.Fatalf("extracted=%+v calls=%d err=%v", got, client.calls, err)
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("preempted memories=%+v err=%v", memories, err)
 	}
 }
 
@@ -224,7 +312,7 @@ func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
-	service := NewService(store, NewLLMExtractor(client, "model"), "model", config.NewLogger(config.LevelError))
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
 	if err != nil {
 		t.Fatal(err)
@@ -240,20 +328,55 @@ func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestLLMExtractorPreservesValidCandidatesBesideMalformedCandidates(t *testing.T) {
-	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"bad","evidence":"bad","importance":0.4},{"statement":"The user uses Go.","evidence":"I use Go","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes_statement":""}]}`}
-	extractor := NewLLMExtractor(client, "model")
-	got, err := extractor.Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got) != 1 || got[0].Statement != "The user uses Go." {
-		t.Fatalf("extracted=%+v err=%v", got, err)
+func TestServiceDoesNotRetryPolicyRejectedCandidate(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "My name is Jonah")
+	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user's name is Jonah.","evidence":"My name is Jonah","scope":"long_term","category":"identity","context":"direct_assertion","provenance":"user_statement","sensitivity":"identity_or_contact","confidence":1,"importance":3,"ttl_days":0,"supersedes_statement":"","claim_slot":"identity_name","claim_value":"jonah"}]}`}
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "rejected", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "succeeded" || client.calls != 1 {
+		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 }
 
-func TestServiceSkipsPermanentExtractionFailureWithoutRetry(t *testing.T) {
+func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandidate(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "I use Go.")
+	source := usermemory.FormationSource{RequestID: "mixed-artifact", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}
+	if _, err := store.EnqueueFormationJob(context.Background(), source, "user-1"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := `{"memories":[{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"claim_slot":"project.language","claim_value":"go"}]}`
+	if err := store.SaveFormationJobArtifact(context.Background(), job, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewService(store, nil, "model", config.NewLogger(config.LevelError)).process(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 1 || memories[0].ClaimSlot != "project.language" || memories[0].ClaimValue != "go" || memories[0].EvidenceCount != 1 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+}
+
+func TestServiceSkipsMalformedOuterArgumentsWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "Nothing to retain")
 	client := &fakeExtractionChatter{content: `[{"statement":"wrong top-level shape"}]`}
-	service := NewService(store, NewLLMExtractor(client, "model"), "model", config.NewLogger(config.LevelError))
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
 	if err != nil {
 		t.Fatal(err)
@@ -262,22 +385,6 @@ func TestServiceSkipsPermanentExtractionFailureWithoutRetry(t *testing.T) {
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
 	if err != nil || state != "skipped" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
-	}
-}
-
-func TestLLMExtractorRejectsPermanentProviderRequestError(t *testing.T) {
-	client := &fakeExtractionChatter{err: &llm.ChatHTTPError{StatusCode: 400, Body: "unsupported response format"}}
-	_, err := NewLLMExtractor(client, "model").Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if !errors.Is(err, errPermanentExtraction) {
-		t.Fatalf("error = %v, want permanent extraction failure", err)
-	}
-}
-
-func TestLLMExtractorLeavesTransientProviderErrorRetryable(t *testing.T) {
-	client := &fakeExtractionChatter{err: &llm.ChatHTTPError{StatusCode: 503, Body: "unavailable"}}
-	_, err := NewLLMExtractor(client, "model").Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err == nil || errors.Is(err, errPermanentExtraction) || errorCode(err) != "transient_provider" {
-		t.Fatalf("error = %v, code = %q", err, errorCode(err))
 	}
 }
 
@@ -294,7 +401,33 @@ func (f *fakeExtractionChatter) Chat(_ context.Context, request llm.ChatRequest,
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: f.content}}, nil
+	arguments := map[string]interface{}{}
+	var artifact map[string]interface{}
+	if err := json.Unmarshal([]byte(f.content), &artifact); err != nil {
+		arguments["_raw"] = f.content
+	} else if candidates, ok := artifact["candidates"].([]interface{}); ok {
+		for _, raw := range candidates {
+			if candidate, ok := raw.(map[string]interface{}); ok {
+				if value, exists := candidate["supersedes_statement"]; exists {
+					candidate["supersedes"] = value
+					delete(candidate, "supersedes_statement")
+				}
+			}
+		}
+		arguments["memories"] = candidates
+	} else {
+		arguments = artifact
+	}
+	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: "user_memory_save", Arguments: arguments}}}}}, nil
+}
+
+func newTestLLMExtractor(t *testing.T, client llm.Chatter) *memoryextractor.LLMExtractor {
+	t.Helper()
+	extractor, err := memoryextractor.NewLLMExtractor(client, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return extractor
 }
 
 func formationTestStore(t *testing.T) *usermemory.Store {

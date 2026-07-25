@@ -152,11 +152,11 @@ func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, cate
 	}
 	table := revision.TableName
 	query := `
-SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
-	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
+SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, ` + table + `.evidence,
+	e.confidence, e.importance, e.status, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
-	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity,
-	e.claim_key, e.claim_slot, e.claim_value, e.evidence_count,
+	e.provenance_type, e.sensitivity,
+	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id),
 	bm25(` + table + `, 0.0, 1.0, 0.5)
 FROM ` + table + `
 JOIN memory_entries e ON e.id = ` + table + `.rowid
@@ -164,7 +164,6 @@ WHERE ` + table + ` MATCH ?
 	AND ` + table + `.canonical_user_id = ?
 	AND e.canonical_user_id = ?
 	AND e.status = 'active'
-	AND e.approval_state = 'approved'
 	AND (e.expires_at IS NULL OR e.expires_at > ?)`
 	args := []any{match, userID, userID, formatTime(time.Now().UTC())}
 	if scope != "" {
@@ -214,17 +213,16 @@ func (s *Store) semanticRecallCandidates(ctx context.Context, revision DerivedIn
 		return nil, err
 	}
 	query := `
-SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, e.evidence,
-	e.confidence, e.importance, e.status, e.source_session_id, e.created_at,
+SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
+	e.confidence, e.importance, e.status, e.created_at,
 	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
-	e.embedding_model, e.embedding_dim, e.provenance_type, e.source_authority, e.approval_state, e.sensitivity,
-	e.claim_key, e.claim_slot, e.claim_value, e.evidence_count, v.distance
+	e.provenance_type, e.sensitivity,
+	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id), v.distance
 FROM ` + revision.TableName + ` v
 JOIN memory_entries e ON e.id = v.rowid
 WHERE v.embedding MATCH ? AND v.k = ?
 	AND v.canonical_user_id = ? AND v.embedding_model = ?
 	AND e.canonical_user_id = ? AND e.status = 'active'
-	AND e.approval_state = 'approved'
 	AND (e.expires_at IS NULL OR e.expires_at > ?)`
 	args := []any{serialized, limit, userID, revision.Model, userID, formatTime(time.Now().UTC())}
 	if scope != "" {
@@ -296,16 +294,12 @@ func ftsTenantRecallQuery(userID string, terms []string) string {
 }
 
 func recallAuthorityForEntry(entry MemoryEntry) RecallAuthority {
-	if entry.ProvenanceType == "model_inference" || entry.SourceAuthority == "model" {
+	if entry.ProvenanceType == "model_inference" {
 		return RecallAuthorityInferred
 	}
-	switch entry.SourceAuthority {
-	case "user_confirmed", "verified_external":
-		return RecallAuthorityVerified
-	case "user_direct":
+	switch entry.ProvenanceType {
+	case "user_statement":
 		return RecallAuthorityUserStated
-	case "model":
-		return RecallAuthorityInferred
 	}
 	return RecallAuthorityUnknown
 }

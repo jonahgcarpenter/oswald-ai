@@ -54,6 +54,50 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	}
 }
 
+func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tools      []Tool      `json:"tools"`
+			ToolChoice *ToolChoice `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Tools) != 1 || body.ToolChoice == nil || body.ToolChoice.Function.Name != "user_memory_save" {
+			t.Fatalf("unexpected forced tool request: %+v", body)
+		}
+		memories := body.Tools[0].Function.Parameters.Properties["memories"]
+		if memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.AdditionalProperties != nil {
+			t.Fatalf("unexpected recursive schema: %+v", memories)
+		}
+		if memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
+			t.Fatalf("item additionalProperties was not false: %+v", memories.Items)
+		}
+		importance := memories.Items.Properties["importance"]
+		if importance.Minimum == nil || importance.Maximum == nil || *importance.Minimum != 1 || *importance.Maximum != 5 {
+			t.Fatalf("importance range was not serialized: %+v", importance)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	maximum := 5
+	minimumImportance, maximumImportance := 1.0, 5.0
+	additional := false
+	tool := Tool{Type: "function", Function: ToolDefinition{Name: "user_memory_save", Parameters: ToolParameters{
+		Type: "object", Properties: map[string]ToolParameterProperty{"memories": {
+			Type: "array", MaxItems: &maximum, Items: &ToolParameterProperty{Type: "object", AdditionalProperties: &additional, Properties: map[string]ToolParameterProperty{
+				"importance": {Type: "integer", Minimum: &minimumImportance, Maximum: &maximumImportance},
+			}},
+		}},
+	}}}
+	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: &ToolChoice{Type: "function", Function: ToolChoiceFunction{Name: "user_memory_save"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.RawQuery, "") {

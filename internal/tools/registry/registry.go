@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +43,7 @@ type Spec struct {
 	Source      string
 	Server      string
 	Parameters  []ParamSpec
+	Schema      *llm.ToolParameters
 }
 
 // CatalogEntry is a registry tool definition annotated with its source.
@@ -172,6 +174,16 @@ func (r *Registry) LLMTools() []llm.Tool {
 	return r.LLMToolsForVisibility(ToolVisibility{})
 }
 
+// LLMTool returns one model-facing tool definition by name.
+func (r *Registry) LLMTool(name string) (llm.Tool, bool) {
+	for _, tool := range r.LLMToolsForVisibility(ToolVisibility{}) {
+		if tool.Function.Name == name {
+			return tool, true
+		}
+	}
+	return llm.Tool{}, false
+}
+
 // LLMToolsForVisibility converts loaded Specs into the []llm.Tool slice passed to
 // ChatRequest.Tools. Builtin tools are always included. MCP tools are included
 // only when explicitly named by the active request's visibility state.
@@ -181,28 +193,30 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {
 			continue
 		}
-		props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
-		required := []string{}
-		for _, p := range spec.Parameters {
-			props[p.Name] = llm.ToolParameterProperty{
-				Type:        p.Type,
-				Description: p.Description,
-				Enum:        p.Enum,
+		parameters := llm.ToolParameters{}
+		if spec.Schema != nil {
+			parameters = *spec.Schema
+		} else {
+			props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
+			required := []string{}
+			for _, p := range spec.Parameters {
+				props[p.Name] = llm.ToolParameterProperty{
+					Type:        p.Type,
+					Description: p.Description,
+					Enum:        p.Enum,
+				}
+				if p.Required {
+					required = append(required, p.Name)
+				}
 			}
-			if p.Required {
-				required = append(required, p.Name)
-			}
+			parameters = llm.ToolParameters{Type: "object", Properties: props, Required: required}
 		}
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolDefinition{
 				Name:        spec.Name,
 				Description: toolDescription(spec),
-				Parameters: llm.ToolParameters{
-					Type:       "object",
-					Properties: props,
-					Required:   required,
-				},
+				Parameters:  parameters,
 			},
 		})
 	}
@@ -428,6 +442,21 @@ func parseToolMarkdown(content string) (Spec, error) {
 		return spec, err
 	}
 	spec.Parameters = params
+	if schemaSection, ok := sections["Schema"]; ok && strings.TrimSpace(schemaSection) != "" {
+		schemaText := strings.TrimSpace(schemaSection)
+		schemaText = strings.TrimPrefix(schemaText, "```json")
+		schemaText = strings.TrimPrefix(schemaText, "```")
+		schemaText = strings.TrimSuffix(schemaText, "```")
+		schemaText = strings.TrimSpace(schemaText)
+		var schema llm.ToolParameters
+		if err := json.Unmarshal([]byte(schemaText), &schema); err != nil {
+			return spec, fmt.Errorf("tool %q: invalid ## Schema JSON: %w", spec.Name, err)
+		}
+		if schema.Type != "object" || schema.Properties == nil {
+			return spec, fmt.Errorf("tool %q: ## Schema must describe an object with properties", spec.Name)
+		}
+		spec.Schema = &schema
+	}
 
 	return spec, nil
 }

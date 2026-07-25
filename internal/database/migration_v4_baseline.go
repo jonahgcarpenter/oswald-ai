@@ -64,13 +64,11 @@ CREATE TABLE session_turns (
 	assistant_text TEXT NOT NULL,
 	tool_names TEXT NOT NULL DEFAULT '',
 	importance INTEGER NOT NULL DEFAULT 2,
-	topic_tags TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	expires_at TEXT,
 	session_generation INTEGER NOT NULL DEFAULT 1,
 	delivered_at TEXT,
 	source_request_id TEXT NOT NULL DEFAULT '',
-	formation_eligible_at TEXT,
 	delivery_failed_at TEXT,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
@@ -102,53 +100,46 @@ CREATE TABLE memory_candidates (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	canonical_user_id TEXT NOT NULL,
 	idempotency_key TEXT NOT NULL,
-	state TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed', 'pending_confirmation', 'approved', 'rejected')),
+	state TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed', 'approved', 'rejected')),
+	publication_status TEXT NOT NULL DEFAULT 'none' CHECK (publication_status IN ('none', 'published', 'blocked_conflict')),
+	redacted_at TEXT,
+	redaction_reason TEXT NOT NULL DEFAULT '',
 	scope TEXT NOT NULL CHECK (scope IN ('short_term', 'long_term')),
 	category TEXT NOT NULL CHECK (category IN ('identity', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
 	statement TEXT NOT NULL,
-	statement_key TEXT NOT NULL,
-	evidence_summary TEXT NOT NULL DEFAULT '',
+	evidence TEXT NOT NULL DEFAULT '',
 	confidence REAL NOT NULL DEFAULT 0.8 CHECK (confidence >= 0 AND confidence <= 1),
 	importance INTEGER NOT NULL DEFAULT 3 CHECK (importance BETWEEN 1 AND 5),
 	provenance_type TEXT NOT NULL,
-	source_authority TEXT NOT NULL DEFAULT 'unknown',
-	source_request_id TEXT NOT NULL DEFAULT '',
-	source_session_id TEXT NOT NULL DEFAULT '',
-	source_session_generation INTEGER NOT NULL DEFAULT 0,
 	source_turn_id INTEGER,
 	extraction_model TEXT NOT NULL DEFAULT '',
 	extractor_version TEXT NOT NULL DEFAULT '',
-	explicit_tool_source TEXT NOT NULL DEFAULT '',
 	formation_mode TEXT NOT NULL,
 	sensitivity TEXT NOT NULL DEFAULT 'unknown',
-	content_context TEXT NOT NULL DEFAULT 'direct_assertion',
-	policy_decision TEXT NOT NULL DEFAULT 'proposed',
 	supersedes_memory_id INTEGER,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	expires_at TEXT,
-	decided_at TEXT,
-	decided_by TEXT NOT NULL DEFAULT '',
 	decision_reason TEXT NOT NULL DEFAULT '',
-	confirmation_session_id TEXT NOT NULL DEFAULT '',
-	confirmation_request_id TEXT NOT NULL DEFAULT '',
-	confirmation_presented_at TEXT,
-	formation_eligible_at TEXT,
 	published_memory_id INTEGER,
-	claim_key TEXT NOT NULL DEFAULT '',
 	claim_slot TEXT NOT NULL DEFAULT '',
 	claim_value TEXT NOT NULL DEFAULT '',
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	FOREIGN KEY (source_turn_id) REFERENCES session_turns(id) ON DELETE SET NULL,
-	FOREIGN KEY (published_memory_id) REFERENCES memory_entries(id) ON DELETE SET NULL,
+	FOREIGN KEY (published_memory_id) REFERENCES memory_entries(id) ON DELETE CASCADE,
 	FOREIGN KEY (canonical_user_id, supersedes_memory_id) REFERENCES memory_entries(canonical_user_id, id),
 	UNIQUE (canonical_user_id, idempotency_key),
-	UNIQUE (canonical_user_id, id)
+	UNIQUE (canonical_user_id, id),
+	CHECK ((publication_status = 'published') = (published_memory_id IS NOT NULL)),
+	CHECK (statement != '' OR evidence = ''),
+	CHECK (publication_status != 'blocked_conflict' OR (state = 'approved' AND published_memory_id IS NULL)),
+	CHECK (state = 'approved' OR publication_status = 'none')
 );
 CREATE INDEX idx_memory_candidates_state ON memory_candidates(canonical_user_id, state, created_at);
-CREATE INDEX idx_memory_candidates_statement ON memory_candidates(canonical_user_id, scope, statement_key);
+CREATE INDEX idx_memory_candidates_publication ON memory_candidates(canonical_user_id, publication_status, updated_at, id);
 CREATE INDEX idx_memory_candidates_source_turn ON memory_candidates(canonical_user_id, source_turn_id);
-CREATE INDEX idx_memory_candidates_claim_key ON memory_candidates(canonical_user_id, scope, claim_key);
+CREATE INDEX idx_memory_candidates_claim_identity ON memory_candidates(canonical_user_id, scope, claim_slot, claim_value);
+CREATE INDEX idx_memory_candidates_published ON memory_candidates(canonical_user_id, published_memory_id, created_at, id) WHERE published_memory_id IS NOT NULL;
 
 CREATE TABLE memory_entries (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,92 +147,34 @@ CREATE TABLE memory_entries (
 	scope TEXT NOT NULL CHECK (scope IN ('short_term', 'long_term')),
 	category TEXT NOT NULL CHECK (category IN ('identity', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
 	statement TEXT NOT NULL,
-	statement_key TEXT NOT NULL,
-	evidence TEXT NOT NULL,
 	confidence REAL NOT NULL DEFAULT 0.8,
 	importance INTEGER NOT NULL DEFAULT 3,
 	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'superseded', 'deleted', 'forgotten')),
-	source_session_id TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	last_used_at TEXT,
 	expires_at TEXT,
 	supersedes_id INTEGER,
-	embedding_model TEXT NOT NULL DEFAULT '',
-	embedding_dim INTEGER NOT NULL DEFAULT 0,
-	profile_approved INTEGER NOT NULL DEFAULT 0 CHECK (profile_approved IN (0, 1)),
-	candidate_id INTEGER,
 	provenance_type TEXT NOT NULL DEFAULT 'legacy_import',
-	source_authority TEXT NOT NULL DEFAULT 'unknown',
-	source_request_id TEXT NOT NULL DEFAULT '',
-	source_turn_id INTEGER,
-	formation_mode TEXT NOT NULL DEFAULT 'legacy_import',
 	sensitivity TEXT NOT NULL DEFAULT 'unknown',
-	approval_state TEXT NOT NULL DEFAULT 'approved' CHECK (approval_state IN ('proposed', 'pending_confirmation', 'approved', 'rejected')),
-	approved_at TEXT NOT NULL DEFAULT '',
-	approved_by TEXT NOT NULL DEFAULT '',
-	valid_from TEXT NOT NULL DEFAULT '',
-	valid_until TEXT,
-	invalidated_at TEXT,
-	invalidation_reason TEXT NOT NULL DEFAULT '',
-	erased_at TEXT,
-	erasure_reason TEXT NOT NULL DEFAULT '',
-	erasure_request_id TEXT NOT NULL DEFAULT '',
-	forgotten_at TEXT,
+	status_changed_at TEXT NOT NULL DEFAULT '',
+	status_reason TEXT NOT NULL DEFAULT '',
 	hard_delete_after TEXT,
 	lifecycle_request_id TEXT NOT NULL DEFAULT '',
-	claim_key TEXT NOT NULL DEFAULT '',
 	claim_slot TEXT NOT NULL DEFAULT '',
 	claim_value TEXT NOT NULL DEFAULT '',
-	evidence_count INTEGER NOT NULL DEFAULT 1 CHECK (evidence_count > 0),
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	FOREIGN KEY (supersedes_id) REFERENCES memory_entries(id) ON DELETE SET NULL,
-	FOREIGN KEY (candidate_id) REFERENCES memory_candidates(id) ON DELETE SET NULL,
-	FOREIGN KEY (source_turn_id) REFERENCES session_turns(id) ON DELETE SET NULL,
-	UNIQUE (canonical_user_id, scope, statement_key),
 	UNIQUE (canonical_user_id, id)
 );
 CREATE INDEX idx_memory_entries_user_scope_category ON memory_entries(canonical_user_id, scope, category, status);
 CREATE INDEX idx_memory_entries_user_updated ON memory_entries(canonical_user_id, updated_at);
 CREATE INDEX idx_memory_entries_expiry ON memory_entries(expires_at, status);
-CREATE INDEX idx_memory_entries_profile_candidates ON memory_entries(canonical_user_id, profile_approved, status, scope, category, expires_at);
-CREATE INDEX idx_memory_entries_candidate ON memory_entries(canonical_user_id, candidate_id);
-CREATE INDEX idx_memory_entries_source_request ON memory_entries(canonical_user_id, source_request_id);
-CREATE INDEX idx_memory_entries_source_turn ON memory_entries(canonical_user_id, source_turn_id);
+CREATE INDEX idx_memory_entries_active_serving ON memory_entries(canonical_user_id, scope, category, updated_at DESC, id DESC) WHERE status = 'active';
 CREATE INDEX idx_memory_entries_hard_delete ON memory_entries(hard_delete_after, id) WHERE hard_delete_after IS NOT NULL;
 CREATE INDEX idx_memory_entries_lifecycle_request ON memory_entries(canonical_user_id, lifecycle_request_id) WHERE lifecycle_request_id != '';
-CREATE INDEX idx_memory_entries_claim_key ON memory_entries(canonical_user_id, scope, claim_key);
+CREATE INDEX idx_memory_entries_claim_identity ON memory_entries(canonical_user_id, scope, claim_slot, claim_value);
 CREATE INDEX idx_memory_entries_claim_slot_status ON memory_entries(canonical_user_id, scope, claim_slot, status);
-
-CREATE TABLE memory_evidence (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	canonical_user_id TEXT NOT NULL,
-	candidate_id INTEGER,
-	memory_id INTEGER,
-	idempotency_key TEXT NOT NULL,
-	evidence_type TEXT NOT NULL,
-	content TEXT NOT NULL,
-	source_authority TEXT NOT NULL DEFAULT 'unknown',
-	source_request_id TEXT NOT NULL DEFAULT '',
-	source_session_id TEXT NOT NULL DEFAULT '',
-	source_turn_id INTEGER,
-	created_at TEXT NOT NULL,
-	provenance_type TEXT NOT NULL DEFAULT 'legacy_import',
-	relation_type TEXT NOT NULL DEFAULT 'supports',
-	confidence_contribution REAL NOT NULL DEFAULT 0 CHECK (confidence_contribution >= 0 AND confidence_contribution <= 1),
-	extraction_model TEXT NOT NULL DEFAULT '',
-	extractor_version TEXT NOT NULL DEFAULT '',
-	source_session_generation INTEGER NOT NULL DEFAULT 0,
-	correlation_key TEXT NOT NULL DEFAULT '',
-	CHECK ((candidate_id IS NULL) != (memory_id IS NULL)),
-	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
-	FOREIGN KEY (canonical_user_id, candidate_id) REFERENCES memory_candidates(canonical_user_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
-	FOREIGN KEY (canonical_user_id, memory_id) REFERENCES memory_entries(canonical_user_id, id) ON DELETE CASCADE ON UPDATE CASCADE,
-	FOREIGN KEY (source_turn_id) REFERENCES session_turns(id) ON DELETE SET NULL,
-	UNIQUE (canonical_user_id, idempotency_key)
-);
-CREATE INDEX idx_memory_evidence_candidate ON memory_evidence(canonical_user_id, candidate_id);
-CREATE INDEX idx_memory_evidence_memory ON memory_evidence(canonical_user_id, memory_id);
 
 CREATE TABLE session_summaries (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,7 +213,6 @@ CREATE TABLE memory_events (
 	created_at TEXT NOT NULL,
 	metadata TEXT NOT NULL DEFAULT '',
 	redacted_at TEXT,
-	updated_at TEXT,
 	event_kind TEXT NOT NULL DEFAULT 'lifecycle' CHECK (event_kind IN ('lifecycle', 'formation_audit')),
 	idempotency_key TEXT NOT NULL DEFAULT '',
 	candidate_id INTEGER,
@@ -288,14 +220,12 @@ CREATE TABLE memory_events (
 	turn_id INTEGER,
 	actor_type TEXT NOT NULL DEFAULT '',
 	actor_id TEXT NOT NULL DEFAULT '',
-	content_expires_at TEXT,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	FOREIGN KEY (memory_id) REFERENCES memory_entries(id) ON DELETE SET NULL
 );
 CREATE INDEX idx_memory_events_tenant_time ON memory_events(canonical_user_id, created_at, id);
 CREATE INDEX idx_memory_events_memory ON memory_events(canonical_user_id, memory_id, created_at);
 CREATE UNIQUE INDEX idx_memory_events_audit_key ON memory_events(canonical_user_id, idempotency_key) WHERE idempotency_key != '';
-CREATE INDEX idx_memory_events_content_expiry ON memory_events(content_expires_at, id) WHERE content_expires_at IS NOT NULL AND redacted_at IS NULL;
 
 CREATE INDEX idx_account_users_lifecycle ON account_users(lifecycle_state, updated_at, canonical_user_id);
 
@@ -508,7 +438,6 @@ CREATE TABLE durable_jobs (
 	idempotency_key TEXT NOT NULL,
 	canonical_user_id TEXT REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'retry', 'succeeded', 'skipped', 'dead')),
-	job_type TEXT NOT NULL DEFAULT '',
 	source_request_id TEXT NOT NULL DEFAULT '',
 	source_session_id TEXT NOT NULL DEFAULT '',
 	source_session_generation INTEGER NOT NULL DEFAULT 0 CHECK (source_session_generation >= 0),
@@ -539,7 +468,6 @@ CREATE TABLE durable_jobs (
 	started_at TEXT,
 	completed_at TEXT,
 	last_error_code TEXT NOT NULL DEFAULT '',
-	last_error_message TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	UNIQUE (job_kind, idempotency_key),
@@ -557,23 +485,6 @@ CREATE INDEX idx_durable_jobs_session ON durable_jobs(canonical_user_id, session
 CREATE INDEX idx_durable_jobs_source_turn ON durable_jobs(canonical_user_id, source_turn_id, id) WHERE job_kind = 'memory_formation';
 CREATE INDEX idx_durable_jobs_entity ON durable_jobs(canonical_user_id, entity_kind, entity_id, id) WHERE job_kind = 'derived_index';
 CREATE INDEX idx_durable_jobs_privacy_completed ON durable_jobs(completed_at, id) WHERE job_kind = 'privacy_invalidation' AND state = 'succeeded';
-
-CREATE TRIGGER memory_evidence_tenant_insert
-BEFORE INSERT ON memory_evidence
-WHEN NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
-)
-BEGIN
-	SELECT RAISE(ABORT, 'cross-tenant memory evidence source turn');
-END;
-CREATE TRIGGER memory_evidence_tenant_update
-BEFORE UPDATE OF canonical_user_id, source_turn_id ON memory_evidence
-WHEN NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
-)
-BEGIN
-	SELECT RAISE(ABORT, 'cross-tenant memory evidence source turn');
-END;
 
 CREATE TRIGGER session_summaries_range_insert
 BEFORE INSERT ON session_summaries
@@ -607,26 +518,6 @@ BEGIN
 	SELECT RAISE(ABORT, 'session summary checkpoints are immutable');
 END;
 
-CREATE TRIGGER memory_entries_formation_tenant_insert
-BEFORE INSERT ON memory_entries
-WHEN (NEW.candidate_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM memory_candidates WHERE id = NEW.candidate_id AND canonical_user_id = NEW.canonical_user_id
-)) OR (NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
-))
-BEGIN
-	SELECT RAISE(ABORT, 'cross-tenant canonical memory reference');
-END;
-CREATE TRIGGER memory_entries_formation_tenant_update
-BEFORE UPDATE OF canonical_user_id, candidate_id, source_turn_id ON memory_entries
-WHEN (NEW.candidate_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM memory_candidates WHERE id = NEW.candidate_id AND canonical_user_id = NEW.canonical_user_id
-)) OR (NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
-))
-BEGIN
-	SELECT RAISE(ABORT, 'cross-tenant canonical memory reference');
-END;
 CREATE TRIGGER memory_candidates_tenant_insert
 BEFORE INSERT ON memory_candidates
 WHEN (NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
@@ -745,9 +636,29 @@ WHEN NEW.redacted_at IS NULL
 	AND (OLD.metadata != '' OR OLD.request_id != '' OR OLD.session_id != '')
 BEGIN
 	UPDATE memory_events
-	SET redacted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+	SET redacted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 	WHERE id = NEW.id;
+END;
+CREATE TRIGGER memory_events_formation_identity_immutable
+BEFORE UPDATE ON memory_events
+WHEN OLD.event_kind = 'formation_audit'
+	AND EXISTS (SELECT 1 FROM account_users WHERE canonical_user_id = OLD.canonical_user_id AND lifecycle_state = 'active')
+	AND (NEW.canonical_user_id != OLD.canonical_user_id OR NEW.id != OLD.id OR NEW.event_kind != OLD.event_kind
+		OR NEW.idempotency_key != OLD.idempotency_key OR NEW.event_type != OLD.event_type
+		OR COALESCE(NEW.candidate_id, 0) != COALESCE(OLD.candidate_id, 0)
+		OR COALESCE(NEW.memory_id, 0) != COALESCE(OLD.memory_id, 0)
+		OR COALESCE(NEW.job_id, 0) != COALESCE(OLD.job_id, 0)
+		OR COALESCE(NEW.turn_id, 0) != COALESCE(OLD.turn_id, 0) OR NEW.created_at != OLD.created_at)
+BEGIN
+	SELECT RAISE(ABORT, 'memory formation audit identity is immutable');
+END;
+CREATE TRIGGER memory_events_formation_no_delete
+BEFORE DELETE ON memory_events
+WHEN OLD.event_kind = 'formation_audit'
+	AND EXISTS (SELECT 1 FROM account_users WHERE canonical_user_id = OLD.canonical_user_id AND lifecycle_state = 'active')
+	AND NOT (OLD.redacted_at IS NOT NULL AND OLD.metadata = '' AND OLD.request_id = '' AND OLD.session_id = '' AND OLD.actor_id = '')
+BEGIN
+	SELECT RAISE(ABORT, 'memory formation audit is append-only');
 END;
 
 CREATE TRIGGER session_turns_summary_content_update
@@ -767,31 +678,6 @@ WHEN EXISTS (
 )
 BEGIN
 	SELECT RAISE(ABORT, 'delete session summaries before source turns');
-END;
-
-CREATE VIEW memory_formation_audit AS
-SELECT id, canonical_user_id, idempotency_key, event_type, candidate_id, memory_id, job_id,
-	request_id, session_id, turn_id, actor_type, actor_id, created_at, metadata,
-	content_expires_at, redacted_at
-FROM memory_events
-WHERE event_kind = 'formation_audit';
-CREATE TRIGGER memory_formation_audit_insert
-INSTEAD OF INSERT ON memory_formation_audit
-BEGIN
-	INSERT INTO memory_events(id, canonical_user_id, event_kind, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, actor_id, created_at, metadata, content_expires_at, redacted_at, updated_at)
-	VALUES (NEW.id, NEW.canonical_user_id, 'formation_audit', NEW.idempotency_key, NEW.event_type, NEW.candidate_id, NEW.memory_id, NEW.job_id, COALESCE(NEW.request_id, ''), COALESCE(NEW.session_id, ''), NEW.turn_id, NEW.actor_type, COALESCE(NEW.actor_id, ''), NEW.created_at, COALESCE(NEW.metadata, ''), NEW.content_expires_at, NEW.redacted_at, NEW.created_at);
-END;
-CREATE TRIGGER memory_formation_audit_update
-INSTEAD OF UPDATE ON memory_formation_audit
-BEGIN
-	SELECT CASE WHEN NEW.canonical_user_id != OLD.canonical_user_id OR NEW.id != OLD.id OR NEW.idempotency_key != OLD.idempotency_key OR NEW.event_type != OLD.event_type OR COALESCE(NEW.candidate_id, 0) != COALESCE(OLD.candidate_id, 0) OR COALESCE(NEW.memory_id, 0) != COALESCE(OLD.memory_id, 0) OR COALESCE(NEW.job_id, 0) != COALESCE(OLD.job_id, 0) OR COALESCE(NEW.turn_id, 0) != COALESCE(OLD.turn_id, 0) OR NEW.created_at != OLD.created_at THEN RAISE(ABORT, 'memory formation audit identity is immutable') END;
-	UPDATE memory_events SET request_id = NEW.request_id, session_id = NEW.session_id, actor_type = NEW.actor_type, actor_id = NEW.actor_id, metadata = NEW.metadata, content_expires_at = NEW.content_expires_at, redacted_at = NEW.redacted_at, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = OLD.id;
-END;
-CREATE TRIGGER memory_formation_audit_delete
-INSTEAD OF DELETE ON memory_formation_audit
-BEGIN
-	SELECT CASE WHEN EXISTS (SELECT 1 FROM account_users WHERE canonical_user_id = OLD.canonical_user_id AND lifecycle_state = 'active') THEN RAISE(ABORT, 'memory formation audit is append-only') END;
-	DELETE FROM memory_events WHERE id = OLD.id;
 END;
 
 CREATE TRIGGER account_users_discard_staged_global_memory

@@ -80,7 +80,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	t.Fatalf("%s schema was not loaded", toolnames.SessionTranscriptSearch)
 }
 
-func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
+func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -89,16 +89,11 @@ func TestRegisterMemoryForgetUsesExactRequiredID(t *testing.T) {
 	if err := Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range reg.BuiltinCatalog() {
-		if entry.Name != toolnames.UserMemoryForget {
-			continue
+	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
+		if _, ok := reg.LLMTool(name); !ok || !reg.HasHandler(name) {
+			t.Fatalf("retrieval tool is unavailable: %s", name)
 		}
-		if len(entry.Parameters) != 1 || entry.Parameters[0].Name != "memory_id" || entry.Parameters[0].Type != "integer" || !entry.Parameters[0].Required {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.UserMemoryForget, entry.Parameters)
-		}
-		return
 	}
-	t.Fatalf("%s schema was not loaded", toolnames.UserMemoryForget)
 }
 
 func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {
@@ -165,10 +160,8 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	want := map[string]bool{
 		"web.search":                      true,
 		"time.current":                    true,
-		toolnames.UserMemorySave:          true,
 		toolnames.UserMemorySearch:        true,
 		toolnames.UserMemoryList:          true,
-		toolnames.UserMemoryForget:        true,
 		toolnames.GlobalMemorySave:        true,
 		toolnames.SessionTranscriptSearch: true,
 	}

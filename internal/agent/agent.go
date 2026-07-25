@@ -86,11 +86,9 @@ type ToolStreamPayload struct {
 
 // ToolStreamUserMemoryPayload contains structured user-memory tool details.
 type ToolStreamUserMemoryPayload struct {
-	Action    string                    `json:"action,omitempty"`
-	Category  string                    `json:"category,omitempty"`
-	Statement string                    `json:"statement,omitempty"`
-	Evidence  string                    `json:"evidence,omitempty"`
-	Content   *usermemory.ParsedContent `json:"content,omitempty"`
+	Action   string                    `json:"action,omitempty"`
+	Category string                    `json:"category,omitempty"`
+	Content  *usermemory.ParsedContent `json:"content,omitempty"`
 }
 
 // ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
@@ -119,7 +117,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 
 	if toolName != "web.search" {
 		switch toolName {
-		case toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.UserMemoryForget:
+		case toolnames.UserMemorySearch, toolnames.UserMemoryList:
 			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
 		case toolnames.GlobalMemorySave:
 			payload.GlobalMemory = globalMemoryStreamPayload(args)
@@ -151,12 +149,6 @@ func userMemoryStreamPayload(toolName string, args map[string]interface{}, resul
 	if category, ok := args["category"].(string); ok {
 		payload.Category = strings.TrimSpace(strings.ToLower(category))
 	}
-	if statement, ok := args["statement"].(string); ok {
-		payload.Statement = strings.TrimSpace(statement)
-	}
-	if evidence, ok := args["evidence"].(string); ok {
-		payload.Evidence = strings.TrimSpace(evidence)
-	}
 	if isError {
 		return payload
 	}
@@ -171,14 +163,10 @@ func userMemoryStreamPayload(toolName string, args map[string]interface{}, resul
 
 func userMemoryToolAction(toolName string) string {
 	switch toolName {
-	case toolnames.UserMemorySave:
-		return "save"
 	case toolnames.UserMemorySearch:
 		return "search"
 	case toolnames.UserMemoryList:
 		return "list"
-	case toolnames.UserMemoryForget:
-		return "forget"
 	}
 	return ""
 }
@@ -690,6 +678,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 
 		req.Messages = messages
 		req.Tools = a.toolsForRequest(ctx, request.Principal, toolExposure)
+		req.ToolChoice = nil
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),
@@ -848,7 +837,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				break
 			}
 		}
-
 		if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
 			break
 		}

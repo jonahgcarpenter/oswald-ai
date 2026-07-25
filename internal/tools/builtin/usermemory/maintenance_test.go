@@ -47,7 +47,7 @@ func TestMaintenanceSweepErasesDueForgottenMemoryAtBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = created_at WHERE id = ?; UPDATE memory_entries SET source_turn_id = ? WHERE id = ?`, turn.ID, turn.ID, memory.ID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = created_at WHERE id = ?; UPDATE memory_candidates SET source_turn_id = ? WHERE published_memory_id = ?`, turn.ID, turn.ID, memory.ID); err != nil {
 		t.Fatal(err)
 	}
 	memoryRevision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
@@ -83,7 +83,7 @@ func TestMaintenanceSweepErasesDueForgottenMemoryAtBoundary(t *testing.T) {
 		t.Fatalf("boundary counts=%+v err=%v", counts, err)
 	}
 	var status, statement, evidence string
-	if err := store.sql.QueryRow(`SELECT status, statement, evidence FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status, &statement, &evidence); err != nil {
+	if err := store.sql.QueryRow(`SELECT memory.status, memory.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id LIMIT 1), '') FROM memory_entries memory WHERE memory.id = ?`, memory.ID).Scan(&status, &statement, &evidence); err != nil {
 		t.Fatal(err)
 	}
 	if status != StatusDeleted || statement != "" || evidence != "" {
@@ -95,6 +95,46 @@ func TestMaintenanceSweepErasesDueForgottenMemoryAtBoundary(t *testing.T) {
 	if repeated, err := store.MaintenanceSweep(ctx, now.Add(policy.ForgottenContentGrace), policy); err != nil || repeated.ForgottenMemories != 0 {
 		t.Fatalf("repeated counts=%+v err=%v", repeated, err)
 	}
+}
+
+func TestMaintenanceSweepDeletesPrivacyTombstoneGraphForActiveUser(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+
+	output := evaluatedFormationCandidate(t, "I build Atlas.", "I build Atlas.", "The user builds Atlas.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(ctx, "user", CandidateProposal{Output: output, IdempotencyKey: "privacy-tombstone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.PublishedMemoryID == 0 {
+		t.Fatal("candidate was not published")
+	}
+	now := time.Now().UTC()
+	if _, err := store.DeleteMemory(ctx, "user", hashText("actor"), candidate.PublishedMemoryID, "delete-memory", now); err != nil {
+		t.Fatal(err)
+	}
+
+	policy := maintenanceTestPolicy()
+	sweepAt := now.Add(policy.ContentFreeTombstoneRetention + time.Hour)
+	var deleted MaintenanceCounts
+	for range 3 {
+		counts, err := store.MaintenanceSweep(ctx, sweepAt, policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deleted.AuditTombstones += counts.AuditTombstones
+		deleted.CandidateTombstones += counts.CandidateTombstones
+		deleted.MemoryTombstonesDeleted += counts.MemoryTombstonesDeleted
+	}
+	if deleted.AuditTombstones == 0 || deleted.CandidateTombstones != 1 || deleted.MemoryTombstonesDeleted != 1 {
+		t.Fatalf("unexpected tombstone deletion counts: %+v", deleted)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_events WHERE event_kind = 'formation_audit' AND (candidate_id = ? OR memory_id = ?)`, 0, candidate.ID, candidate.PublishedMemoryID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE id = ?`, 0, candidate.ID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, candidate.PublishedMemoryID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = 'user' AND lifecycle_state = 'active'`, 1)
 }
 
 func TestMaintenanceSweepBoundsLegacyExpiryCategories(t *testing.T) {
@@ -149,6 +189,7 @@ func TestMaintenanceSweepDoesNotStarveLaterCandidateBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND statement = ''`, 2)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND redacted_at IS NOT NULL AND redaction_reason = 'candidate_retention_expired'`, 2)
 }
 
 func TestMaintenancePreservesEvidenceForActivePublishedMemory(t *testing.T) {
@@ -161,22 +202,22 @@ func TestMaintenancePreservesEvidenceForActivePublishedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PublishCandidate(ctx, "user", candidate.ID); err != nil {
-		t.Fatal(err)
+	if candidate.PublicationStatus != "published" || candidate.PublishedMemoryID == 0 {
+		t.Fatalf("candidate was not atomically published: %+v", candidate)
 	}
 	now := time.Now().UTC()
-	if _, err := store.sql.Exec(`UPDATE memory_evidence SET created_at = ? WHERE candidate_id = ?`, formatTime(now.Add(-3*time.Hour)), candidate.ID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET created_at = ? WHERE id = ?`, formatTime(now.Add(-3*time.Hour)), candidate.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.MaintenanceSweep(ctx, now, maintenanceTestPolicy()); err != nil {
 		t.Fatal(err)
 	}
-	var content, requestID string
-	if err := store.sql.QueryRow(`SELECT content, source_request_id FROM memory_evidence WHERE candidate_id = ? ORDER BY id LIMIT 1`, candidate.ID).Scan(&content, &requestID); err != nil {
+	var content string
+	if err := store.sql.QueryRow(`SELECT evidence FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&content); err != nil {
 		t.Fatal(err)
 	}
 	if content == "" {
-		t.Fatalf("active memory evidence was redacted; request_id=%q", requestID)
+		t.Fatal("active memory evidence was redacted")
 	}
 }
 
@@ -280,9 +321,9 @@ func TestMaintenanceSweepRedactsAndPrunesRetentionArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = store.sql.Exec(`
-INSERT INTO memory_formation_audit(canonical_user_id,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata) VALUES ('user','audit','formed','request','session','system','actor',?, 'sensitive');
-INSERT INTO durable_jobs(job_kind,canonical_user_id,idempotency_key,job_type,state,source_request_id,source_session_id,source_session_generation,source_turn_id,extractor_version,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('memory_formation','user','job','extract','succeeded','request','session',?,?,'test-v1','payload',?,?,?,?);
-INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,session_id,session_generation,covered_from_turn_id,covered_through_turn_id,state,artifact_payload,available_at,completed_at,last_error_message,created_at,updated_at) VALUES ('session_compaction','compaction-job','user','old-session',?,?,?,'succeeded','artifact',?,?,'message',?,?);
+INSERT INTO memory_events(canonical_user_id,event_kind,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata) VALUES ('user','formation_audit','audit','formed','request','session','system','actor',?, 'sensitive');
+INSERT INTO durable_jobs(job_kind,canonical_user_id,idempotency_key,state,source_request_id,source_session_id,source_session_generation,source_turn_id,extractor_version,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('memory_formation','user','job','succeeded','request','session',?,?,'test-v1','payload',?,?,?,?);
+INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,session_id,session_generation,covered_from_turn_id,covered_through_turn_id,state,artifact_payload,available_at,completed_at,created_at,updated_at) VALUES ('session_compaction','compaction-job','user','old-session',?,?,?,'succeeded','artifact',?,?,?,?);
 INSERT INTO memory_events(canonical_user_id,event_type,request_id,session_id,created_at,metadata) VALUES ('user','deleted','request','session',?,'metadata');
 INSERT INTO account_link_challenges(id,code_hash,initiator_user_id,initiator_gateway,initiator_identifier,created_at,expires_at) VALUES ('challenge','code','user','discord','external',?,?);
 INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_user_id,target_hash,operation_type,target_digest,status,created_at,updated_at,completed_at) VALUES ('operation','operation',?,'user',?,'export_user',?,'completed',?,?,?);
@@ -290,7 +331,7 @@ INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_us
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`INSERT INTO memory_formation_audit(canonical_user_id,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata,content_expires_at) VALUES ('user','future-audit','formed','future-request','future-session','system','actor',?,'future-sensitive',?)`, old, formatTime(now.Add(time.Hour))); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO memory_events(canonical_user_id,event_kind,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata) VALUES ('user','formation_audit','future-audit','formed','future-request','future-session','system','actor',?,'future-sensitive')`, formatTime(now.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := store.MaintenanceSweep(ctx, now, policy)
@@ -301,13 +342,13 @@ INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_us
 		t.Fatalf("counts=%+v", counts)
 	}
 	var metadata, requestID, actorID string
-	if err := store.sql.QueryRow(`SELECT metadata, request_id, actor_id FROM memory_formation_audit WHERE idempotency_key = 'audit'`).Scan(&metadata, &requestID, &actorID); err != nil {
+	if err := store.sql.QueryRow(`SELECT metadata, request_id, actor_id FROM memory_events WHERE event_kind = 'formation_audit' AND idempotency_key = 'audit'`).Scan(&metadata, &requestID, &actorID); err != nil {
 		t.Fatal(err)
 	}
 	if metadata != "" || requestID != "" || actorID != "" {
 		t.Fatalf("audit content retained: %q %q %q", metadata, requestID, actorID)
 	}
-	if err := store.sql.QueryRow(`SELECT metadata, request_id FROM memory_formation_audit WHERE idempotency_key = 'future-audit'`).Scan(&metadata, &requestID); err != nil {
+	if err := store.sql.QueryRow(`SELECT metadata, request_id FROM memory_events WHERE event_kind = 'formation_audit' AND idempotency_key = 'future-audit'`).Scan(&metadata, &requestID); err != nil {
 		t.Fatal(err)
 	}
 	if metadata != "future-sensitive" || requestID != "future-request" {
@@ -320,4 +361,5 @@ INSERT INTO privacy_operations(operation_id,idempotency_key,actor_hash,target_us
 		t.Fatal(err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_events WHERE event_type = 'deleted'`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_events WHERE event_kind = 'formation_audit' AND idempotency_key = 'audit'`, 0)
 }

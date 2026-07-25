@@ -5,15 +5,21 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
-const FormationExtractorVersion = "formation-v2"
+const FormationExtractorVersion = "formation-v4"
+
+// ErrStaleFormationJobLease indicates that the exact claimed lease is no longer live.
+var ErrStaleFormationJobLease = errors.New("stale memory formation job lease")
+
+// ErrStaleSessionCompactionJobLease indicates that the exact compaction lease is no longer live.
+var ErrStaleSessionCompactionJobLease = errors.New("stale session compaction job lease")
 
 // FormationSource identifies the canonical turn and request that formed memory.
 type FormationSource struct {
@@ -23,7 +29,6 @@ type FormationSource struct {
 	TurnID            int64
 	Model             string
 	ExtractorVersion  string
-	ToolName          string
 }
 
 // CandidateProposal is one validated policy result ready for canonical staging.
@@ -38,39 +43,36 @@ type CandidateProposal struct {
 
 // FormationCandidate is a persisted memory proposal.
 type FormationCandidate struct {
-	ID                      int64
-	UserID                  string
-	State                   string
-	Scope                   string
-	Category                string
-	Statement               string
-	Evidence                string
-	Confidence              float64
-	Importance              int
-	Provenance              string
-	SourceAuthority         string
-	Sensitivity             string
-	FormationMode           string
-	Context                 string
-	PolicyDecision          string
-	DecisionReason          string
-	SourceRequestID         string
-	SourceSessionID         string
-	SourceGeneration        int
-	SourceTurnID            int64
-	ExtractionModel         string
-	ExtractorVersion        string
-	SupersedesMemoryID      int64
-	SupersedesStatement     string
-	PublishedMemoryID       int64
-	ConfirmationSessionID   string
-	ConfirmationRequestID   string
-	ConfirmationPresentedAt time.Time
-	FormationEligibleAt     time.Time
-	ExpiresAt               time.Time
-	ClaimKey                string
-	ClaimSlot               string
-	ClaimValue              string
+	ID                  int64
+	UserID              string
+	State               string
+	PublicationStatus   string
+	RedactedAt          time.Time
+	RedactionReason     string
+	UpdatedAt           time.Time
+	Scope               string
+	Category            string
+	Statement           string
+	Evidence            string
+	Confidence          float64
+	Importance          int
+	Provenance          string
+	SourceAuthority     string
+	Sensitivity         string
+	FormationMode       string
+	DecisionReason      string
+	SourceRequestID     string
+	SourceSessionID     string
+	SourceGeneration    int
+	SourceTurnID        int64
+	ExtractionModel     string
+	ExtractorVersion    string
+	SupersedesMemoryID  int64
+	SupersedesStatement string
+	PublishedMemoryID   int64
+	ExpiresAt           time.Time
+	ClaimSlot           string
+	ClaimValue          string
 }
 
 // FormationJob is one leased post-turn extraction operation.
@@ -106,48 +108,60 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 	if err := s.ensureAccountUser(userID); err != nil {
 		return FormationCandidate{}, false, err
 	}
+	unlock := s.lockUsers(userID)
+	defer unlock()
 	key := strings.TrimSpace(proposal.IdempotencyKey)
 	if key == "" {
-		key = formationKey(proposal.Source.RequestID, proposal.Source.TurnID, proposal.Output.Statement, string(proposal.Output.Mode), proposal.Source.ExtractorVersion)
+		key = formationKey(
+			proposal.Source.RequestID, proposal.Source.TurnID, proposal.Output.Statement, proposal.Output.Evidence,
+			proposal.Output.ClaimSlot, proposal.Output.ClaimValue, proposal.Output.Scope, proposal.Output.Category, proposal.Output.Provenance,
+			proposal.Output.Context, proposal.Output.Confidence, proposal.Output.TTL, proposal.SupersedesStatement,
+			proposal.Output.Mode, proposal.Source.ExtractorVersion,
+		)
 	}
 	state := "proposed"
 	decisionReason := proposal.Output.Reason
-	switch proposal.Output.Decision {
-	case memoryformation.DecisionAutomatic, memoryformation.DecisionInferredActive, memoryformation.DecisionShortTerm:
+	switch proposal.Output.Approval {
+	case memoryformation.ApprovalApproved:
 		state = "approved"
-	case memoryformation.DecisionDisallowed:
+	case memoryformation.ApprovalRejected:
 		state = "rejected"
+	default:
+		switch proposal.Output.Decision {
+		case memoryformation.DecisionAutomatic, memoryformation.DecisionInferredActive, memoryformation.DecisionShortTerm:
+			state = "approved"
+		case memoryformation.DecisionDisallowed:
+			state = "rejected"
+		}
 	}
+	publicationStatus := "none"
 	now := time.Now().UTC()
 	var expires any
 	if proposal.Output.TTL > 0 {
 		expires = formatTime(now.Add(proposal.Output.TTL))
 	}
-	var formationEligible any
-	if proposal.Source.TurnID > 0 {
-		var eligible sql.NullString
-		err := s.sql.QueryRowContext(ctx, `SELECT formation_eligible_at FROM session_turns WHERE id = ? AND canonical_user_id = ?`, proposal.Source.TurnID, userID).Scan(&eligible)
-		if err != nil && err != sql.ErrNoRows {
-			return FormationCandidate{}, false, fmt.Errorf("read candidate delivery eligibility: %w", err)
-		}
-		if eligible.Valid {
-			formationEligible = eligible.String
-		}
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return FormationCandidate{}, false, fmt.Errorf("begin memory candidate application: %w", err)
 	}
+	defer tx.Rollback() // nolint:errcheck
 	var supersedesID int64
 	if target := strings.TrimSpace(proposal.SupersedesStatement); target != "" {
 		var id int64
 		var existingConfidence float64
-		var existingAuthority string
-		err := s.sql.QueryRowContext(ctx, `SELECT id, confidence, source_authority FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND statement_key = ? AND status = 'active'`, userID, proposal.Output.Scope, statementKey(target)).Scan(&id, &existingConfidence, &existingAuthority)
-		if err != nil && err != sql.ErrNoRows {
+		var existingProvenance string
+		id, err = resolveActiveMemoryByStatementTx(ctx, tx, userID, string(proposal.Output.Scope), target)
+		if err != nil {
 			return FormationCandidate{}, false, fmt.Errorf("resolve candidate supersession: %w", err)
 		}
-		if err == nil {
-			if proposal.Output.Mode == memoryformation.ModeExplicitRemember || candidateEvidenceStronger(string(proposal.Output.SourceAuthority), proposal.Output.Confidence, existingAuthority, existingConfidence) {
+		if id > 0 {
+			if err := tx.QueryRowContext(ctx, `SELECT confidence, provenance_type FROM memory_entries WHERE id = ? AND canonical_user_id = ? AND scope = ? AND status = 'active'`, id, userID, proposal.Output.Scope).Scan(&existingConfidence, &existingProvenance); err != nil {
+				return FormationCandidate{}, false, fmt.Errorf("read candidate supersession strength: %w", err)
+			}
+			if candidateEvidenceAtLeastAsStrong(string(proposal.Output.Provenance), proposal.Output.Confidence, existingProvenance, existingConfidence) {
 				supersedesID = id
-			} else {
-				state = "proposed"
+			} else if state == "approved" {
+				publicationStatus = "blocked_conflict"
 				decisionReason = "replacement evidence is weaker than the active memory"
 			}
 		}
@@ -155,28 +169,23 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 	if supersedesID == 0 && state == "approved" && proposal.Output.ClaimSlot != "" && !strings.HasSuffix(proposal.Output.ClaimSlot, ".fact") {
 		var id int64
 		var existingConfidence float64
-		var existingAuthority string
-		err := s.sql.QueryRowContext(ctx, `SELECT id, confidence, source_authority FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND claim_slot = ? AND claim_key != ? AND status = 'active' ORDER BY CASE source_authority WHEN 'user_direct' THEN 3 WHEN 'verified' THEN 4 WHEN 'model' THEN 2 ELSE 1 END DESC, confidence DESC, updated_at DESC, id DESC LIMIT 1`, userID, proposal.Output.Scope, proposal.Output.ClaimSlot, proposal.Output.ClaimKey).Scan(&id, &existingConfidence, &existingAuthority)
+		var existingProvenance string
+		err := tx.QueryRowContext(ctx, `SELECT id, confidence, provenance_type FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND claim_slot = ? AND claim_value != ? AND status = 'active' ORDER BY CASE provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, confidence DESC, updated_at DESC, id DESC LIMIT 1`, userID, proposal.Output.Scope, proposal.Output.ClaimSlot, proposal.Output.ClaimValue).Scan(&id, &existingConfidence, &existingProvenance)
 		if err != nil {
 			if err != sql.ErrNoRows {
 				return FormationCandidate{}, false, fmt.Errorf("resolve conflicting memory claim: %w", err)
 			}
 		}
 		if id > 0 {
-			if candidateEvidenceStronger(string(proposal.Output.SourceAuthority), proposal.Output.Confidence, existingAuthority, existingConfidence) {
+			if candidateEvidenceStronger(string(proposal.Output.Provenance), proposal.Output.Confidence, existingProvenance, existingConfidence) {
 				supersedesID = id
 				decisionReason = "stronger evidence supersedes a conflicting claim"
 			} else {
-				state = "proposed"
+				publicationStatus = "blocked_conflict"
 				decisionReason = "conflicting evidence is weaker than the active claim"
 			}
 		}
 	}
-	tx, err := s.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return FormationCandidate{}, false, fmt.Errorf("begin memory candidate proposal: %w", err)
-	}
-	defer tx.Rollback() // nolint:errcheck
 	if job := proposal.FormationJob; job != nil {
 		if userID != job.UserID || proposal.Source.RequestID != job.RequestID || proposal.Source.SessionID != job.SessionID || proposal.Source.SessionGeneration != job.SessionGeneration || proposal.Source.TurnID != job.TurnID || job.LeaseUntil.IsZero() {
 			return FormationCandidate{}, false, fmt.Errorf("formation candidate scope does not match fenced job")
@@ -194,7 +203,7 @@ WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND sta
 			return FormationCandidate{}, false, fmt.Errorf("fence formation candidate: %w", err)
 		}
 		if count, _ := fenced.RowsAffected(); count != 1 {
-			return FormationCandidate{}, false, fmt.Errorf("fence formation candidate: stale or cancelled job lease")
+			return FormationCandidate{}, false, ErrStaleFormationJobLease
 		}
 	}
 	if job := proposal.CompactionJob; job != nil {
@@ -202,7 +211,7 @@ WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND sta
 UPDATE durable_jobs SET updated_at = updated_at
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
-	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)
+	AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)
 	AND EXISTS (
 		SELECT 1 FROM sessions active
 		WHERE active.canonical_user_id = durable_jobs.canonical_user_id
@@ -221,34 +230,53 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 	)`,
 			job.ID, job.UserID, job.SessionID, job.SessionGeneration,
 			job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner,
-			formatTime(now), formatTime(now), proposal.Source.TurnID, proposal.Source.TurnID)
+			formatTime(job.LeaseUntil), formatTime(now), formatTime(now), proposal.Source.TurnID, proposal.Source.TurnID)
 		if err != nil {
 			return FormationCandidate{}, false, fmt.Errorf("fence pre-compaction candidate: %w", err)
 		}
 		if count, _ := fenced.RowsAffected(); count != 1 {
-			return FormationCandidate{}, false, fmt.Errorf("fence pre-compaction candidate: stale job lease or generation")
+			return FormationCandidate{}, false, ErrStaleSessionCompactionJobLease
+		}
+	}
+	if proposal.Source.TurnID > 0 {
+		candidate, reconciled, err := s.reconcileSameTurnCandidateTx(ctx, tx, userID, proposal, state, decisionReason, publicationStatus, supersedesID, now)
+		if err != nil {
+			return FormationCandidate{}, false, err
+		}
+		if reconciled {
+			if candidate.State == "approved" && candidate.PublicationStatus == "none" {
+				if _, err := s.publishCandidateTx(ctx, tx, candidate); err != nil {
+					return FormationCandidate{}, false, err
+				}
+				candidate, err = loadCandidateTx(ctx, tx, userID, candidate.ID)
+				if err != nil {
+					return FormationCandidate{}, false, err
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return FormationCandidate{}, false, err
+			}
+			if candidate.PublishedMemoryID > 0 {
+				s.signalDerivedIndex()
+			}
+			return candidate, false, nil
 		}
 	}
 	result, err := tx.ExecContext(ctx, `
 INSERT INTO memory_candidates (
-	canonical_user_id, idempotency_key, state, scope, category, statement, statement_key,
-	evidence_summary, confidence, importance, provenance_type, source_authority,
-	source_request_id, source_session_id, source_session_generation, source_turn_id,
-	extraction_model, extractor_version, explicit_tool_source, formation_mode, sensitivity,
-	content_context, policy_decision, supersedes_memory_id, created_at, updated_at, expires_at, formation_eligible_at,
-	decided_at, decided_by, decision_reason, claim_key, claim_slot, claim_value
+	canonical_user_id, idempotency_key, state, publication_status, scope, category, statement,
+	evidence, confidence, importance, provenance_type, source_turn_id,
+	extraction_model, extractor_version, formation_mode, sensitivity,
+	supersedes_memory_id, created_at, updated_at, expires_at,
+	decision_reason, claim_slot, claim_value
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
-`, userID, key, state, proposal.Output.Scope, proposal.Output.Category, proposal.Output.Statement,
-		statementKey(proposal.Output.Statement), proposal.Output.Evidence, proposal.Output.Confidence,
-		proposal.Output.Importance, proposal.Output.Provenance, proposal.Output.SourceAuthority,
-		proposal.Source.RequestID, proposal.Source.SessionID, proposal.Source.SessionGeneration,
+`, userID, key, state, publicationStatus, proposal.Output.Scope, proposal.Output.Category, proposal.Output.Statement,
+		proposal.Output.Evidence, proposal.Output.Confidence, proposal.Output.Importance, proposal.Output.Provenance,
 		nullableID(proposal.Source.TurnID), proposal.Source.Model, firstNonEmptyFormation(proposal.Source.ExtractorVersion, FormationExtractorVersion),
-		proposal.Source.ToolName, proposal.Output.Mode, proposal.Output.Sensitivity, proposal.Output.Context,
-		proposal.Output.Decision, nullableID(supersedesID), formatTime(now), formatTime(now), expires, formationEligible,
-		decisionTime(state, now), decisionActor(state, proposal.Output.Mode), decisionReason,
-		proposal.Output.ClaimKey, proposal.Output.ClaimSlot, proposal.Output.ClaimValue)
+		proposal.Output.Mode, proposal.Output.Sensitivity, nullableID(supersedesID), formatTime(now), formatTime(now), expires, decisionReason,
+		proposal.Output.ClaimSlot, proposal.Output.ClaimValue)
 	if err != nil {
 		return FormationCandidate{}, false, fmt.Errorf("insert memory candidate: %w", err)
 	}
@@ -260,303 +288,315 @@ ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
 	if err != nil {
 		return FormationCandidate{}, false, err
 	}
-	if created == 0 && (candidate.Statement != proposal.Output.Statement || candidate.Evidence != proposal.Output.Evidence || candidate.Scope != string(proposal.Output.Scope) || candidate.Category != string(proposal.Output.Category) || candidate.Provenance != string(proposal.Output.Provenance) || candidate.SourceAuthority != string(proposal.Output.SourceAuthority) || candidate.Sensitivity != string(proposal.Output.Sensitivity) || candidate.FormationMode != string(proposal.Output.Mode) || candidate.Context != string(proposal.Output.Context) || candidate.PolicyDecision != string(proposal.Output.Decision) || candidate.Confidence != proposal.Output.Confidence || candidate.Importance != proposal.Output.Importance || candidate.SourceRequestID != proposal.Source.RequestID || candidate.SourceSessionID != proposal.Source.SessionID || candidate.SourceGeneration != proposal.Source.SessionGeneration || candidate.SourceTurnID != proposal.Source.TurnID || candidate.ExtractionModel != proposal.Source.Model || candidate.ExtractorVersion != firstNonEmptyFormation(proposal.Source.ExtractorVersion, FormationExtractorVersion) || candidate.SupersedesMemoryID != supersedesID || candidate.ClaimKey != proposal.Output.ClaimKey || candidate.ClaimSlot != proposal.Output.ClaimSlot || candidate.ClaimValue != proposal.Output.ClaimValue) {
+	if created == 0 && (candidate.Statement != proposal.Output.Statement || candidate.Evidence != proposal.Output.Evidence || candidate.Scope != string(proposal.Output.Scope) || candidate.Category != string(proposal.Output.Category) || candidate.Provenance != string(proposal.Output.Provenance) || candidate.Sensitivity != string(proposal.Output.Sensitivity) || candidate.FormationMode != string(proposal.Output.Mode) || candidate.Confidence != proposal.Output.Confidence || candidate.Importance != proposal.Output.Importance || candidate.SourceTurnID != proposal.Source.TurnID || candidate.ExtractionModel != proposal.Source.Model || candidate.ExtractorVersion != firstNonEmptyFormation(proposal.Source.ExtractorVersion, FormationExtractorVersion) || candidate.SupersedesMemoryID != supersedesID || candidate.ClaimSlot != proposal.Output.ClaimSlot || candidate.ClaimValue != proposal.Output.ClaimValue) {
 		return FormationCandidate{}, false, fmt.Errorf("memory candidate idempotency payload mismatch")
 	}
 	if created == 1 {
-		evidenceKey := key + ":candidate-evidence"
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO memory_evidence (canonical_user_id, candidate_id, idempotency_key, evidence_type, content, source_authority, source_request_id, source_session_id, source_turn_id, created_at, provenance_type, relation_type, confidence_contribution, extraction_model, extractor_version, source_session_generation, correlation_key)
-VALUES (?, ?, ?, 'exact_user_quote', ?, ?, ?, ?, ?, ?, ?, 'supports', ?, ?, ?, ?, ?)
-`, userID, candidate.ID, evidenceKey, proposal.Output.Evidence, proposal.Output.SourceAuthority,
-			proposal.Source.RequestID, proposal.Source.SessionID, nullableID(proposal.Source.TurnID), formatTime(now),
-			proposal.Output.Provenance, proposal.Output.Confidence, proposal.Source.Model,
-			firstNonEmptyFormation(proposal.Source.ExtractorVersion, FormationExtractorVersion), proposal.Source.SessionGeneration, evidenceKey); err != nil {
-			return FormationCandidate{}, false, fmt.Errorf("insert candidate evidence: %w", err)
-		}
 		if err := insertFormationAuditTx(ctx, tx, userID, key+":proposed", "candidate."+state, candidate.ID, 0, 0, proposal.Source, "policy", decisionReason); err != nil {
+			return FormationCandidate{}, false, err
+		}
+	}
+	if candidate.State == "approved" && candidate.PublicationStatus == "none" {
+		if _, err := s.publishCandidateTx(ctx, tx, candidate); err != nil {
+			return FormationCandidate{}, false, err
+		}
+		candidate, err = loadCandidateTx(ctx, tx, userID, candidate.ID)
+		if err != nil {
 			return FormationCandidate{}, false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return FormationCandidate{}, false, fmt.Errorf("commit memory candidate proposal: %w", err)
 	}
+	if candidate.PublishedMemoryID > 0 {
+		s.signalDerivedIndex()
+	}
 	return candidate, created == 1, nil
 }
 
-// PublishCandidate atomically publishes one approved candidate or attaches its
-// evidence to an existing exact duplicate.
-func (s *Store) PublishCandidate(ctx context.Context, userID string, candidateID int64) (MemoryEntry, error) {
-	unlock := s.lockUsers(userID)
-	defer unlock()
-	candidate, err := s.LoadCandidate(ctx, userID, candidateID)
+func (s *Store) reconcileSameTurnCandidateTx(ctx context.Context, tx *sql.Tx, userID string, proposal CandidateProposal, incomingState, incomingReason, incomingPublicationStatus string, incomingSupersedesID int64, now time.Time) (FormationCandidate, bool, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, `
+SELECT id FROM memory_candidates
+WHERE canonical_user_id = ? AND source_turn_id = ? AND evidence = ?
+	AND claim_slot = ? AND claim_value = ?
+ORDER BY CASE WHEN published_memory_id IS NOT NULL THEN 0 ELSE 1 END,
+	CASE state WHEN 'approved' THEN 0 WHEN 'proposed' THEN 1 ELSE 2 END,
+	id
+LIMIT 1`, userID, proposal.Source.TurnID, proposal.Output.Evidence, proposal.Output.ClaimSlot, proposal.Output.ClaimValue).Scan(&id)
+	if err == sql.ErrNoRows {
+		return FormationCandidate{}, false, nil
+	}
 	if err != nil {
-		return MemoryEntry{}, err
+		return FormationCandidate{}, false, fmt.Errorf("find equivalent same-turn memory candidate: %w", err)
 	}
-	if candidate.PublishedMemoryID > 0 {
-		return s.EntryByID(candidate.PublishedMemoryID)
-	}
-	if candidate.State != "approved" {
-		return MemoryEntry{}, fmt.Errorf("memory candidate %d is not approved", candidateID)
-	}
-	if !candidate.ExpiresAt.IsZero() && !candidate.ExpiresAt.After(time.Now().UTC()) {
-		_, _ = s.sql.ExecContext(ctx, `UPDATE memory_candidates SET state = 'rejected', decision_reason = 'candidate_expired_before_publication', decided_at = ?, decided_by = 'retention', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'approved' AND published_memory_id IS NULL`, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), candidateID, userID)
-		return MemoryEntry{}, fmt.Errorf("memory candidate %d expired before publication", candidateID)
-	}
-	tx, err := s.sql.BeginTx(ctx, nil)
+	existing, err := loadCandidateTx(ctx, tx, userID, id)
 	if err != nil {
-		return MemoryEntry{}, fmt.Errorf("begin memory publication: %w", err)
+		return FormationCandidate{}, false, err
 	}
-	defer tx.Rollback() // nolint:errcheck
-	candidate, err = loadCandidateTx(ctx, tx, userID, candidateID)
-	if err != nil {
-		return MemoryEntry{}, err
-	}
-	if candidate.PublishedMemoryID > 0 {
-		if err := tx.Commit(); err != nil {
-			return MemoryEntry{}, err
+
+	state, reason := existing.State, existing.DecisionReason
+	publicationStatus := existing.PublicationStatus
+	incomingEligible := incomingState != "rejected"
+	incomingPreferred := incomingEligible && (provenanceAuthorityRank(string(proposal.Output.Provenance)) > provenanceAuthorityRank(existing.Provenance) ||
+		(provenanceAuthorityRank(string(proposal.Output.Provenance)) == provenanceAuthorityRank(existing.Provenance) && proposal.Output.Confidence > existing.Confidence))
+	shouldReplacePolicy := candidateStateRank(incomingState) > candidateStateRank(existing.State) || (candidateStateRank(incomingState) == candidateStateRank(existing.State) && incomingPreferred)
+	if shouldReplacePolicy {
+		state, reason = incomingState, incomingReason
+		if existing.PublishedMemoryID == 0 {
+			publicationStatus = incomingPublicationStatus
 		}
-		return s.EntryByID(candidate.PublishedMemoryID)
 	}
-	if candidate.State != "approved" {
-		return MemoryEntry{}, fmt.Errorf("memory candidate %d changed state", candidateID)
+	confidence, importance := existing.Confidence, existing.Importance
+	provenance, sensitivity := existing.Provenance, existing.Sensitivity
+	if incomingEligible {
+		confidence = max(existing.Confidence, proposal.Output.Confidence)
+		importance = max(existing.Importance, proposal.Output.Importance)
+		provenance = strongestMemoryProvenance(existing.Provenance, string(proposal.Output.Provenance))
+		sensitivity = strongestSensitivity(existing.Sensitivity, string(proposal.Output.Sensitivity))
 	}
-	if !candidate.ExpiresAt.IsZero() && !candidate.ExpiresAt.After(time.Now().UTC()) {
-		return MemoryEntry{}, fmt.Errorf("memory candidate %d expired before transactional publication", candidateID)
+	statement, scope, category := existing.Statement, existing.Scope, existing.Category
+	expiresAt := nullableFormationTime(existing.ExpiresAt)
+	if incomingPreferred {
+		statement, scope, category = proposal.Output.Statement, string(proposal.Output.Scope), string(proposal.Output.Category)
+		if proposal.Output.TTL > 0 {
+			expiresAt = formatTime(now.Add(proposal.Output.TTL))
+		} else {
+			expiresAt = nil
+		}
+	}
+	claimSlot, claimValue := existing.ClaimSlot, existing.ClaimValue
+	mode := existing.FormationMode
+	if proposal.Output.Mode == memoryformation.ModeExplicitRemember || mode == string(memoryformation.ModeExplicitRemember) {
+		mode = string(memoryformation.ModeExplicitRemember)
+	}
+	supersedesID := existing.SupersedesMemoryID
+	if incomingSupersedesID > 0 && incomingEligible && (supersedesID == 0 || incomingPreferred) {
+		supersedesID = incomingSupersedesID
+	}
+	if existing.PublishedMemoryID > 0 && supersedesID == existing.PublishedMemoryID {
+		supersedesID = 0
+	}
+	model, extractorVersion := existing.ExtractionModel, existing.ExtractorVersion
+	if model == "" {
+		model = proposal.Source.Model
+	}
+	if extractorVersion == "" {
+		extractorVersion = firstNonEmptyFormation(proposal.Source.ExtractorVersion, FormationExtractorVersion)
+	}
+	result, err := tx.ExecContext(ctx, `
+UPDATE memory_candidates SET state = ?, scope = ?, category = ?, statement = ?,
+	confidence = ?, importance = ?, provenance_type = ?, extraction_model = ?,
+	extractor_version = ?, formation_mode = ?, sensitivity = ?,
+	decision_reason = ?, expires_at = ?, publication_status = ?,
+	supersedes_memory_id = ?, claim_slot = ?, claim_value = ?, updated_at = ?
+WHERE id = ? AND canonical_user_id = ?`, state, scope, category, statement,
+		confidence, importance, provenance, model, extractorVersion, mode, sensitivity,
+		reason, expiresAt, publicationStatus,
+		nullableID(supersedesID), claimSlot, claimValue, formatTime(now), existing.ID, userID)
+	if err != nil {
+		return FormationCandidate{}, false, fmt.Errorf("reconcile equivalent memory candidate: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return FormationCandidate{}, false, fmt.Errorf("reconcile equivalent memory candidate: candidate changed")
+	}
+	if existing.PublishedMemoryID > 0 {
+		var memoryScope, memoryCategory, memoryStatement, memoryProvenance, memorySensitivity, memoryClaimSlot, memoryClaimValue string
+		var memoryConfidence float64
+		var memoryImportance int
+		var memoryExpires sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT scope, category, statement, confidence, importance, provenance_type, sensitivity, expires_at, claim_slot, claim_value FROM memory_entries WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, existing.PublishedMemoryID, userID).Scan(&memoryScope, &memoryCategory, &memoryStatement, &memoryConfidence, &memoryImportance, &memoryProvenance, &memorySensitivity, &memoryExpires, &memoryClaimSlot, &memoryClaimValue); err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("read published same-turn memory: %w", err)
+		}
+		memoryPreferred := provenanceAuthorityRank(provenance) > provenanceAuthorityRank(memoryProvenance) || (provenanceAuthorityRank(provenance) == provenanceAuthorityRank(memoryProvenance) && confidence > memoryConfidence)
+		canonicalScope, canonicalCategory, canonicalStatement := memoryScope, memoryCategory, memoryStatement
+		canonicalClaimSlot, canonicalClaimValue := memoryClaimSlot, memoryClaimValue
+		canonicalExpires := any(nil)
+		if memoryExpires.Valid {
+			canonicalExpires = memoryExpires.String
+		}
+		if memoryPreferred {
+			canonicalScope, canonicalCategory, canonicalStatement = scope, category, statement
+			canonicalClaimSlot, canonicalClaimValue, canonicalExpires = claimSlot, claimValue, expiresAt
+		}
+		canonicalProvenance := strongestMemoryProvenance(memoryProvenance, provenance)
+		canonicalSensitivity := strongestSensitivity(memorySensitivity, sensitivity)
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET scope = ?, category = ?, statement = ?, confidence = MAX(confidence, ?), importance = MAX(importance, ?), provenance_type = ?, sensitivity = ?, expires_at = ?, supersedes_id = CASE WHEN ? > 0 THEN ? ELSE supersedes_id END, claim_slot = ?, claim_value = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, canonicalScope, canonicalCategory, canonicalStatement, confidence, importance, canonicalProvenance, canonicalSensitivity, canonicalExpires, supersedesID, nullableID(supersedesID), canonicalClaimSlot, canonicalClaimValue, formatTime(now), existing.PublishedMemoryID, userID); err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("reconcile published same-turn memory: %w", err)
+		}
+		if supersedesID > 0 && supersedesID != existing.PublishedMemoryID {
+			if err := s.supersedeActiveMemoryTx(ctx, tx, userID, supersedesID, existing.PublishedMemoryID, now); err != nil {
+				return FormationCandidate{}, false, err
+			}
+		}
+		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", existing.PublishedMemoryID, "upsert", "same-turn-reconcile:"+formatTime(now)); err != nil {
+			return FormationCandidate{}, false, err
+		}
+		if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
+			return FormationCandidate{}, false, fmt.Errorf("refresh profile after same-turn reconciliation: %w", err)
+		}
+	}
+	merged, err := loadCandidateTx(ctx, tx, userID, existing.ID)
+	return merged, true, err
+}
+
+func candidateStateRank(state string) int {
+	switch state {
+	case "approved":
+		return 3
+	case "proposed":
+		return 2
+	default:
+		return 1
+	}
+}
+
+// publishCandidateTx applies one approved candidate inside its proposal transaction.
+func (s *Store) publishCandidateTx(ctx context.Context, tx *sql.Tx, candidate FormationCandidate) (int64, error) {
+	userID, candidateID := candidate.UserID, candidate.ID
+	if candidate.PublishedMemoryID > 0 {
+		return candidate.PublishedMemoryID, nil
+	}
+	if candidate.State != "approved" || candidate.PublicationStatus != "none" {
+		return 0, fmt.Errorf("memory candidate %d is not publishable", candidateID)
 	}
 	if err := s.formationStage("validated"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	now := time.Now().UTC()
 	var duplicateID int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND status = 'active' AND ((? != '' AND claim_key = ?) OR statement_key = ?) ORDER BY CASE WHEN claim_key = ? THEN 0 ELSE 1 END, id LIMIT 1`, userID, candidate.Scope, candidate.ClaimKey, candidate.ClaimKey, statementKey(candidate.Statement), candidate.ClaimKey).Scan(&duplicateID)
+	err := tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND status = 'active' AND claim_slot = ? AND claim_value = ? ORDER BY id LIMIT 1`, userID, candidate.Scope, candidate.ClaimSlot, candidate.ClaimValue).Scan(&duplicateID)
 	if err != nil && err != sql.ErrNoRows {
-		return MemoryEntry{}, fmt.Errorf("read duplicate active memory: %w", err)
+		return 0, fmt.Errorf("read duplicate active memory: %w", err)
 	}
 	if err == nil {
 		if candidate.SupersedesMemoryID > 0 && candidate.SupersedesMemoryID != duplicateID {
 			if err := s.supersedeActiveMemoryTx(ctx, tx, userID, candidate.SupersedesMemoryID, duplicateID, now); err != nil {
-				return MemoryEntry{}, err
+				return 0, err
 			}
 			if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
-				return MemoryEntry{}, fmt.Errorf("advance profile after duplicate correction: %w", err)
+				return 0, fmt.Errorf("advance profile after duplicate correction: %w", err)
 			}
 		}
-		if err := attachPublishedEvidenceTx(ctx, tx, candidate, duplicateID); err != nil {
-			return MemoryEntry{}, err
-		}
 		var oldConfidence float64
-		var oldAuthority, oldProvenance, oldSensitivity string
-		var evidenceCount int
-		if err := tx.QueryRowContext(ctx, `SELECT confidence, source_authority, provenance_type, sensitivity, evidence_count FROM memory_entries WHERE id = ? AND canonical_user_id = ?`, duplicateID, userID).Scan(&oldConfidence, &oldAuthority, &oldProvenance, &oldSensitivity, &evidenceCount); err != nil {
-			return MemoryEntry{}, fmt.Errorf("read memory confidence for reinforcement: %w", err)
+		var oldProvenance, oldSensitivity string
+		if err := tx.QueryRowContext(ctx, `SELECT confidence, provenance_type, sensitivity FROM memory_entries WHERE id = ? AND canonical_user_id = ?`, duplicateID, userID).Scan(&oldConfidence, &oldProvenance, &oldSensitivity); err != nil {
+			return 0, fmt.Errorf("read memory confidence for reinforcement: %w", err)
 		}
 		contribution := candidate.Confidence
-		if candidate.SourceAuthority == string(memoryformation.AuthorityModel) && candidate.SourceSessionID != "" {
+		if candidate.Provenance == string(memoryformation.ProvenanceModelInference) && candidate.SourceSessionID != "" {
 			var correlated int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_evidence WHERE canonical_user_id = ? AND memory_id = ? AND source_session_id = ? AND source_authority = ? AND idempotency_key != ?`, userID, duplicateID, candidate.SourceSessionID, string(memoryformation.AuthorityModel), formationKey("memory-evidence", candidate.ID, duplicateID)).Scan(&correlated); err != nil {
-				return MemoryEntry{}, fmt.Errorf("inspect correlated memory evidence: %w", err)
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_candidates candidate JOIN session_turns turn ON turn.id = candidate.source_turn_id AND turn.canonical_user_id = candidate.canonical_user_id WHERE candidate.canonical_user_id = ? AND candidate.published_memory_id = ? AND turn.session_id = ? AND candidate.provenance_type = ? AND candidate.id != ?`, userID, duplicateID, candidate.SourceSessionID, string(memoryformation.ProvenanceModelInference), candidate.ID).Scan(&correlated); err != nil {
+				return 0, fmt.Errorf("inspect correlated memory evidence: %w", err)
 			}
 			if correlated > 0 {
 				contribution *= 0.25
 			}
 		}
 		confidence := aggregateConfidence(oldConfidence, contribution)
-		authority, provenance := strongestMemorySource(oldAuthority, oldProvenance, candidate.SourceAuthority, candidate.Provenance)
-		statement, evidence := "", ""
-		if sourceAuthorityRank(candidate.SourceAuthority) > sourceAuthorityRank(oldAuthority) {
-			statement, evidence = candidate.Statement, candidate.Evidence
+		provenance := strongestMemoryProvenance(oldProvenance, candidate.Provenance)
+		statement := ""
+		if provenanceAuthorityRank(candidate.Provenance) > provenanceAuthorityRank(oldProvenance) {
+			statement = candidate.Statement
 		}
-		profileApproved := 1
-		if authority == string(memoryformation.AuthorityModel) || provenance == string(memoryformation.ProvenanceModelInference) {
-			profileApproved = 0
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, importance = MAX(importance, ?), evidence_count = ?, source_authority = ?, provenance_type = ?, sensitivity = ?, profile_approved = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, statement_key = CASE WHEN ? = '' THEN statement_key ELSE ? END, evidence = CASE WHEN ? = '' THEN evidence ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END, source_session_id = CASE WHEN ? = '' THEN source_session_id ELSE ? END, source_request_id = CASE WHEN ? = '' THEN source_request_id ELSE ? END, source_turn_id = CASE WHEN ? = 0 THEN source_turn_id ELSE ? END, formation_mode = CASE WHEN ? = '' THEN formation_mode ELSE ? END, claim_key = ?, claim_slot = ?, claim_value = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ?`,
-			confidence, candidate.Importance, evidenceCount+1, authority, provenance, strongestSensitivity(oldSensitivity, candidate.Sensitivity), profileApproved,
-			statement, statement, statement, statementKey(statement), evidence, evidence, statement, candidate.Category,
-			statement, candidate.SourceSessionID, statement, candidate.SourceRequestID,
-			conditionalTurnID(statement, candidate.SourceTurnID), nullableID(candidate.SourceTurnID), statement, candidate.FormationMode,
-			candidate.ClaimKey, candidate.ClaimSlot, candidate.ClaimValue, formatTime(now), duplicateID, userID); err != nil {
-			return MemoryEntry{}, fmt.Errorf("reinforce active memory: %w", err)
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, importance = MAX(importance, ?), provenance_type = ?, sensitivity = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END, claim_slot = ?, claim_value = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ?`,
+			confidence, candidate.Importance, provenance, strongestSensitivity(oldSensitivity, candidate.Sensitivity),
+			statement, statement, statement, candidate.Category,
+			candidate.ClaimSlot, candidate.ClaimValue, formatTime(now), duplicateID, userID); err != nil {
+			return 0, fmt.Errorf("reinforce active memory: %w", err)
 		}
 		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", duplicateID, "upsert", "reinforce:"+formatTime(now)); err != nil {
-			return MemoryEntry{}, err
+			return 0, err
 		}
 		if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
-			return MemoryEntry{}, fmt.Errorf("advance profile after memory reinforcement: %w", err)
+			return 0, fmt.Errorf("advance profile after memory reinforcement: %w", err)
 		}
 		if err := markCandidatePublishedTx(ctx, tx, candidate, duplicateID); err != nil {
-			return MemoryEntry{}, err
+			return 0, err
 		}
 		if err := insertFormationAuditTx(ctx, tx, userID, formationKey("duplicate", candidate.ID, duplicateID), "user_memory.duplicate_observed", candidate.ID, duplicateID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", "exact duplicate"); err != nil {
-			return MemoryEntry{}, err
+			return 0, err
 		}
-		if err := tx.Commit(); err != nil {
-			return MemoryEntry{}, fmt.Errorf("commit duplicate memory evidence: %w", err)
-		}
-		s.signalDerivedIndex()
-		return s.EntryByID(duplicateID)
+		return duplicateID, nil
 	}
 	var memoryID int64
 	var inactiveID int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND status IN ('expired', 'superseded') AND ((? != '' AND claim_key = ?) OR statement_key = ?) ORDER BY CASE WHEN claim_key = ? THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT 1`, userID, candidate.Scope, candidate.ClaimKey, candidate.ClaimKey, statementKey(candidate.Statement), candidate.ClaimKey).Scan(&inactiveID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND status IN ('expired', 'superseded') AND claim_slot = ? AND claim_value = ? ORDER BY updated_at DESC, id DESC LIMIT 1`, userID, candidate.Scope, candidate.ClaimSlot, candidate.ClaimValue).Scan(&inactiveID)
 	if err != nil && err != sql.ErrNoRows {
-		return MemoryEntry{}, fmt.Errorf("read inactive duplicate memory: %w", err)
+		return 0, fmt.Errorf("read inactive duplicate memory: %w", err)
 	}
 	if err == nil {
 		if candidate.SupersedesMemoryID == inactiveID {
 			candidate.SupersedesMemoryID = 0
 		}
 		err = tx.QueryRowContext(ctx, `
-UPDATE memory_entries SET category = ?, statement = ?, statement_key = ?, evidence = ?, confidence = ?, importance = ?,
-	status = 'active', source_session_id = ?, updated_at = ?, expires_at = ?, supersedes_id = ?,
-		embedding_model = ?, embedding_dim = ?, profile_approved = ?, candidate_id = ?, provenance_type = ?,
-	source_authority = ?, source_request_id = ?, source_turn_id = ?, formation_mode = ?, sensitivity = ?,
-	approval_state = 'approved', approved_at = ?, approved_by = ?, valid_from = ?, valid_until = ?,
-	invalidated_at = NULL, invalidation_reason = '', erased_at = NULL, erasure_reason = '',
-		forgotten_at = NULL, hard_delete_after = NULL, lifecycle_request_id = '', claim_key = ?, claim_slot = ?, claim_value = ?, evidence_count = 1
+UPDATE memory_entries SET category = ?, statement = ?, confidence = ?, importance = ?,
+	status = 'active', status_changed_at = ?, status_reason = '', updated_at = ?, expires_at = ?, supersedes_id = ?,
+	provenance_type = ?, sensitivity = ?, hard_delete_after = NULL,
+	lifecycle_request_id = '', claim_slot = ?, claim_value = ?
 WHERE id = ? AND canonical_user_id = ?
 RETURNING id
-`, candidate.Category, candidate.Statement, statementKey(candidate.Statement), candidate.Evidence,
-			candidate.Confidence, candidate.Importance, candidate.SourceSessionID, formatTime(now), nullableFormationTime(candidate.ExpiresAt), nullableID(candidate.SupersedesMemoryID),
-			"", 0, profileApprovedForCandidate(candidate), candidate.ID, candidate.Provenance, candidate.SourceAuthority,
-			candidate.SourceRequestID, nullableID(candidate.SourceTurnID), candidate.FormationMode, candidate.Sensitivity,
-			formatTime(now), candidateDecisionActor(candidate), formatTime(now), nullableFormationTime(candidate.ExpiresAt), candidate.ClaimKey, candidate.ClaimSlot, candidate.ClaimValue, inactiveID, userID).Scan(&memoryID)
+`, candidate.Category, candidate.Statement, candidate.Confidence,
+			candidate.Importance, formatTime(now), formatTime(now), nullableFormationTime(candidate.ExpiresAt), nullableID(candidate.SupersedesMemoryID),
+			candidate.Provenance, candidate.Sensitivity,
+			candidate.ClaimSlot, candidate.ClaimValue, inactiveID, userID).Scan(&memoryID)
 	} else {
 		err = tx.QueryRowContext(ctx, `
 INSERT INTO memory_entries (
-	canonical_user_id, scope, category, statement, statement_key, evidence, confidence,
-	importance, status, source_session_id, created_at, updated_at, expires_at,
-	embedding_model, embedding_dim, profile_approved, candidate_id, provenance_type,
-		source_authority, source_request_id, source_turn_id, formation_mode, sensitivity,
-		approval_state, approved_at, approved_by, valid_from, valid_until, claim_key, claim_slot, claim_value, evidence_count
+	canonical_user_id, scope, category, statement, confidence,
+	importance, status, created_at, updated_at, expires_at, supersedes_id, provenance_type,
+	sensitivity, status_changed_at, claim_slot, claim_value
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, 1)
+VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id
-`, userID, candidate.Scope, candidate.Category, candidate.Statement, statementKey(candidate.Statement),
-			candidate.Evidence, candidate.Confidence, candidate.Importance, candidate.SourceSessionID,
-			formatTime(now), formatTime(now), nullableFormationTime(candidate.ExpiresAt), "", 0, profileApprovedForCandidate(candidate),
-			candidate.ID, candidate.Provenance, candidate.SourceAuthority, candidate.SourceRequestID,
-			nullableID(candidate.SourceTurnID), candidate.FormationMode, candidate.Sensitivity,
-			formatTime(now), candidateDecisionActor(candidate), formatTime(now), nullableFormationTime(candidate.ExpiresAt), candidate.ClaimKey, candidate.ClaimSlot, candidate.ClaimValue).Scan(&memoryID)
+`, userID, candidate.Scope, candidate.Category, candidate.Statement,
+			candidate.Confidence, candidate.Importance, formatTime(now), formatTime(now), nullableFormationTime(candidate.ExpiresAt), nullableID(candidate.SupersedesMemoryID),
+			candidate.Provenance, candidate.Sensitivity, formatTime(now), candidate.ClaimSlot, candidate.ClaimValue).Scan(&memoryID)
 	}
 	if err != nil {
-		return MemoryEntry{}, fmt.Errorf("insert active memory: %w", err)
+		return 0, fmt.Errorf("insert active memory: %w", err)
 	}
 	if err := s.formationStage("canonical_written"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", memoryID, "upsert", "publish:"+formatTime(now)); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if err := s.formationStage("vector_written"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if candidate.SupersedesMemoryID > 0 {
 		if err := s.supersedeActiveMemoryTx(ctx, tx, userID, candidate.SupersedesMemoryID, memoryID, now); err != nil {
-			return MemoryEntry{}, err
+			return 0, err
 		}
 	}
 	if err := s.formationStage("supersession_written"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
-	if err := attachPublishedEvidenceTx(ctx, tx, candidate, memoryID); err != nil {
-		return MemoryEntry{}, err
-	}
-	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("published", candidate.ID, memoryID), "user_memory.published", candidate.ID, memoryID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", candidate.PolicyDecision); err != nil {
-		return MemoryEntry{}, err
+	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("published", candidate.ID, memoryID), "user_memory.published", candidate.ID, memoryID, 0, FormationSource{RequestID: candidate.SourceRequestID, SessionID: candidate.SourceSessionID, TurnID: candidate.SourceTurnID}, "formation", candidate.DecisionReason); err != nil {
+		return 0, err
 	}
 	if err := s.formationStage("audit_written"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
-		return MemoryEntry{}, fmt.Errorf("advance profile after memory publication: %w", err)
+		return 0, fmt.Errorf("advance profile after memory publication: %w", err)
 	}
 	if err := s.formationStage("profile_written"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if err := markCandidatePublishedTx(ctx, tx, candidate, memoryID); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
 	if err := s.formationStage("candidate_published"); err != nil {
-		return MemoryEntry{}, err
+		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return MemoryEntry{}, fmt.Errorf("commit memory publication: %w", err)
-	}
-	s.signalDerivedIndex()
-	return s.EntryByID(memoryID)
+	return memoryID, nil
 }
 
 // LoadCandidate returns one tenant-owned candidate.
 func (s *Store) LoadCandidate(ctx context.Context, userID string, candidateID int64) (FormationCandidate, error) {
 	return loadCandidateSQL(ctx, s.sql, userID, candidateID)
-}
-
-// ApprovedUnpublishedCandidates returns durable approvals awaiting publication.
-func (s *Store) ApprovedUnpublishedCandidates(ctx context.Context, limit int) ([]FormationCandidate, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	rows, err := s.sql.QueryContext(ctx, candidateSelect+` WHERE state = 'approved' AND published_memory_id IS NULL AND updated_at <= ? AND formation_eligible_at IS NOT NULL ORDER BY updated_at, id LIMIT ?`, formatTime(time.Now().UTC().Add(-time.Minute)), limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var candidates []FormationCandidate
-	for rows.Next() {
-		candidate, err := scanFormationCandidate(rows)
-		if err != nil {
-			return nil, err
-		}
-		candidates = append(candidates, candidate)
-	}
-	return candidates, rows.Err()
-}
-
-// DeferCandidatePublication records a failed retry without storing error text.
-func (s *Store) DeferCandidatePublication(ctx context.Context, userID string, candidateID int64) error {
-	_, err := s.sql.ExecContext(ctx, `UPDATE memory_candidates SET updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'approved' AND published_memory_id IS NULL`, formatTime(time.Now().UTC()), candidateID, userID)
-	return err
-}
-
-// AttachRequestCandidates links explicit tool candidates to their persisted turn.
-func (s *Store) AttachRequestCandidates(ctx context.Context, userID, requestID string, turnID int64) ([]int64, error) {
-	tx, err := s.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() // nolint:errcheck
-	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("validate candidate source turn: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET source_turn_id = ?, formation_eligible_at = (SELECT formation_eligible_at FROM session_turns WHERE id = ? AND canonical_user_id = ?), updated_at = ? WHERE canonical_user_id = ? AND source_request_id = ? AND source_turn_id IS NULL`, turnID, turnID, userID, formatTime(time.Now().UTC()), userID, requestID); err != nil {
-		return nil, fmt.Errorf("attach candidate source turn: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET source_turn_id = ? WHERE canonical_user_id = ? AND source_request_id = ? AND source_turn_id IS NULL`, turnID, userID, requestID); err != nil {
-		return nil, fmt.Errorf("attach evidence source turn: %w", err)
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND source_request_id = ? AND state = 'approved' AND published_memory_id IS NULL ORDER BY id`, userID, requestID)
-	if err != nil {
-		return nil, err
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close() // nolint:errcheck
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return ids, nil
 }
 
 // EnqueueFormationJob records one replay-safe extraction job per source turn/version.
@@ -583,11 +623,11 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 	now := time.Now().UTC()
 	if _, err := s.sql.ExecContext(ctx, `
 INSERT INTO durable_jobs (
-	job_kind, canonical_user_id, idempotency_key, job_type, state, source_request_id,
+	job_kind, canonical_user_id, idempotency_key, state, source_request_id,
 	source_session_id, source_session_generation, source_turn_id, extraction_model,
 	extractor_version, available_at, created_at, updated_at
 )
-VALUES ('memory_formation', ?, ?, 'post_turn_extract', 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES ('memory_formation', ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING
 `, userID, key, source.RequestID, source.SessionID, source.SessionGeneration, source.TurnID,
 		source.Model, version, formatTime(now), formatTime(now), formatTime(now)); err != nil {
@@ -608,7 +648,7 @@ func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID
 		return fmt.Errorf("begin mark turn eligible: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
-	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET formation_eligible_at = COALESCE(formation_eligible_at, ?), delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, now, turnID, userID)
+	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, turnID, userID)
 	if err != nil {
 		return fmt.Errorf("mark turn eligible for memory formation: %w", err)
 	}
@@ -616,7 +656,7 @@ func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", turnID, "upsert", "formation-eligible:"+now); err != nil {
+	if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", turnID, "upsert", "delivered:"+now); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -633,14 +673,14 @@ func (s *Store) ReconcileFormationJobs(ctx context.Context, model, version strin
 	now := time.Now().UTC()
 	result, err := s.sql.ExecContext(ctx, `
 INSERT INTO durable_jobs (
-	job_kind, canonical_user_id, idempotency_key, job_type, state, source_request_id,
+	job_kind, canonical_user_id, idempotency_key, state, source_request_id,
 	source_session_id, source_session_generation, source_turn_id, extraction_model,
 	extractor_version, available_at, created_at, updated_at
 )
-SELECT 'memory_formation', turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'post_turn_extract', 'queued',
+SELECT 'memory_formation', turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'queued',
 	turns.source_request_id, turns.session_id, turns.session_generation, turns.id, ?, ?, ?, ?, ?
 FROM session_turns turns
-WHERE turns.created_at >= ? AND turns.formation_eligible_at IS NOT NULL
+WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL
 	AND NOT EXISTS (
 		SELECT 1 FROM durable_jobs jobs
 		WHERE jobs.job_kind = 'memory_formation' AND jobs.canonical_user_id = turns.canonical_user_id
@@ -719,8 +759,23 @@ ORDER BY available_at, id LIMIT 1
 // FormationJobArtifact returns the first persisted extractor result for replay.
 func (s *Store) FormationJobArtifact(ctx context.Context, job FormationJob) (string, error) {
 	var payload string
-	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, job.ID, job.UserID).Scan(&payload)
+	now := time.Now().UTC()
+	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now)).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", ErrStaleFormationJobLease
+	}
 	return payload, err
+}
+
+// ValidateFormationJobLease verifies exact ownership of a currently live lease.
+func (s *Store) ValidateFormationJobLease(ctx context.Context, job FormationJob) error {
+	var exists int
+	now := time.Now().UTC()
+	err := s.sql.QueryRowContext(ctx, `SELECT 1 FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now)).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return ErrStaleFormationJobLease
+	}
+	return err
 }
 
 // SaveFormationJobArtifact persists the first extractor result and never revises it.
@@ -728,8 +783,9 @@ func (s *Store) SaveFormationJobArtifact(ctx context.Context, job FormationJob, 
 	if strings.TrimSpace(payload) == "" {
 		payload = "[]"
 	}
-	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, payload, formatTime(time.Now().UTC()), job.ID, job.UserID)
-	return err
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, payload, formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+	return requireFormationLeaseMutation(result, err)
 }
 
 // CompleteFormationJob records a terminal successful or skipped state.
@@ -739,15 +795,15 @@ func (s *Store) CompleteFormationJob(ctx context.Context, job FormationJob, skip
 		state = "skipped"
 	}
 	now := time.Now().UTC()
-	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now), formatTime(now), job.ID, job.UserID)
-	return err
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, state, formatTime(now), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+	return requireFormationLeaseMutation(result, err)
 }
 
 // SkipFormationJob terminally skips a running job that cannot succeed by retrying.
 func (s *Store) SkipFormationJob(ctx context.Context, job FormationJob, code string) error {
 	now := time.Now().UTC()
-	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
-	return err
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	return requireFormationLeaseMutation(result, err)
 }
 
 // RetryFormationJob releases a failed lease with bounded exponential backoff.
@@ -758,8 +814,33 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 		state = "dead"
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
-	_, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID)
-	return err
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	return requireFormationLeaseMutation(result, err)
+}
+
+// DeferFormationJob releases a lease preempted by foreground work without
+// consuming the job's provider retry budget.
+func (s *Store) DeferFormationJob(ctx context.Context, job FormationJob, delay time.Duration) error {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?, lease_until = NULL, last_error_code = 'foreground_preempted', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	return requireFormationLeaseMutation(result, err)
+}
+
+func requireFormationLeaseMutation(result sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrStaleFormationJobLease
+	}
+	return nil
 }
 
 // FormationJobState returns one tenant-owned job state for observability/tests.
@@ -776,60 +857,45 @@ func (s *Store) SessionTurnByID(ctx context.Context, userID string, turnID int64
 	return turn, err
 }
 
-const candidateSelect = `SELECT id, canonical_user_id, state, scope, category, statement, evidence_summary, confidence, importance, provenance_type, source_authority, sensitivity, formation_mode, content_context, policy_decision, decision_reason, source_request_id, source_session_id, source_session_generation, COALESCE(source_turn_id, 0), extraction_model, extractor_version, COALESCE(supersedes_memory_id, 0), COALESCE((SELECT statement FROM memory_entries WHERE id = memory_candidates.supersedes_memory_id), ''), COALESCE(published_memory_id, 0), confirmation_session_id, confirmation_request_id, confirmation_presented_at, formation_eligible_at, expires_at, claim_key, claim_slot, claim_value FROM memory_candidates`
+const candidateSelect = `SELECT memory_candidates.id, memory_candidates.canonical_user_id, memory_candidates.state, memory_candidates.publication_status, memory_candidates.redacted_at, memory_candidates.redaction_reason, memory_candidates.updated_at, memory_candidates.scope, memory_candidates.category, memory_candidates.statement, memory_candidates.evidence, memory_candidates.confidence, memory_candidates.importance, memory_candidates.provenance_type, memory_candidates.sensitivity, memory_candidates.formation_mode, memory_candidates.decision_reason, COALESCE(source.source_request_id, ''), COALESCE(source.session_id, ''), COALESCE(source.session_generation, 0), COALESCE(memory_candidates.source_turn_id, 0), memory_candidates.extraction_model, memory_candidates.extractor_version, COALESCE(memory_candidates.supersedes_memory_id, 0), COALESCE((SELECT statement FROM memory_entries WHERE id = memory_candidates.supersedes_memory_id), ''), COALESCE(memory_candidates.published_memory_id, 0), memory_candidates.expires_at, memory_candidates.claim_slot, memory_candidates.claim_value FROM memory_candidates LEFT JOIN session_turns source ON source.id = memory_candidates.source_turn_id AND source.canonical_user_id = memory_candidates.canonical_user_id`
 
 func loadCandidateByKeyTx(ctx context.Context, tx *sql.Tx, userID, key string) (FormationCandidate, error) {
-	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE canonical_user_id = ? AND idempotency_key = ?`, userID, key))
+	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.idempotency_key = ?`, userID, key))
 }
 
 func loadCandidateTx(ctx context.Context, tx *sql.Tx, userID string, id int64) (FormationCandidate, error) {
-	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE canonical_user_id = ? AND id = ?`, userID, id))
+	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.id = ?`, userID, id))
 }
 
 func loadCandidateSQL(ctx context.Context, db *sql.DB, userID string, id int64) (FormationCandidate, error) {
-	return scanFormationCandidate(db.QueryRowContext(ctx, candidateSelect+` WHERE canonical_user_id = ? AND id = ?`, userID, id))
+	return scanFormationCandidate(db.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.id = ?`, userID, id))
 }
 
 func scanFormationCandidate(row interface{ Scan(...any) error }) (FormationCandidate, error) {
 	var candidate FormationCandidate
-	var presented, eligible, expires sql.NullString
-	err := row.Scan(&candidate.ID, &candidate.UserID, &candidate.State, &candidate.Scope, &candidate.Category,
+	var updated string
+	var expires, redacted sql.NullString
+	err := row.Scan(&candidate.ID, &candidate.UserID, &candidate.State,
+		&candidate.PublicationStatus, &redacted, &candidate.RedactionReason, &updated, &candidate.Scope, &candidate.Category,
 		&candidate.Statement, &candidate.Evidence, &candidate.Confidence, &candidate.Importance,
-		&candidate.Provenance, &candidate.SourceAuthority, &candidate.Sensitivity,
-		&candidate.FormationMode, &candidate.Context, &candidate.PolicyDecision, &candidate.DecisionReason,
+		&candidate.Provenance, &candidate.Sensitivity,
+		&candidate.FormationMode, &candidate.DecisionReason,
 		&candidate.SourceRequestID, &candidate.SourceSessionID, &candidate.SourceGeneration,
 		&candidate.SourceTurnID, &candidate.ExtractionModel, &candidate.ExtractorVersion,
-		&candidate.SupersedesMemoryID, &candidate.SupersedesStatement, &candidate.PublishedMemoryID, &candidate.ConfirmationSessionID,
-		&candidate.ConfirmationRequestID, &presented, &eligible, &expires, &candidate.ClaimKey, &candidate.ClaimSlot, &candidate.ClaimValue)
+		&candidate.SupersedesMemoryID, &candidate.SupersedesStatement, &candidate.PublishedMemoryID,
+		&expires, &candidate.ClaimSlot, &candidate.ClaimValue)
 	if err != nil {
 		return FormationCandidate{}, err
 	}
 	if expires.Valid {
 		candidate.ExpiresAt = parseTime(expires.String)
 	}
-	if presented.Valid {
-		candidate.ConfirmationPresentedAt = parseTime(presented.String)
+	if redacted.Valid {
+		candidate.RedactedAt = parseTime(redacted.String)
 	}
-	if eligible.Valid {
-		candidate.FormationEligibleAt = parseTime(eligible.String)
-	}
+	candidate.UpdatedAt = parseTime(updated)
+	candidate.SourceAuthority = sourceAuthorityForProvenance(candidate.Provenance)
 	return candidate, nil
-}
-
-func attachPublishedEvidenceTx(ctx context.Context, tx *sql.Tx, candidate FormationCandidate, memoryID int64) error {
-	_, err := tx.ExecContext(ctx, `
-INSERT INTO memory_evidence (canonical_user_id, memory_id, idempotency_key, evidence_type, content, source_authority, source_request_id, source_session_id, source_turn_id, created_at, provenance_type, relation_type, confidence_contribution, extraction_model, extractor_version, source_session_generation, correlation_key)
-VALUES (?, ?, ?, 'exact_user_quote', ?, ?, ?, ?, ?, ?, ?, 'supports', ?, ?, ?, ?, ?)
-ON CONFLICT(canonical_user_id, idempotency_key) DO NOTHING
-`, candidate.UserID, memoryID, formationKey("memory-evidence", candidate.ID, memoryID), candidate.Evidence,
-		candidate.SourceAuthority, candidate.SourceRequestID, candidate.SourceSessionID,
-		nullableID(candidate.SourceTurnID), formatTime(time.Now().UTC()), candidate.Provenance,
-		candidate.Confidence, candidate.ExtractionModel, candidate.ExtractorVersion,
-		candidate.SourceGeneration, formationKey("correlation", candidate.SourceTurnID, candidate.ClaimKey))
-	if err != nil {
-		return fmt.Errorf("attach published memory evidence: %w", err)
-	}
-	return nil
 }
 
 func aggregateConfidence(current, contribution float64) float64 {
@@ -843,29 +909,43 @@ func aggregateConfidence(current, contribution float64) float64 {
 	return combined
 }
 
-func sourceAuthorityRank(authority string) int {
-	switch authority {
-	case "verified":
-		return 4
-	case string(memoryformation.AuthorityUserDirect):
+func provenanceAuthorityRank(provenance string) int {
+	switch provenance {
+	case string(memoryformation.ProvenanceUserStatement):
 		return 3
-	case string(memoryformation.AuthorityModel):
+	case string(memoryformation.ProvenanceModelInference):
 		return 2
 	default:
 		return 1
 	}
 }
 
-func candidateEvidenceStronger(newAuthority string, newConfidence float64, oldAuthority string, oldConfidence float64) bool {
-	newRank, oldRank := sourceAuthorityRank(newAuthority), sourceAuthorityRank(oldAuthority)
+func candidateEvidenceStronger(newProvenance string, newConfidence float64, oldProvenance string, oldConfidence float64) bool {
+	newRank, oldRank := provenanceAuthorityRank(newProvenance), provenanceAuthorityRank(oldProvenance)
 	return newRank > oldRank || (newRank == oldRank && newConfidence > oldConfidence)
 }
 
-func strongestMemorySource(oldAuthority, oldProvenance, newAuthority, newProvenance string) (string, string) {
-	if sourceAuthorityRank(newAuthority) > sourceAuthorityRank(oldAuthority) {
-		return newAuthority, newProvenance
+func candidateEvidenceAtLeastAsStrong(newProvenance string, newConfidence float64, oldProvenance string, oldConfidence float64) bool {
+	newRank, oldRank := provenanceAuthorityRank(newProvenance), provenanceAuthorityRank(oldProvenance)
+	return newRank > oldRank || (newRank == oldRank && newConfidence >= oldConfidence)
+}
+
+func strongestMemoryProvenance(oldProvenance, newProvenance string) string {
+	if provenanceAuthorityRank(newProvenance) > provenanceAuthorityRank(oldProvenance) {
+		return newProvenance
 	}
-	return oldAuthority, oldProvenance
+	return oldProvenance
+}
+
+func sourceAuthorityForProvenance(provenance string) string {
+	switch provenance {
+	case string(memoryformation.ProvenanceUserStatement):
+		return string(memoryformation.AuthorityUserDirect)
+	case string(memoryformation.ProvenanceModelInference):
+		return string(memoryformation.AuthorityModel)
+	default:
+		return "unknown"
+	}
 }
 
 func strongestSensitivity(oldSensitivity, newSensitivity string) string {
@@ -885,26 +965,12 @@ func strongestSensitivity(oldSensitivity, newSensitivity string) string {
 	return oldSensitivity
 }
 
-func profileApprovedForCandidate(candidate FormationCandidate) int {
-	if candidate.SourceAuthority == string(memoryformation.AuthorityModel) || candidate.Provenance == string(memoryformation.ProvenanceModelInference) {
-		return 0
-	}
-	return 1
-}
-
-func conditionalTurnID(statement string, turnID int64) int64 {
-	if statement == "" {
-		return 0
-	}
-	return turnID
-}
-
 func (s *Store) supersedeActiveMemoryTx(ctx context.Context, tx *sql.Tx, userID string, oldMemoryID, replacementMemoryID int64, now time.Time) error {
 	if oldMemoryID <= 0 || oldMemoryID == replacementMemoryID {
 		return nil
 	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE memory_entries SET status = 'superseded', invalidated_at = ?, invalidation_reason = 'explicit_correction', updated_at = ?
+UPDATE memory_entries SET status = 'superseded', status_changed_at = ?, status_reason = 'stronger_conflicting_evidence', updated_at = ?
 WHERE id = ? AND canonical_user_id = ? AND status = 'active'
 `, formatTime(now), formatTime(now), oldMemoryID, userID)
 	if err != nil {
@@ -921,7 +987,8 @@ WHERE id = ? AND canonical_user_id = ? AND status = 'active'
 }
 
 func markCandidatePublishedTx(ctx context.Context, tx *sql.Tx, candidate FormationCandidate, memoryID int64) error {
-	result, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET published_memory_id = ?, updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'approved' AND published_memory_id IS NULL`, memoryID, formatTime(time.Now().UTC()), candidate.ID, candidate.UserID)
+	now := formatTime(time.Now().UTC())
+	result, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET published_memory_id = ?, publication_status = 'published', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND state = 'approved' AND publication_status = 'none' AND published_memory_id IS NULL`, memoryID, now, candidate.ID, candidate.UserID)
 	if err != nil {
 		return fmt.Errorf("mark memory candidate published: %w", err)
 	}
@@ -934,10 +1001,10 @@ func markCandidatePublishedTx(ctx context.Context, tx *sql.Tx, candidate Formati
 
 func insertFormationAuditTx(ctx context.Context, tx *sql.Tx, userID, key, event string, candidateID, memoryID, jobID int64, source FormationSource, actor, reason string) error {
 	_, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO memory_events (canonical_user_id, event_kind, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, created_at, updated_at, metadata)
-VALUES (?, 'formation_audit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT OR IGNORE INTO memory_events (canonical_user_id, event_kind, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, created_at, metadata)
+VALUES (?, 'formation_audit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, userID, key, event, nullableID(candidateID), nullableID(memoryID), nullableID(jobID), source.RequestID,
-		source.SessionID, nullableID(source.TurnID), actor, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), `{"reason":`+quoteProfileText(reason)+`}`)
+		source.SessionID, nullableID(source.TurnID), actor, formatTime(time.Now().UTC()), `{"reason":`+quoteProfileText(reason)+`}`)
 	if err != nil {
 		return fmt.Errorf("append memory formation audit: %w", err)
 	}
@@ -958,33 +1025,6 @@ func formationKey(values ...any) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(sum[:])
-}
-
-func decisionTime(state string, now time.Time) any {
-	if state == "approved" || state == "rejected" {
-		return formatTime(now)
-	}
-	return nil
-}
-
-func decisionActor(state string, mode memoryformation.FormationMode) string {
-	if state == "approved" && mode == memoryformation.ModeExplicitRemember {
-		return "explicit_user_request"
-	}
-	if state == "approved" {
-		return "formation_policy"
-	}
-	if state == "rejected" {
-		return "formation_policy"
-	}
-	return ""
-}
-
-func candidateDecisionActor(candidate FormationCandidate) string {
-	if candidate.FormationMode == string(memoryformation.ModeExplicitRemember) {
-		return "explicit_user_request"
-	}
-	return "formation_policy"
 }
 
 func nullableFormationTime(value time.Time) any {
@@ -1020,81 +1060,4 @@ func safeErrorCode(value string) string {
 		}
 	}
 	return b.String()
-}
-
-func (s *Store) findLikelyContradiction(ctx context.Context, userID, scope, category, statement string) (int64, error) {
-	if category == string(memoryformation.CategoryNotes) || category == string(memoryformation.CategoryRelationships) {
-		return 0, nil
-	}
-	candidateTokens := contradictionTokens(statement)
-	if len(candidateTokens) < 3 || !hasContradictionSlot(candidateTokens) {
-		return 0, nil
-	}
-	rows, err := s.sql.QueryContext(ctx, `SELECT id, statement FROM memory_entries WHERE canonical_user_id = ? AND scope = ? AND category = ? AND status = 'active' AND approval_state = 'approved' ORDER BY updated_at DESC, id DESC`, userID, scope, category)
-	if err != nil {
-		return 0, fmt.Errorf("read authoritative memories for contradiction: %w", err)
-	}
-	defer rows.Close()
-	var bestID int64
-	bestScore := 0.0
-	for rows.Next() {
-		var id int64
-		var existing string
-		if err := rows.Scan(&id, &existing); err != nil {
-			return 0, err
-		}
-		if statementKey(existing) == statementKey(statement) {
-			continue
-		}
-		existingTokens := contradictionTokens(existing)
-		if len(existingTokens) < 3 || !hasContradictionSlot(existingTokens) {
-			continue
-		}
-		intersection := 0
-		for token := range candidateTokens {
-			if _, ok := existingTokens[token]; ok {
-				intersection++
-			}
-		}
-		denominator := min(len(candidateTokens), len(existingTokens))
-		if denominator == 0 {
-			continue
-		}
-		score := float64(intersection) / float64(denominator)
-		if score >= 0.6 && score > bestScore {
-			bestID, bestScore = id, score
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	return bestID, nil
-}
-
-func contradictionTokens(value string) map[string]struct{} {
-	tokens := make(map[string]struct{})
-	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	}) {
-		token = strings.TrimSuffix(token, "s")
-		if len([]rune(token)) < 2 || contradictionStopWords[token] {
-			continue
-		}
-		tokens[token] = struct{}{}
-	}
-	return tokens
-}
-
-func hasContradictionSlot(tokens map[string]struct{}) bool {
-	for _, token := range []string{"live", "prefer", "timezone", "name", "work", "use", "project", "environment", "located", "based", "want", "need", "call"} {
-		if _, ok := tokens[token]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-var contradictionStopWords = map[string]bool{
-	"the": true, "user": true, "directly": true, "stated": true, "explicitly": true,
-	"asked": true, "remember": true, "that": true, "this": true, "and": true,
 }

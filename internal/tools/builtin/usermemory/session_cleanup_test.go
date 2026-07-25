@@ -81,11 +81,11 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
 	ctx := context.Background()
-	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary secret code.", Evidence: "temporary", TTL: time.Nanosecond, Embedding: []float64{1, 0}})
+	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary secret code.", Evidence: "temporary", TTL: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pendingInput := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4}
+	pendingInput := memoryformation.CandidateInput{SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityIdentityOrContact, Mode: memoryformation.ModeAutomaticExtraction, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryIdentity, Context: memoryformation.ContextDirectAssertion, Confidence: 0.2, Importance: 4}
 	output, err := memoryformation.Evaluate(pendingInput)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	if err := store.sql.QueryRow(`SELECT statement FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&candidateStatement); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT content FROM memory_evidence WHERE candidate_id = ?`, candidate.ID).Scan(&evidence); err != nil {
+	if err := store.sql.QueryRow(`SELECT evidence FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&evidence); err != nil {
 		t.Fatal(err)
 	}
 	if status != "expired" || candidateStatement != "" || evidence != "" {

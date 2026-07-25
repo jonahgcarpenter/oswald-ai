@@ -71,7 +71,6 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	return &Config{
 		Port:                     getEnv("PORT", "8000"),
 		WebSocketAuthSigningKey:  getEnv("WEBSOCKET_AUTH_SIGNING_KEY", ""),

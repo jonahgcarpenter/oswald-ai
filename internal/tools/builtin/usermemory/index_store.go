@@ -238,7 +238,7 @@ func (s *Store) ActiveMemoryIndexRecords(ctx context.Context, afterID int64, lim
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.sql.QueryContext(ctx, `SELECT id, canonical_user_id, scope, category, statement, evidence, updated_at FROM memory_entries WHERE id > ? AND status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?) ORDER BY id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
+	rows, err := s.sql.QueryContext(ctx, `SELECT entries.id, entries.canonical_user_id, entries.scope, entries.category, entries.statement, COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''), entries.updated_at FROM memory_entries entries WHERE entries.id > ? AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?) ORDER BY entries.id LIMIT ?`, afterID, formatTime(time.Now().UTC()), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (s *Store) DeliveredTranscriptIndexRecords(ctx context.Context, afterID int
 // MemoryIndexRecordByID resolves current canonical eligibility and ownership.
 func (s *Store) MemoryIndexRecordByID(ctx context.Context, id int64, userID string) (MemoryIndexRecord, error) {
 	var record MemoryIndexRecord
-	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, scope, category, statement, evidence, updated_at FROM memory_entries WHERE id = ? AND canonical_user_id = ? AND status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?)`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.Scope, &record.Category, &record.Statement, &record.Evidence, &record.Version)
+	err := s.sql.QueryRowContext(ctx, `SELECT entries.id, entries.canonical_user_id, entries.scope, entries.category, entries.statement, COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''), entries.updated_at FROM memory_entries entries WHERE entries.id = ? AND entries.canonical_user_id = ? AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?)`, id, userID, formatTime(time.Now().UTC())).Scan(&record.ID, &record.UserID, &record.Scope, &record.Category, &record.Statement, &record.Evidence, &record.Version)
 	return record, err
 }
 
@@ -306,7 +306,7 @@ func (s *Store) WriteMemoryIndexRecord(ctx context.Context, revision DerivedInde
 	}
 	defer tx.Rollback() // nolint:errcheck
 	var current MemoryIndexRecord
-	err = tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, scope, category, statement, evidence, updated_at FROM memory_entries WHERE id = ? AND canonical_user_id = ? AND status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?)`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.Scope, &current.Category, &current.Statement, &current.Evidence, &current.Version)
+	err = tx.QueryRowContext(ctx, `SELECT entries.id, entries.canonical_user_id, entries.scope, entries.category, entries.statement, COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''), entries.updated_at FROM memory_entries entries WHERE entries.id = ? AND entries.canonical_user_id = ? AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?)`, record.ID, record.UserID, formatTime(time.Now().UTC())).Scan(&current.ID, &current.UserID, &current.Scope, &current.Category, &current.Statement, &current.Evidence, &current.Version)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && current != record) {
 		if _, deleteErr := tx.ExecContext(ctx, `DELETE FROM `+revision.TableName+` WHERE rowid = ?`, record.ID); deleteErr != nil {
 			return deleteErr
@@ -504,7 +504,7 @@ func (s *Store) ReconcileDerivedIndexChanges(ctx context.Context) error {
 	_, err := s.sql.ExecContext(ctx, `
 UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ? WHERE job_kind = 'derived_index' AND state = 'running' AND lease_until <= ?;
 INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'reconcile:memory:' || id || ':' || updated_at, canonical_user_id, 'memory', id, 'upsert', ?, ?, ? FROM memory_entries WHERE status = 'active' AND approval_state = 'approved' AND (expires_at IS NULL OR expires_at > ?)
+SELECT 'derived_index', 'reconcile:memory:' || id || ':' || updated_at, canonical_user_id, 'memory', id, 'upsert', ?, ?, ? FROM memory_entries WHERE status = 'active' AND (expires_at IS NULL OR expires_at > ?)
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
 INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
 SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?
@@ -569,10 +569,10 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 
 func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
 	nowClause := `(entries.expires_at IS NULL OR entries.expires_at > ?)`
-	expected := `SELECT COUNT(*) FROM memory_entries entries WHERE entries.status = 'active' AND entries.approval_state = 'approved' AND ` + nowClause
-	valid := `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN memory_entries entries ON entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id WHERE entries.status = 'active' AND entries.approval_state = 'approved' AND ` + nowClause + ` AND idx.statement = entries.statement AND idx.evidence = entries.evidence`
+	expected := `SELECT COUNT(*) FROM memory_entries entries WHERE entries.status = 'active' AND ` + nowClause
+	valid := `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN memory_entries entries ON entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id WHERE entries.status = 'active' AND ` + nowClause + ` AND idx.statement = entries.statement AND idx.evidence = COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), '')`
 	if revision.Kind == IndexKindMemoryVector {
-		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN memory_entries entries ON entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id WHERE entries.status = 'active' AND entries.approval_state = 'approved' AND ` + nowClause + ` AND idx.embedding_model = ?`
+		valid = `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN memory_entries entries ON entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id WHERE entries.status = 'active' AND ` + nowClause + ` AND idx.embedding_model = ?`
 		if generatedIndexTable.MatchString(revision.TableName) {
 			valid += ` AND idx.canonical_version = entries.updated_at`
 		}
@@ -622,10 +622,10 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 			return counts, err
 		}
 		nowText := formatTime(now)
-		deleteSQL := `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM memory_entries entries WHERE entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id AND entries.status = 'active' AND entries.approval_state = 'approved' AND (entries.expires_at IS NULL OR entries.expires_at > ?)) LIMIT ?)`
+		deleteSQL := `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM memory_entries entries WHERE entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?)) LIMIT ?)`
 		args := []any{nowText, batch}
 		if revision.Kind == IndexKindMemoryVector {
-			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE idx.embedding_model != ? OR NOT EXISTS (SELECT 1 FROM memory_entries entries WHERE entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id AND entries.status = 'active' AND entries.approval_state = 'approved' AND (entries.expires_at IS NULL OR entries.expires_at > ?)) LIMIT ?)`
+			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE idx.embedding_model != ? OR NOT EXISTS (SELECT 1 FROM memory_entries entries WHERE entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id AND entries.status = 'active' AND (entries.expires_at IS NULL OR entries.expires_at > ?)) LIMIT ?)`
 			args = []any{revision.Model, nowText, batch}
 		} else if revision.Kind == IndexKindTranscriptFTS {
 			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE NOT EXISTS (SELECT 1 FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.id = idx.rowid AND turns.canonical_user_id = idx.canonical_user_id AND turns.session_id = idx.session_id AND turns.session_generation = CAST(idx.session_generation AS INTEGER) AND turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ?) LIMIT ?)`

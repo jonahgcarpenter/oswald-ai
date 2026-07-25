@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/maintenanceruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
 	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
@@ -137,10 +138,17 @@ func main() {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
-	formationService := formationruntime.NewService(userMemStore, formationruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, rootLog)
-	formationService.Start(context.Background())
+
+	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, accountLinkService, rootLog)
+	if err != nil {
+		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
+	}
+	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel)
+	if err != nil {
+		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
+	}
+	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog, cfg.LLMGatewayTimeout)
 	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel), cfg.LLMGatewayModel, budget, cfg.LLMGatewayTimeout, rootLog)
-	compactionService.Start(context.Background())
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
@@ -148,11 +156,6 @@ func main() {
 		)
 	} else {
 		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
-	}
-
-	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, accountLinkService, rootLog)
-	if err != nil {
-		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 
 	privacyBus := privacyruntime.NewBus()
@@ -191,6 +194,10 @@ func main() {
 	// limit and routes responses back to the originating gateway.
 	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, rootLog.Server("broker"))
 	requestBroker.Start()
+	formationService.SetLowPriorityGate(requestBroker)
+	compactionService.SetLowPriorityGate(requestBroker)
+	formationService.Start(context.Background())
+	compactionService.Start(context.Background())
 	// Boot up all registered gateways dynamically
 	log.Info("app.start", "starting application")
 	for _, gw := range activeGateways {
@@ -217,9 +224,9 @@ func main() {
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
 	requestBroker.Shutdown()
-	indexService.Stop()
 	formationService.Stop()
 	compactionService.Stop()
+	indexService.Stop()
 	if err := mcpManager.Close(); err != nil {
 		log.Warn("app.mcp.shutdown_failed", "failed to shut down MCP clients", config.ErrorField(err), config.F("status", "degraded"))
 	}

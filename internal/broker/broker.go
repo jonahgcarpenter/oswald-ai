@@ -139,11 +139,16 @@ type Broker struct {
 	outstanding int
 	accepting   bool
 	started     bool
+	background  *backgroundPermit
 
 	workWG    sync.WaitGroup
 	workerWG  sync.WaitGroup
 	startOnce sync.Once
 	shutdown  sync.Once
+}
+
+type backgroundPermit struct {
+	cancel context.CancelFunc
 }
 
 // Processor handles one typed agent request.
@@ -313,6 +318,9 @@ func (b *Broker) enqueue(w *work) error {
 		b.mu.Unlock()
 		return ErrQueueFull
 	}
+	if b.background != nil {
+		b.background.cancel()
+	}
 	lane := b.lanes[w.key]
 	if len(w.fences) == 0 {
 		fence := b.userFences[w.key.CanonicalUserID]
@@ -340,11 +348,41 @@ func (b *Broker) enqueue(w *work) error {
 	return nil
 }
 
+// TryAcquireLowPriority reserves model capacity only while no foreground work
+// is active or queued. Accepted foreground work cancels the returned context.
+func (b *Broker) TryAcquireLowPriority(parent context.Context) (context.Context, func(), bool) {
+	b.mu.Lock()
+	if !b.accepting || !b.started || b.outstanding != 0 || b.background != nil {
+		b.mu.Unlock()
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(parent)
+	permit := &backgroundPermit{cancel: cancel}
+	b.background = permit
+	b.mu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			b.mu.Lock()
+			if b.background == permit {
+				b.background = nil
+			}
+			b.mu.Unlock()
+		})
+	}
+	return ctx, release, true
+}
+
 // Shutdown rejects new work, drains every accepted lane, and stops workers.
 func (b *Broker) Shutdown() {
 	b.shutdown.Do(func() {
 		b.mu.Lock()
 		b.accepting = false
+		if b.background != nil {
+			b.background.cancel()
+		}
 		queued := b.outstanding
 		started := b.started
 		b.mu.Unlock()

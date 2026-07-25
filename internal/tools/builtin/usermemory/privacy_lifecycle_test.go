@@ -3,6 +3,7 @@ package usermemory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,11 +68,30 @@ func TestDeleteAllMemoriesCancelsLeasedFormationJob(t *testing.T) {
 	}
 	output := evaluatedFormationCandidate(t, "I use Go", "I use Go", "The user uses Go.", memoryformation.CategoryProjects)
 	_, _, err = store.ProposeCandidate(ctx, "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: job.RequestID, SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: job.TurnID}, IdempotencyKey: "stale-job", FormationJob: &job})
-	if err == nil || !strings.Contains(err.Error(), "stale or cancelled") {
+	if !errors.Is(err, ErrStaleFormationJobLease) {
 		t.Fatalf("stale proposal err=%v", err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = 'user'`, 0)
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND statement != ''`, 0)
+}
+
+func TestPrivacyCandidateDeletionPreservesPolicyClassification(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	output := evaluatedFormationCandidate(t, "I use Go", "I use Go", "The user uses Go.", memoryformation.CategoryProjects)
+	candidate, _, err := store.ProposeCandidate(ctx, "user", CandidateProposal{Output: output, IdempotencyKey: "privacy-lifecycle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteCandidate(ctx, "user", hashText("actor"), candidate.ID, "delete", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadCandidate(ctx, "user", candidate.ID)
+	if err != nil || loaded.State != candidate.State || loaded.DecisionReason != candidate.DecisionReason || loaded.RedactionReason != "privacy_delete" || loaded.RedactedAt.IsZero() {
+		t.Fatalf("deleted candidate=%+v err=%v", loaded, err)
+	}
 }
 
 func TestEraseUserRetainsAndTerminatesAllPrivacyOperations(t *testing.T) {

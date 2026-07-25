@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -193,6 +194,125 @@ func TestPreCompactionCandidateRequiresLiveJobLease(t *testing.T) {
 		t.Fatal("mismatched session staged pre-compaction candidate")
 	}
 	assertCompactionCount(t, store, `SELECT COUNT(*) FROM memory_candidates WHERE idempotency_key = 'wrong-scope'`, 0)
+}
+
+func TestPreCompactionCandidateLifecyclePublicationAndStaleLeaseFence(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	belowTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I work on Atlas.")
+	approvedTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I prefer tea.")
+	rejectedTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "My coworker prefers coffee.")
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, belowTurn, rejectedTurn); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluate := func(source, statement, evidence, category, slot, value string, confidence float64) memoryformation.CandidateOutput {
+		t.Helper()
+		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+			SourceUserText: source, Statement: statement, Evidence: evidence,
+			Scope: memoryformation.ScopeLongTerm, Category: memoryformation.Category(category),
+			Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityModel,
+			Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModePreCompactionExtraction,
+			Context: memoryformation.ContextDirectAssertion, Confidence: confidence, Importance: 4,
+			ClaimSlot: slot, ClaimValue: value,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return output
+	}
+	propose := func(key string, turnID int64, output memoryformation.CandidateOutput) FormationCandidate {
+		t.Helper()
+		candidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{
+			Output: output, IdempotencyKey: key, CompactionJob: &job,
+			Source: FormationSource{RequestID: "session-compaction:" + fmt.Sprint(job.ID), SessionID: job.SessionID, SessionGeneration: generation, TurnID: turnID, Model: "model", ExtractorVersion: "v2"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return candidate
+	}
+	below := propose("compact-below", belowTurn, evaluate("I work on Atlas.", "The user works on Atlas.", "I work on Atlas.", "projects", "project.name", "Atlas", 0.349))
+	if below.State != "proposed" || below.PublicationStatus != "none" {
+		t.Fatalf("below-threshold candidate=%+v", below)
+	}
+	approved := propose("compact-approved", approvedTurn, evaluate("I prefer tea.", "The user prefers tea.", "I prefer tea.", "durable_preferences", "preference.drink", "tea", 0.35))
+	if approved.State != "approved" || approved.PublicationStatus != "published" || approved.PublishedMemoryID == 0 {
+		t.Fatalf("approved candidate=%+v", approved)
+	}
+	memory, err := store.EntryByID(approved.PublishedMemoryID)
+	if err != nil || memory.Status != "active" || memory.ClaimSlot != "preference.drink" {
+		t.Fatalf("published memory=%+v err=%v", memory, err)
+	}
+	published, err := store.LoadCandidate(context.Background(), "user", approved.ID)
+	if err != nil || published.PublicationStatus != "published" || published.PublishedMemoryID != memory.ID {
+		t.Fatalf("published candidate=%+v err=%v", published, err)
+	}
+	rejected := propose("compact-rejected", rejectedTurn, evaluate("My coworker prefers coffee.", "The user prefers coffee.", "My coworker prefers coffee.", "durable_preferences", "preference.drink", "coffee", 0.99))
+	if rejected.State != "rejected" || rejected.PublicationStatus != "none" {
+		t.Fatalf("unsound candidate=%+v", rejected)
+	}
+}
+
+func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerReclaim(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I prefer tea.")
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID); err != nil {
+		t.Fatal(err)
+	}
+	staleJob, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluate := func(confidence float64, importance int) memoryformation.CandidateOutput {
+		t.Helper()
+		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+			SourceUserText: "I prefer tea.", Statement: "The user prefers tea.", Evidence: "I prefer tea.",
+			Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences,
+			Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityModel,
+			Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModePreCompactionExtraction,
+			Context: memoryformation.ContextDirectAssertion, Confidence: confidence, Importance: importance,
+			ClaimSlot: "preference.drink", ClaimValue: "tea",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return output
+	}
+	source := FormationSource{RequestID: fmt.Sprintf("session-compaction:%d", staleJob.ID), SessionID: staleJob.SessionID, SessionGeneration: generation, TurnID: turnID, Model: "model", ExtractorVersion: "v2"}
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: evaluate(0.7, 3), IdempotencyKey: "published-before-reclaim", Source: source, CompactionJob: &staleJob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(candidate.PublishedMemoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Minute)), staleJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	currentJob, err := store.ClaimSessionCompactionJob(context.Background(), staleJob.LeaseOwner, 2*time.Minute)
+	if err != nil || currentJob.LeaseUntil.Equal(staleJob.LeaseUntil) {
+		t.Fatalf("reclaimed job=%+v err=%v", currentJob, err)
+	}
+	if _, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: evaluate(0.95, 5), IdempotencyKey: "stale-reconcile", Source: source, CompactionJob: &staleJob}); err == nil {
+		t.Fatal("stale proposal reconciled under the same owner's newer lease")
+	}
+	loaded, err := store.EntryByID(memory.ID)
+	if err != nil || loaded.Confidence != 0.7 || loaded.Importance != 3 || loaded.EvidenceCount != 1 {
+		t.Fatalf("published memory mutated by stale reconciliation: %+v err=%v", loaded, err)
+	}
+	loadedCandidate, err := store.LoadCandidate(context.Background(), "user", candidate.ID)
+	if err != nil || loadedCandidate.PublicationStatus != "published" || loadedCandidate.Confidence != 0.7 {
+		t.Fatalf("published candidate mutated by stale reconciliation: %+v err=%v", loadedCandidate, err)
+	}
 }
 
 func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testing.T) {

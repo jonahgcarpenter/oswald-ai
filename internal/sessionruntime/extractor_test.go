@@ -15,13 +15,13 @@ func (f summaryFakeChatter) Chat(context.Context, llm.ChatRequest, func(llm.Chat
 }
 
 func TestLLMExtractorParsesStructuredSummaryAndCandidate(t *testing.T) {
-	content := `{"narrative":"Atlas is active.","open_tasks":["ship"],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[{"source_turn_id":4,"statement":"The user works on Atlas.","evidence":"I work on Atlas.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0}]}`
+	content := `{"narrative":"Atlas is active.","open_tasks":["ship"],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[{"source_turn_id":4,"statement":"The user works on Atlas.","evidence":"I work on Atlas.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.name","claim_value":"Atlas"}]}`
 	extractor := NewLLMExtractor(summaryFakeChatter{content: content}, "model")
 	artifact, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted."}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.Narrative != "Atlas is active." || artifact.GenerationModel != "model" || artifact.GeneratorVersion != SummaryGeneratorVersion || len(artifact.Candidates) != 1 || artifact.Candidates[0].SourceTurnID != 4 {
+	if artifact.Narrative != "Atlas is active." || artifact.GenerationModel != "model" || artifact.GeneratorVersion != SummaryGeneratorVersion || len(artifact.Candidates) != 1 || artifact.Candidates[0].SourceTurnID != 4 || artifact.Candidates[0].ClaimSlot != "project.name" {
 		t.Fatalf("artifact=%+v", artifact)
 	}
 }
