@@ -75,10 +75,8 @@ func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
 		}
 	}
 	toolAnnotations := strings.Join([]string{
-		toolnames.UserMemorySave,
 		toolnames.UserMemorySearch,
 		toolnames.UserMemoryList,
-		toolnames.UserMemoryForget,
 		toolnames.GlobalMemorySave,
 		toolnames.SessionTranscriptSearch,
 	}, ",")
@@ -87,10 +85,10 @@ INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('re
 INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, tool_names, created_at)
 VALUES ('restart-session', 'restart-user', 'remember this', 'saved', ?, '2026-07-21T00:00:00Z');
 INSERT INTO memory_candidates(
-	canonical_user_id, idempotency_key, state, scope, category, statement, statement_key,
-	provenance_type, explicit_tool_source, formation_mode, created_at, updated_at
+	canonical_user_id, idempotency_key, state, scope, category, statement, claim_slot, claim_value,
+	provenance_type, formation_mode, created_at, updated_at
 ) VALUES ('restart-user', 'restart-candidate', 'approved', 'long_term', 'notes', 'Persisted final tool name.',
-	'persisted final tool name.', 'explicit_user', ?, 'explicit_tool', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, toolAnnotations, toolnames.UserMemorySave); err != nil {
+	'notes.fact', 'persisted final tool name', 'user_statement', 'explicit_remember', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, toolAnnotations); err != nil {
 		t.Fatalf("persist final tool names: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -105,15 +103,12 @@ INSERT INTO memory_candidates(
 	if err := reopened.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("baseline reapplied: count=%d err=%v", count, err)
 	}
-	var persistedAnnotations, persistedSource string
+	var persistedAnnotations string
 	if err := reopened.SQL().QueryRow(`SELECT tool_names FROM session_turns WHERE canonical_user_id = 'restart-user'`).Scan(&persistedAnnotations); err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.SQL().QueryRow(`SELECT explicit_tool_source FROM memory_candidates WHERE canonical_user_id = 'restart-user'`).Scan(&persistedSource); err != nil {
-		t.Fatal(err)
-	}
-	if persistedAnnotations != toolAnnotations || persistedSource != toolnames.UserMemorySave {
-		t.Fatalf("persisted tool names changed across restart: annotations=%q source=%q", persistedAnnotations, persistedSource)
+	if persistedAnnotations != toolAnnotations {
+		t.Fatalf("persisted tool names changed across restart: annotations=%q", persistedAnnotations)
 	}
 }
 
@@ -126,7 +121,7 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 	expected := []string{
 		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
 		"global_memory_claims", "global_memory_evidence", "linked_accounts", "mcp_servers", "memory_candidates",
-		"memory_entries", "memory_events", "memory_evidence",
+		"memory_entries", "memory_events",
 		"privacy_operations", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions", "websocket_bootstrap_state",
 		"websocket_clients", "websocket_device_authorizations",
@@ -156,7 +151,7 @@ func TestCompactV4CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 19, "index": 58, "trigger": 28, "view": 1} {
+	for objectType, want := range map[string]int{"table": 18, "index": 52, "trigger": 23, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

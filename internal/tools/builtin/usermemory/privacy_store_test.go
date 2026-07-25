@@ -150,7 +150,7 @@ func TestPrivacyHardDeletePurgesCanonicalProfileTranscriptAndRevisions(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = created_at WHERE id = ?; UPDATE memory_entries SET source_turn_id = ? WHERE id = ?`, turn.ID, turn.ID, memory.ID); err != nil {
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = created_at WHERE id = ?; UPDATE memory_candidates SET source_turn_id = ? WHERE published_memory_id = ?`, turn.ID, turn.ID, memory.ID); err != nil {
 		t.Fatal(err)
 	}
 	memoryRevision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
@@ -180,7 +180,7 @@ func TestPrivacyHardDeletePurgesCanonicalProfileTranscriptAndRevisions(t *testin
 		t.Fatalf("state=%q err=%v", state, err)
 	}
 	var status, statement, evidence string
-	if err := store.sql.QueryRow(`SELECT status, statement, evidence FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status, &statement, &evidence); err != nil {
+	if err := store.sql.QueryRow(`SELECT memory.status, memory.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id LIMIT 1), '') FROM memory_entries memory WHERE memory.id = ?`, memory.ID).Scan(&status, &statement, &evidence); err != nil {
 		t.Fatal(err)
 	}
 	if status != StatusDeleted || statement != "" || evidence != "" {

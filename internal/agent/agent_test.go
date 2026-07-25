@@ -71,10 +71,6 @@ func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
 	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "search" || userPayload.GlobalMemory != nil {
 		t.Fatalf("unexpected user memory payload: %+v", userPayload)
 	}
-	removedPayload := toolStreamPayload(toolnames.UserMemorySave, nil, "accepted", time.Millisecond, false)
-	if removedPayload.UserMemory != nil {
-		t.Fatalf("removed user mutation payload remains structured: %+v", removedPayload)
-	}
 	globalPayload := toolStreamPayload(toolnames.GlobalMemorySave, map[string]interface{}{"statement": "Oswald is written in Go.", "evidence": "language: Go"}, "accepted", time.Millisecond, false)
 	if globalPayload.GlobalMemory == nil || globalPayload.GlobalMemory.Action != "save" || globalPayload.UserMemory != nil {
 		t.Fatalf("unexpected global memory payload: %+v", globalPayload)
@@ -167,11 +163,6 @@ func TestProcessOffersRetrievalOnlyUserMemoryToolsAndGlobalSave(t *testing.T) {
 	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySave} {
 		if !requestHasTool(request, name) {
 			t.Fatalf("expected tool missing from primary request: %s", name)
-		}
-	}
-	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemoryForget} {
-		if requestHasTool(request, name) {
-			t.Fatalf("user mutation tool advertised to primary agent: %s", name)
 		}
 	}
 }
@@ -604,9 +595,9 @@ func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 	if strings.Contains(messages[0].Content, "memory confirmation") || strings.Contains(messages[len(messages)-1].Content, "pending_memory_confirmation") || strings.Contains(messages[len(messages)-1].Content, "555-0100") {
 		t.Fatalf("pending confirmation was injected: %+v", messages)
 	}
-	unconfirmed, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || unconfirmed.PublishedMemoryID != 0 {
-		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unconfirmed, err)
+	unchanged, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
+	if err != nil || unchanged.PublicationStatus != "published" || unchanged.PublishedMemoryID != candidate.PublishedMemoryID {
+		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unchanged, err)
 	}
 }
 

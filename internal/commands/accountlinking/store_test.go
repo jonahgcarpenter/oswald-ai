@@ -340,7 +340,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	if _, err := db.Exec(`UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, "You are speaking with Target.", now, targetID); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "the user likes green.", "test", 0.9, 3, "active", "session-target", now, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "durable_preferences.fact", "the_user_likes_green", 0.9, 3, "active", now, now); err != nil {
 		t.Fatalf("insert memory entry: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES (?, ?, ?, ?, ?)`, "session-target", targetID, "hello", "hi", now); err != nil {

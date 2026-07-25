@@ -9,8 +9,12 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+)
+
+const (
+	userMemorySaveToolName  = "user_memory_save"
+	maxExtractedMemoryBatch = 5
 )
 
 // ErrPermanentExtraction marks malformed output and non-retryable provider requests.
@@ -23,10 +27,9 @@ type LLMExtractor struct {
 	tool   llm.Tool
 }
 
-// UserMemorySaveTool returns the private forced-tool schema used by background extraction.
-func UserMemorySaveTool() llm.Tool {
+func userMemorySaveTool() llm.Tool {
 	additionalProperties := false
-	minItems, maxItems := 0, usermemory.MaxMemorySaveBatch
+	minItems, maxItems := 0, maxExtractedMemoryBatch
 	minImportance, maxImportance := 1.0, 5.0
 	item := llm.ToolParameterProperty{
 		Type:                 "object",
@@ -51,7 +54,7 @@ func UserMemorySaveTool() llm.Tool {
 	return llm.Tool{
 		Type: "function",
 		Function: llm.ToolDefinition{
-			Name:        toolnames.UserMemorySave,
+			Name:        userMemorySaveToolName,
 			Description: "Submit zero to five independently grounded durable-memory candidates from the current user turn.",
 			Parameters: llm.ToolParameters{
 				Type:                 "object",
@@ -74,7 +77,7 @@ func NewLLMExtractor(client llm.Chatter, model string) (*LLMExtractor, error) {
 	if model == "" {
 		return nil, fmt.Errorf("memory extractor model is required")
 	}
-	tool := UserMemorySaveTool()
+	tool := userMemorySaveTool()
 	if err := validateTool(tool); err != nil {
 		return nil, fmt.Errorf("invalid private memory extraction schema: %w", err)
 	}
@@ -93,7 +96,7 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 			{Role: "user", Content: turn.UserText},
 		},
 		Tools:      []llm.Tool{e.tool},
-		ToolChoice: &llm.ToolChoice{Type: "function", Function: llm.ToolChoiceFunction{Name: toolnames.UserMemorySave}},
+		ToolChoice: &llm.ToolChoice{Type: "function", Function: llm.ToolChoiceFunction{Name: userMemorySaveToolName}},
 	}, nil)
 	if err != nil {
 		if isPermanentProviderError(err) {
@@ -105,7 +108,7 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory formation extraction must return exactly one tool call"))
 	}
 	call := resp.Message.ToolCalls[0]
-	if call.Function.Name != toolnames.UserMemorySave {
+	if call.Function.Name != userMemorySaveToolName {
 		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory formation extraction called unexpected tool %q", call.Function.Name))
 	}
 	batch, _, err := usermemory.DecodeMemorySaveBatch(call.Function.Arguments)
@@ -117,7 +120,7 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 
 func validateTool(tool llm.Tool) error {
 	memories, ok := tool.Function.Parameters.Properties["memories"]
-	if tool.Type != "function" || tool.Function.Name != toolnames.UserMemorySave || tool.Function.Parameters.Type != "object" || !ok || memories.Type != "array" || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != usermemory.MaxMemorySaveBatch {
+	if tool.Type != "function" || tool.Function.Name != userMemorySaveToolName || tool.Function.Parameters.Type != "object" || !ok || memories.Type != "array" || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != maxExtractedMemoryBatch {
 		return fmt.Errorf("user_memory_save batch contract is incomplete")
 	}
 	importance, ok := memories.Items.Properties["importance"]

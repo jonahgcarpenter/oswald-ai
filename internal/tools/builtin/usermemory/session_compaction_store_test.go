@@ -237,36 +237,24 @@ func TestPreCompactionCandidateLifecyclePublicationAndStaleLeaseFence(t *testing
 		return candidate
 	}
 	below := propose("compact-below", belowTurn, evaluate("I work on Atlas.", "The user works on Atlas.", "I work on Atlas.", "projects", "project.name", "Atlas", 0.349))
-	if below.State != "proposed" || below.LifecycleState != "retained" {
+	if below.State != "proposed" || below.PublicationStatus != "none" {
 		t.Fatalf("below-threshold candidate=%+v", below)
 	}
 	approved := propose("compact-approved", approvedTurn, evaluate("I prefer tea.", "The user prefers tea.", "I prefer tea.", "durable_preferences", "preference.drink", "tea", 0.35))
-	if approved.State != "approved" || approved.LifecycleState != "pending_publication" {
+	if approved.State != "approved" || approved.PublicationStatus != "published" || approved.PublishedMemoryID == 0 {
 		t.Fatalf("approved candidate=%+v", approved)
 	}
-	memory, err := store.PublishCandidateForCompaction(context.Background(), job, approved.ID)
+	memory, err := store.EntryByID(approved.PublishedMemoryID)
 	if err != nil || memory.Status != "active" || memory.ClaimSlot != "preference.drink" {
 		t.Fatalf("published memory=%+v err=%v", memory, err)
 	}
 	published, err := store.LoadCandidate(context.Background(), "user", approved.ID)
-	if err != nil || published.LifecycleState != "published" || published.PublishedMemoryID != memory.ID {
+	if err != nil || published.PublicationStatus != "published" || published.PublishedMemoryID != memory.ID {
 		t.Fatalf("published candidate=%+v err=%v", published, err)
 	}
 	rejected := propose("compact-rejected", rejectedTurn, evaluate("My coworker prefers coffee.", "The user prefers coffee.", "My coworker prefers coffee.", "durable_preferences", "preference.drink", "coffee", 0.99))
-	if rejected.State != "rejected" || rejected.LifecycleState != "retained" {
+	if rejected.State != "rejected" || rejected.PublicationStatus != "none" {
 		t.Fatalf("unsound candidate=%+v", rejected)
-	}
-
-	stale := propose("compact-stale", belowTurn, evaluate("I work on Atlas.", "The user works on Atlas.", "I work on Atlas.", "projects", "project.name", "Atlas", 0.9))
-	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Minute)), job.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PublishCandidateForCompaction(context.Background(), job, stale.ID); !errors.Is(err, ErrStaleSessionCompactionJobLease) {
-		t.Fatalf("stale publication error=%v", err)
-	}
-	loaded, err := store.LoadCandidate(context.Background(), "user", stale.ID)
-	if err != nil || loaded.LifecycleState != "pending_publication" || loaded.PublishedMemoryID != 0 {
-		t.Fatalf("stale candidate changed=%+v err=%v", loaded, err)
 	}
 }
 
@@ -302,7 +290,7 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 	if err != nil {
 		t.Fatal(err)
 	}
-	memory, err := store.PublishCandidateForCompaction(context.Background(), staleJob, candidate.ID)
+	memory, err := store.EntryByID(candidate.PublishedMemoryID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +310,7 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 		t.Fatalf("published memory mutated by stale reconciliation: %+v err=%v", loaded, err)
 	}
 	loadedCandidate, err := store.LoadCandidate(context.Background(), "user", candidate.ID)
-	if err != nil || loadedCandidate.LifecycleState != "published" || loadedCandidate.Confidence != 0.7 {
+	if err != nil || loadedCandidate.PublicationStatus != "published" || loadedCandidate.Confidence != 0.7 {
 		t.Fatalf("published candidate mutated by stale reconciliation: %+v err=%v", loadedCandidate, err)
 	}
 }

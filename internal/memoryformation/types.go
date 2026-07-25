@@ -131,7 +131,6 @@ type CandidateOutput struct {
 	Approval        Approval
 	Decision        PolicyDecision
 	Reason          string
-	ClaimKey        string
 	ClaimSlot       string
 	ClaimValue      string
 }

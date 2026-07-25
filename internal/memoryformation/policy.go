@@ -48,7 +48,7 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		Decision:        DecisionProposed,
 		Reason:          "candidate requires review",
 	}
-	out.ClaimSlot, out.ClaimValue, out.ClaimKey = normalizeClaimIdentity(in.Category, in.ClaimSlot, in.ClaimValue, out.Statement)
+	out.ClaimSlot, out.ClaimValue = NormalizeClaimIdentity(in.Category, in.ClaimSlot, in.ClaimValue, out.Statement)
 	if !claimSlotCompatible(in.Category, out.ClaimSlot) {
 		return disallow(out, "semantic claim slot is incompatible with memory category"), nil
 	}
@@ -104,7 +104,7 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 			}
 			out.Statement = directEvidenceStatement(out.Evidence)
 			if strings.TrimSpace(in.ClaimValue) == "" {
-				out.ClaimSlot, out.ClaimValue, out.ClaimKey = normalizeClaimIdentity(in.Category, in.ClaimSlot, "", out.Statement)
+				out.ClaimSlot, out.ClaimValue = NormalizeClaimIdentity(in.Category, in.ClaimSlot, "", out.Statement)
 			}
 		}
 	}
@@ -1024,14 +1024,16 @@ func invalid(field, reason string) error {
 	return fmt.Errorf("%w: %s %s", errInvalidCandidate, field, reason)
 }
 
-func normalizeClaimIdentity(category Category, slot, value, statement string) (string, string, string) {
+// NormalizeClaimIdentity returns the canonical slot/value identity used by
+// memory formation and compatibility writers.
+func NormalizeClaimIdentity(category Category, slot, value, statement string) (string, string) {
 	slot = normalizeClaimPart(slot)
 	if slot == "" {
 		slot = normalizeClaimPart(string(category) + ".fact")
 	}
-	value = normalizeClaimPart(value)
+	value = normalizeClaimValue(value)
 	if value == "" {
-		value = normalizeClaimPart(statement)
+		value = normalizeClaimValue(statement)
 	}
 	if slot == "environment.linux_distribution" || slot == "environment.os_family" {
 		switch value {
@@ -1041,14 +1043,22 @@ func normalizeClaimIdentity(category Category, slot, value, statement string) (s
 	}
 	slot = truncateClaimRunes(slot, maxClaimSlotRunes)
 	value = truncateClaimRunes(value, maxClaimValueRunes)
-	return slot, value, slot + "=" + value
+	return slot, value
 }
 
 func normalizeClaimPart(value string) string {
+	return normalizeClaimToken(value, true)
+}
+
+func normalizeClaimValue(value string) string {
+	return normalizeClaimToken(value, false)
+}
+
+func normalizeClaimToken(value string, allowDot bool) string {
 	var out []rune
 	underscore := false
 	for _, r := range strings.ToLower(normalizeText(value)) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '.' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || (allowDot && r == '.') {
 			out = append(out, r)
 			underscore = false
 		} else if !underscore && len(out) > 0 {

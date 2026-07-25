@@ -784,10 +784,6 @@ func TestEvaluateClaimIdentityNormalization(t *testing.T) {
 			if got.ClaimSlot != tt.wantSlot || got.ClaimValue != tt.wantValue {
 				t.Fatalf("Evaluate() claim slot/value = %q/%q, want %q/%q", got.ClaimSlot, got.ClaimValue, tt.wantSlot, tt.wantValue)
 			}
-			wantKey := tt.wantSlot + "=" + tt.wantValue
-			if got.ClaimKey != wantKey {
-				t.Errorf("Evaluate() claim key = %q, want %q", got.ClaimKey, wantKey)
-			}
 		})
 	}
 }

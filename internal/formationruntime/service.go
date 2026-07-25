@@ -96,7 +96,6 @@ func (s *Service) run(ctx context.Context) {
 	ticker := time.NewTicker(formationPollInterval)
 	defer ticker.Stop()
 	_, _ = s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion)
-	s.publishApproved(ctx)
 	ticks := 0
 	for {
 		s.drain(ctx)
@@ -106,27 +105,12 @@ func (s *Service) run(ctx context.Context) {
 		case <-ticker.C:
 			ticks++
 			if ticks%60 == 0 {
-				s.publishApproved(ctx)
 				_, _ = s.store.RedriveDeadFormationJobs(ctx, 5*time.Minute)
 				if _, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
 					s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
 				}
 			}
 		case <-s.notify:
-		}
-	}
-}
-
-func (s *Service) publishApproved(ctx context.Context) {
-	candidates, err := s.store.ApprovedUnpublishedCandidates(ctx, 20)
-	if err != nil {
-		s.warn("user_memory.formation.publication.scan_failed", "failed to scan approved user-memory candidates", err)
-		return
-	}
-	for _, candidate := range candidates {
-		if _, err := s.store.PublishCandidate(ctx, candidate.UserID, candidate.ID); err != nil {
-			_ = s.store.DeferCandidatePublication(context.Background(), candidate.UserID, candidate.ID)
-			s.warn("user_memory.formation.publication.retry", "approved user-memory publication will retry", err, config.F("candidate_id", candidate.ID), config.F("user_id", candidate.UserID), config.F("status", "retry"))
 		}
 	}
 }
@@ -190,23 +174,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
 		return err
 	}
-	explicitIDs, err := s.store.AttachRequestCandidatesForFormation(ctx, job, turn.ID)
-	if err != nil {
-		return err
-	}
 	publishedCount := 0
-	for _, candidateID := range explicitIDs {
-		candidate, loadErr := s.store.LoadCandidate(ctx, job.UserID, candidateID)
-		if loadErr != nil {
-			return loadErr
-		}
-		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" && candidate.PublishedMemoryID == 0 {
-			if _, publishErr := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); publishErr != nil {
-				return publishErr
-			}
-			publishedCount++
-		}
-	}
 	extracted := usermemory.MemorySaveBatch{}
 	artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
 	if artifactErr != nil {
@@ -247,11 +215,6 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 			return err
 		}
 	}
-	candidateIDs := make([]int64, 0, len(explicitIDs)+len(extracted.Memories))
-	seenCandidate := make(map[int64]bool, cap(candidateIDs))
-	for _, id := range explicitIDs {
-		seenCandidate[id] = true
-	}
 	outcomes := s.store.SubmitMemorySaveBatch(ctx, job.UserID, turn.UserText, usermemory.FormationSource{
 		RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation,
 		TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.ExtractorVersion,
@@ -263,23 +226,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if outcome.Err != nil {
 			continue
 		}
-		if !seenCandidate[outcome.CandidateID] {
-			candidateIDs = append(candidateIDs, outcome.CandidateID)
-			seenCandidate[outcome.CandidateID] = true
-		}
-	}
-	for _, candidateID := range candidateIDs {
-		if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
-			return err
-		}
-		candidate, err := s.store.LoadCandidate(ctx, job.UserID, candidateID)
-		if err != nil {
-			return err
-		}
-		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" && candidate.PublishedMemoryID == 0 {
-			if _, err := s.store.PublishCandidateForFormation(ctx, job, candidate.ID); err != nil {
-				return err
-			}
+		if outcome.PublicationStatus == "published" {
 			publishedCount++
 		}
 	}

@@ -147,8 +147,8 @@ func TestMemoryFTS5InitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 	_, err := db.SQL().Exec(`
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, created_at, updated_at)
-VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'grows orchids.', 'Keeps them by the window.', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
+INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, created_at, updated_at)
+VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'notes.fact', 'grows_orchids', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
 	if err != nil {
 		t.Fatalf("insert memory: %v", err)
 	}

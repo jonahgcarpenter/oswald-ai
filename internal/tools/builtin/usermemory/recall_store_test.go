@@ -65,12 +65,12 @@ func TestRecallVectorPrefilterPreventsForeignNeighborCrowding(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1", "user-2")
 	ctx := context.Background()
-	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user's favorite color is purple.", Evidence: "user statement", Confidence: 0.9, Importance: 4, Embedding: []float64{1, 0}})
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user's favorite color is purple.", Evidence: "user statement", Confidence: 0.9, Importance: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
-		_, err = store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Foreign private fact %d", i), Evidence: "foreign", Confidence: 1, Importance: 5, Embedding: []float64{1, 0}})
+		_, err = store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Foreign private fact %d", i), Evidence: "foreign", Confidence: 1, Importance: 5})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,12 +94,12 @@ func TestRecallVectorPrefiltersScopeBeforeKNN(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
 	ctx := context.Background()
-	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project home is Lisbon.", Evidence: "user statement", Embedding: []float64{0.9, 0}})
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project home is Lisbon.", Evidence: "user statement"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
-		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Closer unrelated note %d", i), Evidence: "note", Embedding: []float64{1, 0}})
+		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("Closer unrelated note %d", i), Evidence: "note"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,13 +119,13 @@ func TestRecallRemovesInactiveVectorsBeforeKNN(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
 	ctx := context.Background()
-	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "Active home city is Porto.", Evidence: "user statement", Embedding: []float64{0.9, 0}})
+	_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "Active home city is Porto.", Evidence: "user statement"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
 		statement := fmt.Sprintf("Obsolete home city %d", i)
-		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: statement, Evidence: "obsolete", Embedding: []float64{1, 0}})
+		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: statement, Evidence: "obsolete"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func TestRecallDegradesIndependentlyWhenFTSIsUnavailable(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
-	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user lives in Lisbon.", Evidence: "user statement", Confidence: 1, Importance: 4, Embedding: []float64{1, 0}})
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user lives in Lisbon.", Evidence: "user statement", Confidence: 1, Importance: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestRecallFallsBackToFTSWhenEmbeddingFails(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
-	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Exact project name is Meridian.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Exact project name is Meridian.", Evidence: "user statement"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRecallDoesNotDropIncompatibleLiveVectorIndex(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1")
-	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project codename is Helios.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	_, err = store.SaveMemory(context.Background(), "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project codename is Helios.", Evidence: "user statement"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestMergeMovesTenantVectorOwnership(t *testing.T) {
 	}
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "winner", "loser")
-	_, err = store.SaveMemory(context.Background(), "loser", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user was born in Porto.", Evidence: "user statement", Embedding: []float64{1, 0}})
+	_, err = store.SaveMemory(context.Background(), "loser", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user was born in Porto.", Evidence: "user statement"})
 	if err != nil {
 		t.Fatal(err)
 	}

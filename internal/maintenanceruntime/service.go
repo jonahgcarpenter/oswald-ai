@@ -103,7 +103,7 @@ func (s *Service) sweepAt(ctx context.Context, now time.Time) {
 		s.log.Info("maintenance.sweep.complete", "periodic maintenance sweep completed",
 			config.F("rows_changed", counts.Changed()),
 			config.F("forgotten_memory_count", counts.ForgottenMemories),
-			config.F("redacted_count", counts.AuditRowsRedacted+counts.FormationJobsRedacted+counts.CompactionJobsRedacted+counts.CandidatesRedacted+counts.EvidenceRowsRedacted+counts.EventsRedacted),
+			config.F("redacted_count", counts.AuditRowsRedacted+counts.FormationJobsRedacted+counts.CompactionJobsRedacted+counts.CandidatesRedacted+counts.EventsRedacted),
 			config.F("tombstone_deleted_count", counts.AuditTombstones+counts.MemoryTombstonesDeleted+counts.CandidateTombstones+counts.EventTombstones+counts.PrivacyTombstones+counts.InvalidationTombstones+counts.FormationJobsDeleted+counts.CompactionJobsDeleted),
 			config.F("challenge_deleted_count", counts.ChallengesDeleted),
 			config.F("index_row_deleted_count", counts.IndexRowsDeleted),

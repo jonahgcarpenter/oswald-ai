@@ -105,7 +105,7 @@ func (s *Store) InspectPrivacy(ctx context.Context, userID, section string, page
 	var items []PrivacyItem
 	queries := []struct{ section, query string }{
 		{"memories", `SELECT CAST(id AS TEXT), status, '', 0 FROM memory_entries WHERE canonical_user_id = ?`},
-		{"candidates", `SELECT CAST(id AS TEXT), lifecycle_state, source_session_id, source_session_generation FROM memory_candidates WHERE canonical_user_id = ?`},
+		{"candidates", `SELECT CAST(candidate.id AS TEXT), candidate.state || '/' || candidate.publication_status || CASE WHEN candidate.redacted_at IS NULL THEN '' ELSE '/redacted' END, COALESCE(turn.session_id, ''), COALESCE(turn.session_generation, 0) FROM memory_candidates candidate LEFT JOIN session_turns turn ON turn.id = candidate.source_turn_id AND turn.canonical_user_id = candidate.canonical_user_id WHERE candidate.canonical_user_id = ?`},
 		{"sessions", `SELECT session_id || ':' || generation, CASE WHEN is_active = 1 THEN 'active' ELSE 'inactive' END, session_id, generation FROM sessions WHERE canonical_user_id = ?`},
 	}
 	for _, item := range queries {
@@ -170,7 +170,7 @@ func (s *Store) ForgetMemory(ctx context.Context, userID, actorHash string, memo
 			return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
 		}
 		nowText := formatTime(now)
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'forgotten', forgotten_at = ?, hard_delete_after = ?, lifecycle_request_id = ?, valid_until = ?, invalidated_at = ?, invalidation_reason = 'privacy_forget', updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, formatTime(now.Add(policy.ForgottenContentGrace)), requestID, nowText, nowText, nowText, userID, memoryID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'forgotten', status_changed_at = ?, status_reason = 'privacy_forget', hard_delete_after = ?, lifecycle_request_id = ?, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, formatTime(now.Add(policy.ForgottenContentGrace)), requestID, nowText, userID, memoryID); err != nil {
 			return err
 		}
 		if err := deleteProfileCopiesTx(ctx, tx, userID, memoryID); err != nil {
@@ -246,7 +246,7 @@ func (s *Store) DeleteMemory(ctx context.Context, userID, actorHash string, memo
 	return status, err
 }
 
-// DeleteCandidate scrubs one proposal and leaves a content-free lifecycle tombstone.
+// DeleteCandidate scrubs one proposal while preserving policy and publication metadata.
 func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, candidateID int64, requestID string, now time.Time) error {
 	if candidateID <= 0 {
 		return fmt.Errorf("candidate id must be positive")
@@ -260,7 +260,7 @@ func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, c
 			return err
 		}
 		var published sql.NullInt64
-		var candidateTurn, memoryTurn sql.NullInt64
+		var candidateTurn sql.NullInt64
 		turns := map[int64]struct{}{}
 		if err := tx.QueryRowContext(ctx, `SELECT published_memory_id, source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND id = ?`, userID, candidateID).Scan(&published, &candidateTurn); err != nil {
 			return err
@@ -273,9 +273,6 @@ func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, c
 			for _, turnID := range relatedTurns {
 				turns[turnID] = struct{}{}
 			}
-			if err := tx.QueryRowContext(ctx, `SELECT source_turn_id FROM memory_entries WHERE canonical_user_id = ? AND id = ?`, userID, published.Int64).Scan(&memoryTurn); err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
 			if err := scrubMemoryTx(ctx, tx, userID, published.Int64, requestID, now); err != nil {
 				return err
 			}
@@ -285,9 +282,6 @@ func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, c
 		}
 		if candidateTurn.Valid {
 			turns[candidateTurn.Int64] = struct{}{}
-		}
-		if memoryTurn.Valid {
-			turns[memoryTurn.Int64] = struct{}{}
 		}
 		for turnID := range turns {
 			if err := deleteSourceExchangeTx(ctx, tx, userID, turnID, requestID); err != nil {
@@ -440,16 +434,15 @@ func (s *Store) ExportPrivacy(ctx context.Context, userID string, exportedAt tim
 		{"user", `SELECT canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason, lifecycle_state, speaker_intro FROM account_users WHERE canonical_user_id = ?`, []any{userID}},
 		{"linked_accounts", `SELECT gateway, identifier, display_name, linked_at, verified FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, []any{userID}},
 		{"websocket_clients", `SELECT client_id, websocket_identifier, client_name, token_version, is_bootstrap, created_at, last_used_at, refresh_expires_at, revoked_at FROM websocket_clients WHERE canonical_user_id = ? ORDER BY created_at, client_id`, []any{userID}},
-		{"memories", `SELECT * FROM memory_entries WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"memory_events", `SELECT * FROM memory_events WHERE event_kind = 'lifecycle' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"candidates", `SELECT * FROM memory_candidates WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"evidence", `SELECT * FROM memory_evidence WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"formation_jobs", `SELECT * FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
-		{"audit", `SELECT * FROM memory_formation_audit WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"memories", `SELECT id, canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, last_used_at, expires_at, supersedes_id, provenance_type, sensitivity, status_changed_at, status_reason, hard_delete_after, lifecycle_request_id, claim_slot, claim_value FROM memory_entries WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"memory_events", `SELECT id, canonical_user_id, memory_id, event_type, request_id, session_id, created_at, metadata, redacted_at, event_kind, idempotency_key, candidate_id, job_id, turn_id, actor_type, actor_id FROM memory_events WHERE event_kind = 'lifecycle' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"candidates", `SELECT id, canonical_user_id, idempotency_key, state, publication_status, redacted_at, redaction_reason, scope, category, statement, evidence, confidence, importance, provenance_type, source_turn_id, extraction_model, extractor_version, formation_mode, sensitivity, supersedes_memory_id, created_at, updated_at, expires_at, decision_reason, published_memory_id, claim_slot, claim_value FROM memory_candidates WHERE canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"formation_jobs", `SELECT id, job_kind, idempotency_key, canonical_user_id, state, source_request_id, source_session_id, source_session_generation, source_turn_id, extraction_model, extractor_version, extraction_payload, attempt_count, redrive_count, available_at, lease_owner, lease_until, started_at, completed_at, last_error_code, created_at, updated_at FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"audit", `SELECT id, canonical_user_id, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, actor_id, created_at, metadata, redacted_at FROM memory_events WHERE event_kind = 'formation_audit' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"sessions", `SELECT * FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, []any{userID}},
-		{"session_turns", `SELECT * FROM session_turns WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
+		{"session_turns", `SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at, session_generation, delivered_at, source_request_id, delivery_failed_at FROM session_turns WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
 		{"session_summaries", `SELECT * FROM session_summaries WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
-		{"compaction_jobs", `SELECT * FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
+		{"compaction_jobs", `SELECT id, job_kind, idempotency_key, canonical_user_id, state, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, artifact_payload, artifact_summary_id, generation_model, generator_version, attempt_count, redrive_count, available_at, lease_owner, lease_until, started_at, completed_at, last_error_code, created_at, updated_at FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"privacy_operations", `SELECT operation_id, operation_type, status, created_at, updated_at, started_at, completed_at, last_error_code FROM privacy_operations WHERE target_user_id = ? ORDER BY created_at, operation_id`, []any{userID}},
 		{"derived_index_changes", `SELECT id, entity_kind, entity_id, operation, state, attempt_count, created_at, updated_at, completed_at, last_error_code FROM durable_jobs WHERE job_kind = 'derived_index' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"account_link_challenges", `SELECT id, initiator_user_id, initiator_gateway, initiator_identifier, created_at, expires_at, consumed_at, consumed_by_user_id, consumed_gateway, consumed_identifier, result_user_id, invalidated_at, invalidated_by_user_id, invalidated_reason FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ? ORDER BY created_at, id`, []any{userID, userID, userID, userID}},
@@ -487,15 +480,14 @@ func (s *Store) PrivacyExportPreflight(ctx context.Context, userID string, limit
 	var estimated int64
 	err = tx.QueryRowContext(ctx, `
 SELECT
-	COALESCE((SELECT SUM(length(statement) + length(evidence)) FROM memory_entries WHERE canonical_user_id = ?), 0) +
-	COALESCE((SELECT SUM(length(statement) + length(evidence_summary) + length(content_context)) FROM memory_candidates WHERE canonical_user_id = ?), 0) +
-	COALESCE((SELECT SUM(length(content)) FROM memory_evidence WHERE canonical_user_id = ?), 0) +
+	COALESCE((SELECT SUM(length(statement)) FROM memory_entries WHERE canonical_user_id = ?), 0) +
+	COALESCE((SELECT SUM(length(statement) + length(evidence)) FROM memory_candidates WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(extraction_payload)) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(metadata)) FROM memory_events WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(user_text) + length(assistant_text) + length(tool_names)) FROM session_turns WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(narrative) + length(open_tasks) + length(commitments) + length(entities) + length(decisions) + length(topic_tags)) FROM session_summaries WHERE canonical_user_id = ?), 0) +
 	COALESCE((SELECT SUM(length(artifact_payload)) FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ?), 0)
-`, userID, userID, userID, userID, userID, userID, userID, userID).Scan(&estimated)
+`, userID, userID, userID, userID, userID, userID, userID).Scan(&estimated)
 	if err != nil {
 		return fmt.Errorf("estimate privacy export size: %w", err)
 	}
@@ -536,21 +528,15 @@ func requireActivePrivacyUser(ctx context.Context, tx *sql.Tx, userID string) er
 }
 
 func relatedMemorySourceTurnsTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64) ([]int64, error) {
-	return privacyIDsTx(ctx, tx, `
-SELECT source_turn_id FROM memory_entries
-WHERE canonical_user_id = ? AND id = ? AND source_turn_id IS NOT NULL
-UNION
-SELECT source_turn_id FROM memory_candidates
+	return privacyIDsTx(ctx, tx, `SELECT source_turn_id FROM memory_candidates
 WHERE canonical_user_id = ? AND source_turn_id IS NOT NULL
-	AND (published_memory_id = ? OR supersedes_memory_id = ? OR id IN (
-		SELECT candidate_id FROM memory_entries WHERE canonical_user_id = ? AND id = ? AND candidate_id IS NOT NULL
-	))
-ORDER BY 1`, userID, memoryID, userID, memoryID, memoryID, userID, memoryID)
+	AND (published_memory_id = ? OR supersedes_memory_id = ?)
+ORDER BY 1`, userID, memoryID, memoryID)
 }
 
 func scrubMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64, requestID string, now time.Time) error {
 	nowText := formatTime(now)
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND (published_memory_id = ? OR supersedes_memory_id = ? OR id IN (SELECT candidate_id FROM memory_entries WHERE id = ? AND candidate_id IS NOT NULL))`, userID, memoryID, memoryID, memoryID)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND (published_memory_id = ? OR supersedes_memory_id = ?)`, userID, memoryID, memoryID)
 	if err != nil {
 		return err
 	}
@@ -569,16 +555,13 @@ func scrubMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int6
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE canonical_user_id = ? AND memory_id = ?`, userID, memoryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE event_kind = 'formation_audit' AND canonical_user_id = ? AND (memory_id = ? OR candidate_id IN (SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND published_memory_id = ?))`, nowText, userID, memoryID, userID, memoryID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_audit SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE canonical_user_id = ? AND (memory_id = ? OR candidate_id IN (SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND published_memory_id = ?))`, nowText, userID, memoryID, userID, memoryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE event_kind = 'lifecycle' AND canonical_user_id = ? AND memory_id = ?`, userID, memoryID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE canonical_user_id = ? AND memory_id = ?`, userID, memoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence = '', status = 'deleted', profile_approved = 0, embedding_model = '', embedding_dim = 0, candidate_id = NULL, source_session_id = '', source_request_id = '', source_turn_id = NULL, valid_until = ?, invalidated_at = ?, invalidation_reason = 'privacy_delete', erased_at = ?, erasure_reason = 'privacy_delete', erasure_request_id = ?, lifecycle_request_id = ?, forgotten_at = NULL, hard_delete_after = NULL, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, nowText, requestID, requestID, nowText, userID, memoryID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET statement = '', claim_slot = '', claim_value = '', status = 'deleted', status_changed_at = ?, status_reason = 'privacy_delete', lifecycle_request_id = ?, hard_delete_after = NULL, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, requestID, nowText, userID, memoryID); err != nil {
 		return err
 	}
 	if err := deleteProfileCopiesTx(ctx, tx, userID, memoryID); err != nil {
@@ -589,16 +572,13 @@ func scrubMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int6
 
 func scrubCandidateTx(ctx context.Context, tx *sql.Tx, userID string, candidateID int64, now time.Time) error {
 	nowText := formatTime(now)
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE canonical_user_id = ? AND candidate_id = ?`, userID, candidateID); err != nil {
-		return err
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id IN (SELECT source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND id = ?)`, userID, userID, candidateID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_audit SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE canonical_user_id = ? AND candidate_id = ?`, nowText, userID, candidateID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE event_kind = 'formation_audit' AND canonical_user_id = ? AND candidate_id = ?`, nowText, userID, candidateID); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET statement = '', statement_key = 'deleted:' || id, claim_key = 'deleted:' || id, claim_slot = '', claim_value = '', evidence_summary = '', source_request_id = '', source_session_id = '', source_turn_id = NULL, extraction_model = '', explicit_tool_source = '', confirmation_session_id = '', confirmation_request_id = '', published_memory_id = NULL, supersedes_memory_id = NULL, lifecycle_state = 'deleted', lifecycle_reason = 'privacy_delete', lifecycle_updated_at = ?, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, candidateID)
+	_, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET statement = '', claim_slot = '', claim_value = '', evidence = '', source_turn_id = NULL, extraction_model = '', supersedes_memory_id = NULL, redacted_at = ?, redaction_reason = 'privacy_delete', updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, candidateID)
 	return err
 }
 
@@ -639,13 +619,7 @@ func deleteSessionTurnsTx(ctx context.Context, tx *sql.Tx, userID, sessionID str
 		return err
 	}
 	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET source_turn_id = NULL WHERE canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET source_turn_id = NULL WHERE canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET source_turn_id = NULL WHERE canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET source_turn_id = NULL, extraction_payload = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id = ?`, userID, id); err != nil {
@@ -661,15 +635,12 @@ func deleteSessionTurnsTx(ctx context.Context, tx *sql.Tx, userID, sessionID str
 }
 
 func deleteAllMemoriesTx(ctx context.Context, tx *sql.Tx, userID, requestID string, now time.Time) error {
-	sourceTurns, err := privacyIDsTx(ctx, tx, `SELECT source_turn_id FROM memory_entries WHERE canonical_user_id = ? AND source_turn_id IS NOT NULL UNION SELECT source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND source_turn_id IS NOT NULL ORDER BY 1`, userID, userID)
+	sourceTurns, err := privacyIDsTx(ctx, tx, `SELECT source_turn_id FROM memory_candidates WHERE canonical_user_id = ? AND source_turn_id IS NOT NULL ORDER BY 1`, userID)
 	if err != nil {
 		return err
 	}
 	nowText := formatTime(now)
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_formation_audit SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE canonical_user_id = ?`, nowText, userID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_evidence SET content = '', correlation_key = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE canonical_user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET request_id = '', session_id = '', actor_id = '', metadata = '', redacted_at = ? WHERE event_kind = 'formation_audit' AND canonical_user_id = ?`, nowText, userID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET request_id = '', session_id = '', metadata = '' WHERE canonical_user_id = ?`, userID); err != nil {
@@ -763,7 +734,7 @@ func eraseUserTx(ctx context.Context, tx *sql.Tx, userID, operationID string, no
 	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'derived_index' AND canonical_user_id = ?`, userID); err != nil {
 		return nil, nil, 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_formation_audit WHERE canonical_user_id = ?`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE event_kind = 'formation_audit' AND canonical_user_id = ?`, userID); err != nil {
 		return nil, nil, 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE privacy_operations SET

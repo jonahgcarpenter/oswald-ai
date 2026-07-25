@@ -258,7 +258,7 @@ func (s *Store) RecentCompletedExchangesAfter(ctx context.Context, userID, sessi
 		return nil, err
 	}
 	rows, err := s.sql.QueryContext(ctx, `
-SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
+SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND id > ? AND delivered_at IS NOT NULL
@@ -325,7 +325,7 @@ func (s *Store) DeliveredSessionTurnsRange(ctx context.Context, userID, sessionI
 }
 
 func (s *Store) deliveredSessionTurnsRange(ctx context.Context, userID, sessionID string, generation int, afterTurnID, throughTurnID int64, limit int, stopAtUndelivered bool) ([]SessionTurn, error) {
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, topic_tags, created_at, expires_at
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ?`
 	args := []any{userID, sessionID, generation, afterTurnID}
@@ -461,7 +461,7 @@ func (s *Store) ReconcileSessionCompactionJobs(ctx context.Context) (int64, erro
 	stale, err := tx.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = 'skipped', completed_at = ?, lease_owner = '', lease_until = NULL,
-	last_error_code = 'stale_generation', last_error_message = '', updated_at = ?
+	last_error_code = 'stale_generation', updated_at = ?
 	WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry') AND NOT EXISTS (
 	SELECT 1 FROM sessions active
 	WHERE active.canonical_user_id = durable_jobs.canonical_user_id
@@ -478,7 +478,7 @@ UPDATE durable_jobs
 SET state = CASE WHEN attempt_count >= ? THEN 'dead' ELSE 'retry' END,
 	available_at = ?, lease_owner = '', lease_until = NULL,
 	completed_at = CASE WHEN attempt_count >= ? THEN ? ELSE NULL END,
-	last_error_code = 'lease_expired', last_error_message = '', updated_at = ?
+	last_error_code = 'lease_expired', updated_at = ?
 WHERE job_kind = 'session_compaction' AND state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?`,
 		maxSessionCompactionAttempts, formatTime(now), maxSessionCompactionAttempts, formatTime(now), formatTime(now), formatTime(now))
 	if err != nil {
@@ -686,7 +686,7 @@ func (s *Store) CompleteSessionCompactionJob(ctx context.Context, job SessionCom
 		artifactCondition = ""
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', last_error_message = '', updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?) `+artifactCondition, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?) `+artifactCondition, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("complete session compaction job: %w", err)
 	}
@@ -708,9 +708,9 @@ func (s *Store) RetrySessionCompactionJob(ctx context.Context, job SessionCompac
 UPDATE durable_jobs
 SET state = ?, available_at = ?, lease_owner = '', lease_until = NULL,
 	completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END,
-	last_error_code = ?, last_error_message = ?, updated_at = ?
+	last_error_code = ?, updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`,
-		state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), safeCompactionErrorMessage(message),
+		state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code),
 		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("retry session compaction job: %w", err)
@@ -731,8 +731,7 @@ func (s *Store) DeferSessionCompactionJob(ctx context.Context, job SessionCompac
 	result, err := s.sql.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?,
-	lease_owner = '', lease_until = NULL, last_error_code = 'foreground_preempted',
-	last_error_message = '', updated_at = ?
+	lease_owner = '', lease_until = NULL, last_error_code = 'foreground_preempted', updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?
 	AND state = 'running' AND lease_owner = ? AND lease_until = ?`,
 		formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
@@ -754,7 +753,7 @@ func (s *Store) RedriveDeadSessionCompactionJobs(ctx context.Context, delay time
 	result, err := s.sql.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = 'retry', attempt_count = 0, redrive_count = redrive_count + 1,
-	available_at = ?, completed_at = NULL, last_error_code = '', last_error_message = '', updated_at = ?
+	available_at = ?, completed_at = NULL, last_error_code = '', updated_at = ?
 WHERE job_kind = 'session_compaction' AND state = 'dead' AND redrive_count < 3
 	AND ((redrive_count = 0 AND updated_at <= ?)
 		OR (redrive_count = 1 AND updated_at <= ?)

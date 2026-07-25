@@ -3,6 +3,7 @@ package usermemory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,7 +68,7 @@ func TestDeleteAllMemoriesCancelsLeasedFormationJob(t *testing.T) {
 	}
 	output := evaluatedFormationCandidate(t, "I use Go", "I use Go", "The user uses Go.", memoryformation.CategoryProjects)
 	_, _, err = store.ProposeCandidate(ctx, "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: job.RequestID, SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: job.TurnID}, IdempotencyKey: "stale-job", FormationJob: &job})
-	if err == nil || !strings.Contains(err.Error(), "stale or cancelled") {
+	if !errors.Is(err, ErrStaleFormationJobLease) {
 		t.Fatalf("stale proposal err=%v", err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = 'user'`, 0)
@@ -88,7 +89,7 @@ func TestPrivacyCandidateDeletionPreservesPolicyClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := store.LoadCandidate(ctx, "user", candidate.ID)
-	if err != nil || loaded.State != candidate.State || loaded.PolicyDecision != candidate.PolicyDecision || loaded.DecisionReason != candidate.DecisionReason || loaded.LifecycleState != "deleted" {
+	if err != nil || loaded.State != candidate.State || loaded.DecisionReason != candidate.DecisionReason || loaded.RedactionReason != "privacy_delete" || loaded.RedactedAt.IsZero() {
 		t.Fatalf("deleted candidate=%+v err=%v", loaded, err)
 	}
 }

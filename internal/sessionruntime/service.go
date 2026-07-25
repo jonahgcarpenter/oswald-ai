@@ -342,7 +342,7 @@ func (s *Service) stageCandidates(ctx context.Context, job usermemory.SessionCom
 		raw, turn, output := artifact.Candidates[i], item.turn, item.output
 		encoded, _ := json.Marshal(raw)
 		sum := sha256.Sum256(append([]byte(fmt.Sprintf("%d:%d:%d:", job.ID, job.CoveredFromTurnID, job.CoveredThroughTurnID)), encoded...))
-		candidate, _, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
+		_, _, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
 			Output: output, IdempotencyKey: "compact:" + hex.EncodeToString(sum[:]),
 			Source:              usermemory.FormationSource{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: turn.ID, Model: s.model, ExtractorVersion: SummaryGeneratorVersion},
 			SupersedesStatement: raw.Supersedes,
@@ -350,14 +350,6 @@ func (s *Service) stageCandidates(ctx context.Context, job usermemory.SessionCom
 		})
 		if err != nil {
 			return err
-		}
-		if candidate.PublishedMemoryID > 0 {
-			continue
-		}
-		if candidate.State == "approved" && candidate.LifecycleState == "pending_publication" {
-			if _, err := s.store.PublishCandidateForCompaction(ctx, job, candidate.ID); err != nil {
-				return err
-			}
 		}
 	}
 	return nil

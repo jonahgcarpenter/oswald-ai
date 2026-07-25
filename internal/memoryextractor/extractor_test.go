@@ -7,14 +7,13 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 func TestUserMemorySaveToolMatchesBatchContract(t *testing.T) {
-	tool := UserMemorySaveTool()
+	tool := userMemorySaveTool()
 	memories := tool.Function.Parameters.Properties["memories"]
-	if tool.Function.Name != toolnames.UserMemorySave || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != usermemory.MaxMemorySaveBatch {
+	if tool.Function.Name != userMemorySaveToolName || memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != maxExtractedMemoryBatch {
 		t.Fatalf("private tool schema=%+v", tool)
 	}
 	if memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties || len(memories.Items.Required) != 13 {
@@ -42,7 +41,7 @@ func TestLLMExtractorParsesStrictJSON(t *testing.T) {
 	if err != nil || len(got.Memories) != 1 || got.Memories[0].Evidence != "I use Go" || got.Memories[0].ClaimSlot != "project.language" {
 		t.Fatalf("extracted=%+v err=%v", got, err)
 	}
-	if len(client.request.Tools) != 1 || client.request.ToolChoice == nil || client.request.ToolChoice.Function.Name != toolnames.UserMemorySave {
+	if len(client.request.Tools) != 1 || client.request.ToolChoice == nil || client.request.ToolChoice.Function.Name != userMemorySaveToolName {
 		t.Fatalf("request did not force the private memory save tool: %+v", client.request)
 	}
 	for _, required := range []string{"smallest unambiguous exact quote", "Inference evidence must be the complete user turn", "stable category-compatible dotted claim slots", "identity.name, never identity_name", "positive independent first-person assertion", "integer from 1 to 5"} {
@@ -69,6 +68,18 @@ func TestLLMExtractorPreservesValidCandidatesBesideMalformedCandidates(t *testin
 	got, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
 	if err != nil || len(got.Memories) != 1 || got.Memories[0].Statement != "The user uses Go." {
 		t.Fatalf("extracted=%+v err=%v", got, err)
+	}
+}
+
+func TestLLMExtractorRejectsMoreThanFiveCandidates(t *testing.T) {
+	items := make([]interface{}, maxExtractedMemoryBatch+1)
+	for i := range items {
+		items[i] = validCandidate()
+	}
+	client := &fakeChatter{arguments: map[string]interface{}{"memories": items}}
+	_, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use several tools"})
+	if !errors.Is(err, ErrPermanentExtraction) || !strings.Contains(err.Error(), "maximum is 5") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -99,7 +110,7 @@ func (f *fakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ func(ll
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: f.arguments}}}}}, nil
+	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemorySaveToolName, Arguments: f.arguments}}}}}, nil
 }
 
 func newTestExtractor(t *testing.T, client llm.Chatter) *LLMExtractor {

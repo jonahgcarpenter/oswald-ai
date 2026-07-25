@@ -11,12 +11,9 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
-	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -184,7 +181,7 @@ func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 	memory := memories[0]
-	if memory.Confidence != 0.55 || memory.ProvenanceType != "model_inference" || memory.SourceAuthority != "model" || memory.ClaimKey != "environment.linux_distribution=arch_family" || memory.EvidenceCount != 1 {
+	if memory.Confidence != 0.55 || memory.ProvenanceType != "model_inference" || memory.SourceAuthority != "model" || memory.ClaimSlot != "environment.linux_distribution" || memory.ClaimValue != "arch_family" || memory.EvidenceCount != 1 {
 		t.Fatalf("uncertain memory=%+v", memory)
 	}
 }
@@ -206,8 +203,8 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PublishCandidate(context.Background(), "user-1", activeCandidate.ID); err != nil {
-		t.Fatal(err)
+	if activeCandidate.PublicationStatus != "published" || activeCandidate.PublishedMemoryID == 0 {
+		t.Fatalf("active candidate was not atomically published: %+v", activeCandidate)
 	}
 
 	turnID := formationTestTurn(t, store, "I prefer coffee.")
@@ -237,7 +234,7 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 	}
 	foundBlocked := false
 	for _, item := range page.Items {
-		foundBlocked = foundBlocked || item.State == "blocked_conflict"
+		foundBlocked = foundBlocked || item.State == "approved/blocked_conflict"
 	}
 	if !foundBlocked {
 		t.Fatalf("blocked candidate missing from lifecycle inspection: %+v", page.Items)
@@ -311,134 +308,6 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 	}
 }
 
-func TestServicePublishesExplicitToolCandidateAfterTurnPersistence(t *testing.T) {
-	store := formationTestStore(t)
-	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
-		SourceUserText: "Remember that I prefer tea", Statement: "The user prefers tea.", Evidence: "I prefer tea",
-		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
-		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeExplicitRemember,
-		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences,
-		Context: memoryformation.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, IdempotencyKey: "explicit", Source: usermemory.FormationSource{RequestID: "req", SessionID: "session", ToolName: toolnames.UserMemorySave}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	turnID := formationTestTurn(t, store, "Remember that I prefer tea")
-	_, err = store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError))
-	if err := service.process(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.SourceTurnID != turnID || loaded.PublishedMemoryID == 0 {
-		t.Fatalf("explicit candidate=%+v err=%v", loaded, err)
-	}
-}
-
-func TestServiceReconcilesEquivalentExplicitAndAutomaticCandidate(t *testing.T) {
-	store := formationTestStore(t)
-	text := "Remember that I prefer concise replies."
-	toolCtx := requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "user-1", Gateway: "discord", ExternalID: "user-1", Assurance: identity.AssuranceDiscordGateway})
-	toolCtx = requestctx.WithMetadata(toolCtx, requestctx.Metadata{RequestID: "same", SessionID: "session", Model: "model", CurrentUserText: text})
-	if _, err := usermemory.NewSaveHandler(store, config.NewLogger(config.LevelError))(toolCtx, memoryBatchArgs(map[string]interface{}{
-		"statement": "The user prefers the concise replies.", "evidence": "I prefer concise replies.", "scope": "long_term", "category": "communication_preferences", "importance": 4, "claim_slot": "communication.reply_style", "claim_value": "concise",
-	})); err != nil {
-		t.Fatal(err)
-	}
-	turnID := formationTestTurn(t, store, text)
-	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{Statement: "The user prefers concise replies.", Evidence: "I prefer concise replies.", Scope: "long_term", Category: "communication_preferences", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.95, Importance: 4, ClaimSlot: "communication.reply_style", ClaimValue: "concise"}}}
-	if _, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "same", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1"); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := NewService(store, extractor, "model", config.NewLogger(config.LevelError)).process(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	memories, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(memories) != 1 || memories[0].EvidenceCount != 1 || memories[0].Confidence != 0.95 || memories[0].ClaimKey != "communication.reply_style=concise" {
-		t.Fatalf("memories=%+v err=%v", memories, err)
-	}
-}
-
-func TestServiceUnrelatedAutomaticCandidateDoesNotReplaceExplicitFact(t *testing.T) {
-	store := formationTestStore(t)
-	text := "Remember that I prefer tea."
-	toolCtx := requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "user-1", Gateway: "discord", ExternalID: "user-1", Assurance: identity.AssuranceDiscordGateway})
-	toolCtx = requestctx.WithMetadata(toolCtx, requestctx.Metadata{RequestID: "unrelated", SessionID: "session", Model: "model", CurrentUserText: text})
-	if _, err := usermemory.NewSaveHandler(store, config.NewLogger(config.LevelError))(toolCtx, memoryBatchArgs(map[string]interface{}{
-		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "scope": "long_term", "category": "durable_preferences", "importance": 4, "claim_slot": "preference.drink", "claim_value": "tea",
-	})); err != nil {
-		t.Fatal(err)
-	}
-	turnID := formationTestTurn(t, store, text)
-	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{Statement: "The user prefers the tea.", Evidence: "I prefer tea.", Scope: "long_term", Category: "notes", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.99, Importance: 5, ClaimSlot: "notes.preference", ClaimValue: "tea"}}}
-	if _, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "unrelated", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1"); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := NewService(store, extractor, "model", config.NewLogger(config.LevelError)).process(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	memories, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(memories) != 2 {
-		t.Fatalf("memories=%+v err=%v", memories, err)
-	}
-	foundExplicit, foundAutomatic := false, false
-	for _, memory := range memories {
-		foundExplicit = foundExplicit || (memory.Statement == "The user prefers tea." && memory.Category == "durable_preferences")
-		foundAutomatic = foundAutomatic || (memory.Statement == "The user prefers the tea." && memory.Category == "notes")
-	}
-	if !foundExplicit || !foundAutomatic {
-		t.Fatalf("explicit=%v automatic=%v memories=%+v", foundExplicit, foundAutomatic, memories)
-	}
-}
-
-func TestServiceRejectsStaleLeaseBeforeExplicitAttachment(t *testing.T) {
-	store := formationTestStore(t)
-	text := "Remember that I prefer tea."
-	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: text, Statement: "The user prefers tea.", Evidence: "I prefer tea.", Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect, Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeExplicitRemember, Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryDurablePreferences, Context: memoryformation.ContextDirectAssertion, Confidence: 0.9, Importance: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: output, Source: usermemory.FormationSource{RequestID: "stale", SessionID: "session", ToolName: toolnames.UserMemorySave}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	turnID := formationTestTurn(t, store, text)
-	if _, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "stale", SessionID: "session", SessionGeneration: 1, TurnID: turnID, ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1"); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	job.LeaseUntil = job.LeaseUntil.Add(-time.Second)
-	if err := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError)).process(context.Background(), job); !errors.Is(err, usermemory.ErrStaleFormationJobLease) {
-		t.Fatalf("process error=%v", err)
-	}
-	loaded, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || loaded.SourceTurnID != 0 || loaded.PublishedMemoryID != 0 {
-		t.Fatalf("candidate changed before lease validation: %+v err=%v", loaded, err)
-	}
-}
-
 func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0")
@@ -498,7 +367,7 @@ func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandida
 		t.Fatal(err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(memories) != 1 || memories[0].ClaimKey != "project.language=go" || memories[0].EvidenceCount != 1 {
+	if err != nil || len(memories) != 1 || memories[0].ClaimSlot != "project.language" || memories[0].ClaimValue != "go" || memories[0].EvidenceCount != 1 {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 }
@@ -549,7 +418,7 @@ func (f *fakeExtractionChatter) Chat(_ context.Context, request llm.ChatRequest,
 	} else {
 		arguments = artifact
 	}
-	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: arguments}}}}}, nil
+	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: "user_memory_save", Arguments: arguments}}}}}, nil
 }
 
 func newTestLLMExtractor(t *testing.T, client llm.Chatter) *memoryextractor.LLMExtractor {
@@ -559,16 +428,6 @@ func newTestLLMExtractor(t *testing.T, client llm.Chatter) *memoryextractor.LLME
 		t.Fatal(err)
 	}
 	return extractor
-}
-
-func memoryBatchArgs(item map[string]interface{}) map[string]interface{} {
-	item["context"] = "direct_assertion"
-	item["provenance"] = "user_statement"
-	item["sensitivity"] = "low"
-	item["confidence"] = 0.9
-	item["ttl_days"] = 0
-	item["supersedes"] = ""
-	return map[string]interface{}{"memories": []interface{}{item}}
 }
 
 func formationTestStore(t *testing.T) *usermemory.Store {

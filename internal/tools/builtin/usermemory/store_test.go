@@ -72,7 +72,7 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 		t.Fatalf("expected one deleted row, got %d", deleted)
 	}
 	var erasedStatement, erasedEvidence string
-	if err := store.sql.QueryRow(`SELECT statement, evidence FROM memory_entries WHERE id = ?`, entry.ID).Scan(&erasedStatement, &erasedEvidence); err != nil {
+	if err := store.sql.QueryRow(`SELECT memory.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id LIMIT 1), '') FROM memory_entries memory WHERE memory.id = ?`, entry.ID).Scan(&erasedStatement, &erasedEvidence); err != nil {
 		t.Fatal(err)
 	}
 	var ftsCount int
@@ -95,16 +95,155 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 	}
 }
 
+func TestSaveMemoryAppendsObservationInsteadOfRelinkingRedactedCandidate(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+
+	request := SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "The user builds Atlas.", Evidence: "I build Atlas.", Confidence: 0.9, Importance: 4}
+	first, err := store.SaveMemory(ctx, "user", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteMemory(ctx, "user", hashText("actor"), first.ID, "delete-first", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.SaveMemory(ctx, "user", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("privacy-deleted memory was unexpectedly reused")
+	}
+
+	rows, err := store.sql.Query(`SELECT idempotency_key, publication_status, published_memory_id, redacted_at, scope, category, statement, evidence, confidence, importance FROM memory_candidates WHERE canonical_user_id = 'user' ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type observation struct {
+		key, publication, scope, category, statement, evidence string
+		memoryID                                               int64
+		redacted                                               sql.NullString
+		confidence                                             float64
+		importance                                             int
+	}
+	var observations []observation
+	for rows.Next() {
+		var item observation
+		if err := rows.Scan(&item.key, &item.publication, &item.memoryID, &item.redacted, &item.scope, &item.category, &item.statement, &item.evidence, &item.confidence, &item.importance); err != nil {
+			t.Fatal(err)
+		}
+		observations = append(observations, item)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 2 {
+		t.Fatalf("observation count = %d, want 2: %+v", len(observations), observations)
+	}
+	old, fresh := observations[0], observations[1]
+	if old.key == fresh.key || old.memoryID != first.ID || !old.redacted.Valid || old.statement != "" || old.evidence != "" {
+		t.Fatalf("redacted observation was mutated or relinked: %+v", old)
+	}
+	if fresh.memoryID != second.ID || fresh.publication != "published" || fresh.redacted.Valid || fresh.scope != request.Scope || fresh.category != request.Category || fresh.statement != request.Statement || fresh.evidence != request.Evidence || fresh.confidence != request.Confidence || fresh.importance != request.Importance {
+		t.Fatalf("fresh observation metadata mismatch: %+v", fresh)
+	}
+}
+
+func TestSaveMemoryDoesNotReactivateForgottenMemory(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+
+	request := SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "The user keeps a private journal.", Evidence: "original evidence"}
+	forgotten, err := store.SaveMemory(ctx, "user", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	policy := config.RetentionPolicy{ForgottenContentGrace: time.Hour}
+	if _, err := store.ForgetMemory(ctx, "user", hashText("actor"), forgotten.ID, "forget-request", now, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := store.SaveMemory(ctx, "user", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ID == forgotten.ID || fresh.Status != StatusActive {
+		t.Fatalf("fresh memory=%+v forgotten=%+v", fresh, forgotten)
+	}
+	var status, hardDeleteAfter, lifecycleRequestID string
+	if err := store.sql.QueryRow(`SELECT status, hard_delete_after, lifecycle_request_id FROM memory_entries WHERE id = ?`, forgotten.ID).Scan(&status, &hardDeleteAfter, &lifecycleRequestID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "forgotten" || hardDeleteAfter != formatTime(now.Add(policy.ForgottenContentGrace)) || lifecycleRequestID != "forget-request" {
+		t.Fatalf("forgotten lifecycle changed: status=%q hard_delete_after=%q request=%q", status, hardDeleteAfter, lifecycleRequestID)
+	}
+}
+
+func TestSaveMemoryDeduplicatesBackgroundFallbackIdentity(t *testing.T) {
+	store := newFormationTestStore(t)
+	output := evaluatedFormationCandidate(t, "I build Atlas.", "I build Atlas.", "The user builds Atlas.", memoryformation.CategoryProjects)
+	background, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: "background-fallback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compatibility, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: output.Statement, Evidence: "compatibility evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compatibility.ID != background.PublishedMemoryID {
+		t.Fatalf("compatibility memory=%d background memory=%d", compatibility.ID, background.PublishedMemoryID)
+	}
+	var memoryCount, candidateCount int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = 'user' AND status = 'active'`).Scan(&memoryCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND published_memory_id = ?`, compatibility.ID).Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if memoryCount != 1 || candidateCount != 2 {
+		t.Fatalf("memory count=%d candidate count=%d", memoryCount, candidateCount)
+	}
+}
+
+func TestSaveMemorySupersedesBackgroundFallbackByNormalizedStatement(t *testing.T) {
+	store := newFormationTestStore(t)
+	oldOutput := evaluatedFormationCandidate(t, "I prefer tea.", "I prefer tea.", "The user prefers tea.", memoryformation.CategoryDurablePreferences)
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: oldOutput, IdempotencyKey: "background-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := store.SaveMemory(context.Background(), "user", SaveRequest{
+		Scope: ScopeLongTerm, Category: "durable_preferences", Statement: "The user prefers coffee.",
+		Evidence: "I prefer coffee.", Supersedes: "  THE user prefers tea  ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.EntryByID(oldCandidate.PublishedMemoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Status != StatusSuperseded || replacement.SupersedesID != old.ID {
+		t.Fatalf("old=%+v replacement=%+v", old, replacement)
+	}
+}
+
 func TestSaveMemoryUpsertKeepsTenantScopedIDAndVector(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1", "user-2")
 	ctx := context.Background()
-	first, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User one fact.", Evidence: "first", Embedding: []float64{1, 0}})
+	first, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User one fact.", Evidence: "first"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User two private fact.", Evidence: "private", Embedding: []float64{0, 1}})
+	second, err := store.SaveMemory(ctx, "user-2", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "User two private fact.", Evidence: "private"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +420,8 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	}
 
 	var duplicateCount, loserCount, loserVectorCount, winnerVectorCount int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries WHERE canonical_user_id = 'winner' AND scope = ? AND statement_key = ?`, ScopeLongTerm, statementKey("Duplicate statement")).Scan(&duplicateCount); err != nil {
+	_, duplicateClaimValue := memoryformation.NormalizeClaimIdentity(memoryformation.CategoryNotes, "", "", "Duplicate statement")
+	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries WHERE canonical_user_id = 'winner' AND scope = ? AND claim_slot = 'notes.fact' AND claim_value = ?`, ScopeLongTerm, duplicateClaimValue).Scan(&duplicateCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.sql.QueryRow(`SELECT count(*) FROM memory_entries WHERE canonical_user_id = 'loser'`).Scan(&loserCount); err != nil {
@@ -337,7 +477,7 @@ func TestMergeUsersTxRebuildsWinnerVectorAsynchronously(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = store.SaveMemory(ctx, "loser", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "Shared fact", Evidence: "loser", Embedding: []float64{0.1, 0.2}})
+	_, err = store.SaveMemory(ctx, "loser", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "Shared fact", Evidence: "loser"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,12 +512,11 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 		if err != nil || !created {
 			t.Fatalf("propose %s candidate=%+v created=%v err=%v", userID, candidate, created, err)
 		}
-		memory, err := store.PublishCandidate(ctx, userID, candidate.ID)
-		if err != nil {
-			t.Fatalf("publish %s: %v", userID, err)
+		if candidate.PublicationStatus != "published" || candidate.PublishedMemoryID == 0 {
+			t.Fatalf("candidate for %s was not atomically published: %+v", userID, candidate)
 		}
 		if userID == "winner" {
-			winnerMemoryID = memory.ID
+			winnerMemoryID = candidate.PublishedMemoryID
 		} else {
 			loserCandidateID = candidate.ID
 		}
@@ -402,9 +541,13 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 	if owner != "winner" || !strings.HasPrefix(key, "merge:loser:same-key:") || publishedID != winnerMemoryID {
 		t.Fatalf("merged candidate owner=%q key=%q published=%d want=%d", owner, key, publishedID, winnerMemoryID)
 	}
-	for table, want := range map[string]int{"memory_candidates": 2, "memory_evidence": 4, "memory_formation_audit": 4} {
+	for table, want := range map[string]int{"memory_candidates": 2, "memory_events": 4} {
 		var got int
-		if err := store.sql.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE canonical_user_id = 'winner'`).Scan(&got); err != nil {
+		query := `SELECT COUNT(*) FROM ` + table + ` WHERE canonical_user_id = 'winner'`
+		if table == "memory_events" {
+			query += ` AND event_kind = 'formation_audit'`
+		}
+		if err := store.sql.QueryRow(query).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
 		if got != want {
@@ -450,15 +593,12 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	seedAccountUsers(t, store, "winner", "loser")
 	ctx := context.Background()
 
-	winnerMemory, err := store.SaveMemory(ctx, "winner", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Winner builds Atlas", Evidence: "winner"})
+	_, err := store.SaveMemory(ctx, "winner", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Winner builds Atlas", Evidence: "winner"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	loserMemory, err := store.SaveMemory(ctx, "loser", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Loser builds Beacon", Evidence: "loser"})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.sql.Exec(`UPDATE memory_entries SET profile_approved = 1 WHERE id IN (?, ?)`, winnerMemory.ID, loserMemory.ID); err != nil {
 		t.Fatal(err)
 	}
 	winnerProfile, err := store.ResolveSessionProfile(ctx, "winner", "shared", time.Hour)

@@ -31,7 +31,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	if _, err := db.SQL().Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, "You are speaking with Test User.", "usr_test"); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "the user likes purple.", "test evidence", 0.9, 3, "active", formatDBTime(now), formatDBTime(now)); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "durable_preferences.fact", "the_user_likes_purple", 0.9, 3, "active", formatDBTime(now), formatDBTime(now)); err != nil {
 		t.Fatalf("insert entry: %v", err)
 	}
 

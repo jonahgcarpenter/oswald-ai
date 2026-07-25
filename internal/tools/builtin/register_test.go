@@ -94,11 +94,6 @@ func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
 			t.Fatalf("retrieval tool is unavailable: %s", name)
 		}
 	}
-	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemoryForget} {
-		if _, ok := reg.LLMTool(name); ok || reg.HasHandler(name) {
-			t.Fatalf("user mutation tool remains available: %s", name)
-		}
-	}
 }
 
 func TestRegisterGlobalMemorySaveIsDefaultVisibleWithOptionalToolCallID(t *testing.T) {

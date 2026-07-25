@@ -12,10 +12,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
-const MaxMemorySaveBatch = 5
+const maxExtractedMemoryBatch = 5
 
-// MemorySaveItem is the shared untrusted candidate shape used by foreground
-// tool calls and background extraction.
+// MemorySaveItem is the untrusted candidate shape used by background extraction.
 type MemorySaveItem struct {
 	InputIndex  int     `json:"-"`
 	Statement   string  `json:"statement"`
@@ -33,20 +32,20 @@ type MemorySaveItem struct {
 	ClaimValue  string  `json:"claim_value"`
 }
 
-// MemorySaveBatch is the single shared input contract for memory formation.
+// MemorySaveBatch is the input contract for background memory formation.
 type MemorySaveBatch struct {
 	Memories []MemorySaveItem `json:"memories"`
 }
 
 // MemorySaveOutcome reports one independently evaluated batch item.
 type MemorySaveOutcome struct {
-	InputIndex  int
-	CandidateID int64
-	State       string
-	Lifecycle   string
-	Reason      string
-	Err         error
-	Operational bool
+	InputIndex        int
+	CandidateID       int64
+	State             string
+	PublicationStatus string
+	Reason            string
+	Err               error
+	Operational       bool
 }
 
 // MemorySaveItemError identifies one malformed item without rejecting valid siblings.
@@ -74,8 +73,8 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 	if !ok {
 		return MemorySaveBatch{}, nil, fmt.Errorf("memories must be an array")
 	}
-	if len(rawItems) > MaxMemorySaveBatch {
-		return MemorySaveBatch{}, nil, fmt.Errorf("memories contains %d items; maximum is %d", len(rawItems), MaxMemorySaveBatch)
+	if len(rawItems) > maxExtractedMemoryBatch {
+		return MemorySaveBatch{}, nil, fmt.Errorf("memories contains %d items; maximum is %d", len(rawItems), maxExtractedMemoryBatch)
 	}
 	batch := MemorySaveBatch{Memories: make([]MemorySaveItem, 0, len(rawItems))}
 	itemErrors := make([]MemorySaveItemError, 0)
@@ -106,8 +105,7 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 	return batch, itemErrors, nil
 }
 
-// SubmitMemorySaveBatch evaluates and stages each item independently through
-// the canonical candidate lifecycle.
+// SubmitMemorySaveBatch evaluates and atomically applies each item independently.
 func (s *Store) SubmitMemorySaveBatch(ctx context.Context, userID, sourceText string, source FormationSource, batch MemorySaveBatch, formationJob *FormationJob) []MemorySaveOutcome {
 	outcomes := make([]MemorySaveOutcome, 0, len(batch.Memories))
 	remembered, hasExplicitIntent := memoryformation.ParseExplicitRemember(sourceText)
@@ -145,10 +143,7 @@ func (s *Store) SubmitMemorySaveBatch(ctx context.Context, userID, sourceText st
 			continue
 		}
 		reason := candidate.DecisionReason
-		if candidate.LifecycleState == "blocked_conflict" {
-			reason = candidate.LifecycleReason
-		}
-		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, Lifecycle: candidate.LifecycleState, Reason: reason})
+		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, PublicationStatus: candidate.PublicationStatus, Reason: reason})
 	}
 	return outcomes
 }
