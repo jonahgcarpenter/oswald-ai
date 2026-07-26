@@ -10,7 +10,7 @@ import (
 	clientauthcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/clientauth"
 	globalmemorycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/globalmemory"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
-	privacycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/privacy"
+	memoriescommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/memories"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -65,7 +65,7 @@ func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemor
 		if err != nil {
 			return nil, err
 		}
-		registrations = append(registrations, commands.Command{Handler: privacycommands.New(privacyService)})
+		registrations = append(registrations, commands.Command{Handler: memoriescommands.New(privacyService)})
 	}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})

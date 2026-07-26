@@ -25,7 +25,7 @@ func TestNewServiceAlwaysRegistersReset(t *testing.T) {
 	t.Fatal("reset command was not registered")
 }
 
-func TestNewServiceWithPrivacyRegistersPrivacy(t *testing.T) {
+func TestNewServiceWithPrivacyRegistersMemories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
 	memory := usermemory.NewStore(path, log)
@@ -36,10 +36,16 @@ func TestNewServiceWithPrivacyRegistersPrivacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	foundMemories := false
 	for _, definition := range service.Definitions() {
 		if definition.Name == "privacy" {
-			return
+			t.Fatal("privacy command remained registered")
+		}
+		if definition.Name == "memories" {
+			foundMemories = true
 		}
 	}
-	t.Fatal("privacy command was not registered")
+	if !foundMemories {
+		t.Fatal("memories command was not registered")
+	}
 }

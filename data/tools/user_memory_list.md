@@ -2,7 +2,7 @@
 
 ## Description
 
-List active memories and stable canonical memory IDs stored for the authenticated current user. This remains available in direct and group conversations. Use it when the user asks what you remember about them or needs an exact ID for correction or deletion.
+List active memories and stable canonical memory IDs stored for the authenticated current user. This remains available in direct and group conversations. Use it when the user asks what you remember about them or needs an exact ID for `/memories forget <id>`.
 
 Entries include confidence, formation provenance, source authority, epistemic status, and sensitivity. Treat `uncertain_inference` as a hypothesis rather than an established fact.
 

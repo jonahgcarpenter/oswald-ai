@@ -15,7 +15,7 @@ It combines tools, private long-term memory, conversation continuity, image unde
 - Remember your preferences, projects, and other useful details across conversations
 - Keep continuity in long conversations and search earlier conversation details
 - Link your accounts so your personal memory follows you across gateways
-- Inspect, export, forget, or delete your stored memories and account data
+- List or forget your stored personal memories
 
 ## Memory
 
@@ -28,7 +28,7 @@ Oswald uses four memory layers:
 
 Personal memories are formed in the background after a response is delivered. Oswald prioritizes clear first-person facts, tracks confidence and provenance, and labels uncertain inferences accordingly.
 
-Use `/reset` to start a new conversation without deleting personal memory. Use `/privacy` to inspect, export, forget, or delete retained data. Administrators manage shared facts with the `/global-memory` commands.
+Use `/reset` to start a new conversation without deleting personal memory. Use `/memories` to list or forget personal memories. Administrators manage shared facts with the `/global-memory` commands.
 
 ## Usage
 
@@ -130,7 +130,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/connect`     | `/connect [code\|cancel]`                                                                                           | Create, confirm, or cancel a 10-minute account-link code.                       |
 | `/disconnect`  | `/disconnect [account_number]`                                                                                      | List or disconnect linked accounts. The final account cannot be removed.        |
 | `/reset`       | `/reset`                                                                                                            | Clear the current conversation history and load the latest user profile.        |
-| `/privacy`     | `/privacy <operation>`                                                                                              | Inspect, export, forget, or delete your retained data.                          |
+| `/memories`    | `/memories list`, `/memories forget <id\|all>`                                                                      | List or forget your personal memories.                                          |
 | `/client`      | `/client approve <code>`, `/client approve-new <code> <display_name>`, `/client list`, `/client revoke <client_id>` | Approve and manage WebSocket clients.                                           |
 | `/mcp servers` | `/mcp servers`                                                                                                      | List your user-scoped MCP servers.                                              |
 | `/mcp add`     | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]`                                         | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
@@ -139,23 +139,15 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/mcp disable` | `/mcp disable <name>`                                                                                               | Disable one of your MCP servers.                                                |
 | `/mcp test`    | `/mcp test <name>`                                                                                                  | Connect to one of your MCP servers and report its tool count.                   |
 
-`/connect`, `/disconnect`, `/client`, and every `/privacy` operation require an authenticated direct conversation. `/bootstrap` additionally requires the temporary WebSocket bootstrap client. In Discord servers and iMessage groups, slash commands must mention Oswald. MCP commands can contain credentials, so use `/mcp add` only in a private conversation.
+`/connect`, `/disconnect`, `/client`, and every `/memories` operation require an authenticated direct conversation. `/bootstrap` additionally requires the temporary WebSocket bootstrap client. In Discord servers and iMessage groups, slash commands must mention Oswald. MCP commands can contain credentials, so use `/mcp add` only in a private conversation.
 
-### Privacy Commands
+### Memory Commands
 
-| Command                                                         | Description                                                                      |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `/privacy inspect [memories\|candidates\|sessions\|all] [page]` | List retained record metadata and stable IDs.                                    |
-| `/privacy export`                                               | Export your retained Oswald data as JSON attachments.                            |
-| `/privacy forget-memory <id>`                                   | Stop using a memory immediately and schedule its retained content for scrubbing. |
-| `/privacy delete-memory <id>`                                   | Immediately delete one memory and its linked source material.                    |
-| `/privacy delete-candidate <id>`                                | Delete one memory candidate and any memory published from it.                    |
-| `/privacy delete-session`                                       | Delete the current conversation generation.                                      |
-| `/privacy delete-all-memories`                                  | Request deletion of all memories and candidates while keeping your account.      |
-| `/privacy delete-account`                                       | Request deletion of your account and retained Oswald data.                       |
-| `/privacy confirm <code>`                                       | Confirm a pending bulk deletion with its one-time code.                          |
-
-Bulk memory deletion and account deletion require confirmation. Confirmation codes expire after 10 minutes.
+| Command                 | Description                                                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `/memories list`        | Attach a complete text file containing every active memory's stable ID, category, and statement.                           |
+| `/memories forget <id>` | Stop using one memory immediately and schedule its retained content and linked source exchange for grace-period scrubbing. |
+| `/memories forget all`  | Immediately purge all memories, candidates, linked source exchanges, profiles, indexes, and pending formation work.        |
 
 ### Admin Commands
 

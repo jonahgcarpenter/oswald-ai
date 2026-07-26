@@ -16,7 +16,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Remote MCP tools are not filtered for read-only behavior.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/privacy`, `/client`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Privacy and global-memory mutations are commands and are never exposed to the model as tools.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/memories`, `/client`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Memory and global-memory mutations are commands and are never exposed to the model as tools.
 
 Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -65,7 +65,7 @@ Current layers:
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Create the command service, including `/privacy`, `/client`, `/bootstrap`, and administrator global-memory management
+11. Create the command service, including `/memories`, `/client`, `/bootstrap`, and administrator global-memory management
 12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
 14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
@@ -209,7 +209,7 @@ Oswald keeps four distinct memory layers.
 ### Persistent User Memory
 
 - Stored in `data/database/oswald.db`; the speaker intro lives on `account_users` and durable user facts remain tenant-owned memory claims
-- Retrieved by `user_memory_search` and `user_memory_list`; mutation is owned by background formation and authenticated privacy commands rather than primary-agent tools
+- Retrieved by `user_memory_search` and `user_memory_list`; mutation is owned by background formation and authenticated memory commands rather than primary-agent tools
 - Includes an intro line that identifies the current speaker across linked accounts
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
@@ -231,7 +231,7 @@ Oswald keeps four distinct memory layers.
 - Conflicting claim values use monotonic authority and confidence: stronger evidence may supersede a weaker active claim, while weak inference cannot replace a stronger direct fact
 - Candidate insertion or same-turn reconciliation, canonical publication or reinforcement, supersession, audit history, profile advancement, and a durable derived-index outbox entry commit in one lease-fenced SQLite transaction. Successful approved proposals therefore cannot remain unpublished; FTS/vector tables are derived asynchronously rather than part of canonical publication
 - Superseded memory statement and claim content, plus evidence on candidates published to that old memory, is scrubbed after `MEMORY_CANDIDATE_CONTENT_RETENTION`; safe supersedes links are then cleared. The active replacement and its evidence remain intact. Dependency-safe content-free candidate and memory tombstones become deletable only after the later tombstone-retention window
-- `/privacy forget-memory` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
+- `/memories forget <id>` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and provenance-derived authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
@@ -268,27 +268,21 @@ Oswald keeps four distinct memory layers.
 - `/disconnect` requires an authenticated direct conversation and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, and `/deleteuser`
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
-- `/connect`, `/disconnect`, `/privacy`, and `/client` explicitly require authenticated direct conversations; `/bootstrap` additionally requires the active temporary bootstrap client. MCP and other administrator commands currently have no direct-conversation guard; they rely on the resolved canonical principal and, where applicable, administrator status. MCP credentials must not be placed in group command text
+- `/connect`, `/disconnect`, `/memories`, and `/client` explicitly require authenticated direct conversations; `/bootstrap` additionally requires the active temporary bootstrap client. MCP and other administrator commands currently have no direct-conversation guard; they rely on the resolved canonical principal and, where applicable, administrator status. MCP credentials must not be placed in group command text
 
-### Privacy Commands and Erasure
+### Memory Commands and Erasure
 
-`/privacy` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and a direct conversation. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
+`/memories` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and a direct conversation. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
 
 Commands:
 
-- `/privacy inspect [memories|candidates|sessions|all] [page]` returns pages of 25 lifecycle records with stable IDs and no memory/session content; memory and candidate IDs are positive decimals, while session records identify the session and generation
-- `/privacy export` creates one read-transaction `oswald.user-export.v1` JSON snapshot; user MCP rows include metadata and a redacted endpoint, never encrypted URLs, headers, or credentials
-- `/privacy forget-memory <id>` immediately removes one memory from profile and retrieval serving state, marks it forgotten, and schedules canonical/source-exchange scrubbing after `MEMORY_FORGOTTEN_CONTENT_GRACE` (`720h` by default)
-- `/privacy delete-memory <id>` immediately scrubs one exact memory, related candidate/evidence/audit/event/relation data, derived rows, profile copies, and its linked source exchange
-- `/privacy delete-candidate <id>` immediately scrubs one exact candidate, any published memory, related evidence/audit/relations, derived rows, and linked source exchanges
-- `/privacy delete-session` deletes only the current session's current generation, including turns, summaries, compaction jobs, and transcript-index rows, then deactivates the retained session row and advances its generation high-water
-- `/privacy delete-all-memories` requires confirmation and scrubs all memories/candidates and linked source exchanges while preserving the canonical user and unrelated sessions
-- `/privacy delete-account` requires confirmation and erases the canonical user, linked accounts, memories, sessions, profiles, candidates, audit, jobs, derived work/rows, account-link state, and user-owned MCP configuration
-- `/privacy confirm <code>` consumes a one-time challenge bound to the initiating normalized gateway identity; codes expire after 10 minutes and cannot be replayed or confirmed by another linked actor
+- `/memories list` returns every active, unexpired memory as UTF-8 text attachment data containing stable ID, category, and statement. The command is not capped at the model tool's 25-memory limit; large payloads are split at UTF-8 boundaries within the shared 10-part/80 MiB command-attachment limits
+- `/memories forget <id>` immediately removes one memory from profile and retrieval serving state, marks it forgotten, and schedules canonical/source-exchange scrubbing after `MEMORY_FORGOTTEN_CONTENT_GRACE` (`720h` by default)
+- `/memories forget all` immediately and atomically scrubs every memory and candidate, linked source exchanges, profile copies, derived serving rows, and pending memory-formation work. It requires no confirmation and preserves the canonical account and unrelated sessions
 
-Exact-ID commands reject non-positive or non-decimal IDs. Export parts are limited to 8 MiB each and 10 parts/80 MiB total. Multipart exports are raw ordered byte ranges named `.partNNN`; concatenate them byte-for-byte in filename order to reconstruct the exact JSON document.
+Exact IDs reject non-positive or non-decimal values. A complete list that exceeds the UTF-8-safe multipart attachment limit fails rather than returning a partial result.
 
-Forget is not immediate hard deletion. It removes all serving copies immediately, but canonical content remains during the configured grace period and is scrubbed by maintenance when due. Immediate delete, session delete, confirmed delete-all, and confirmed user erasure do not use that grace period. Completed operations leave only dependency-safe content-free tombstones until retention permits removal.
+Exact-ID forget is not immediate hard deletion. It removes all serving copies immediately, but canonical content remains during the configured grace period and is scrubbed by maintenance when due. Forget-all is an immediate full memory-data purge and does not use that grace period. Completed operations leave only dependency-safe content-free tombstones until retention permits removal.
 
 Every privacy mutation durably enqueues its external-identity and session invalidation scope in the same transaction. Because the outbox row's FK-backed `canonical_user_id` remains null so erasure cannot cascade the work away, a dedicated non-FK subject canonical-user fence records the original incarnation. Claim filters identities and session IDs that have since become owned by another canonical user, while retaining unowned scope for account-erasure crash recovery. The dispatcher reconciles expired leases at startup, polls every second, retries subscriber failures with bounded exponential backoff, and scrubs the outbox payload on completion while retaining the subject fence. Account-erasure close events use a short recovery delay so the command path can deliver confirmation before immediately publishing the same invalidation; a crash still dispatches the durable event afterward. Gateways discard affected reply/session caches; account erasure also closes matching authenticated connections. If the erased external identity sends a later message, normal account resolution creates a new blank canonical user rather than restoring erased state.
 

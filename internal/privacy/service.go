@@ -100,6 +100,19 @@ func NewService(accounts *accountlinking.Service, memory *usermemory.Store, poli
 	return &Service{accounts: accounts, memory: memory, policy: policy, log: log, now: time.Now, random: rand.Reader}, nil
 }
 
+// ListMemories returns every active memory owned by the authenticated user.
+func (s *Service) ListMemories(ctx context.Context, req Request) ([]usermemory.ListedMemory, error) {
+	started := time.Now()
+	userID, _, err := s.authorize(req)
+	if err != nil {
+		s.observe("list_memories", started, 0, err)
+		return nil, err
+	}
+	memories, err := s.memory.ListActiveMemories(ctx, userID, s.now().UTC())
+	s.observe("list_memories", started, len(memories), err)
+	return memories, err
+}
+
 // Inspect returns one bounded metadata-only page.
 func (s *Service) Inspect(ctx context.Context, req Request, section string, page int) (usermemory.PrivacyPage, error) {
 	started := time.Now()
@@ -152,9 +165,35 @@ func (s *Service) ForgetMemory(ctx context.Context, req Request, id int64) (stri
 		s.observe("forget_memory", started, 0, err)
 		return "", err
 	}
-	state, err := s.memory.ForgetMemory(ctx, userID, actorHash, id, req.RequestID, s.now().UTC(), s.policy)
+	state := ""
+	err = s.accounts.RunAuthenticatedUserMutation(req.Principal, func(lockedUserID string) error {
+		if lockedUserID != userID {
+			return accountlinking.ErrPrincipalMismatch
+		}
+		var forgetErr error
+		state, forgetErr = s.memory.ForgetMemory(ctx, lockedUserID, actorHash, id, req.RequestID, s.now().UTC(), s.policy)
+		return forgetErr
+	})
 	s.observe("forget_memory", started, 1, err)
 	return state, err
+}
+
+// DeleteAllMemories immediately purges every memory artifact for the authenticated user.
+func (s *Service) DeleteAllMemories(ctx context.Context, req Request) error {
+	started := time.Now()
+	userID, actorHash, err := s.authorize(req)
+	if err != nil {
+		s.observe("delete_all_memories", started, 0, err)
+		return err
+	}
+	err = s.accounts.RunAuthenticatedUserMutation(req.Principal, func(lockedUserID string) error {
+		if lockedUserID != userID {
+			return accountlinking.ErrPrincipalMismatch
+		}
+		return s.memory.DeleteAllMemories(ctx, lockedUserID, actorHash, req.RequestID, s.now().UTC())
+	})
+	s.observe("delete_all_memories", started, 1, err)
+	return err
 }
 
 // DeleteMemory irreversibly deletes an exact memory ID.
@@ -308,10 +347,10 @@ func (s *Service) begin(ctx context.Context, req Request, operation string) (Cha
 
 func (s *Service) authorize(req Request) (string, string, error) {
 	if !req.IsDirect {
-		return "", "", fmt.Errorf("privacy commands require a direct conversation")
+		return "", "", fmt.Errorf("memory commands require a direct conversation")
 	}
 	if !req.Principal.Valid() || !req.Principal.Authenticated() {
-		return "", "", fmt.Errorf("privacy commands require an authenticated identity")
+		return "", "", fmt.Errorf("memory commands require an authenticated identity")
 	}
 	identifier, err := accountlinking.NormalizeIdentifier(req.Principal.Gateway, req.Principal.ExternalID)
 	if err != nil {

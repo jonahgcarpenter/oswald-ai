@@ -32,6 +32,13 @@ type PrivacyPage struct {
 	HasMore bool          `json:"has_more"`
 }
 
+// ListedMemory is one active memory exposed to its owning user.
+type ListedMemory struct {
+	ID        int64
+	Category  string
+	Statement string
+}
+
 // PrivacyChallenge describes a persisted confirmation challenge.
 type PrivacyChallenge struct {
 	OperationID string
@@ -91,6 +98,35 @@ func (s *Store) PrivacySessionIDs(ctx context.Context, userID string) ([]string,
 const privacyPageSize = 25
 
 const privacyCloseInvalidationDelay = 30 * time.Second
+
+// ListActiveMemories returns every active, unexpired memory owned by a user.
+func (s *Store) ListActiveMemories(ctx context.Context, userID string, now time.Time) ([]ListedMemory, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.sql.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() // nolint:errcheck
+	if err := requireActivePrivacyUser(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, category, statement FROM memory_entries WHERE canonical_user_id = ? AND status = 'active' AND (expires_at IS NULL OR julianday(expires_at) > julianday(?)) ORDER BY id`, userID, formatTime(now))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	memories := make([]ListedMemory, 0)
+	for rows.Next() {
+		var memory ListedMemory
+		if err := rows.Scan(&memory.ID, &memory.Category, &memory.Statement); err != nil {
+			return nil, err
+		}
+		memories = append(memories, memory)
+	}
+	return memories, rows.Err()
+}
 
 // InspectPrivacy returns lifecycle metadata without exposing content.
 func (s *Store) InspectPrivacy(ctx context.Context, userID, section string, page int) (PrivacyPage, error) {
@@ -205,6 +241,34 @@ func (s *Store) ForgetMemory(ctx context.Context, userID, actorHash string, memo
 		s.signalDerivedIndex()
 	}
 	return status, err
+}
+
+// DeleteAllMemories immediately scrubs all memory data owned by a user.
+func (s *Store) DeleteAllMemories(ctx context.Context, userID, actorHash, requestID string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	err := s.withPrivacyTx(ctx, userID, func(tx *sql.Tx) error {
+		completed, err := completedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_all_memories", "all")
+		if err != nil || completed {
+			return err
+		}
+		externalIdentities, sessionIDs, err := privacyInvalidationScopeTx(ctx, tx, userID)
+		if err != nil {
+			return err
+		}
+		if err := deleteAllMemoriesTx(ctx, tx, userID, requestID, now); err != nil {
+			return err
+		}
+		if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_all_memories", "all", now); err != nil {
+			return err
+		}
+		return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
+	})
+	if err == nil {
+		s.signalDerivedIndex()
+	}
+	return err
 }
 
 // DeleteMemory irreversibly scrubs one canonical memory and linked artifacts.
@@ -986,6 +1050,24 @@ func recordCompletedPrivacyOperationTx(ctx context.Context, tx *sql.Tx, userID, 
 		return fmt.Errorf("privacy operation idempotency payload mismatch")
 	}
 	return nil
+}
+
+func completedPrivacyOperationTx(ctx context.Context, tx *sql.Tx, userID, actorHash, operationID, operationType, target string) (bool, error) {
+	if len(actorHash) != 64 || strings.TrimSpace(operationID) == "" {
+		return false, fmt.Errorf("privacy operation identity is invalid")
+	}
+	var storedOperationID, storedKey, storedActor, storedTargetHash, storedType, storedDigest, status string
+	err := tx.QueryRowContext(ctx, `SELECT operation_id, idempotency_key, actor_hash, target_hash, operation_type, target_digest, status FROM privacy_operations WHERE operation_id = ? OR (actor_hash = ? AND idempotency_key = ?) ORDER BY operation_id = ? DESC LIMIT 1`, operationID, actorHash, operationID, operationID).Scan(&storedOperationID, &storedKey, &storedActor, &storedTargetHash, &storedType, &storedDigest, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedOperationID != operationID || storedKey != operationID || storedActor != actorHash || storedTargetHash != hashText(userID) || storedType != operationType || storedDigest != hashText(operationType+"\x00"+target) || status != "completed" {
+		return false, fmt.Errorf("privacy operation idempotency payload mismatch")
+	}
+	return true, nil
 }
 
 func privacyInvalidationScopeTx(ctx context.Context, tx *sql.Tx, userID string) ([]string, []string, error) {

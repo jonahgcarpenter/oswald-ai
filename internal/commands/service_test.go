@@ -123,12 +123,12 @@ func TestServiceRejectsDuplicateNamesAndAliases(t *testing.T) {
 }
 
 func TestServiceDefinitionResolvesAliasesAndExclusivity(t *testing.T) {
-	service, err := NewService(HandlerFunc{DefinitionValue: Definition{Name: "privacy", Aliases: []string{"private"}, UserExclusive: true}})
+	service, err := NewService(HandlerFunc{DefinitionValue: Definition{Name: "memories", Aliases: []string{"memory"}, UserExclusive: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	definition, ok := service.Definition("/private")
-	if !ok || definition.Name != "privacy" || !definition.UserExclusive {
+	definition, ok := service.Definition("/memory")
+	if !ok || definition.Name != "memories" || !definition.UserExclusive {
 		t.Fatalf("definition=%+v found=%v", definition, ok)
 	}
 	if _, ok := service.Definition("missing"); ok {

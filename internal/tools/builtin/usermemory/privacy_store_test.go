@@ -4,12 +4,69 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
+
+func TestListActiveMemoriesAndDeleteAllMemories(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user", "other")
+	for i := 0; i < 30; i++ {
+		if _, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: fmt.Sprintf("memory %02d", i), Evidence: "private evidence"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fractional, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "fractional expiry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveMemory(ctx, "other", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "other memory"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET expires_at = ? WHERE id = ?`, formatTime(now.Add(500*time.Millisecond)), fractional.ID); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListActiveMemories(ctx, "user", now)
+	if err != nil || len(listed) != 31 {
+		t.Fatalf("listed=%d err=%v", len(listed), err)
+	}
+	if listed[0].ID >= listed[len(listed)-1].ID || listed[0].Category != "notes" || listed[0].Statement != "memory 00" {
+		t.Fatalf("unexpected listing=%+v", listed)
+	}
+	if err := store.DeleteAllMemories(ctx, "user", hashText("actor"), "forget-all", now); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = store.ListActiveMemories(ctx, "user", now)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("post-delete listing=%+v err=%v", listed, err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = 'user' AND (statement != '' OR claim_slot != '' OR claim_value != '')`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND (statement != '' OR evidence != '' OR claim_slot != '' OR claim_value != '')`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = 'user'`, 0)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND idempotency_key = 'forget-all'`, 1)
+	newMemory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "created after purge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteAllMemories(ctx, "user", hashText("actor"), "forget-all", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = store.ListActiveMemories(ctx, "user", now.Add(time.Minute))
+	if err != nil || len(listed) != 1 || listed[0].ID != newMemory.ID {
+		t.Fatalf("idempotent replay deleted new memory: listed=%+v err=%v", listed, err)
+	}
+	other, err := store.ListActiveMemories(ctx, "other", now)
+	if err != nil || len(other) != 1 || other[0].Statement != "other memory" {
+		t.Fatalf("other=%+v err=%v", other, err)
+	}
+}
 
 func TestForgetMemoryImmediatelySuppressesSourceExchangeServingAndWork(t *testing.T) {
 	ctx := context.Background()
