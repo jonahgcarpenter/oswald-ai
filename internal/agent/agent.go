@@ -424,8 +424,8 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
 func (a *Agent) Process(request Request) (*AgentResponse, error) {
-	if !request.Principal.Valid() {
-		return nil, fmt.Errorf("agent request has no valid principal")
+	if !request.Principal.Authenticated() {
+		return nil, fmt.Errorf("agent request has no authenticated principal")
 	}
 	requestID := request.RequestID
 	gateway := request.Principal.Gateway
@@ -438,7 +438,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, sessionKey, senderID, gateway, a.model)
 	reqLog.Debug("agent.request.start", "agent request started",
-		config.F("display_name", displayName),
 		config.F("prompt_chars", len(userPrompt)),
 		config.F("image_count", len(userImages)),
 	)

@@ -11,34 +11,38 @@ import (
 
 // MaintenanceCounts contains privacy-safe aggregate results from one sweep.
 type MaintenanceCounts struct {
-	SessionCleanup           SessionCleanupCounts `json:"session_cleanup"`
-	ForgottenMemories        int64                `json:"forgotten_memories"`
-	AuditRowsRedacted        int64                `json:"audit_rows_redacted"`
-	FormationJobsRedacted    int64                `json:"formation_jobs_redacted"`
-	CompactionJobsRedacted   int64                `json:"compaction_jobs_redacted"`
-	CandidatesRedacted       int64                `json:"candidates_redacted"`
-	EventsRedacted           int64                `json:"events_redacted"`
-	AuditTombstones          int64                `json:"audit_tombstones_deleted"`
-	MemoryTombstonesDeleted  int64                `json:"memory_tombstones_deleted"`
-	CandidateTombstones      int64                `json:"candidate_tombstones_deleted"`
-	EventTombstones          int64                `json:"event_tombstones_deleted"`
-	PrivacyTombstones        int64                `json:"privacy_tombstones_deleted"`
-	InvalidationTombstones   int64                `json:"privacy_invalidation_tombstones_deleted"`
-	PrivacyChallengesExpired int64                `json:"privacy_challenges_expired"`
-	FormationJobsDeleted     int64                `json:"formation_jobs_deleted"`
-	CompactionJobsDeleted    int64                `json:"compaction_jobs_deleted"`
-	ChallengesDeleted        int64                `json:"account_challenges_deleted"`
-	IndexRowsDeleted         int64                `json:"index_rows_deleted"`
-	IndexRevisionsDegraded   int64                `json:"index_revisions_degraded"`
-	IndexTablesDropped       int64                `json:"index_tables_dropped"`
-	OptimizeRun              bool                 `json:"optimize_run"`
+	SessionCleanup             SessionCleanupCounts `json:"session_cleanup"`
+	PendingDeliveriesFailed    int64                `json:"pending_deliveries_failed"`
+	ForgottenMemories          int64                `json:"forgotten_memories"`
+	AuditRowsRedacted          int64                `json:"audit_rows_redacted"`
+	FormationJobsRedacted      int64                `json:"formation_jobs_redacted"`
+	CompactionJobsRedacted     int64                `json:"compaction_jobs_redacted"`
+	CandidatesRedacted         int64                `json:"candidates_redacted"`
+	SupersededMemoriesRedacted int64                `json:"superseded_memories_redacted"`
+	SupersedesLinksCleared     int64                `json:"supersedes_links_cleared"`
+	EventsRedacted             int64                `json:"events_redacted"`
+	AuditTombstones            int64                `json:"audit_tombstones_deleted"`
+	MemoryTombstonesDeleted    int64                `json:"memory_tombstones_deleted"`
+	CandidateTombstones        int64                `json:"candidate_tombstones_deleted"`
+	EventTombstones            int64                `json:"event_tombstones_deleted"`
+	PrivacyTombstones          int64                `json:"privacy_tombstones_deleted"`
+	InvalidationTombstones     int64                `json:"privacy_invalidation_tombstones_deleted"`
+	PrivacyChallengesExpired   int64                `json:"privacy_challenges_expired"`
+	FormationJobsDeleted       int64                `json:"formation_jobs_deleted"`
+	CompactionJobsDeleted      int64                `json:"compaction_jobs_deleted"`
+	DerivedIndexJobsDeleted    int64                `json:"derived_index_jobs_deleted"`
+	ChallengesDeleted          int64                `json:"account_challenges_deleted"`
+	IndexRowsDeleted           int64                `json:"index_rows_deleted"`
+	IndexRevisionsDegraded     int64                `json:"index_revisions_degraded"`
+	IndexTablesDropped         int64                `json:"index_tables_dropped"`
+	OptimizeRun                bool                 `json:"optimize_run"`
 }
 
 // Changed returns the number of rows changed, excluding database hygiene.
 func (c MaintenanceCounts) Changed() int64 {
 	s := c.SessionCleanup
 	return s.SessionTurnsDeleted + s.TenantSessionsDeleted + s.ProfileVersionsDeleted + s.MemoryEntriesExpired + s.CandidatesErased + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsDeleted +
-		c.ForgottenMemories + c.AuditRowsRedacted + c.FormationJobsRedacted + c.CompactionJobsRedacted + c.CandidatesRedacted + c.EventsRedacted + c.AuditTombstones + c.MemoryTombstonesDeleted + c.CandidateTombstones + c.EventTombstones + c.PrivacyChallengesExpired + c.PrivacyTombstones + c.InvalidationTombstones + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped
+		c.PendingDeliveriesFailed + c.ForgottenMemories + c.AuditRowsRedacted + c.FormationJobsRedacted + c.CompactionJobsRedacted + c.CandidatesRedacted + c.SupersededMemoriesRedacted + c.SupersedesLinksCleared + c.EventsRedacted + c.AuditTombstones + c.MemoryTombstonesDeleted + c.CandidateTombstones + c.EventTombstones + c.PrivacyChallengesExpired + c.PrivacyTombstones + c.InvalidationTombstones + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped
 }
 
 // MaintenanceSweep performs one bounded, serialized retention and consistency
@@ -83,6 +87,11 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	contentCutoff := formatTime(now.Add(-policy.ContentBearingAuditJobRetention))
 	tombstoneCutoff := formatTime(now.Add(-policy.ContentFreeTombstoneRetention))
 	candidateCutoff := formatTime(now.Add(-policy.CandidateContentRetention))
+	pendingDeliveryCutoff := formatTime(now.Add(-policy.PendingDeliveryTimeout))
+
+	if counts.PendingDeliveriesFailed, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM session_turns WHERE delivered_at IS NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL AND julianday(created_at) <= julianday(?) ORDER BY julianday(created_at), id LIMIT ?) UPDATE session_turns SET delivery_failed_at = ? WHERE id IN (SELECT id FROM due)`, pendingDeliveryCutoff, batch, nowText); err != nil {
+		return counts, err
+	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT id, canonical_user_id, COALESCE(NULLIF(lifecycle_request_id, ''), 'maintenance-retention'), hard_delete_after FROM memory_entries WHERE status = 'forgotten' AND hard_delete_after IS NOT NULL ORDER BY julianday(hard_delete_after), hard_delete_after, id LIMIT ?`, batch)
 	if err != nil {
@@ -143,9 +152,22 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 		return counts, linkedJobsErr
 	}
 	counts.FormationJobsRedacted += linkedJobsRedacted
-	if counts.CandidatesRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries memory ON memory.id = candidate.published_memory_id WHERE julianday(candidate.created_at) <= julianday(?) AND (candidate.publication_status != 'published' OR memory.status IN ('expired','deleted')) AND candidate.redacted_at IS NULL AND (candidate.statement != '' OR candidate.evidence != '' OR candidate.claim_slot != '' OR candidate.claim_value != '' OR candidate.source_turn_id IS NOT NULL OR candidate.extraction_model != '') ORDER BY candidate.id LIMIT ?) UPDATE memory_candidates SET statement = '', claim_slot = '', claim_value = '', evidence = '', source_turn_id = NULL, extraction_model = '', redacted_at = ?, redaction_reason = 'candidate_retention_expired', updated_at = ? WHERE id IN (SELECT id FROM due)`, candidateCutoff, batch, nowText, nowText); err != nil {
+	if counts.CandidatesRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries memory ON memory.id = candidate.published_memory_id WHERE (((candidate.publication_status != 'published' OR memory.status IN ('expired','deleted')) AND julianday(candidate.created_at) <= julianday(?)) OR (memory.status = 'superseded' AND julianday(memory.status_changed_at) <= julianday(?))) AND candidate.redacted_at IS NULL AND (candidate.statement != '' OR candidate.evidence != '' OR candidate.claim_slot != '' OR candidate.claim_value != '' OR candidate.source_turn_id IS NOT NULL OR candidate.extraction_model != '') ORDER BY candidate.id LIMIT ?) UPDATE memory_candidates SET statement = '', claim_slot = '', claim_value = '', evidence = '', source_turn_id = NULL, extraction_model = '', redacted_at = ?, redaction_reason = 'candidate_retention_expired', updated_at = ? WHERE id IN (SELECT id FROM due)`, candidateCutoff, candidateCutoff, batch, nowText, nowText); err != nil {
 		return counts, err
 	}
+	if counts.SupersededMemoriesRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_entries WHERE status = 'superseded' AND (statement != '' OR claim_slot != '' OR claim_value != '') AND julianday(status_changed_at) <= julianday(?) ORDER BY id LIMIT ?) UPDATE memory_entries SET statement = '', claim_slot = '', claim_value = '', updated_at = ? WHERE id IN (SELECT id FROM due)`, candidateCutoff, batch, nowText); err != nil {
+		return counts, err
+	}
+	links, linkErr := execAffected(ctx, tx, `WITH due AS (SELECT replacement.id FROM memory_entries replacement JOIN memory_entries old ON old.id = replacement.supersedes_id AND old.canonical_user_id = replacement.canonical_user_id WHERE old.status = 'superseded' AND old.statement = '' AND old.claim_slot = '' AND old.claim_value = '' AND julianday(old.status_changed_at) <= julianday(?) ORDER BY replacement.id LIMIT ?) UPDATE memory_entries SET supersedes_id = NULL WHERE id IN (SELECT id FROM due)`, candidateCutoff, batch)
+	if linkErr != nil {
+		return counts, linkErr
+	}
+	counts.SupersedesLinksCleared += links
+	links, linkErr = execAffected(ctx, tx, `WITH due AS (SELECT candidate.id FROM memory_candidates candidate JOIN memory_entries old ON old.id = candidate.supersedes_memory_id AND old.canonical_user_id = candidate.canonical_user_id WHERE old.status = 'superseded' AND old.statement = '' AND old.claim_slot = '' AND old.claim_value = '' AND julianday(old.status_changed_at) <= julianday(?) ORDER BY candidate.id LIMIT ?) UPDATE memory_candidates SET supersedes_memory_id = NULL WHERE id IN (SELECT id FROM due)`, candidateCutoff, batch)
+	if linkErr != nil {
+		return counts, linkErr
+	}
+	counts.SupersedesLinksCleared += links
 	if counts.EventsRedacted, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM memory_events WHERE event_kind = 'lifecycle' AND julianday(created_at) <= julianday(?) AND (metadata != '' OR request_id != '' OR session_id != '') ORDER BY id LIMIT ?) UPDATE memory_events SET metadata = '', request_id = '', session_id = '' WHERE event_kind = 'lifecycle' AND id IN (SELECT id FROM due)`, contentCutoff, batch); err != nil {
 		return counts, err
 	}
@@ -159,10 +181,10 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if counts.AuditTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_events WHERE event_kind = 'formation_audit' AND id IN (SELECT event.id FROM memory_events event WHERE event.event_kind = 'formation_audit' AND event.redacted_at IS NOT NULL AND julianday(event.redacted_at) <= julianday(?) AND event.metadata = '' AND event.request_id = '' AND event.session_id = '' AND event.actor_id = '' ORDER BY event.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.CandidateTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_candidates WHERE id IN (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries published ON published.id = candidate.published_memory_id AND published.canonical_user_id = candidate.canonical_user_id WHERE candidate.redacted_at IS NOT NULL AND julianday(candidate.redacted_at) <= julianday(?) AND (candidate.published_memory_id IS NULL OR published.status IN ('deleted','expired')) AND NOT EXISTS (SELECT 1 FROM memory_events audit WHERE audit.event_kind = 'formation_audit' AND audit.candidate_id = candidate.id) ORDER BY candidate.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
+	if counts.CandidateTombstones, err = execAffected(ctx, tx, `DELETE FROM memory_candidates WHERE id IN (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries published ON published.id = candidate.published_memory_id AND published.canonical_user_id = candidate.canonical_user_id WHERE candidate.redacted_at IS NOT NULL AND julianday(candidate.redacted_at) <= julianday(?) AND (candidate.published_memory_id IS NULL OR published.status IN ('deleted','expired','superseded')) AND NOT EXISTS (SELECT 1 FROM memory_events audit WHERE audit.event_kind = 'formation_audit' AND audit.candidate_id = candidate.id) ORDER BY candidate.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
-	if counts.MemoryTombstonesDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_entries WHERE id IN (SELECT memory.id FROM memory_entries memory WHERE memory.status IN ('deleted','expired') AND memory.statement = '' AND julianday(memory.updated_at) <= julianday(?) AND NOT EXISTS (SELECT 1 FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id OR candidate.supersedes_memory_id = memory.id) AND NOT EXISTS (SELECT 1 FROM memory_events audit WHERE audit.event_kind = 'formation_audit' AND audit.memory_id = memory.id) ORDER BY memory.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
+	if counts.MemoryTombstonesDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_entries WHERE id IN (SELECT memory.id FROM memory_entries memory WHERE memory.status IN ('deleted','expired','superseded') AND memory.statement = '' AND julianday(memory.updated_at) <= julianday(?) AND NOT EXISTS (SELECT 1 FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id OR candidate.supersedes_memory_id = memory.id) AND NOT EXISTS (SELECT 1 FROM memory_entries replacement WHERE replacement.supersedes_id = memory.id) AND NOT EXISTS (SELECT 1 FROM memory_events audit WHERE audit.event_kind = 'formation_audit' AND audit.memory_id = memory.id) ORDER BY memory.id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
 		return counts, err
 	}
 	if counts.PrivacyTombstones, err = execAffected(ctx, tx, `DELETE FROM privacy_operations WHERE operation_id IN (SELECT operation_id FROM privacy_operations WHERE status IN ('completed','failed','expired') AND julianday(updated_at) <= julianday(?) ORDER BY julianday(updated_at), operation_id LIMIT ?)`, tombstoneCutoff, batch); err != nil {
@@ -175,6 +197,9 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 		return counts, err
 	}
 	if counts.CompactionJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) AND artifact_payload = '' ORDER BY id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch); err != nil {
+		return counts, err
+	}
+	if counts.DerivedIndexJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE id IN (SELECT job.id FROM durable_jobs job WHERE job.job_kind = 'derived_index' AND job.state = 'succeeded' AND julianday(job.completed_at) <= julianday(?) AND NOT (job.operation = 'upsert' AND ((job.entity_kind = 'memory' AND EXISTS (SELECT 1 FROM memory_entries entity WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.status = 'active' AND (entity.expires_at IS NULL OR julianday(entity.expires_at) > julianday(?)))) OR (job.entity_kind = 'session_turn' AND EXISTS (SELECT 1 FROM session_turns entity JOIN sessions active ON active.canonical_user_id = entity.canonical_user_id AND active.session_id = entity.session_id AND active.generation = entity.session_generation WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.delivered_at IS NOT NULL AND entity.privacy_suppressed_at IS NULL AND active.is_active = 1 AND julianday(active.expires_at) > julianday(?))) OR (job.entity_kind = 'global_memory' AND EXISTS (SELECT 1 FROM global_memories entity WHERE entity.id = job.entity_id))) AND job.id = (SELECT MAX(receipt.id) FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = job.entity_kind AND receipt.entity_id = job.entity_id AND receipt.canonical_user_id IS job.canonical_user_id)) ORDER BY job.id LIMIT ?)`, formatTime(now.Add(-policy.SuccessfulJobRetention)), nowText, nowText, batch); err != nil {
 		return counts, err
 	}
 	if counts.ChallengesDeleted, err = execAffected(ctx, tx, `DELETE FROM account_link_challenges WHERE id IN (SELECT id FROM account_link_challenges WHERE julianday(expires_at) <= julianday(?) ORDER BY julianday(expires_at), id LIMIT ?)`, formatTime(now.Add(-policy.AccountChallengeGrace)), batch); err != nil {
@@ -206,9 +231,9 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 }
 
 func normalizedMaintenancePolicy(policy config.RetentionPolicy) config.RetentionPolicy {
-	defaults := config.RetentionPolicy{ForgottenContentGrace: 30 * 24 * time.Hour, ContentBearingAuditJobRetention: 30 * 24 * time.Hour, ContentFreeTombstoneRetention: 365 * 24 * time.Hour, RetiredIndexRetention: 7 * 24 * time.Hour, SessionInactivity: 24 * time.Hour, CandidateContentRetention: 30 * 24 * time.Hour, SuccessfulJobRetention: 7 * 24 * time.Hour, DeadJobRetention: 30 * 24 * time.Hour, AccountChallengeGrace: 24 * time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: 24 * time.Hour, BatchSize: 100}
-	values := []*time.Duration{&policy.ForgottenContentGrace, &policy.ContentBearingAuditJobRetention, &policy.ContentFreeTombstoneRetention, &policy.RetiredIndexRetention, &policy.SessionInactivity, &policy.CandidateContentRetention, &policy.SuccessfulJobRetention, &policy.DeadJobRetention, &policy.AccountChallengeGrace, &policy.MaintenanceInterval, &policy.DatabaseOptimizeInterval}
-	defaultValues := []time.Duration{defaults.ForgottenContentGrace, defaults.ContentBearingAuditJobRetention, defaults.ContentFreeTombstoneRetention, defaults.RetiredIndexRetention, defaults.SessionInactivity, defaults.CandidateContentRetention, defaults.SuccessfulJobRetention, defaults.DeadJobRetention, defaults.AccountChallengeGrace, defaults.MaintenanceInterval, defaults.DatabaseOptimizeInterval}
+	defaults := config.RetentionPolicy{ForgottenContentGrace: 30 * 24 * time.Hour, ContentBearingAuditJobRetention: 30 * 24 * time.Hour, ContentFreeTombstoneRetention: 365 * 24 * time.Hour, RetiredIndexRetention: 7 * 24 * time.Hour, SessionInactivity: 24 * time.Hour, PendingDeliveryTimeout: 15 * time.Minute, CandidateContentRetention: 30 * 24 * time.Hour, SuccessfulJobRetention: 7 * 24 * time.Hour, DeadJobRetention: 30 * 24 * time.Hour, AccountChallengeGrace: 24 * time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: 24 * time.Hour, BatchSize: 100}
+	values := []*time.Duration{&policy.ForgottenContentGrace, &policy.ContentBearingAuditJobRetention, &policy.ContentFreeTombstoneRetention, &policy.RetiredIndexRetention, &policy.SessionInactivity, &policy.PendingDeliveryTimeout, &policy.CandidateContentRetention, &policy.SuccessfulJobRetention, &policy.DeadJobRetention, &policy.AccountChallengeGrace, &policy.MaintenanceInterval, &policy.DatabaseOptimizeInterval}
+	defaultValues := []time.Duration{defaults.ForgottenContentGrace, defaults.ContentBearingAuditJobRetention, defaults.ContentFreeTombstoneRetention, defaults.RetiredIndexRetention, defaults.SessionInactivity, defaults.PendingDeliveryTimeout, defaults.CandidateContentRetention, defaults.SuccessfulJobRetention, defaults.DeadJobRetention, defaults.AccountChallengeGrace, defaults.MaintenanceInterval, defaults.DatabaseOptimizeInterval}
 	for i := range values {
 		if *values[i] <= 0 {
 			*values[i] = defaultValues[i]

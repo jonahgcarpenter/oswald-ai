@@ -15,6 +15,12 @@ type ErasureDescriptor struct {
 	SessionIDs         []string
 }
 
+// DisconnectDescriptor identifies runtime state invalidated by a completed disconnect.
+type DisconnectDescriptor struct {
+	ExternalIdentities []string
+	SessionIDs         []string
+}
+
 // UserRecord stores the linked accounts for a canonical Oswald user.
 type UserRecord = database.AccountUser
 

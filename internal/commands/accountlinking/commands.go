@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 )
 
 type handler struct {
@@ -19,7 +20,7 @@ type handler struct {
 func New(links *Service) []commands.Handler {
 	return []commands.Handler{
 		&handler{links: links, definition: commands.Definition{Name: "connect", Summary: "Securely connect another authenticated account.", Usage: "/connect [code|cancel]"}},
-		&handler{links: links, definition: commands.Definition{Name: "disconnect", Summary: "Disconnect a linked gateway account.", Usage: "/disconnect [account_number]"}},
+		&handler{links: links, definition: commands.Definition{Name: "disconnect", Summary: "Disconnect a linked gateway account.", Usage: "/disconnect [account_number]", UserExclusive: true}},
 	}
 }
 
@@ -49,7 +50,7 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	case "connect":
 		return h.handleConnect(ctx, req)
 	case "disconnect":
-		return h.handleDisconnect(req.Principal.CanonicalUserID, req.Args)
+		return h.handleDisconnect(ctx, req)
 	default:
 		return commands.Result{Text: "Unknown command: /" + req.Name}, nil
 	}
@@ -108,7 +109,9 @@ func linkErrorResult(err error) (commands.Result, error) {
 	}
 }
 
-func (h *handler) handleDisconnect(canonicalUserID string, args []string) (commands.Result, error) {
+func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (commands.Result, error) {
+	canonicalUserID := req.Principal.CanonicalUserID
+	args := req.Args
 	if len(args) == 0 {
 		return h.startDisconnect(canonicalUserID)
 	}
@@ -130,7 +133,11 @@ func (h *handler) handleDisconnect(canonicalUserID string, args []string) (comma
 	}
 
 	account := accounts[selection-1]
-	if err := h.links.DisconnectAccount(canonicalUserID, account.Gateway, account.Identifier); err != nil {
+	descriptor, err := h.links.DisconnectAccountAs(ctx, req.Principal, account.Gateway, account.Identifier, req.RequestID)
+	if err != nil {
+		if errors.Is(err, ErrPrincipalMismatch) {
+			return commands.Result{Text: "Your account identity changed. Send the command again."}, nil
+		}
 		return commands.Result{Text: fmt.Sprintf("Could not disconnect %s: %v", gatewayLabel(account.Gateway), err)}, nil
 	}
 
@@ -139,7 +146,7 @@ func (h *handler) handleDisconnect(canonicalUserID string, args []string) (comma
 		return commands.Result{}, err
 	}
 	message := fmt.Sprintf("Disconnected %s: %s.\n\nRemaining linked accounts:\n%s", gatewayLabel(account.Gateway), account.Identifier, renderLinkedAccounts(remaining))
-	return commands.Result{Text: message}, nil
+	return commands.Result{Text: message, Invalidation: &privacyruntime.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}}, nil
 }
 
 func (h *handler) startDisconnect(canonicalUserID string) (commands.Result, error) {

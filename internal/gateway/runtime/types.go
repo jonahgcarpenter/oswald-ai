@@ -16,13 +16,13 @@ import (
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
-	Broker       *broker.Broker
-	Commands     *commands.Service
-	Access       AccessChecker
-	Log          *config.Logger
-	Formation    FormationEnqueuer
-	Compaction   CompactionEnqueuer
-	PrivacyBus   *privacyruntime.Bus
+	Broker     *broker.Broker
+	Commands   *commands.Service
+	Access     AccessChecker
+	Log        *config.Logger
+	Formation  FormationEnqueuer
+	Compaction CompactionEnqueuer
+	PrivacyBus *privacyruntime.Bus
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.

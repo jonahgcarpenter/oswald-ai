@@ -34,7 +34,7 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("idempotent count=%d err=%v", count, err)
 	}
-	change, err := store.ClaimDerivedIndexChange(context.Background(), "test", time.Minute)
+	change, err := store.ClaimDerivedIndexChange(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,14 +52,14 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	reclaimed, err := store.ClaimDerivedIndexChange(context.Background(), "restart", time.Minute)
+	reclaimed, err := store.ClaimDerivedIndexChange(context.Background(), time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reclaimed.Sequence != change.Sequence || reclaimed.AttemptCount != 2 {
 		t.Fatalf("reclaimed=%+v initial=%+v", reclaimed, change)
 	}
-	if err := store.CompleteDerivedIndexChange(context.Background(), reclaimed.Sequence); err != nil {
+	if err := store.CompleteDerivedIndexChange(context.Background(), reclaimed); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -74,12 +74,52 @@ func TestClaimGlobalDerivedIndexChangeAllowsNullCanonicalUser(t *testing.T) {
 	if err := store.ReconcileDerivedIndexChanges(ctx); err != nil {
 		t.Fatal(err)
 	}
-	change, err := store.ClaimDerivedIndexChange(ctx, "test", time.Minute)
+	change, err := store.ClaimDerivedIndexChange(ctx, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if change.EntityKind != "global_memory" || change.UserID != "" || change.EntityID <= 0 {
 		t.Fatalf("global change=%+v", change)
+	}
+}
+
+func TestReclaimedDerivedIndexLeaseRejectsStaleWorker(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	tx, err := store.sql.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueDerivedChangeTx(ctx, tx, "user", "memory", 42, "delete", "stale-lease"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.ClaimDerivedIndexChange(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), stale.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ClaimDerivedIndexChange(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.LeaseOwner == current.LeaseOwner || current.LeaseOwner == "" {
+		t.Fatalf("stale owner=%q current owner=%q", stale.LeaseOwner, current.LeaseOwner)
+	}
+	if err := store.CompleteDerivedIndexChange(ctx, stale); !errors.Is(err, ErrStaleDerivedIndexChangeLease) {
+		t.Fatalf("stale complete error=%v", err)
+	}
+	if err := store.RetryDerivedIndexChange(ctx, stale, "stale"); !errors.Is(err, ErrStaleDerivedIndexChangeLease) {
+		t.Fatalf("stale retry error=%v", err)
+	}
+	if err := store.CompleteDerivedIndexChange(ctx, current); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -105,6 +145,35 @@ func TestDeleteIndexRecordCannotCrossTenant(t *testing.T) {
 	}
 	if err := store.DeleteIndexRecord(ctx, revision, memory.ID, "user-a"); err != nil {
 		t.Fatal(err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
+}
+
+func TestStalePrivateIndexWriteCannotDeleteAnotherTenantRow(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-a", "user-b")
+	memory, err := store.SaveMemory(ctx, "user-a", SaveRequest{Scope: ScopeLongTerm, Statement: "stale tenant A fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.MemoryIndexRecordByID(ctx, memory.ID, "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`INSERT INTO `+revision.TableName+`(rowid, canonical_user_id, statement, evidence) VALUES (?, 'user-b', 'tenant B row', '')`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET status = 'deleted' WHERE id = ? AND canonical_user_id = 'user-a'`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); !errors.Is(err, ErrStaleIndexRecord) {
+		t.Fatalf("stale write error=%v", err)
 	}
 	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
 }
@@ -345,6 +414,152 @@ func TestRevisionValidationRejectsStaleCanonicalContent(t *testing.T) {
 	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err == nil {
 		t.Fatal("stale shadow revision was published")
 	}
+}
+
+func TestRevisionPublicationRejectsMismatchedGeneratedTableIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTable := "derived_index_transcript_fts_r999"
+	if _, err := store.sql.Exec(`CREATE VIRTUAL TABLE `+wrongTable+` USING fts5(canonical_user_id, statement, evidence); UPDATE derived_index_revisions SET table_name = ? WHERE id = ?`, wrongTable, revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err == nil {
+		t.Fatal("revision with mismatched generated table identity was published")
+	}
+}
+
+func TestRetiredCleanupDoesNotDropMismatchedGeneratedTableIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTable := "derived_index_transcript_fts_r999"
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`CREATE VIRTUAL TABLE `+wrongTable+` USING fts5(canonical_user_id, statement, evidence); UPDATE derived_index_revisions SET table_name = ?, state = 'failed', updated_at = ? WHERE id = ?`, wrongTable, formatTime(now.Add(-2*time.Hour)), revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.MaintainDerivedIndexes(ctx, now, time.Hour, 100)
+	if err != nil || counts.TablesDropped != 0 {
+		t.Fatalf("corrupt identity cleanup counts=%+v err=%v", counts, err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, wrongTable)
+}
+
+func TestMemoryVectorValidationRejectsCorruptedCanonicalMetadata(t *testing.T) {
+	for _, corruption := range []struct {
+		name   string
+		column string
+		value  string
+	}{
+		{name: "canonical version", column: "canonical_version", value: "stale"},
+		{name: "scope", column: "scope", value: ScopeShortTerm},
+		{name: "category", column: "category", value: "identity"},
+	} {
+		t.Run(corruption.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+			defer store.Close() // nolint:errcheck
+			seedAccountUsers(t, store, "user")
+			memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "canonical vector fact"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.MemoryIndexRecordByID(ctx, memory.ID, "user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryVector, "llm_gateway", "model", 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.WriteMemoryIndexRecord(ctx, revision, record, []float64{1, 0}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.sql.Exec(`UPDATE `+revision.TableName+` SET `+corruption.column+` = ? WHERE rowid = ?`, corruption.value, memory.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err == nil {
+				t.Fatalf("revision with corrupted %s was published", corruption.column)
+			}
+		})
+	}
+}
+
+func TestVectorMaintenanceDeletesCorruptedCanonicalMetadata(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "maintained vector fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.MemoryIndexRecordByID(ctx, memory.ID, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, IndexKindMemoryVector, "llm_gateway", "model", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteMemoryIndexRecord(ctx, revision, record, []float64{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE `+revision.TableName+` SET scope = 'short_term' WHERE rowid = ?`, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.MaintainDerivedIndexes(ctx, time.Now().UTC(), time.Hour, 100)
+	if err != nil || counts.RowsDeleted != 1 || counts.RevisionsDegraded != 1 {
+		t.Fatalf("maintenance counts=%+v err=%v", counts, err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
+}
+
+func TestGlobalVectorMaintenanceDeletesStaleCanonicalVersion(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	result, err := store.sql.Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('canonical global fact', 'canonical global fact', ?)`, formatTime(time.Now().UTC()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GlobalMemoryIndexRecordByID(ctx, memoryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, IndexKindGlobalMemoryVector, "llm_gateway", "model", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteGlobalMemoryIndexRecord(ctx, revision, record, []float64{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE `+revision.TableName+` SET canonical_version = 'stale' WHERE rowid = ?`, memoryID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.MaintainDerivedIndexes(ctx, time.Now().UTC(), time.Hour, 100)
+	if err != nil || counts.RowsDeleted != 1 || counts.RevisionsDegraded != 1 {
+		t.Fatalf("maintenance counts=%+v err=%v", counts, err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memoryID)
 }
 
 func TestIndexMaintenanceNeverDropsLiveAndRetainsRetiredUntilDue(t *testing.T) {

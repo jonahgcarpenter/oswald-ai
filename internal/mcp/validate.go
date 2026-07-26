@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+const maxProviderIdentifierBytes = 64
+
+func validateProviderIdentifier(name string) error {
+	if len(name) == 0 || len(name) > maxProviderIdentifierBytes {
+		return fmt.Errorf("identifier must contain 1-%d bytes", maxProviderIdentifierBytes)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if i == 0 {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '_' {
+				return fmt.Errorf("identifier must start with an ASCII letter or underscore")
+			}
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
+			return fmt.Errorf("identifier may contain only ASCII letters, numbers, underscores, and hyphens")
+		}
+	}
+	return nil
+}
+
 type hostnameResolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }

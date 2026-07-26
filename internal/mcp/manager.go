@@ -384,12 +384,18 @@ func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientS
 }
 
 func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, log *config.Logger) (ToolSpec, error) {
+	remoteName := strings.TrimSpace(tool.Name)
+	if err := validateProviderIdentifier(remoteName); err != nil {
+		return ToolSpec{}, fmt.Errorf("invalid remote tool name: %w", err)
+	}
+	localName := cfg.Name + "." + remoteName
+	if len(localName) > maxProviderIdentifierBytes {
+		return ToolSpec{}, fmt.Errorf("qualified tool name exceeds %d bytes", maxProviderIdentifierBytes)
+	}
 	params, err := schemaToParams(tool.InputSchema)
 	if err != nil {
 		return ToolSpec{}, fmt.Errorf("normalize input schema: %w", err)
 	}
-	remoteName := strings.TrimSpace(tool.Name)
-	localName := cfg.Name + "." + remoteName
 	description := strings.TrimSpace(tool.Description)
 	if description == "" {
 		description = strings.TrimSpace(tool.Title)
@@ -401,14 +407,25 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
 		if err != nil {
-			return "", fmt.Errorf("MCP tool %q failed: %w", remoteName, err)
+			return "", safeMCPRequestError(err)
 		}
 		flattened, err := flattenToolResult(result)
 		if err != nil {
-			return "", fmt.Errorf("format MCP tool %q result: %w", remoteName, err)
+			return "", err
 		}
 		return flattened, nil
 	}}, nil
+}
+
+func safeMCPRequestError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("MCP request was canceled (category: canceled). Do not retry automatically")
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("MCP request timed out (category: timeout). Retry once")
+	default:
+		return fmt.Errorf("MCP request failed (category: transport). Retry once; if it fails again, check server availability")
+	}
 }
 
 func scopeKey(cfg ServerConfig) string {

@@ -276,6 +276,30 @@ func (s *Service) IsAdmin(canonicalUserID string) (bool, error) {
 	return ok && user.IsAdmin, nil
 }
 
+// IsAdminPrincipal checks admin status for the current owner of the principal's
+// authenticated external account, ignoring any stale canonical ID it carries.
+func (s *Service) IsAdminPrincipal(principal identity.Principal) (bool, error) {
+	if !principal.Authenticated() {
+		return false, nil
+	}
+	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	owner, ok := data.AccountIndex[accountKey(principal.Gateway, identifier)]
+	if !ok {
+		return false, nil
+	}
+	user, ok := data.Users[owner]
+	return ok && user.IsAdmin, nil
+}
+
 // IsBanned reports whether a canonical user is blocked from using Oswald.
 func (s *Service) IsBanned(canonicalUserID string) (bool, error) {
 	s.mu.Lock()
@@ -451,8 +475,7 @@ func (s *Service) unbanUserLocked(data fileData, actorID, targetID string) error
 	return nil
 }
 
-// DeleteUser removes a canonical user and all data owned by that user.
-func (s *Service) DeleteUser(actorID, targetID string) error {
+func (s *Service) deleteUser(actorID, targetID string) error {
 	targetID = strings.TrimSpace(targetID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -562,52 +585,116 @@ func (s *Service) SpeakerLine(canonicalUserID string) (string, error) {
 	return FormatSpeakerLine(accounts), nil
 }
 
-// DisconnectAccount removes a linked external account from a canonical user.
-func (s *Service) DisconnectAccount(canonicalUserID, gateway, identifier string) error {
-	identifier, err := NormalizeIdentifier(gateway, identifier)
+// DisconnectAccountAs removes one exact linked account after atomically
+// re-resolving the authenticated initiating principal and durably queues its
+// runtime invalidation scope.
+func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Principal, gateway, identifier, requestID string) (DisconnectDescriptor, error) {
+	if !principal.Valid() || !principal.Authenticated() {
+		return DisconnectDescriptor{}, fmt.Errorf("disconnect requires an authenticated identity")
+	}
+	principalIdentifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
 	if err != nil {
-		return err
+		return DisconnectDescriptor{}, err
+	}
+	identifier, err = NormalizeIdentifier(gateway, identifier)
+	if err != nil {
+		return DisconnectDescriptor{}, err
+	}
+	gateway = strings.ToLower(strings.TrimSpace(gateway))
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return DisconnectDescriptor{}, fmt.Errorf("disconnect request ID is required")
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	data, err := s.loadLocked()
-	if err != nil {
-		return err
+	if err := s.ensureInitializedLocked(); err != nil {
+		return DisconnectDescriptor{}, err
 	}
 
-	user, ok := data.Users[canonicalUserID]
-	if !ok {
-		return fmt.Errorf("canonical user %q not found", canonicalUserID)
+	canonicalUserID := principal.CanonicalUserID
+	now := s.now().UTC()
+	descriptor := DisconnectDescriptor{
+		ExternalIdentities: []string{accountKey(gateway, identifier)},
 	}
-	if len(user.Accounts) <= 1 {
-		return fmt.Errorf("cannot disconnect the last linked account")
-	}
-
-	key := accountKey(gateway, identifier)
-	kept := user.Accounts[:0]
-	removed := false
-	for _, account := range user.Accounts {
-		if account.Gateway == strings.ToLower(gateway) && account.Identifier == identifier {
-			removed = true
-			continue
+	err = s.db.WithTx(ctx, func(tx *sql.Tx) error {
+		owner, _, err := accountOwnerTx(ctx, tx, principal.Gateway, principalIdentifier)
+		if err != nil {
+			return err
 		}
-		kept = append(kept, account)
-	}
-	if !removed {
-		return fmt.Errorf("linked account not found")
-	}
-	user.Accounts = kept
-	user.UpdatedAt = time.Now().UTC()
-	data.Users[canonicalUserID] = user
-	delete(data.AccountIndex, key)
+		if owner != canonicalUserID {
+			return ErrPrincipalMismatch
+		}
 
-	if err := s.saveLocked(data); err != nil {
-		return err
+		var targetOwner string
+		if err := tx.QueryRowContext(ctx, `SELECT canonical_user_id FROM linked_accounts WHERE gateway = ? AND identifier = ?`, gateway, identifier).Scan(&targetOwner); err == sql.ErrNoRows {
+			return fmt.Errorf("linked account not found")
+		} else if err != nil {
+			return fmt.Errorf("resolve disconnect target: %w", err)
+		}
+		if targetOwner != canonicalUserID {
+			return fmt.Errorf("linked account not found")
+		}
+
+		var accountCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM linked_accounts WHERE canonical_user_id = ?`, canonicalUserID).Scan(&accountCount); err != nil {
+			return fmt.Errorf("count linked accounts: %w", err)
+		}
+		if accountCount <= 1 {
+			return fmt.Errorf("cannot disconnect the last linked account")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM linked_accounts WHERE canonical_user_id = ? AND gateway = ? AND identifier = ?`, canonicalUserID, gateway, identifier); err != nil {
+			return fmt.Errorf("delete linked account: %w", err)
+		}
+
+		rows, err := tx.QueryContext(ctx, `SELECT gateway, identifier, display_name FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, canonicalUserID)
+		if err != nil {
+			return fmt.Errorf("read remaining linked accounts: %w", err)
+		}
+		remaining := make([]LinkedAccount, 0, accountCount-1)
+		for rows.Next() {
+			var account LinkedAccount
+			if err := rows.Scan(&account.Gateway, &account.Identifier, &account.DisplayName); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan remaining linked account: %w", err)
+			}
+			remaining = append(remaining, account)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, FormatSpeakerLine(remaining), now.Format(time.RFC3339Nano), canonicalUserID); err != nil {
+			return fmt.Errorf("update speaker intro: %w", err)
+		}
+
+		sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, canonicalUserID)
+		if err != nil {
+			return fmt.Errorf("read disconnect sessions: %w", err)
+		}
+		for sessionRows.Next() {
+			var sessionID string
+			if err := sessionRows.Scan(&sessionID); err != nil {
+				sessionRows.Close()
+				return err
+			}
+			descriptor.SessionIDs = append(descriptor.SessionIDs, sessionID)
+		}
+		if err := sessionRows.Close(); err != nil {
+			return err
+		}
+		if err := sessionRows.Err(); err != nil {
+			return err
+		}
+		return s.memories.EnqueuePrivacyInvalidationTx(ctx, tx, canonicalUserID, "disconnect:"+requestID, descriptor.ExternalIdentities, descriptor.SessionIDs, true, now)
+	})
+	if err != nil {
+		return DisconnectDescriptor{}, err
 	}
-	s.log.Info("account_link.account.disconnected", "disconnected account", config.F("account", key), config.F("target_user_id", canonicalUserID))
-	return s.memories.SyncSpeakerIntro(canonicalUserID, FormatSpeakerLine(user.Accounts))
+	s.log.Info("account_link.account.disconnected", "disconnected account", config.F("account", descriptor.ExternalIdentities[0]), config.F("target_user_id", canonicalUserID), config.F("status", "ok"))
+	return descriptor, nil
 }
 
 func (s *Service) loadLocked() (fileData, error) {

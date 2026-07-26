@@ -301,7 +301,7 @@ func (s *Service) publishAfterDrain(ctx context.Context, revision usermemory.Der
 
 func (s *Service) drain(ctx context.Context) {
 	for ctx.Err() == nil {
-		change, err := s.store.ClaimDerivedIndexChange(ctx, "indexruntime", leaseTime)
+		change, err := s.store.ClaimDerivedIndexChange(ctx, leaseTime)
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
@@ -310,11 +310,14 @@ func (s *Service) drain(ctx context.Context) {
 			return
 		}
 		if err := s.applyChange(ctx, change); err != nil {
-			_ = s.store.RetryDerivedIndexChange(ctx, change, err.Error())
+			if retryErr := s.store.RetryDerivedIndexChange(ctx, change, err.Error()); retryErr != nil {
+				s.warn("index.outbox.retry_failed", change.EntityKind, retryErr)
+				return
+			}
 			s.warn("index.outbox.retry", change.EntityKind, err)
 			continue
 		}
-		if err := s.store.CompleteDerivedIndexChange(ctx, change.Sequence); err != nil {
+		if err := s.store.CompleteDerivedIndexChange(ctx, change); err != nil {
 			s.warn("index.outbox.complete_failed", change.EntityKind, err)
 			return
 		}

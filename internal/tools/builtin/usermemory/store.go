@@ -325,15 +325,33 @@ DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_use
 DELETE FROM session_summaries WHERE canonical_user_id = ?;
 DELETE FROM sessions WHERE canonical_user_id = ?;
 
+UPDATE durable_jobs AS loser
+SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id
+WHERE loser.job_kind = 'memory_formation' AND loser.canonical_user_id = ?
+	AND EXISTS (SELECT 1 FROM durable_jobs winner WHERE winner.job_kind = loser.job_kind AND winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key);
+
 UPDATE session_turns
 SET canonical_user_id = ?,
 	session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = session_turns.session_id AND map.old_generation = session_turns.session_generation), session_generation)
 WHERE canonical_user_id = ?;
+
+UPDATE durable_jobs
+SET canonical_user_id = ?,
+	source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = durable_jobs.source_session_id AND map.old_generation = durable_jobs.source_session_generation), source_session_generation),
+	state = CASE WHEN state = 'running' THEN 'retry' ELSE state END,
+	lease_owner = CASE WHEN state = 'running' THEN '' ELSE lease_owner END,
+	lease_until = CASE WHEN state = 'running' THEN NULL ELSE lease_until END,
+	available_at = CASE WHEN state = 'running' THEN ? ELSE available_at END,
+	updated_at = CASE WHEN state = 'running' THEN ? ELSE updated_at END
+WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
 `, loserID, loserID, loserID, loserID,
 		winnerID, winnerID, winnerID, winnerID,
 		winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID,
 		loserID, loserID, loserID,
-		loserID, loserID, loserID, winnerID, loserID); err != nil {
+		loserID, loserID, loserID,
+		loserID, loserID, winnerID,
+		winnerID, loserID,
+		winnerID, formatTime(time.Now().UTC()), formatTime(time.Now().UTC()), loserID); err != nil {
 		return fmt.Errorf("snapshot and move merged sessions: %w", err)
 	}
 
@@ -395,15 +413,6 @@ SET profile_version = profile_version + (SELECT COALESCE(MAX(profile_version_hig
 			return fmt.Errorf("re-key merged %s: %w", table, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs AS loser SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id WHERE loser.job_kind = 'memory_formation' AND loser.canonical_user_id = ? AND EXISTS (SELECT 1 FROM durable_jobs winner WHERE winner.job_kind = loser.job_kind AND winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key)`, loserID, loserID, winnerID); err != nil {
-		return fmt.Errorf("re-key merged memory formation jobs: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs
-SET source_session_generation = COALESCE((SELECT new_generation FROM merge_session_generation_map map WHERE map.session_id = durable_jobs.source_session_id AND map.old_generation = durable_jobs.source_session_generation), source_session_generation)
-WHERE job_kind = 'memory_formation' AND canonical_user_id = ?`, loserID); err != nil {
-		return fmt.Errorf("remap merged formation session generations: %w", err)
-	}
-
 	duplicateJoin := `
 FROM memory_entries loser
 JOIN memory_entries winner
@@ -496,9 +505,6 @@ UPDATE memory_events SET memory_id = NULL WHERE event_kind = 'formation_audit' A
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory candidates: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET canonical_user_id = ? WHERE job_kind = 'memory_formation' AND canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to move merged memory formation jobs: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = (`+winnerForDuplicate+`) WHERE canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)`, winnerID, winnerID, loserID, loserID, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to redirect merged memory events: %w", err)
 	}
@@ -513,9 +519,6 @@ UPDATE memory_events SET memory_id = NULL WHERE event_kind = 'formation_audit' A
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = COALESCE((SELECT replacement_memory_id FROM merge_audit_memory_links links WHERE links.audit_id = memory_events.id), memory_id) WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory events: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', lease_owner = '', lease_until = NULL WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'`, winnerID); err != nil {
-		return fmt.Errorf("reset merged memory formation leases: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DROP TABLE merge_audit_memory_links`); err != nil {
 		return fmt.Errorf("remove merged memory formation audit snapshot: %w", err)
@@ -1103,12 +1106,12 @@ WHERE EXISTS (
 
 // RecentSessionTurns returns a user's newest completed session exchanges, newest first.
 func (s *Store) RecentSessionTurns(userID, sessionID string, offset int, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(context.Background(), userID, sessionID, 0, offset, count)
+	return s.recentSessionTurns(context.Background(), userID, sessionID, 0, offset, count, false)
 }
 
 // RecentSessionTurnsForGeneration returns turns from exactly one session generation.
 func (s *Store) RecentSessionTurnsForGeneration(userID, sessionID string, generation, offset, count int) ([]SessionTurn, error) {
-	return s.recentSessionTurns(context.Background(), userID, sessionID, generation, offset, count)
+	return s.recentSessionTurns(context.Background(), userID, sessionID, generation, offset, count, false)
 }
 
 // RecentCompletedExchanges returns complete newest-first exchanges for one tenant session generation.
@@ -1116,10 +1119,10 @@ func (s *Store) RecentCompletedExchanges(ctx context.Context, userID, sessionID 
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" || generation <= 0 {
 		return nil, fmt.Errorf("recent session exchanges require user, session, and generation")
 	}
-	return s.recentSessionTurns(ctx, userID, sessionID, generation, 1, limit)
+	return s.recentSessionTurns(ctx, userID, sessionID, generation, 1, limit, true)
 }
 
-func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string, generation, offset int, count int) ([]SessionTurn, error) {
+func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string, generation, offset int, count int, deliveredOnly bool) ([]SessionTurn, error) {
 	if offset < 1 {
 		offset = 1
 	}
@@ -1129,11 +1132,14 @@ func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string
 	if count > 100 {
 		count = 100
 	}
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND privacy_suppressed_at IS NULL AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
 	args := []any{userID, sessionID, formatTime(time.Now())}
 	if generation > 0 {
 		query += ` AND session_generation = ?`
 		args = append(args, generation)
+	}
+	if deliveredOnly {
+		query += ` AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL`
 	}
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, count, offset-1)

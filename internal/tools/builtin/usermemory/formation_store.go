@@ -86,8 +86,22 @@ type FormationJob struct {
 	Model             string
 	ExtractorVersion  string
 	AttemptCount      int
+	LeaseOwner        string
 	LeaseUntil        time.Time
 }
+
+const formationSourceFenceSQL = `
+	AND EXISTS (
+		SELECT 1 FROM session_turns source
+		WHERE source.id = durable_jobs.source_turn_id
+			AND source.canonical_user_id = durable_jobs.canonical_user_id
+			AND source.session_id = durable_jobs.source_session_id
+			AND source.session_generation = durable_jobs.source_session_generation
+			AND source.source_request_id = durable_jobs.source_request_id
+			AND source.delivered_at IS NOT NULL
+			AND source.delivery_failed_at IS NULL
+			AND source.privacy_suppressed_at IS NULL
+	)`
 
 // StoredSessionTurn identifies an exchange that was actually persisted.
 type StoredSessionTurn struct {
@@ -187,18 +201,19 @@ func (s *Store) ProposeCandidate(ctx context.Context, userID string, proposal Ca
 		}
 	}
 	if job := proposal.FormationJob; job != nil {
-		if userID != job.UserID || proposal.Source.RequestID != job.RequestID || proposal.Source.SessionID != job.SessionID || proposal.Source.SessionGeneration != job.SessionGeneration || proposal.Source.TurnID != job.TurnID || job.LeaseUntil.IsZero() {
+		if userID != job.UserID || proposal.Source.RequestID != job.RequestID || proposal.Source.SessionID != job.SessionID || proposal.Source.SessionGeneration != job.SessionGeneration || proposal.Source.TurnID != job.TurnID || job.LeaseOwner == "" || job.LeaseUntil.IsZero() {
 			return FormationCandidate{}, false, fmt.Errorf("formation candidate scope does not match fenced job")
 		}
 		fenced, err := tx.ExecContext(ctx, `
 UPDATE durable_jobs SET updated_at = updated_at
 WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running'
-	AND lease_until = ? AND julianday(lease_until) > julianday(?)
+	AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)
+	`+formationSourceFenceSQL+`
 	AND EXISTS (
 		SELECT 1 FROM account_users active
 		WHERE active.canonical_user_id = durable_jobs.canonical_user_id
 			AND active.lifecycle_state = 'active'
-	)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+		)`, job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 		if err != nil {
 			return FormationCandidate{}, false, fmt.Errorf("fence formation candidate: %w", err)
 		}
@@ -227,6 +242,7 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 			AND source.session_id = durable_jobs.session_id
 			AND source.session_generation = durable_jobs.session_generation
 			AND source.delivered_at IS NOT NULL
+			AND source.privacy_suppressed_at IS NULL
 	)`,
 			job.ID, job.UserID, job.SessionID, job.SessionGeneration,
 			job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner,
@@ -604,10 +620,13 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 	if source.TurnID <= 0 || strings.TrimSpace(userID) == "" {
 		return 0, fmt.Errorf("formation job requires tenant and source turn")
 	}
-	var storedSessionID string
+	var storedRequestID, storedSessionID string
 	var storedGeneration int
-	if err := s.sql.QueryRowContext(ctx, `SELECT session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ?`, source.TurnID, userID).Scan(&storedSessionID, &storedGeneration); err != nil {
+	if err := s.sql.QueryRowContext(ctx, `SELECT source_request_id, session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL`, source.TurnID, userID).Scan(&storedRequestID, &storedSessionID, &storedGeneration); err != nil {
 		return 0, fmt.Errorf("resolve formation job source turn: %w", err)
+	}
+	if source.RequestID == "" {
+		source.RequestID = storedRequestID
 	}
 	if source.SessionID == "" {
 		source.SessionID = storedSessionID
@@ -615,7 +634,7 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 	if source.SessionGeneration <= 0 {
 		source.SessionGeneration = storedGeneration
 	}
-	if source.SessionID != storedSessionID || source.SessionGeneration != storedGeneration {
+	if source.RequestID != storedRequestID || source.SessionID != storedSessionID || source.SessionGeneration != storedGeneration {
 		return 0, fmt.Errorf("formation job source scope does not match persisted turn")
 	}
 	version := firstNonEmptyFormation(source.ExtractorVersion, FormationExtractorVersion)
@@ -648,13 +667,22 @@ func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID
 		return fmt.Errorf("begin mark turn eligible: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
-	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET delivered_at = COALESCE(delivered_at, ?) WHERE id = ? AND canonical_user_id = ?`, now, turnID, userID)
+	lateDelivery, err := sessionTurnHadDeliveryFailureTx(ctx, tx, userID, turnID)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET delivered_at = COALESCE(delivered_at, ?), delivery_failed_at = NULL WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NULL`, now, turnID, userID)
 	if err != nil {
 		return fmt.Errorf("mark turn eligible for memory formation: %w", err)
 	}
 	count, _ := result.RowsAffected()
 	if count != 1 {
 		return sql.ErrNoRows
+	}
+	if lateDelivery {
+		if err := invalidateCompactionAfterLateDeliveryTx(ctx, tx, userID, turnID); err != nil {
+			return err
+		}
 	}
 	if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", turnID, "upsert", "delivered:"+now); err != nil {
 		return err
@@ -680,7 +708,7 @@ INSERT INTO durable_jobs (
 SELECT 'memory_formation', turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'queued',
 	turns.source_request_id, turns.session_id, turns.session_generation, turns.id, ?, ?, ?, ?, ?
 FROM session_turns turns
-WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL
+WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND turns.privacy_suppressed_at IS NULL
 	AND NOT EXISTS (
 		SELECT 1 FROM durable_jobs jobs
 		WHERE jobs.job_kind = 'memory_formation' AND jobs.canonical_user_id = turns.canonical_user_id
@@ -704,6 +732,7 @@ UPDATE durable_jobs
 SET state = 'retry', attempt_count = 0, available_at = ?, completed_at = NULL,
 	redrive_count = redrive_count + 1, updated_at = ?
 WHERE job_kind = 'memory_formation' AND state = 'dead' AND redrive_count < 3 AND last_error_code LIKE 'transient_%'
+	`+formationSourceFenceSQL+`
 	AND ((redrive_count = 0 AND updated_at <= ?)
 		OR (redrive_count = 1 AND updated_at <= ?)
 		OR (redrive_count = 2 AND updated_at <= ?))
@@ -721,6 +750,10 @@ func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (For
 	}
 	now := time.Now().UTC()
 	leaseUntil := now.Add(lease)
+	leaseOwner, err := newLeaseOwner()
+	if err != nil {
+		return FormationJob{}, fmt.Errorf("create memory formation lease owner: %w", err)
+	}
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return FormationJob{}, err
@@ -734,13 +767,14 @@ SELECT id, canonical_user_id, source_request_id, source_session_id,
 FROM durable_jobs
 WHERE job_kind = 'memory_formation' AND ((state IN ('queued', 'retry') AND available_at <= ?)
 	OR (state = 'running' AND lease_until <= ?))
+	`+formationSourceFenceSQL+`
 ORDER BY available_at, id LIMIT 1
 `, formatTime(now), formatTime(now)).Scan(&job.ID, &job.UserID, &job.RequestID, &job.SessionID,
 		&job.SessionGeneration, &job.TurnID, &job.Model, &job.ExtractorVersion, &job.AttemptCount)
 	if err != nil {
 		return FormationJob{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, formatTime(now), formatTime(leaseUntil), formatTime(now), job.ID, job.UserID)
+	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, started_at = ?, lease_owner = ?, lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? `+formationSourceFenceSQL, formatTime(now), leaseOwner, formatTime(leaseUntil), formatTime(now), job.ID, job.UserID)
 	if err != nil {
 		return FormationJob{}, err
 	}
@@ -749,6 +783,7 @@ ORDER BY available_at, id LIMIT 1
 		return FormationJob{}, sql.ErrNoRows
 	}
 	job.AttemptCount++
+	job.LeaseOwner = leaseOwner
 	job.LeaseUntil = leaseUntil
 	if err := tx.Commit(); err != nil {
 		return FormationJob{}, err
@@ -760,7 +795,7 @@ ORDER BY available_at, id LIMIT 1
 func (s *Store) FormationJobArtifact(ctx context.Context, job FormationJob) (string, error) {
 	var payload string
 	now := time.Now().UTC()
-	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now)).Scan(&payload)
+	err := s.sql.QueryRowContext(ctx, `SELECT extraction_payload FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now)).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return "", ErrStaleFormationJobLease
 	}
@@ -771,7 +806,7 @@ func (s *Store) FormationJobArtifact(ctx context.Context, job FormationJob) (str
 func (s *Store) ValidateFormationJobLease(ctx context.Context, job FormationJob) error {
 	var exists int
 	now := time.Now().UTC()
-	err := s.sql.QueryRowContext(ctx, `SELECT 1 FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now)).Scan(&exists)
+	err := s.sql.QueryRowContext(ctx, `SELECT 1 FROM durable_jobs WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now)).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return ErrStaleFormationJobLease
 	}
@@ -784,7 +819,7 @@ func (s *Store) SaveFormationJobArtifact(ctx context.Context, job FormationJob, 
 		payload = "[]"
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, payload, formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = CASE WHEN extraction_payload = '' THEN ? ELSE extraction_payload END, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, payload, formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 	return requireFormationLeaseMutation(result, err)
 }
 
@@ -795,14 +830,14 @@ func (s *Store) CompleteFormationJob(ctx context.Context, job FormationJob, skip
 		state = "skipped"
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ? AND julianday(lease_until) > julianday(?)`, state, formatTime(now), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil), formatTime(now))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 	return requireFormationLeaseMutation(result, err)
 }
 
 // SkipFormationJob terminally skips a running job that cannot succeed by retrying.
 func (s *Store) SkipFormationJob(ctx context.Context, job FormationJob, code string) error {
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? `+formationSourceFenceSQL, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
 	return requireFormationLeaseMutation(result, err)
 }
 
@@ -814,7 +849,7 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 		state = "dead"
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? `+formationSourceFenceSQL, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
 	return requireFormationLeaseMutation(result, err)
 }
 
@@ -825,7 +860,7 @@ func (s *Store) DeferFormationJob(ctx context.Context, job FormationJob, delay t
 		delay = time.Second
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?, lease_until = NULL, last_error_code = 'foreground_preempted', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_until = ?`, formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, formatTime(job.LeaseUntil))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), available_at = ?, lease_owner = '', lease_until = NULL, last_error_code = 'foreground_preempted', updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? `+formationSourceFenceSQL, formatTime(now.Add(delay)), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
 	return requireFormationLeaseMutation(result, err)
 }
 
@@ -853,7 +888,7 @@ func (s *Store) FormationJobState(ctx context.Context, userID string, jobID int6
 // SessionTurnByID reloads a source turn under canonical tenant scope.
 func (s *Store) SessionTurnByID(ctx context.Context, userID string, turnID int64) (StoredSessionTurn, error) {
 	var turn StoredSessionTurn
-	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText)
+	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text FROM session_turns WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NULL`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText)
 	return turn, err
 }
 

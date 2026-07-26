@@ -49,6 +49,40 @@ func TestServiceRejectsInvalidPrincipal(t *testing.T) {
 	}
 }
 
+func TestRequireAdminRejectsUnauthenticatedPrincipalBeforeLookup(t *testing.T) {
+	auth := &countingAuthorizer{isAdmin: true}
+	service, err := NewServiceWithCommands(Command{
+		Handler:    fakeCommand{name: "secret", admin: true},
+		Middleware: []Middleware{RequireAdmin(auth)},
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	principal := identity.Principal{
+		CanonicalUserID: "admin",
+		Gateway:         "websocket",
+		ExternalID:      "admin",
+		Assurance:       identity.AssuranceSelfAsserted,
+	}
+	result, err := service.Execute(context.Background(), Request{Principal: principal, Raw: "/secret"})
+	if err != nil || result.Text != adminDeniedMessage || auth.calls != 0 {
+		t.Fatalf("result=%+v err=%v admin lookups=%d", result, err, auth.calls)
+	}
+}
+
+func TestRequireAdminUsesPrincipalAuthorizerWhenAvailable(t *testing.T) {
+	auth := &principalAuthorizer{admin: true}
+	service, err := NewServiceWithCommands(Command{Handler: fakeCommand{name: "secret"}, Middleware: []Middleware{RequireAdmin(auth)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := testPrincipal("stale")
+	result, err := service.Execute(context.Background(), Request{Principal: principal, Raw: "/secret"})
+	if err != nil || result.Text != "ran secret:" || auth.principal != principal || auth.legacyCalls != 0 {
+		t.Fatalf("result=%+v err=%v auth=%+v", result, err, auth)
+	}
+}
+
 func TestServicePropagatesPrincipalToHandler(t *testing.T) {
 	want := identity.Principal{
 		CanonicalUserID: "user",
@@ -143,10 +177,36 @@ type fakeAuthorizer struct {
 	admins map[string]bool
 }
 
+type countingAuthorizer struct {
+	isAdmin bool
+	calls   int
+}
+
+type principalAuthorizer struct {
+	admin       bool
+	principal   identity.Principal
+	legacyCalls int
+}
+
 func testPrincipal(userID string) identity.Principal {
 	return identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "external-" + userID, Assurance: identity.AssuranceDiscordGateway}
 }
 
 func (a fakeAuthorizer) IsAdmin(userID string) (bool, error) {
 	return a.admins[userID], nil
+}
+
+func (a *countingAuthorizer) IsAdmin(string) (bool, error) {
+	a.calls++
+	return a.isAdmin, nil
+}
+
+func (a *principalAuthorizer) IsAdmin(string) (bool, error) {
+	a.legacyCalls++
+	return false, nil
+}
+
+func (a *principalAuthorizer) IsAdminPrincipal(principal identity.Principal) (bool, error) {
+	a.principal = principal
+	return a.admin, nil
 }

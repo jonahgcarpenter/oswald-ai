@@ -38,9 +38,9 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		}
 		return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
 	}
-	if !req.Principal.Valid() {
+	if !req.Principal.Authenticated() {
 		err := responder.SendAgentError("Failed to resolve account identity")
-		log.Error("gateway.account.invalid_principal", "request has no valid principal", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID))
+		log.Error("gateway.account.invalid_principal", "request has no authenticated principal", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID))
 		return Outcome{Action: decision.Action, Reason: "invalid_principal", Err: err}
 	}
 	userID := req.Principal.CanonicalUserID
@@ -75,6 +75,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 		var commandErr error
 		var sendErr error
 		deliveryAttempted := false
+		attachmentValidationFailed := false
 		if deps.Commands != nil {
 			commandReq := commands.Request{
 				RequestID: req.RequestID, Principal: req.Principal, ChatID: req.ChatID,
@@ -93,20 +94,19 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 					response.Attachment = nil
 					response.Attachments = nil
 				} else if attachments := response.OrderedAttachments(); len(attachments) > 0 {
-					attachmentNames := make([]string, 0, len(attachments))
 					totalBytes := 0
 					for _, attachment := range attachments {
-						attachmentNames = append(attachmentNames, attachment.Filename)
 						totalBytes += len(attachment.Data)
 					}
 					if validateErr := response.ValidateAttachments(); validateErr != nil {
 						commandErr = validateErr
-						log.Error("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("attachment_names", attachmentNames), config.ErrorField(validateErr))
+						attachmentValidationFailed = true
+						log.Error("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("status", "error"))
 						response.Text = config.SafeErrorText(validateErr)
 						response.Attachment = nil
 						response.Attachments = nil
 					} else {
-						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("attachment_names", attachmentNames))
+						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes))
 					}
 				}
 				sendErr = responder.SendCommandResponse(response)
@@ -129,7 +129,13 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			}
 		}
 		if commandErr != nil {
-			log.Error("gateway.command.failed", "command failed", config.F("request_id", req.RequestID), config.F("user_id", userID), config.ErrorField(commandErr))
+			fields := []config.Field{config.F("request_id", req.RequestID), config.F("user_id", userID)}
+			if attachmentValidationFailed {
+				fields = append(fields, config.F("failure_kind", "attachment_validation"))
+			} else {
+				fields = append(fields, config.ErrorField(commandErr))
+			}
+			log.Error("gateway.command.failed", "command failed", fields...)
 		}
 		if !deliveryAttempted {
 			if commandErr != nil {

@@ -33,6 +33,19 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
+func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
+	principal := identity.Principal{
+		CanonicalUserID: "user-1",
+		Gateway:         "websocket",
+		ExternalID:      "user-1",
+		Assurance:       identity.AssuranceSelfAsserted,
+	}
+	response, err := (&Agent{}).Process(Request{Principal: principal})
+	if err == nil || response != nil || !strings.Contains(err.Error(), "authenticated principal") {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+}
+
 func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
@@ -1022,7 +1035,7 @@ func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, nam
 }
 
 func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayName, prompt string, images []llm.InputImage, streamFunc func(StreamChunk)) (*AgentResponse, error) {
-	assurance := identity.AssuranceSelfAsserted
+	assurance := identity.AssuranceWebSocketSignedToken
 	switch gateway {
 	case "discord":
 		assurance = identity.AssuranceDiscordGateway

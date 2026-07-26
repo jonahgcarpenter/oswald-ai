@@ -17,8 +17,8 @@ const (
 type Store interface {
 	ReconcilePrivacyInvalidationLeases(context.Context, time.Time) (int64, error)
 	ClaimPrivacyInvalidation(context.Context, time.Time, time.Duration) (*usermemory.PrivacyInvalidationEvent, error)
-	RetryPrivacyInvalidation(context.Context, int64, time.Time, time.Time, string) error
-	CompletePrivacyInvalidation(context.Context, int64, time.Time) error
+	RetryPrivacyInvalidation(context.Context, usermemory.PrivacyInvalidationEvent, time.Time, time.Time, string) error
+	CompletePrivacyInvalidation(context.Context, usermemory.PrivacyInvalidationEvent, time.Time) error
 }
 
 // Service dispatches the durable privacy invalidation outbox.
@@ -79,12 +79,12 @@ func (s *Service) DispatchOne(ctx context.Context) error {
 	})
 	if publishErr != nil {
 		delay := time.Second << min(event.Attempts-1, 6)
-		if retryErr := s.store.RetryPrivacyInvalidation(ctx, event.ID, now.Add(delay), now, "publish_failed"); retryErr != nil {
+		if retryErr := s.store.RetryPrivacyInvalidation(ctx, *event, now.Add(delay), now, "publish_failed"); retryErr != nil {
 			return retryErr
 		}
 		return publishErr
 	}
-	return s.store.CompletePrivacyInvalidation(ctx, event.ID, time.Now().UTC())
+	return s.store.CompletePrivacyInvalidation(ctx, *event, time.Now().UTC())
 }
 
 // Stop stops polling without waiting for or claiming more work.

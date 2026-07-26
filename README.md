@@ -140,6 +140,24 @@ Commands are gateway-level slash commands. They are handled before requests reac
 
 Bulk memory deletion and account deletion require confirmation. Confirmation codes expire after 10 minutes.
 
+### Backup And Restore
+
+Oswald's canonical state is `data/database/oswald.db`. SQLite runs in WAL mode, so do not copy only the `.db` file while Oswald is running. Use SQLite's online backup command against the live database, or stop Oswald cleanly before copying the database together with any `-wal` and `-shm` files:
+
+```bash
+sqlite3 data/database/oswald.db ".backup '/secure-backups/oswald.db'"
+```
+
+Keep the exact `MCP_CONFIG_ENCRYPTION_KEY` with the backup in a separate secrets store. MCP URLs and headers in a restored database cannot be decrypted with a different key. Protect backups as sensitive user data and apply retention and deletion policies to backups and log sinks independently; application privacy commands cannot erase copies already retained outside the live database.
+
+For restore, stop Oswald, replace the database with the backup, remove stale destination `-wal` and `-shm` files, preserve restrictive filesystem permissions, and verify it before startup:
+
+```bash
+sqlite3 data/database/oswald.db "PRAGMA integrity_check; PRAGMA foreign_key_check;"
+```
+
+`integrity_check` must return `ok`, and `foreign_key_check` must return no rows. Restore into a compatible Oswald release and retain the original backup until startup and these checks succeed.
+
 ### Admin Commands
 
 | Command | Usage | Description |

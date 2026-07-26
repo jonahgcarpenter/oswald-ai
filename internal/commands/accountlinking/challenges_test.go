@@ -388,14 +388,14 @@ func TestDeleteUserRollsBackWhenMCPDeletionFails(t *testing.T) {
 	actorID, _ := links.EnsureAccount("discord", "511", "Actor")
 	targetID, _ := links.EnsureAccount("websocket", "ws-511", "Target")
 
-	if err := links.DeleteUser(actorID, targetID); err == nil {
+	if err := links.deleteUser(actorID, targetID); err == nil {
 		t.Fatal("expected injected MCP deletion failure")
 	}
 	if _, ok, err := links.User(targetID); err != nil || !ok {
 		t.Fatalf("failed deletion removed user: ok=%v err=%v", ok, err)
 	}
 	mcpMerger.deleteFail = false
-	if err := links.DeleteUser(actorID, targetID); err != nil {
+	if err := links.deleteUser(actorID, targetID); err != nil {
 		t.Fatalf("delete after recovery: %v", err)
 	}
 	if mcpMerger.deletedUser != targetID {

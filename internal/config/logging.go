@@ -69,7 +69,7 @@ func ErrorField(err error) Field {
 	if err == nil {
 		return Field{}
 	}
-	return F("error", err.Error())
+	return F("error", SafeErrorText(err))
 }
 
 // Logger emits structured JSON logs to stderr.
@@ -156,7 +156,7 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 			"service": serviceName,
 			"event":   "logger.marshal_failed",
 			"msg":     "failed to marshal log payload",
-			"error":   err.Error(),
+			"error":   SafeErrorText(err),
 		}
 		line, _ = json.Marshal(fallback)
 	}

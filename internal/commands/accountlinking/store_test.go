@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -56,10 +57,14 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("unexpected speaker line %q", line)
 	}
 
-	if err := links.DisconnectAccount(userID, "websocket", "alice-local"); err != nil {
+	descriptor, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "websocket", "alice-local", "disconnect-store-test")
+	if err != nil {
 		t.Fatalf("disconnect websocket: %v", err)
 	}
-	if err := links.DisconnectAccount(userID, "discord", "123"); err == nil {
+	if len(descriptor.ExternalIdentities) != 1 || descriptor.ExternalIdentities[0] != "websocket:alice-local" {
+		t.Fatalf("unexpected invalidation descriptor: %+v", descriptor)
+	}
+	if _, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "discord", "123", "disconnect-last-test"); err == nil {
 		t.Fatal("expected error disconnecting last account")
 	}
 }
@@ -107,12 +112,140 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 		t.Fatalf("unexpected disconnect menu: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, confirmer, "/disconnect 2")
+	result, err := service.Execute(context.Background(), commands.Request{Principal: confirmer, IsDirect: true, Raw: "/disconnect 2", RequestID: "req_disconnect"})
 	if err != nil {
 		t.Fatalf("disconnect err=%v", err)
 	}
-	if !strings.Contains(response, "Disconnected WebSocket: alice-local.") {
-		t.Fatalf("unexpected disconnect response: %q", response)
+	if !strings.Contains(result.Text, "Disconnected WebSocket: alice-local.") {
+		t.Fatalf("unexpected disconnect response: %q", result.Text)
+	}
+	if result.Invalidation == nil || !result.Invalidation.CloseConnections || len(result.Invalidation.ExternalIdentities) != 1 || result.Invalidation.ExternalIdentities[0] != "websocket:alice-local" {
+		t.Fatalf("unexpected disconnect invalidation: %+v", result.Invalidation)
+	}
+	definition, ok := service.Definition("disconnect")
+	if !ok || !definition.UserExclusive {
+		t.Fatalf("disconnect definition is not user-exclusive: %+v", definition)
+	}
+}
+
+func TestDisconnectDurablyInvalidatesRemovedIdentityAndAllSessionsAfterCloseDelay(t *testing.T) {
+	links := newTestService(t)
+	userID, _ := links.EnsureAccount("discord", "701", "Durable")
+	otherID, _ := links.EnsureAccount("websocket", "durable-local", "Durable Local")
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "701", Assurance: identity.AssuranceDiscordGateway}
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: otherID, Gateway: "websocket", ExternalID: "durable-local", Assurance: identity.AssuranceWebSocketSignedToken})
+	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "session-b", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "session-a", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	links.now = func() time.Time { return now }
+
+	descriptor, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "durable-local", "req-durable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(descriptor.SessionIDs, ",") != "session-a,session-b" {
+		t.Fatalf("unexpected session scope: %+v", descriptor)
+	}
+	if event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second-time.Nanosecond), time.Minute); err != nil || event != nil {
+		t.Fatalf("close invalidation became available early: event=%+v err=%v", event, err)
+	}
+	event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second), time.Minute)
+	if err != nil || event == nil {
+		t.Fatalf("claim delayed invalidation: event=%+v err=%v", event, err)
+	}
+	if event.OperationID != "disconnect:req-durable" || !event.CloseConnections || strings.Join(event.ExternalIdentities, ",") != "websocket:durable-local" || strings.Join(event.SessionIDs, ",") != "session-a,session-b" {
+		t.Fatalf("unexpected durable invalidation: %+v", event)
+	}
+}
+
+func TestDisconnectDelayedInvalidationDoesNotTargetRecreatedTenant(t *testing.T) {
+	links := newTestService(t)
+	userID, _ := links.EnsureAccount("discord", "704", "Original")
+	disconnectedID, _ := links.EnsureAccount("websocket", "recreated-local", "Original Local")
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "704", Assurance: identity.AssuranceDiscordGateway}
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: disconnectedID, Gateway: "websocket", ExternalID: "recreated-local", Assurance: identity.AssuranceWebSocketSignedToken})
+	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "recreated-session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	links.now = func() time.Time { return now }
+	descriptor, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "recreated-local", "req-recreated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(descriptor.ExternalIdentities) != 1 || len(descriptor.SessionIDs) != 1 {
+		t.Fatalf("immediate invalidation changed: %+v", descriptor)
+	}
+
+	newUserID, err := links.EnsureAccount("websocket", "recreated-local", "New Tenant")
+	if err != nil || newUserID == userID {
+		t.Fatalf("recreate identity user=%q err=%v", newUserID, err)
+	}
+	if _, err := links.memories.ResolveSessionProfile(context.Background(), newUserID, "recreated-session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second), time.Minute)
+	if err != nil || event == nil {
+		t.Fatalf("claim delayed invalidation: event=%+v err=%v", event, err)
+	}
+	if len(event.ExternalIdentities) != 0 || len(event.SessionIDs) != 0 || !event.CloseConnections {
+		t.Fatalf("delayed replay retained recreated socket/cache scope: %+v", event)
+	}
+}
+
+func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
+	links := newTestService(t)
+	userID, _ := links.EnsureAccount("discord", "702", "Owner")
+	localID, _ := links.EnsureAccount("websocket", "owner-local", "Owner Local")
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "702", Assurance: identity.AssuranceDiscordGateway}
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "owner-local", Assurance: identity.AssuranceWebSocketSignedToken})
+	_, _ = links.EnsureAccount("imessage", "outsider@example.com", "Outsider")
+
+	stale := principal
+	stale.CanonicalUserID = "usr_stale"
+	if _, err := links.DisconnectAccountAs(context.Background(), stale, "websocket", "owner-local", "req-stale"); !errors.Is(err, ErrPrincipalMismatch) {
+		t.Fatalf("stale principal error=%v", err)
+	}
+	if _, err := links.DisconnectAccountAs(context.Background(), principal, "imessage", "outsider@example.com", "req-target"); err == nil || !strings.Contains(err.Error(), "linked account not found") {
+		t.Fatalf("non-owned exact target error=%v", err)
+	}
+	accounts, err := links.AccountsForUser(userID)
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("rejected disconnect mutated accounts: accounts=%+v err=%v", accounts, err)
+	}
+}
+
+func TestDisconnectRollsBackAccountAndSpeakerIntroWhenInvalidationEnqueueFails(t *testing.T) {
+	links := newTestService(t)
+	userID, _ := links.EnsureAccount("discord", "703", "Rollback")
+	localID, _ := links.EnsureAccount("websocket", "rollback-local", "Rollback Local")
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "703", Assurance: identity.AssuranceDiscordGateway}
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "rollback-local", Assurance: identity.AssuranceWebSocketSignedToken})
+	before, err := links.memories.ReadIntro(userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := links.db.WithTx(context.Background(), func(tx *sql.Tx) error {
+		return links.memories.EnqueuePrivacyInvalidationTx(context.Background(), tx, userID, "disconnect:req-conflict", []string{"websocket:different"}, nil, true, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "rollback-local", "req-conflict"); err == nil || !strings.Contains(err.Error(), "idempotency payload mismatch") {
+		t.Fatalf("expected enqueue conflict, got %v", err)
+	}
+	accounts, err := links.AccountsForUser(userID)
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("rollback did not preserve accounts: accounts=%+v err=%v", accounts, err)
+	}
+	after, err := links.memories.ReadIntro(userID)
+	if err != nil || after != before {
+		t.Fatalf("rollback changed speaker intro: before=%q after=%q err=%v", before, after, err)
 	}
 }
 
@@ -289,6 +422,30 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 	}
 }
 
+func TestServiceAdminAuthorizationRebindsExternalAccountOwner(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "810", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := links.SetAdmin(adminID, adminID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.EnsureAccount("discord", "811", "User"); err != nil {
+		t.Fatal(err)
+	}
+	stale := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "811", Assurance: identity.AssuranceDiscordGateway}
+	isAdmin, err := links.IsAdminPrincipal(stale)
+	if err != nil || isAdmin {
+		t.Fatalf("stale principal authorized: admin=%t err=%v", isAdmin, err)
+	}
+	missing := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "812", Assurance: identity.AssuranceDiscordGateway}
+	isAdmin, err = links.IsAdminPrincipal(missing)
+	if err != nil || isAdmin {
+		t.Fatalf("unowned principal authorized: admin=%t err=%v", isAdmin, err)
+	}
+}
+
 func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	links := newTestService(t)
 	targetID, err := links.EnsureAccount("discord", "300", "Target")
@@ -350,10 +507,10 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 		t.Fatalf("insert mcp server: %v", err)
 	}
 
-	if err := links.DeleteUser(adminID, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
+	if err := links.deleteUser(adminID, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
 		t.Fatalf("expected self delete error, got %v", err)
 	}
-	if err := links.DeleteUser(adminID, targetID); err != nil {
+	if err := links.deleteUser(adminID, targetID); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 

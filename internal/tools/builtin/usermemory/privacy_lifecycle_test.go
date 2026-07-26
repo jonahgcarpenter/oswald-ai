@@ -52,7 +52,7 @@ func TestDeleteAllMemoriesCancelsLeasedFormationJob(t *testing.T) {
 	if err := store.MarkFormationEligible(ctx, "user", turn.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueFormationJob(ctx, FormationSource{RequestID: "source", SessionID: "session", SessionGeneration: profile.Generation, TurnID: turn.ID}, "user"); err != nil {
+	if _, err := store.EnqueueFormationJob(ctx, FormationSource{SessionID: "session", SessionGeneration: profile.Generation, TurnID: turn.ID}, "user"); err != nil {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimFormationJob(ctx, time.Minute)
