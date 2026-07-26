@@ -488,7 +488,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			config.F("is_reply", msg.ReferencedMessage != nil),
 			config.F("is_command", isCommandAttempt),
 			config.F("reason", preflight.Reason),
-			config.F("message_preview", routing.MessagePreview(msg.Content, 100)),
+			config.F("message_chars", len(msg.Content)),
 		)
 		return
 	}
@@ -730,7 +730,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 		return messageResponse{}, false
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Debug("gateway.reply_lookup.failed", "discord reply lookup failed", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", trimResponseBody(respBody)))
+		log.Debug("gateway.reply_lookup.failed", "discord reply lookup failed", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(respBody)), config.F("status", "degraded"))
 		return messageResponse{}, false
 	}
 
@@ -774,7 +774,7 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]l
 
 		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
-			dg.log().Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("filename", attachment.Filename), config.F("status", "degraded"), config.ErrorField(err))
+			dg.log().Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("attachment_id", attachment.ID), config.F("declared_mime", strings.TrimSpace(attachment.ContentType)), config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -961,29 +961,29 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 
 	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("download attachment: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("filename", filename), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
-		return llm.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
+		dg.log().Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		return llm.InputImage{}, fmt.Errorf("download attachment: unexpected status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("read attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("read attachment: %w", err)
 	}
 	if len(body) > media.MaxImageBytes {
-		return llm.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
+		return llm.InputImage{}, fmt.Errorf("attachment exceeds %d bytes", media.MaxImageBytes)
 	}
 
 	result, err := media.NormalizeInputImageFromBytes(resp.Header, declaredMIME, body, filename)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("attachment rejected: %w", err)
 	}
-	dg.log().Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
+	dg.log().Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil
 }
 
@@ -1018,7 +1018,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
+		dg.log().Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
@@ -1061,7 +1061,7 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		dg.log().Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "error"), config.F("body_preview", trimResponseBody(respBody)))
+		dg.log().Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(respBody)), config.F("status", "error"))
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -1155,12 +1155,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "..."
-}
-
-func trimResponseBody(body []byte) string {
-	trimmed := strings.TrimSpace(string(body))
-	if len(trimmed) <= 512 {
-		return trimmed
-	}
-	return trimmed[:512] + "..."
 }

@@ -2,6 +2,7 @@ package usermemory
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 func TestProposeCandidateAtomicallyPublishesApprovedPolicy(t *testing.T) {
@@ -199,10 +201,7 @@ func TestSameTurnPolicyPromotionPublishesInReconciliationTransaction(t *testing.
 
 func TestFormationLeaseFenceRollsBackCandidateAndCanonicalWrites(t *testing.T) {
 	store := newFormationTestStore(t)
-	turnID := seedFormationTurn(t, store, "user", "session", "I use Go")
-	if err := store.MarkFormationEligible(context.Background(), "user", turnID); err != nil {
-		t.Fatal(err)
-	}
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
 	jobID, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user")
 	if err != nil {
 		t.Fatal(err)
@@ -221,6 +220,139 @@ func TestFormationLeaseFenceRollsBackCandidateAndCanonicalWrites(t *testing.T) {
 	_ = store.sql.QueryRow(`SELECT COUNT(*) FROM memory_entries`).Scan(&memories)
 	if candidates != 0 || memories != 0 {
 		t.Fatalf("candidate=%d memory=%d", candidates, memories)
+	}
+}
+
+func TestFormationJobsRequireExactSuccessfullyDeliveredSource(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Store, int64)
+	}{
+		{name: "undelivered", mutate: func(store *Store, turnID int64) {
+			if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = NULL WHERE id = ?`, turnID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "failed", mutate: func(store *Store, turnID int64) {
+			if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), turnID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "deleted", mutate: func(store *Store, turnID int64) {
+			if _, err := store.sql.Exec(`DELETE FROM session_turns WHERE id = ?`, turnID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFormationTestStore(t)
+			turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+			jobID, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user")
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(store, turnID)
+			if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID, ExtractorVersion: "other"}, "user"); err == nil {
+				t.Fatal("enqueued job from invalid source")
+			}
+			if _, err := store.ClaimFormationJob(context.Background(), time.Minute); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("claim invalid source job %d: %v", jobID, err)
+			}
+		})
+	}
+
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "wrong", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err == nil {
+		t.Fatal("enqueued source with mismatched request identity")
+	}
+}
+
+func TestReconcileFormationJobsOnlyUsesSuccessfulExactSources(t *testing.T) {
+	store := newFormationTestStore(t)
+	successful := seedFormationTurn(t, store, "user", "successful", "I use Go", "successful-request")
+	undelivered := seedFormationTurn(t, store, "user", "undelivered", "I use Rust", "undelivered-request")
+	failed := seedFormationTurn(t, store, "user", "failed", "I use Java", "failed-request")
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = NULL WHERE id = ?; UPDATE session_turns SET delivery_failed_at = ? WHERE id = ?`, undelivered, formatTime(time.Now().UTC()), failed); err != nil {
+		t.Fatal(err)
+	}
+	count, err := store.ReconcileFormationJobs(context.Background(), "model", FormationExtractorVersion)
+	if err != nil || count != 1 {
+		t.Fatalf("reconciled=%d err=%v", count, err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.TurnID != successful || job.RequestID != "successful-request" || job.SessionID != "successful" || job.SessionGeneration != 1 {
+		t.Fatalf("reconciled job=%+v", job)
+	}
+	if _, err := store.ClaimFormationJob(context.Background(), time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("claimed ineligible reconciled source: %v", err)
+	}
+}
+
+func TestFormationLeaseMutationsFailAfterSourceBecomesUnsuccessful(t *testing.T) {
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.LeaseOwner == "" {
+		t.Fatal("claim returned empty lease owner")
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), turnID); err != nil {
+		t.Fatal(err)
+	}
+	assertStale := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrStaleFormationJobLease) {
+			t.Fatalf("%s error=%v", name, err)
+		}
+	}
+	_, err = store.FormationJobArtifact(context.Background(), job)
+	assertStale("artifact", err)
+	assertStale("validate", store.ValidateFormationJobLease(context.Background(), job))
+	assertStale("save", store.SaveFormationJobArtifact(context.Background(), job, `{"memories":[]}`))
+	output := evaluatedFormationCandidate(t, "I use Go", "I use Go", "The user uses Go.", memoryformation.CategoryProjects)
+	_, _, err = store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, FormationJob: &job})
+	assertStale("propose", err)
+	assertStale("complete", store.CompleteFormationJob(context.Background(), job, false))
+	assertStale("retry", store.RetryFormationJob(context.Background(), job, "transient", 5))
+	assertStale("defer", store.DeferFormationJob(context.Background(), job, time.Second))
+	assertStale("skip", store.SkipFormationJob(context.Background(), job, "invalid"))
+}
+
+func TestReclaimedFormationLeaseRejectsStaleOwnerAtExactLeaseUntil(t *testing.T) {
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.LeaseOwner == stale.LeaseOwner || current.LeaseOwner == "" {
+		t.Fatalf("stale owner=%q current owner=%q", stale.LeaseOwner, current.LeaseOwner)
+	}
+	stale.LeaseUntil = current.LeaseUntil
+	if err := store.SaveFormationJobArtifact(context.Background(), stale, `{"memories":[]}`); !errors.Is(err, ErrStaleFormationJobLease) {
+		t.Fatalf("stale reclaimed lease saved artifact: %v", err)
+	}
+	if err := store.SaveFormationJobArtifact(context.Background(), current, `{"memories":[]}`); err != nil {
+		t.Fatalf("current lease failed: %v", err)
 	}
 }
 
@@ -254,14 +386,21 @@ func evaluatedClaimCandidate(t *testing.T, source, statement string, category me
 	return output
 }
 
-func seedFormationTurn(t *testing.T, store *Store, userID, sessionID, userText string) int64 {
+func seedFormationTurn(t *testing.T, store *Store, userID, sessionID, userText string, requestID ...string) int64 {
 	t.Helper()
 	profile, err := store.ResolveSessionProfile(context.Background(), userID, sessionID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := store.AppendSessionTurnForGenerationResult(context.Background(), sessionID, userID, profile.Generation, userText, "answer", nil, time.Hour)
+	ctx := context.Background()
+	if len(requestID) > 0 {
+		ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: requestID[0]})
+	}
+	turn, err := store.AppendSessionTurnForGenerationResult(ctx, sessionID, userID, profile.Generation, userText, "answer", nil, time.Hour)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkFormationEligible(context.Background(), userID, turn.ID); err != nil {
 		t.Fatal(err)
 	}
 	return turn.ID

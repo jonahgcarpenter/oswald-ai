@@ -15,6 +15,16 @@ func (a fakeAuth) IsAdmin(canonicalUserID string) (bool, error) {
 	return a.admin, nil
 }
 
+type fullFakeAuth struct {
+	fakeAuth
+	principal identity.Principal
+}
+
+func (a *fullFakeAuth) IsAdminPrincipal(principal identity.Principal) (bool, error) {
+	a.principal = principal
+	return a.admin, nil
+}
+
 func TestGlobalCommandsRequireAdmin(t *testing.T) {
 	h := New(nil, nil, fakeAuth{admin: false})
 	result, err := h.Execute(context.Background(), commands.Request{Principal: identity.Principal{CanonicalUserID: "user_1"}, Args: []string{"global", "servers"}})
@@ -23,6 +33,15 @@ func TestGlobalCommandsRequireAdmin(t *testing.T) {
 	}
 	if result.Text != "You are not allowed to use admin commands." {
 		t.Fatalf("unexpected result: %q", result.Text)
+	}
+}
+
+func TestGlobalCommandsUsePrincipalAuthorization(t *testing.T) {
+	auth := &fullFakeAuth{fakeAuth: fakeAuth{admin: false}}
+	principal := identity.Principal{CanonicalUserID: "stale", Gateway: "discord", ExternalID: "current", Assurance: identity.AssuranceDiscordGateway}
+	result, err := New(nil, nil, auth).Execute(context.Background(), commands.Request{Principal: principal, Args: []string{"global", "servers"}})
+	if err != nil || result.Text != "You are not allowed to use admin commands." || auth.principal != principal {
+		t.Fatalf("result=%+v err=%v principal=%+v", result, err, auth.principal)
 	}
 }
 

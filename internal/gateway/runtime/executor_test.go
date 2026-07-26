@@ -152,7 +152,7 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 	commandService, err := commands.NewService(commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "export"},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
-			return commands.Result{Attachments: []commands.Attachment{{Filename: "safe.json", MIMEType: "application/json", Data: []byte(privateContent)}}}, nil
+			return commands.Result{Attachments: []commands.Attachment{{Filename: "alice-private-export.json", MIMEType: "application/json", Data: []byte(privateContent)}}}, nil
 		},
 	})
 	if err != nil {
@@ -165,7 +165,7 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(output), privateContent) || !strings.Contains(string(output), "safe.json") || !strings.Contains(string(output), "attachment_bytes") {
+	if strings.Contains(string(output), privateContent) || strings.Contains(string(output), "alice-private-export.json") || !strings.Contains(string(output), "attachment_bytes") || !strings.Contains(string(output), "attachment_count") {
 		t.Fatalf("unsafe or incomplete attachment log: %s", output)
 	}
 }
@@ -251,6 +251,22 @@ func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	outcome := Execute(Request{RequestID: "req", Text: "/ping"}, deps, responder)
 	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
 		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
+	}
+}
+
+func TestExecuteRejectsUnauthenticatedPrincipalBeforeOwnedOperations(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	access := &fakeAccess{}
+	deps.Access = access
+	responder := &fakeResponder{}
+	principal := testPrincipal("user")
+	principal.Assurance = identity.AssuranceSelfAsserted
+
+	outcome := Execute(Request{RequestID: "req", Principal: principal, Text: "/ping"}, deps, responder)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
+		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
 	}
 }
 
@@ -502,7 +518,7 @@ func (a *fakeAccess) BanStatus(userID string) (bool, string, error) {
 }
 
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "external-" + userID, Assurance: identity.AssuranceSelfAsserted}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "external-" + userID, Assurance: identity.AssuranceWebSocketSignedToken}
 }
 
 type runtimeFakeChatter struct{}

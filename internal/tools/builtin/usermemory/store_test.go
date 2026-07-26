@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 type fakeMemoryEmbedder struct{}
@@ -553,6 +554,59 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 		if got != want {
 			t.Fatalf("merged %s count=%d want=%d", table, got, want)
 		}
+	}
+}
+
+func TestMergeUsersTxMovesRunningFormationJobAfterSourceTurn(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "winner", "loser")
+	ctx := context.Background()
+	if _, err := store.ResolveSessionProfile(ctx, "winner", "shared", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	loserProfile, err := store.ResolveSessionProfile(ctx, "loser", "shared", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnCtx := requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "formation-request"})
+	turn, err := store.AppendSessionTurnForGenerationResult(turnCtx, "shared", "loser", loserProfile.Generation, "I use Go", "noted", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkFormationEligible(ctx, "loser", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := store.EnqueueFormationJob(ctx, FormationSource{RequestID: "formation-request", SessionID: "shared", SessionGeneration: loserProfile.Generation, TurnID: turn.ID, Model: "model", ExtractorVersion: FormationExtractorVersion}, "loser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ? WHERE id = ?`, formatTime(time.Now().Add(time.Minute)), jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := store.sql.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeUsersTx(ctx, tx, "winner", "loser", "winner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var owner, state, leaseOwner string
+	var sourceGeneration, turnGeneration int
+	var leaseUntil sql.NullString
+	if err := store.sql.QueryRow(`SELECT canonical_user_id, source_session_generation, state, lease_owner, lease_until FROM durable_jobs WHERE id = ?`, jobID).Scan(&owner, &sourceGeneration, &state, &leaseOwner, &leaseUntil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT session_generation FROM session_turns WHERE id = ? AND canonical_user_id = 'winner'`, turn.ID).Scan(&turnGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "winner" || sourceGeneration != turnGeneration || sourceGeneration == loserProfile.Generation || state != "retry" || leaseOwner != "" || leaseUntil.Valid {
+		t.Fatalf("merged formation owner=%q source_generation=%d turn_generation=%d state=%q lease_owner=%q lease_until=%v", owner, sourceGeneration, turnGeneration, state, leaseOwner, leaseUntil)
 	}
 }
 

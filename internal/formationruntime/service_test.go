@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -57,7 +58,7 @@ func (f *fakeExtractor) Extract(context.Context, usermemory.StoredSessionTurn) (
 
 func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go for project Atlas")
+	turnID := formationTestTurn(t, store, "I use Go for project Atlas", "req")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user uses Go for project Atlas.", Evidence: "I use Go for project Atlas",
 		Scope: "long_term", Category: "projects", Context: "direct_assertion",
@@ -99,7 +100,7 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 
 func TestServicePublishesPartialDirectNameIntoNewSessionProfile(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "Before we continue, my name is Ada. What should we build?")
+	turnID := formationTestTurn(t, store, "Before we continue, my name is Ada. What should we build?", "name")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user's name is Ada.", Evidence: "my name is Ada.",
 		Scope: "long_term", Category: "identity", Context: "direct_assertion",
@@ -131,7 +132,7 @@ func TestServicePublishesPartialDirectNameIntoNewSessionProfile(t *testing.T) {
 func TestServicePublishesIndependentFactsFromLongTurn(t *testing.T) {
 	store := formationTestStore(t)
 	text := "My name is Ada. I use Fedora on my workstation. I prefer concise replies."
-	turnID := formationTestTurn(t, store, text)
+	turnID := formationTestTurn(t, store, text, "long")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{
 		{Statement: "The user's name is Ada.", Evidence: "My name is Ada.", Scope: "long_term", Category: "identity", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "identity_or_contact", Confidence: 0.95, Importance: 3, ClaimSlot: "identity.name", ClaimValue: "Ada"},
 		{Statement: "The user uses Fedora on their workstation.", Evidence: "I use Fedora on my workstation.", Scope: "long_term", Category: "environment", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.95, Importance: 4, ClaimSlot: "environment.workstation_os", ClaimValue: "Fedora"},
@@ -157,7 +158,7 @@ func TestServicePublishesIndependentFactsFromLongTurn(t *testing.T) {
 func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 	store := formationTestStore(t)
 	text := "Considering pacman packages for file management."
-	turnID := formationTestTurn(t, store, text)
+	turnID := formationTestTurn(t, store, text, "pacman")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user may use or be evaluating a pacman-based Arch-family Linux environment.", Evidence: text,
 		Scope: "long_term", Category: "environment", Context: "direct_assertion",
@@ -207,7 +208,7 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 		t.Fatalf("active candidate was not atomically published: %+v", activeCandidate)
 	}
 
-	turnID := formationTestTurn(t, store, "I prefer coffee.")
+	turnID := formationTestTurn(t, store, "I prefer coffee.", "blocked")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{
 		Statement: "The user prefers coffee.", Evidence: "I prefer coffee.", Scope: "long_term",
 		Category: "durable_preferences", Context: "direct_assertion", Provenance: "user_statement",
@@ -243,7 +244,7 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 
 func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go")
+	turnID := formationTestTurn(t, store, "I use Go", "req")
 	extractor := &fakeExtractor{err: errors.New("extractor offline")}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	_, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -271,7 +272,7 @@ func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 
 func TestServiceDefersExtractionWhileForegroundWorkIsBusy(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go")
+	turnID := formationTestTurn(t, store, "I use Go", "busy")
 	extractor := &fakeExtractor{}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(unavailableLowPriorityGate{})
@@ -288,7 +289,7 @@ func TestServiceDefersExtractionWhileForegroundWorkIsBusy(t *testing.T) {
 
 func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go")
+	turnID := formationTestTurn(t, store, "I use Go", "preempt")
 	extractor := &fakeExtractor{candidates: []usermemory.MemorySaveItem{{Statement: "The user uses Go.", Evidence: "I use Go", Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4, ClaimSlot: "project.language", ClaimValue: "Go"}}}
 	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(canceledLowPriorityGate{})
@@ -310,7 +311,7 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 
 func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0")
+	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0", "req")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
 	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -330,7 +331,7 @@ func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 
 func TestServiceDoesNotRetryPolicyRejectedCandidate(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "My name is Jonah")
+	turnID := formationTestTurn(t, store, "My name is Jonah", "rejected")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The user's name is Jonah.","evidence":"My name is Jonah","scope":"long_term","category":"identity","context":"direct_assertion","provenance":"user_statement","sensitivity":"identity_or_contact","confidence":1,"importance":3,"ttl_days":0,"supersedes_statement":"","claim_slot":"identity_name","claim_value":"jonah"}]}`}
 	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "rejected", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -350,7 +351,7 @@ func TestServiceDoesNotRetryPolicyRejectedCandidate(t *testing.T) {
 
 func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandidate(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "I use Go.")
+	turnID := formationTestTurn(t, store, "I use Go.", "mixed-artifact")
 	source := usermemory.FormationSource{RequestID: "mixed-artifact", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}
 	if _, err := store.EnqueueFormationJob(context.Background(), source, "user-1"); err != nil {
 		t.Fatal(err)
@@ -374,7 +375,7 @@ func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandida
 
 func TestServiceSkipsMalformedOuterArgumentsWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
-	turnID := formationTestTurn(t, store, "Nothing to retain")
+	turnID := formationTestTurn(t, store, "Nothing to retain", "req")
 	client := &fakeExtractionChatter{content: `[{"statement":"wrong top-level shape"}]`}
 	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
 	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "req", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
@@ -448,14 +449,18 @@ func formationTestStore(t *testing.T) *usermemory.Store {
 	return store
 }
 
-func formationTestTurn(t *testing.T, store *usermemory.Store, text string) int64 {
+func formationTestTurn(t *testing.T, store *usermemory.Store, text, requestID string) int64 {
 	t.Helper()
 	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := store.AppendSessionTurnForGenerationResult(context.Background(), "session", "user-1", profile.Generation, text, "answer", nil, time.Hour)
+	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
+	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user-1", profile.Generation, text, "answer", nil, time.Hour)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkFormationEligible(context.Background(), "user-1", turn.ID); err != nil {
 		t.Fatal(err)
 	}
 	return turn.ID

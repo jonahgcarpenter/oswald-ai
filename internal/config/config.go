@@ -42,6 +42,7 @@ type RetentionPolicy struct {
 	ContentFreeTombstoneRetention   time.Duration
 	RetiredIndexRetention           time.Duration
 	SessionInactivity               time.Duration
+	PendingDeliveryTimeout          time.Duration
 	CandidateContentRetention       time.Duration
 	SuccessfulJobRetention          time.Duration
 	DeadJobRetention                time.Duration
@@ -109,6 +110,7 @@ func loadRetentionPolicy() (RetentionPolicy, error) {
 		{key: "MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION", defaultValue: 8760 * time.Hour, destination: &policy.ContentFreeTombstoneRetention},
 		{key: "MEMORY_RETIRED_INDEX_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.RetiredIndexRetention},
 		{key: "MEMORY_SESSION_INACTIVITY", defaultValue: 24 * time.Hour, destination: &policy.SessionInactivity},
+		{key: "MEMORY_PENDING_DELIVERY_TIMEOUT", defaultValue: 15 * time.Minute, destination: &policy.PendingDeliveryTimeout},
 		{key: "MEMORY_CANDIDATE_CONTENT_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.CandidateContentRetention},
 		{key: "MEMORY_SUCCESSFUL_JOB_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.SuccessfulJobRetention},
 		{key: "MEMORY_DEAD_JOB_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.DeadJobRetention},

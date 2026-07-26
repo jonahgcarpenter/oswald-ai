@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,24 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
+const (
+	maxDiscoveryResultChars = 16000
+)
+
+type discoveryData struct {
+	Server string           `json:"server"`
+	Query  string           `json:"query,omitempty"`
+	Status string           `json:"status"`
+	Tools  []discoveredTool `json:"tools"`
+}
+
+type discoveredTool struct {
+	Name               string   `json:"name"`
+	Server             string   `json:"server"`
+	Description        string   `json:"description,omitempty"`
+	RequiredParameters []string `json:"required_parameters,omitempty"`
+}
+
 // Provider exposes scoped MCP tools to the agent for a single request.
 type Provider struct {
 	manager *Manager
@@ -23,7 +42,7 @@ func NewProvider(manager *Manager) *Provider {
 }
 
 func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool {
-	if p == nil || p.manager == nil || p.manager.store == nil || !principal.Valid() {
+	if p == nil || p.manager == nil || p.manager.store == nil || !principal.Authenticated() {
 		return nil
 	}
 	configs, err := p.manager.store.ListForUser(ctx, principal.CanonicalUserID)
@@ -42,7 +61,7 @@ func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Princi
 
 // ResolveTools returns historical MCP tool names that remain available to the principal.
 func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string {
-	if p == nil || p.manager == nil || len(names) == 0 || !principal.Valid() {
+	if p == nil || p.manager == nil || len(names) == 0 || !principal.Authenticated() {
 		return nil
 	}
 
@@ -85,7 +104,7 @@ func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principa
 }
 
 func (p *Provider) LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool {
-	if p == nil || p.manager == nil || len(exposed) == 0 || !principal.Valid() {
+	if p == nil || p.manager == nil || len(exposed) == 0 || !principal.Authenticated() {
 		return nil
 	}
 	specs := p.manager.ToolSpecs(ctx, principal.CanonicalUserID)
@@ -100,7 +119,7 @@ func (p *Provider) LLMTools(ctx context.Context, principal identity.Principal, e
 }
 
 func (p *Provider) Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (ExecutionResult, bool, error) {
-	if p == nil || p.manager == nil || !principal.Valid() || !strings.Contains(name, ".") {
+	if p == nil || p.manager == nil || !principal.Authenticated() || !strings.Contains(name, ".") {
 		return ExecutionResult{}, false, nil
 	}
 	server, remote, ok := strings.Cut(name, ".")
@@ -136,25 +155,19 @@ func discoveryTool(server string) llm.Tool {
 
 func (p *Provider) discover(ctx context.Context, principal identity.Principal, server string, args map[string]interface{}) (string, error) {
 	if isReservedServerName(server) {
-		return fmt.Sprintf("No configured MCP server named %q.", server), nil
+		return formatDiscoveryStatus(server, "", "not_found"), nil
 	}
 	query := strings.TrimSpace(stringArg(args, "query"))
-	entries, info, err := p.Catalog(ctx, principal.CanonicalUserID, server)
+	entries, info, err := p.catalog(ctx, principal.CanonicalUserID, server)
 	if err != nil {
-		return fmt.Sprintf("No configured MCP server named %q.", server), nil
+		return formatDiscoveryStatus(server, query, "not_found"), nil
 	}
 	if info.Status != serverStatusConnected {
-		if info.Reason != "" {
-			return fmt.Sprintf("MCP server %q is configured but unavailable: %s", info.Name, info.Reason), nil
-		}
-		return fmt.Sprintf("MCP server %q is configured but unavailable.", info.Name), nil
+		return formatDiscoveryStatus(info.Name, query, "unavailable"), nil
 	}
 	tools := searchTools(entries, info.Name, query)
 	if len(tools) == 0 {
-		if query != "" {
-			return fmt.Sprintf("No MCP tools matched server %q for query %q.", info.Name, query), nil
-		}
-		return fmt.Sprintf("No MCP tools matched server %q.", info.Name), nil
+		return formatDiscoveryResult(info.Name, query, tools), nil
 	}
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
@@ -167,12 +180,12 @@ func (p *Provider) discover(ctx context.Context, principal identity.Principal, s
 	meta := requestctx.MetadataFromContext(ctx)
 	if p.manager.log != nil {
 		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
-		reqLog.Debug("agent.tool.mcp.discovery", "listed MCP tools", config.F("server", info.Name), config.F("query", query), config.F("tool_count", len(tools)))
+		reqLog.Debug("agent.tool.mcp.discovery", "listed MCP tools", config.F("server", info.Name), config.F("query_chars", len(query)), config.F("tool_count", len(tools)))
 	}
 	return formatDiscoveryResult(info.Name, query, tools), nil
 }
 
-func (p *Provider) Catalog(ctx context.Context, userID string, server string) ([]registry.CatalogEntry, ServerInfo, error) {
+func (p *Provider) catalog(ctx context.Context, userID string, server string) ([]registry.CatalogEntry, ServerInfo, error) {
 	if isReservedServerName(server) {
 		return nil, ServerInfo{}, fmt.Errorf("MCP server name %q is reserved", server)
 	}
@@ -192,18 +205,12 @@ func llmTool(spec ToolSpec) llm.Tool {
 	props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
 	required := []string{}
 	for _, p := range spec.Parameters {
-		props[p.Name] = llm.ToolParameterProperty{Type: p.Type, Description: p.Description, Enum: p.Enum}
+		props[p.Name] = llm.ToolParameterProperty{Type: p.Type, Description: "Input value for this MCP tool."}
 		if p.Required {
 			required = append(required, p.Name)
 		}
 	}
-	description := strings.TrimSpace(spec.Description)
-	if description == "" {
-		description = "MCP tool from " + spec.Server
-	} else {
-		description = "MCP tool from " + spec.Server + ": " + description
-	}
-	return llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: spec.Name, Description: description, Parameters: llm.ToolParameters{Type: "object", Properties: props, Required: required}}}
+	return llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: spec.Name, Description: "Execute this configured MCP tool.", Parameters: llm.ToolParameters{Type: "object", Properties: props, Required: required}}}
 }
 
 func mapParams(params []ParamSpec) []registry.ParamSpec {
@@ -282,28 +289,60 @@ func toolSearchScore(tool registry.CatalogEntry, query string) int {
 }
 
 func formatDiscoveryResult(server, query string, tools []registry.CatalogEntry) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Available MCP tools from %s", server)
-	if query != "" {
-		fmt.Fprintf(&b, " matching %q", query)
+	data := discoveryData{Server: server, Query: query, Status: "ok", Tools: make([]discoveredTool, 0, len(tools))}
+	for _, tool := range tools {
+		data.Tools = append(data.Tools, discoveredTool{
+			Name: tool.Name, Server: tool.Server, Description: tool.Description,
+			RequiredParameters: requiredParams(tool.Parameters),
+		})
 	}
-	fmt.Fprintf(&b, ":\n")
-	for i, tool := range tools {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, tool.Name)
-		fmt.Fprintf(&b, "Server: %s\n", tool.Server)
-		if tool.Description != "" {
-			fmt.Fprintf(&b, "Description: %s\n", tool.Description)
+	return encodeDiscoveryEnvelope(data)
+}
+
+func formatDiscoveryStatus(server, query, status string) string {
+	return encodeDiscoveryEnvelope(discoveryData{
+		Server: server, Query: query, Status: status, Tools: []discoveredTool{},
+	})
+}
+
+func encodeDiscoveryEnvelope(data discoveryData) string {
+	envelope := untrustedEnvelope{Type: "mcp_tool_discovery", Untrusted: true, Notice: untrustedDataNotice, Data: data}
+	if encoded, err := json.Marshal(envelope); err == nil && len([]rune(string(encoded))) <= maxDiscoveryResultChars {
+		return string(encoded)
+	}
+
+	allTools := data.Tools
+	data.Tools = make([]discoveredTool, 0, len(allTools))
+	envelope.Truncated = true
+	envelope.Data = data
+	if encoded, _ := json.Marshal(envelope); len([]rune(string(encoded))) > maxDiscoveryResultChars {
+		runes := []rune(data.Query)
+		low, high := 0, len(runes)
+		for low <= high {
+			mid := low + (high-low)/2
+			data.Query = string(runes[:mid])
+			envelope.Data = data
+			encoded, _ = json.Marshal(envelope)
+			if len([]rune(string(encoded))) <= maxDiscoveryResultChars {
+				low = mid + 1
+			} else {
+				high = mid - 1
+			}
 		}
-		required := requiredParams(tool.Parameters)
-		if len(required) > 0 {
-			fmt.Fprintf(&b, "Required parameters: %s\n", strings.Join(required, ", "))
-		}
-		if i < len(tools)-1 {
-			fmt.Fprintf(&b, "\n")
+		data.Query = string(runes[:high])
+	}
+	for _, tool := range allTools {
+		data.Tools = append(data.Tools, tool)
+		envelope.Data = data
+		encoded, err := json.Marshal(envelope)
+		if err != nil || len([]rune(string(encoded))) > maxDiscoveryResultChars {
+			data.Tools = data.Tools[:len(data.Tools)-1]
+			break
 		}
 	}
-	fmt.Fprintf(&b, "\n\nThese tools are now available for direct tool calls in this request. Tool descriptions and parameters are provided by the MCP server.")
-	return strings.TrimSpace(b.String())
+	envelope.Data = data
+	encoded, _ := json.Marshal(envelope)
+	return string(encoded)
 }
 
 func requiredParams(params []registry.ParamSpec) []string {

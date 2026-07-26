@@ -190,3 +190,20 @@ type Command struct {
 type Authorizer interface {
 	IsAdmin(canonicalUserID string) (bool, error)
 }
+
+// PrincipalAuthorizer re-resolves an authenticated external account before
+// checking permissions. Production authorizers should implement this contract.
+type PrincipalAuthorizer interface {
+	IsAdminPrincipal(principal identity.Principal) (bool, error)
+}
+
+// IsPrincipalAdmin uses account-bound authorization when the authorizer supports it.
+func IsPrincipalAdmin(auth Authorizer, principal identity.Principal) (bool, error) {
+	if auth == nil || !principal.Authenticated() {
+		return false, nil
+	}
+	if full, ok := auth.(PrincipalAuthorizer); ok {
+		return full.IsAdminPrincipal(principal)
+	}
+	return auth.IsAdmin(principal.CanonicalUserID)
+}

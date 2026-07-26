@@ -57,11 +57,18 @@ type UserErasureInvalidation struct {
 type PrivacyInvalidationEvent struct {
 	ID                 int64
 	OperationID        string
+	SubjectUserID      string
 	ExternalIdentities []string
 	SessionIDs         []string
 	CloseConnections   bool
 	Attempts           int
+	LeaseOwner         string
+	LeaseUntil         time.Time
 }
+
+// ErrStalePrivacyInvalidationLease indicates that an invalidation lease was
+// released or reclaimed by another dispatcher.
+var ErrStalePrivacyInvalidationLease = errors.New("stale privacy invalidation lease")
 
 // PrivacySessionIDs returns all session identifiers currently associated with a user.
 func (s *Store) PrivacySessionIDs(ctx context.Context, userID string) ([]string, error) {
@@ -161,13 +168,16 @@ func (s *Store) ForgetMemory(ctx context.Context, userID, actorHash string, memo
 		}
 		if current == StatusDeleted || current == "forgotten" {
 			status = current
+			if err := suppressMemorySourceTurnsTx(ctx, tx, userID, memoryID, requestID, now); err != nil {
+				return err
+			}
 			if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", memoryID, "delete", "forget:"+formatTime(now)); err != nil {
 				return err
 			}
 			if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "forget_memory", strconv.FormatInt(memoryID, 10), now); err != nil {
 				return err
 			}
-			return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
+			return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
 		}
 		nowText := formatTime(now)
 		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'forgotten', status_changed_at = ?, status_reason = 'privacy_forget', hard_delete_after = ?, lifecycle_request_id = ?, updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, formatTime(now.Add(policy.ForgottenContentGrace)), requestID, nowText, userID, memoryID); err != nil {
@@ -182,11 +192,14 @@ func (s *Store) ForgetMemory(ctx context.Context, userID, actorHash string, memo
 		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", memoryID, "delete", "forget:"+nowText); err != nil {
 			return err
 		}
+		if err := suppressMemorySourceTurnsTx(ctx, tx, userID, memoryID, requestID, now); err != nil {
+			return err
+		}
 		status = "forgotten"
 		if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "forget_memory", strconv.FormatInt(memoryID, 10), now); err != nil {
 			return err
 		}
-		return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
+		return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
 	})
 	if err == nil {
 		s.signalDerivedIndex()
@@ -220,7 +233,7 @@ func (s *Store) DeleteMemory(ctx context.Context, userID, actorHash string, memo
 			if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_memory", strconv.FormatInt(memoryID, 10), now); err != nil {
 				return err
 			}
-			return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
+			return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
 		}
 		sourceTurns, err := relatedMemorySourceTurnsTx(ctx, tx, userID, memoryID)
 		if err != nil {
@@ -238,7 +251,7 @@ func (s *Store) DeleteMemory(ctx context.Context, userID, actorHash string, memo
 		if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_memory", strconv.FormatInt(memoryID, 10), now); err != nil {
 			return err
 		}
-		return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
+		return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
 	})
 	if err == nil {
 		s.signalDerivedIndex()
@@ -291,7 +304,7 @@ func (s *Store) DeleteCandidate(ctx context.Context, userID, actorHash string, c
 		if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_candidate", strconv.FormatInt(candidateID, 10), now); err != nil {
 			return err
 		}
-		return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, sessionIDs, false, now)
+		return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, sessionIDs, false, now)
 	})
 }
 
@@ -324,7 +337,7 @@ LIMIT 1`, userID, sessionID, userID, sessionID, userID, sessionID, userID, sessi
 			if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_session", sessionID, now); err != nil {
 				return err
 			}
-			return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, []string{sessionID}, false, now)
+			return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, []string{sessionID}, false, now)
 		}
 		if err != nil {
 			return err
@@ -335,7 +348,7 @@ LIMIT 1`, userID, sessionID, userID, sessionID, userID, sessionID, userID, sessi
 		if err := recordCompletedPrivacyOperationTx(ctx, tx, userID, actorHash, requestID, "delete_session", sessionID+":"+strconv.Itoa(generation), now); err != nil {
 			return err
 		}
-		return enqueuePrivacyInvalidationTx(ctx, tx, requestID, externalIdentities, []string{sessionID}, false, now)
+		return enqueuePrivacyInvalidationTx(ctx, tx, userID, requestID, externalIdentities, []string{sessionID}, false, now)
 	})
 	if err == nil {
 		s.signalDerivedIndex()
@@ -389,7 +402,7 @@ func (s *Store) ConfirmPrivacyChallenge(ctx context.Context, userID, actorHash, 
 			if err := deleteAllMemoriesTx(ctx, tx, userID, requestID, now); err != nil {
 				return err
 			}
-			if err := enqueuePrivacyInvalidationTx(ctx, tx, operationID, externalIdentities, sessionIDs, false, now); err != nil {
+			if err := enqueuePrivacyInvalidationTx(ctx, tx, userID, operationID, externalIdentities, sessionIDs, false, now); err != nil {
 				return err
 			}
 		case "delete_user":
@@ -399,7 +412,7 @@ func (s *Store) ConfirmPrivacyChallenge(ctx context.Context, userID, actorHash, 
 				return err
 			}
 			confirmation.DeletedUserID = userID
-			if err := enqueuePrivacyInvalidationTx(ctx, tx, operationID, confirmation.ExternalIdentities, confirmation.SessionIDs, true, now); err != nil {
+			if err := enqueuePrivacyInvalidationTx(ctx, tx, userID, operationID, confirmation.ExternalIdentities, confirmation.SessionIDs, true, now); err != nil {
 				return err
 			}
 		default:
@@ -440,7 +453,7 @@ func (s *Store) ExportPrivacy(ctx context.Context, userID string, exportedAt tim
 		{"formation_jobs", `SELECT id, job_kind, idempotency_key, canonical_user_id, state, source_request_id, source_session_id, source_session_generation, source_turn_id, extraction_model, extractor_version, extraction_payload, attempt_count, redrive_count, available_at, lease_owner, lease_until, started_at, completed_at, last_error_code, created_at, updated_at FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"audit", `SELECT id, canonical_user_id, idempotency_key, event_type, candidate_id, memory_id, job_id, request_id, session_id, turn_id, actor_type, actor_id, created_at, metadata, redacted_at FROM memory_events WHERE event_kind = 'formation_audit' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"sessions", `SELECT * FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, []any{userID}},
-		{"session_turns", `SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at, session_generation, delivered_at, source_request_id, delivery_failed_at FROM session_turns WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
+		{"session_turns", `SELECT id, session_id, canonical_user_id, user_text, assistant_text, tool_names, importance, created_at, expires_at, session_generation, delivered_at, source_request_id, delivery_failed_at, privacy_suppressed_at FROM session_turns WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
 		{"session_summaries", `SELECT * FROM session_summaries WHERE canonical_user_id = ? ORDER BY session_id, session_generation, id`, []any{userID}},
 		{"compaction_jobs", `SELECT id, job_kind, idempotency_key, canonical_user_id, state, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, artifact_payload, artifact_summary_id, generation_model, generator_version, attempt_count, redrive_count, available_at, lease_owner, lease_until, started_at, completed_at, last_error_code, created_at, updated_at FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? ORDER BY id`, []any{userID}},
 		{"privacy_operations", `SELECT operation_id, operation_type, status, created_at, updated_at, started_at, completed_at, last_error_code FROM privacy_operations WHERE target_user_id = ? ORDER BY created_at, operation_id`, []any{userID}},
@@ -532,6 +545,62 @@ func relatedMemorySourceTurnsTx(ctx context.Context, tx *sql.Tx, userID string, 
 WHERE canonical_user_id = ? AND source_turn_id IS NOT NULL
 	AND (published_memory_id = ? OR supersedes_memory_id = ?)
 ORDER BY 1`, userID, memoryID, memoryID)
+}
+
+func suppressMemorySourceTurnsTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64, token string, now time.Time) error {
+	turnIDs, err := relatedMemorySourceTurnsTx(ctx, tx, userID, memoryID)
+	if err != nil || len(turnIDs) == 0 {
+		return err
+	}
+	nowText := formatTime(now)
+	for _, turnID := range turnIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE session_turns SET privacy_suppressed_at = COALESCE(privacy_suppressed_at, ?) WHERE canonical_user_id = ? AND id = ?`, nowText, userID, turnID); err != nil {
+			return err
+		}
+	}
+	if err := deleteDerivedRowsTx(ctx, tx, "session_turn", turnIDs, userID); err != nil {
+		return err
+	}
+	for _, turnID := range turnIDs {
+		if err := enqueueDerivedChangeTx(ctx, tx, userID, "session_turn", turnID, "delete", "forget-source:"+token+":"+strconv.FormatInt(turnID, 10)); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries
+WHERE canonical_user_id = ? AND EXISTS (
+	SELECT 1 FROM json_each(session_summaries.source_turn_ids) source
+	JOIN session_turns turn ON turn.id = CAST(source.value AS INTEGER)
+	WHERE turn.canonical_user_id = ? AND turn.privacy_suppressed_at IS NOT NULL
+)`, userID, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = COALESCE(completed_at, ?),
+	lease_owner = '', lease_until = NULL, artifact_payload = '', artifact_summary_id = NULL,
+	last_error_code = 'privacy_suppressed', updated_at = ?
+WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND state IN ('queued','running','retry','dead')
+	AND EXISTS (SELECT 1 FROM session_turns turn WHERE turn.canonical_user_id = ?
+		AND turn.privacy_suppressed_at IS NOT NULL AND turn.session_id = durable_jobs.session_id
+		AND turn.session_generation = durable_jobs.session_generation
+		AND turn.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id)`, nowText, nowText, userID, userID); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = COALESCE(completed_at, ?),
+	lease_owner = '', lease_until = NULL, extraction_payload = '', last_error_code = 'privacy_suppressed', updated_at = ?
+WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id IN (`+privacyPlaceholders(len(turnIDs))+`)
+	AND state IN ('queued','running','retry','dead')`, append([]any{nowText, nowText, userID}, int64Args(turnIDs)...)...)
+	return err
+}
+
+func privacyPlaceholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func int64Args(values []int64) []any {
+	args := make([]any, len(values))
+	for i, value := range values {
+		args[i] = value
+	}
+	return args
 }
 
 func scrubMemoryTx(ctx context.Context, tx *sql.Tx, userID string, memoryID int64, requestID string, now time.Time) error {
@@ -784,9 +853,15 @@ func (s *Store) EraseUserWithInvalidationTx(ctx context.Context, tx *sql.Tx, use
 	var err error
 	invalidation.ExternalIdentities, invalidation.SessionIDs, _, err = eraseUserTx(ctx, tx, userID, "", now)
 	if err == nil {
-		err = enqueuePrivacyInvalidationTx(ctx, tx, operationID, invalidation.ExternalIdentities, invalidation.SessionIDs, true, now)
+		err = enqueuePrivacyInvalidationTx(ctx, tx, userID, operationID, invalidation.ExternalIdentities, invalidation.SessionIDs, true, now)
 	}
 	return invalidation, err
+}
+
+// EnqueuePrivacyInvalidationTx durably queues a runtime invalidation in a
+// caller-owned transaction.
+func (s *Store) EnqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, subjectUserID, operationID string, externalIdentities, sessionIDs []string, closeConnections bool, now time.Time) error {
+	return enqueuePrivacyInvalidationTx(ctx, tx, subjectUserID, operationID, externalIdentities, sessionIDs, closeConnections, now)
 }
 
 func deleteDerivedRowsTx(ctx context.Context, tx *sql.Tx, entityKind string, ids []int64, userID string) error {
@@ -943,7 +1018,11 @@ func scanStrings(rows *sql.Rows) ([]string, error) {
 	return values, rows.Err()
 }
 
-func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID string, externalIdentities, sessionIDs []string, closeConnections bool, now time.Time) error {
+func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, subjectUserID, operationID string, externalIdentities, sessionIDs []string, closeConnections bool, now time.Time) error {
+	subjectUserID = strings.TrimSpace(subjectUserID)
+	if subjectUserID == "" {
+		return fmt.Errorf("privacy invalidation subject user id is required")
+	}
 	operationID = strings.TrimSpace(operationID)
 	if operationID == "" {
 		return fmt.Errorf("privacy invalidation operation id is required")
@@ -973,19 +1052,19 @@ func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID s
 		// initiating WebSocket before that response is written.
 		availableAt = now.Add(privacyCloseInvalidationDelay)
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, privacy_operation_id, external_identities, session_ids, close_connections, state, attempt_count, available_at, created_at, updated_at) VALUES ('privacy_invalidation', ?, NULL, ?, ?, ?, ?, 'queued', 0, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, operationID, operationID, string(externalJSON), string(sessionJSON), closeValue, formatTime(availableAt), nowText, nowText)
+	result, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, privacy_operation_id, subject_canonical_user_id, external_identities, session_ids, close_connections, state, attempt_count, available_at, created_at, updated_at) VALUES ('privacy_invalidation', ?, NULL, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, operationID, operationID, subjectUserID, string(externalJSON), string(sessionJSON), closeValue, formatTime(availableAt), nowText, nowText)
 	if err != nil {
 		return err
 	}
 	if inserted, _ := result.RowsAffected(); inserted == 1 {
 		return nil
 	}
-	var storedOperation, storedExternal, storedSessions, state string
+	var storedOperation, storedSubject, storedExternal, storedSessions, state string
 	var storedClose int
-	if err := tx.QueryRowContext(ctx, `SELECT privacy_operation_id, external_identities, session_ids, close_connections, state FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND idempotency_key = ?`, operationID).Scan(&storedOperation, &storedExternal, &storedSessions, &storedClose, &state); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT privacy_operation_id, subject_canonical_user_id, external_identities, session_ids, close_connections, state FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND idempotency_key = ?`, operationID).Scan(&storedOperation, &storedSubject, &storedExternal, &storedSessions, &storedClose, &state); err != nil {
 		return err
 	}
-	if storedOperation != operationID || storedClose != closeValue {
+	if storedOperation != operationID || storedSubject != subjectUserID || storedClose != closeValue {
 		return fmt.Errorf("privacy invalidation idempotency payload mismatch")
 	}
 	if state != "succeeded" && (storedExternal != string(externalJSON) || storedSessions != string(sessionJSON)) {
@@ -997,7 +1076,7 @@ func enqueuePrivacyInvalidationTx(ctx context.Context, tx *sql.Tx, operationID s
 // ReconcilePrivacyInvalidationLeases makes expired work available after a crash.
 func (s *Store) ReconcilePrivacyInvalidationLeases(ctx context.Context, now time.Time) (int64, error) {
 	nowText := formatTime(now.UTC())
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', lease_until = NULL, available_at = ?, updated_at = ?, last_error_code = 'lease_expired' WHERE job_kind = 'privacy_invalidation' AND state = 'running' AND julianday(lease_until) <= julianday(?)`, nowText, nowText, nowText)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', lease_owner = '', lease_until = NULL, available_at = ?, updated_at = ?, last_error_code = 'lease_expired' WHERE job_kind = 'privacy_invalidation' AND state = 'running' AND julianday(lease_until) <= julianday(?)`, nowText, nowText, nowText)
 	if err != nil {
 		return 0, err
 	}
@@ -1009,6 +1088,10 @@ func (s *Store) ClaimPrivacyInvalidation(ctx context.Context, now time.Time, lea
 	if lease <= 0 {
 		return nil, fmt.Errorf("privacy invalidation lease must be positive")
 	}
+	leaseOwner, err := newLeaseOwner()
+	if err != nil {
+		return nil, fmt.Errorf("create privacy invalidation lease owner: %w", err)
+	}
 	if _, err := s.ReconcilePrivacyInvalidationLeases(ctx, now); err != nil {
 		return nil, err
 	}
@@ -1019,14 +1102,16 @@ func (s *Store) ClaimPrivacyInvalidation(ctx context.Context, now time.Time, lea
 	defer tx.Rollback() // nolint:errcheck
 	var event PrivacyInvalidationEvent
 	var externalJSON, sessionJSON string
-	err = tx.QueryRowContext(ctx, `SELECT id, privacy_operation_id, external_identities, session_ids, close_connections, attempt_count FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND state IN ('queued','retry') AND julianday(available_at) <= julianday(?) ORDER BY julianday(available_at), id LIMIT 1`, formatTime(now.UTC())).Scan(&event.ID, &event.OperationID, &externalJSON, &sessionJSON, &event.CloseConnections, &event.Attempts)
+	err = tx.QueryRowContext(ctx, `SELECT id, privacy_operation_id, subject_canonical_user_id, external_identities, session_ids, close_connections, attempt_count FROM durable_jobs WHERE job_kind = 'privacy_invalidation' AND state IN ('queued','retry') AND julianday(available_at) <= julianday(?) ORDER BY julianday(available_at), id LIMIT 1`, formatTime(now.UTC())).Scan(&event.ID, &event.OperationID, &event.SubjectUserID, &externalJSON, &sessionJSON, &event.CloseConnections, &event.Attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, lease_until = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state IN ('queued','retry')`, formatTime(now.UTC().Add(lease)), formatTime(now.UTC()), event.ID)
+	event.LeaseOwner = leaseOwner
+	event.LeaseUntil = now.UTC().Add(lease)
+	result, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET state = 'running', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state IN ('queued','retry')`, event.LeaseOwner, formatTime(event.LeaseUntil), formatTime(now.UTC()), event.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1039,6 +1124,14 @@ func (s *Store) ClaimPrivacyInvalidation(ctx context.Context, now time.Time, lea
 	if err := json.Unmarshal([]byte(sessionJSON), &event.SessionIDs); err != nil {
 		return nil, fmt.Errorf("decode privacy invalidation sessions: %w", err)
 	}
+	event.ExternalIdentities, err = filterReassignedExternalIdentitiesTx(ctx, tx, event.SubjectUserID, event.ExternalIdentities)
+	if err != nil {
+		return nil, err
+	}
+	event.SessionIDs, err = filterReassignedSessionIDsTx(ctx, tx, event.SubjectUserID, event.SessionIDs)
+	if err != nil {
+		return nil, err
+	}
 	event.Attempts++
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -1046,29 +1139,57 @@ func (s *Store) ClaimPrivacyInvalidation(ctx context.Context, now time.Time, lea
 	return &event, nil
 }
 
+func filterReassignedExternalIdentitiesTx(ctx context.Context, tx *sql.Tx, subjectUserID string, identities []string) ([]string, error) {
+	filtered := make([]string, 0, len(identities))
+	for _, externalIdentity := range identities {
+		var reassigned int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM linked_accounts WHERE gateway || ':' || identifier = ? AND canonical_user_id != ?)`, externalIdentity, subjectUserID).Scan(&reassigned); err != nil {
+			return nil, err
+		}
+		if reassigned == 0 {
+			filtered = append(filtered, externalIdentity)
+		}
+	}
+	return filtered, nil
+}
+
+func filterReassignedSessionIDsTx(ctx context.Context, tx *sql.Tx, subjectUserID string, sessionIDs []string) ([]string, error) {
+	filtered := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		var reassigned int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE session_id = ? AND canonical_user_id != ?)`, sessionID, subjectUserID).Scan(&reassigned); err != nil {
+			return nil, err
+		}
+		if reassigned == 0 {
+			filtered = append(filtered, sessionID)
+		}
+	}
+	return filtered, nil
+}
+
 // RetryPrivacyInvalidation releases a failed event for a later attempt.
-func (s *Store) RetryPrivacyInvalidation(ctx context.Context, id int64, availableAt, now time.Time, errorCode string) error {
+func (s *Store) RetryPrivacyInvalidation(ctx context.Context, event PrivacyInvalidationEvent, availableAt, now time.Time, errorCode string) error {
 	if strings.TrimSpace(errorCode) == "" {
 		errorCode = "publish_failed"
 	}
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_until = NULL, updated_at = ?, last_error_code = ? WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running'`, formatTime(availableAt.UTC()), formatTime(now.UTC()), errorCode, id)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ?, last_error_code = ? WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running' AND lease_owner = ?`, formatTime(availableAt.UTC()), formatTime(now.UTC()), errorCode, event.ID, event.LeaseOwner)
 	if err != nil {
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed != 1 {
-		return fmt.Errorf("privacy invalidation lease is no longer active")
+		return ErrStalePrivacyInvalidationLease
 	}
 	return nil
 }
 
 // CompletePrivacyInvalidation atomically completes an event and scrubs its payload.
-func (s *Store) CompletePrivacyInvalidation(ctx context.Context, id int64, now time.Time) error {
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET external_identities = '[]', session_ids = '[]', state = 'succeeded', lease_until = NULL, completed_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running'`, formatTime(now.UTC()), formatTime(now.UTC()), id)
+func (s *Store) CompletePrivacyInvalidation(ctx context.Context, event PrivacyInvalidationEvent, now time.Time) error {
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET external_identities = '[]', session_ids = '[]', state = 'succeeded', lease_owner = '', lease_until = NULL, completed_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'privacy_invalidation' AND state = 'running' AND lease_owner = ?`, formatTime(now.UTC()), formatTime(now.UTC()), event.ID, event.LeaseOwner)
 	if err != nil {
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed != 1 {
-		return fmt.Errorf("privacy invalidation lease is no longer active")
+		return ErrStalePrivacyInvalidationLease
 	}
 	return nil
 }

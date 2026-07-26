@@ -87,6 +87,7 @@ WHERE `+table+` MATCH ?
 	AND sessions.is_active = 1
 	AND julianday(sessions.expires_at) > julianday(?)
 	AND turns.delivered_at IS NOT NULL
+	AND turns.privacy_suppressed_at IS NULL
 ORDER BY bm25(`+table+`, 0.0, 0.0, 0.0, 1.0, 1.0), turns.created_at DESC, turns.id DESC
 LIMIT ?`, match, userID, sessionID, generation, userID, sessionID, generation,
 		userID, sessionID, generation, now, maxTranscriptCandidateLimit)

@@ -167,10 +167,15 @@ func (s *Store) MarkSessionTurnDelivered(ctx context.Context, userID string, tur
 	}
 	defer tx.Rollback() // nolint:errcheck
 	now := time.Now().UTC()
+	lateDelivery, err := sessionTurnHadDeliveryFailureTx(ctx, tx, strings.TrimSpace(userID), turnID)
+	if err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `
 UPDATE session_turns
 SET delivered_at = COALESCE(delivered_at, ?), delivery_failed_at = NULL
 WHERE id = ? AND canonical_user_id = ?
+	AND privacy_suppressed_at IS NULL
 	AND EXISTS (
 		SELECT 1 FROM sessions active
 		WHERE active.canonical_user_id = session_turns.canonical_user_id
@@ -189,6 +194,11 @@ WHERE id = ? AND canonical_user_id = ?
 	if count != 1 {
 		return sql.ErrNoRows
 	}
+	if lateDelivery {
+		if err := invalidateCompactionAfterLateDeliveryTx(ctx, tx, strings.TrimSpace(userID), turnID); err != nil {
+			return err
+		}
+	}
 	if err := enqueueDerivedChangeTx(ctx, tx, strings.TrimSpace(userID), "session_turn", turnID, "upsert", "delivered:"+formatTime(now)); err != nil {
 		return err
 	}
@@ -196,6 +206,29 @@ WHERE id = ? AND canonical_user_id = ?
 		return fmt.Errorf("commit delivered session turn update: %w", err)
 	}
 	s.signalDerivedIndex()
+	return nil
+}
+
+func sessionTurnHadDeliveryFailureTx(ctx context.Context, tx *sql.Tx, userID string, turnID int64) (bool, error) {
+	var failedAt sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_failed_at FROM session_turns WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NULL`, turnID, userID).Scan(&failedAt); err != nil {
+		return false, err
+	}
+	return failedAt.Valid, nil
+}
+
+func invalidateCompactionAfterLateDeliveryTx(ctx context.Context, tx *sql.Tx, userID string, turnID int64) error {
+	var sessionID string
+	var generation int
+	if err := tx.QueryRowContext(ctx, `SELECT session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&sessionID, &generation); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_through_turn_id >= ?`, userID, sessionID, generation, turnID); err != nil {
+		return fmt.Errorf("invalidate compaction jobs after late delivery: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_through_turn_id >= ?`, userID, sessionID, generation, turnID); err != nil {
+		return fmt.Errorf("invalidate session summaries after late delivery: %w", err)
+	}
 	return nil
 }
 
@@ -261,7 +294,7 @@ func (s *Store) RecentCompletedExchangesAfter(ctx context.Context, userID, sessi
 SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
-	AND id > ? AND delivered_at IS NOT NULL
+	AND id > ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL
 ORDER BY created_at DESC, id DESC LIMIT ?`, userID, sessionID, generation, afterTurnID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read recent uncompacted exchanges: %w", err)
@@ -297,7 +330,7 @@ func (s *Store) DeliveredSessionTurnsAfter(ctx context.Context, userID, sessionI
 	err := s.sql.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
-	AND delivered_at IS NOT NULL AND id > ?
+	AND delivered_at IS NOT NULL AND privacy_suppressed_at IS NULL AND id > ?
 	AND id < COALESCE((
 		SELECT MIN(blocked.id) FROM session_turns blocked
 		WHERE blocked.canonical_user_id = ? AND blocked.session_id = ?
@@ -327,7 +360,7 @@ func (s *Store) DeliveredSessionTurnsRange(ctx context.Context, userID, sessionI
 func (s *Store) deliveredSessionTurnsRange(ctx context.Context, userID, sessionID string, generation int, afterTurnID, throughTurnID int64, limit int, stopAtUndelivered bool) ([]SessionTurn, error) {
 	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
 FROM session_turns
-WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ?`
+WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND privacy_suppressed_at IS NULL AND id > ?`
 	args := []any{userID, sessionID, generation, afterTurnID}
 	if throughTurnID > 0 {
 		query += ` AND id <= ?`
@@ -392,15 +425,15 @@ WHERE EXISTS (
 	)
 	AND EXISTS (
 		SELECT 1 FROM session_turns WHERE id = ? AND canonical_user_id = ?
-			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL
+			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND privacy_suppressed_at IS NULL
 	)
 	AND NOT EXISTS (
 		SELECT 1 FROM session_turns WHERE canonical_user_id = ? AND session_id = ?
-			AND session_generation = ? AND id BETWEEN ? AND ? AND delivered_at IS NULL AND delivery_failed_at IS NULL
+			AND session_generation = ? AND id BETWEEN ? AND ? AND (privacy_suppressed_at IS NOT NULL OR (delivered_at IS NULL AND delivery_failed_at IS NULL))
 	)
 	AND EXISTS (
 		SELECT 1 FROM session_turns WHERE id = ? AND canonical_user_id = ?
-			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL
+			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND privacy_suppressed_at IS NULL
 	)
 ON CONFLICT DO NOTHING`,
 		userID, sessionID, generation, fromTurnID, throughTurnID, userID, sessionID, generation, fromTurnID, throughTurnID, formatTime(now), formatTime(now), formatTime(now),
@@ -415,7 +448,7 @@ ON CONFLICT DO NOTHING`,
 		return 0, countErr
 	} else if count == 0 {
 		var id int64
-		err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ?`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
+		err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ? AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id AND suppressed.privacy_suppressed_at IS NOT NULL)`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
 		if err == nil {
 			return id, nil
 		}
@@ -425,7 +458,7 @@ ON CONFLICT DO NOTHING`,
 		return 0, err
 	}
 	var id int64
-	err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ?`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
+	err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ? AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id AND suppressed.privacy_suppressed_at IS NOT NULL)`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
 	return id, err
 }
 
@@ -434,7 +467,12 @@ func (s *Store) ListSessionCompactionJobsForStartup(ctx context.Context, limit i
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.sql.QueryContext(ctx, sessionCompactionJobSelect+` WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry') ORDER BY available_at, id LIMIT ?`, limit)
+	rows, err := s.sql.QueryContext(ctx, sessionCompactionJobSelect+` WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry')
+	AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id
+		AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation
+		AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL)
+	ORDER BY available_at, id LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list startup session compaction jobs: %w", err)
 	}
@@ -462,14 +500,17 @@ func (s *Store) ReconcileSessionCompactionJobs(ctx context.Context) (int64, erro
 UPDATE durable_jobs
 SET state = 'skipped', completed_at = ?, lease_owner = '', lease_until = NULL,
 	last_error_code = 'stale_generation', updated_at = ?
-	WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry') AND NOT EXISTS (
+	WHERE job_kind = 'session_compaction' AND state IN ('queued', 'running', 'retry') AND (NOT EXISTS (
 	SELECT 1 FROM sessions active
 	WHERE active.canonical_user_id = durable_jobs.canonical_user_id
 		AND active.session_id = durable_jobs.session_id
 		AND active.generation = durable_jobs.session_generation
 		AND active.is_active = 1
 		AND julianday(active.expires_at) > julianday(?)
-	)`, formatTime(now), formatTime(now), formatTime(now))
+	) OR EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id
+		AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation
+		AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL))`, formatTime(now), formatTime(now), formatTime(now))
 	if err != nil {
 		return 0, fmt.Errorf("skip stale session compaction jobs: %w", err)
 	}
@@ -520,6 +561,10 @@ WHERE job_kind = 'session_compaction' AND ((state IN ('queued', 'retry') AND ava
 			AND active.is_active = 1
 			AND julianday(active.expires_at) > julianday(?)
 	)
+	AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = jobs.canonical_user_id
+		AND suppressed.session_id = jobs.session_id AND suppressed.session_generation = jobs.session_generation
+		AND suppressed.id BETWEEN jobs.covered_from_turn_id AND jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL)
 ORDER BY available_at, id LIMIT 1`, formatTime(now), formatTime(now), formatTime(now)).Scan(&id)
 	if err != nil {
 		return SessionCompactionJob{}, err
@@ -528,7 +573,11 @@ ORDER BY available_at, id LIMIT 1`, formatTime(now), formatTime(now), formatTime
 UPDATE durable_jobs
 SET state = 'running', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?,
 	started_at = COALESCE(started_at, ?), updated_at = ?
-WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?`, owner, formatTime(now.Add(lease)), formatTime(now), formatTime(now), id, maxSessionCompactionAttempts)
+WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?
+	AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id
+		AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation
+		AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL)`, owner, formatTime(now.Add(lease)), formatTime(now), formatTime(now), id, maxSessionCompactionAttempts)
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -559,7 +608,11 @@ SET artifact_payload = CASE WHEN artifact_payload = '' THEN ? ELSE artifact_payl
 	updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
-	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`,
+	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)
+	AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id
+		AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation
+		AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL)`,
 		payload, artifact.GenerationModel, artifact.GeneratorVersion, formatTime(time.Now().UTC()),
 		job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner, formatTime(time.Now().UTC()))
 	if err != nil {
@@ -581,7 +634,7 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 // SessionCompactionArtifact loads and strictly decodes a tenant-owned artifact.
 func (s *Store) SessionCompactionArtifact(ctx context.Context, job SessionCompactionJob) (SummaryArtifact, error) {
 	var payload string
-	err := s.sql.QueryRowContext(ctx, `SELECT artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ?`, job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID).Scan(&payload)
+	err := s.sql.QueryRowContext(ctx, `SELECT artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ? AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id AND suppressed.privacy_suppressed_at IS NOT NULL)`, job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID).Scan(&payload)
 	if err != nil {
 		return SummaryArtifact{}, err
 	}
@@ -765,7 +818,11 @@ WHERE job_kind = 'session_compaction' AND state = 'dead' AND redrive_count < 3
 			AND active.generation = durable_jobs.session_generation
 			AND active.is_active = 1
 			AND julianday(active.expires_at) > julianday(?)
-	)`, formatTime(now), formatTime(now), formatTime(now.Add(-delay)), formatTime(now.Add(-2*delay)), formatTime(now.Add(-4*delay)), formatTime(now))
+	)
+	AND NOT EXISTS (SELECT 1 FROM session_turns suppressed WHERE suppressed.canonical_user_id = durable_jobs.canonical_user_id
+		AND suppressed.session_id = durable_jobs.session_id AND suppressed.session_generation = durable_jobs.session_generation
+		AND suppressed.id BETWEEN durable_jobs.covered_from_turn_id AND durable_jobs.covered_through_turn_id
+		AND suppressed.privacy_suppressed_at IS NOT NULL)`, formatTime(now), formatTime(now), formatTime(now.Add(-delay)), formatTime(now.Add(-2*delay)), formatTime(now.Add(-4*delay)), formatTime(now))
 	if err != nil {
 		return 0, fmt.Errorf("redrive dead session compaction jobs: %w", err)
 	}
@@ -1017,13 +1074,13 @@ func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompact
 		boundary = priorThrough
 	}
 	var blocked int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND id > ? AND id <= ? AND delivered_at IS NULL AND delivery_failed_at IS NULL`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID).Scan(&blocked); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND id > ? AND id <= ? AND (privacy_suppressed_at IS NOT NULL OR (delivered_at IS NULL AND delivery_failed_at IS NULL))`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID).Scan(&blocked); err != nil {
 		return nil, "", err
 	}
 	if blocked != 0 {
 		return nil, "", fmt.Errorf("publish session summary: range crosses an undelivered turn")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ? AND id <= ? ORDER BY id`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND privacy_suppressed_at IS NULL AND id > ? AND id <= ? ORDER BY id`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1041,7 +1098,7 @@ func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompact
 	hash := sha256.New()
 	for _, id := range sources {
 		var userText, assistantText string
-		if err := tx.QueryRowContext(ctx, `SELECT user_text, assistant_text FROM session_turns WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?`, id, job.UserID, job.SessionID, job.SessionGeneration).Scan(&userText, &assistantText); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT user_text, assistant_text FROM session_turns WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND privacy_suppressed_at IS NULL`, id, job.UserID, job.SessionID, job.SessionGeneration).Scan(&userText, &assistantText); err != nil {
 			return nil, "", err
 		}
 		fmt.Fprintf(hash, "%d\x00%s\x00%s\x00", id, userText, assistantText)

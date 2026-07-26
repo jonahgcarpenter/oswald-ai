@@ -2,8 +2,21 @@ package database
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
+
+func TestSessionTurnsPendingDeliveryIndexIsPartial(t *testing.T) {
+	db := openTestDB(t)
+	defer db.Close()
+	var definition string
+	if err := db.SQL().QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_session_turns_pending_delivery'`).Scan(&definition); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(definition, "delivered_at IS NULL AND delivery_failed_at IS NULL") {
+		t.Fatalf("pending delivery index is not partial: %s", definition)
+	}
+}
 
 func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 	db := openTestDB(t)

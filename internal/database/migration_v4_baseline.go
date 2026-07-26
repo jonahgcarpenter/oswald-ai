@@ -70,12 +70,14 @@ CREATE TABLE session_turns (
 	delivered_at TEXT,
 	source_request_id TEXT NOT NULL DEFAULT '',
 	delivery_failed_at TEXT,
+	privacy_suppressed_at TEXT,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_session_turns_session_created ON session_turns(session_id, created_at);
 CREATE INDEX idx_session_turns_user_created ON session_turns(canonical_user_id, created_at);
 CREATE INDEX idx_session_turns_context ON session_turns(canonical_user_id, session_id, session_generation, created_at DESC, id DESC);
 CREATE INDEX idx_session_turns_expiry ON session_turns(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX idx_session_turns_pending_delivery ON session_turns(created_at, id) WHERE delivered_at IS NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL;
 CREATE UNIQUE INDEX idx_session_turns_tenant_id ON session_turns(canonical_user_id, id);
 
 CREATE TABLE mcp_servers (
@@ -237,7 +239,7 @@ CREATE TABLE derived_index_revisions (
 	dimension INTEGER NOT NULL DEFAULT 0 CHECK (dimension >= 0),
 	schema_version INTEGER NOT NULL CHECK (schema_version > 0),
 	revision INTEGER NOT NULL CHECK (revision > 0),
-	table_name TEXT NOT NULL,
+	table_name TEXT NOT NULL UNIQUE,
 	state TEXT NOT NULL CHECK (state IN ('building', 'live', 'degraded', 'failed', 'retired')),
 	expected_count INTEGER NOT NULL DEFAULT 0 CHECK (expected_count >= 0),
 	indexed_count INTEGER NOT NULL DEFAULT 0 CHECK (indexed_count >= 0),
@@ -404,6 +406,7 @@ CREATE TABLE durable_jobs (
 	entity_id INTEGER,
 	operation TEXT,
 	privacy_operation_id TEXT,
+	subject_canonical_user_id TEXT,
 	external_identities TEXT,
 	session_ids TEXT,
 	close_connections INTEGER,
@@ -424,10 +427,12 @@ CREATE TABLE durable_jobs (
 		OR (job_kind != 'privacy_invalidation' AND NOT (job_kind = 'derived_index' AND entity_kind = 'global_memory') AND canonical_user_id IS NOT NULL)
 	),
 	CHECK (job_kind != 'memory_formation' OR (source_session_generation > 0 AND extractor_version != '')),
+	CHECK (job_kind NOT IN ('memory_formation', 'derived_index', 'privacy_invalidation') OR ((state = 'running' AND lease_owner != '' AND lease_until IS NOT NULL) OR (state != 'running' AND lease_owner = '' AND lease_until IS NULL))),
 	CHECK (job_kind != 'session_compaction' OR (session_id IS NOT NULL AND session_generation > 0 AND covered_from_turn_id > 0 AND covered_through_turn_id >= covered_from_turn_id)),
 	CHECK (job_kind != 'session_compaction' OR attempt_count <= 3),
 	CHECK (job_kind != 'derived_index' OR (entity_kind IN ('memory', 'session_turn', 'global_memory') AND entity_id > 0 AND operation IN ('upsert', 'delete'))),
-	CHECK (job_kind != 'privacy_invalidation' OR (privacy_operation_id IS NOT NULL AND json_valid(external_identities) AND json_type(external_identities) = 'array' AND json_valid(session_ids) AND json_type(session_ids) = 'array' AND close_connections IN (0, 1)))
+	CHECK ((job_kind = 'privacy_invalidation') = (subject_canonical_user_id IS NOT NULL)),
+	CHECK (job_kind != 'privacy_invalidation' OR (length(trim(subject_canonical_user_id)) > 0 AND privacy_operation_id IS NOT NULL AND json_valid(external_identities) AND json_type(external_identities) = 'array' AND json_valid(session_ids) AND json_type(session_ids) = 'array' AND close_connections IN (0, 1)))
 );
 CREATE UNIQUE INDEX idx_durable_jobs_compaction_range ON durable_jobs(canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id) WHERE job_kind = 'session_compaction';
 CREATE INDEX idx_durable_jobs_ready ON durable_jobs(job_kind, state, available_at, id);
@@ -458,6 +463,7 @@ WHEN json_array_length(NEW.source_turn_ids) = 0
 			SELECT 1 FROM session_turns turn
 			WHERE turn.id = source.value AND turn.canonical_user_id = NEW.canonical_user_id
 				AND turn.session_id = NEW.session_id AND turn.session_generation = NEW.session_generation
+				AND turn.privacy_suppressed_at IS NULL
 		)
 	)
 BEGIN
@@ -634,15 +640,25 @@ END;
 CREATE TRIGGER durable_jobs_formation_source_insert
 BEFORE INSERT ON durable_jobs
 WHEN NEW.job_kind = 'memory_formation' AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
+	SELECT 1 FROM session_turns
+	WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
+		AND session_id = NEW.source_session_id
+		AND session_generation = NEW.source_session_generation
+		AND source_request_id = NEW.source_request_id
+		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid memory formation source turn');
 END;
 CREATE TRIGGER durable_jobs_formation_source_update
-BEFORE UPDATE OF canonical_user_id, source_turn_id ON durable_jobs
+BEFORE UPDATE OF canonical_user_id, source_request_id, source_session_id, source_session_generation, source_turn_id ON durable_jobs
 WHEN NEW.job_kind = 'memory_formation' AND NEW.source_turn_id IS NOT NULL AND NOT EXISTS (
-	SELECT 1 FROM session_turns WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
+	SELECT 1 FROM session_turns
+	WHERE id = NEW.source_turn_id AND canonical_user_id = NEW.canonical_user_id
+		AND session_id = NEW.source_session_id
+		AND session_generation = NEW.source_session_generation
+		AND source_request_id = NEW.source_request_id
+		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid memory formation source turn');
@@ -650,8 +666,8 @@ END;
 CREATE TRIGGER durable_jobs_compaction_range_insert
 BEFORE INSERT ON durable_jobs
 WHEN NEW.job_kind = 'session_compaction' AND (
-	NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_from_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation)
-	OR NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_through_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation)
+	NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_from_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation AND privacy_suppressed_at IS NULL)
+	OR NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_through_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation AND privacy_suppressed_at IS NULL)
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid session compaction job turn range');

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 )
 
@@ -34,7 +35,7 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	scope := mcpmanager.ScopeUser
 	owner := actorID
 	if args[0] == "global" {
-		if err := h.requireAdmin(actorID); err != nil {
+		if err := h.requireAdmin(req.Principal); err != nil {
 			return commands.Result{Text: err.Error()}, nil
 		}
 		scope = mcpmanager.ScopeGlobal
@@ -65,11 +66,11 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	}
 }
 
-func (h handler) requireAdmin(userID string) error {
+func (h handler) requireAdmin(principal identity.Principal) error {
 	if h.auth == nil {
 		return fmt.Errorf("You are not allowed to use admin commands.")
 	}
-	isAdmin, err := h.auth.IsAdmin(userID)
+	isAdmin, err := commands.IsPrincipalAdmin(h.auth, principal)
 	if err != nil {
 		return err
 	}

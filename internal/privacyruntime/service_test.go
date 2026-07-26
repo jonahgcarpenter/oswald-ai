@@ -73,19 +73,19 @@ func (s *retryStore) ClaimPrivacyInvalidation(context.Context, time.Time, time.D
 	}
 	return &s.event, nil
 }
-func (s *retryStore) RetryPrivacyInvalidation(_ context.Context, id int64, _, _ time.Time, code string) error {
-	if id != s.event.ID || code != "publish_failed" {
+func (s *retryStore) RetryPrivacyInvalidation(_ context.Context, event usermemory.PrivacyInvalidationEvent, _, _ time.Time, code string) error {
+	if event.ID != s.event.ID || event.LeaseOwner != s.event.LeaseOwner || code != "publish_failed" {
 		return errors.New("wrong retry metadata")
 	}
 	s.retryCalled = true
 	return nil
 }
-func (*retryStore) CompletePrivacyInvalidation(context.Context, int64, time.Time) error {
+func (*retryStore) CompletePrivacyInvalidation(context.Context, usermemory.PrivacyInvalidationEvent, time.Time) error {
 	return errors.New("completed failed publication")
 }
 
 func TestDispatcherRetriesSubscriberFailure(t *testing.T) {
-	store := &retryStore{event: usermemory.PrivacyInvalidationEvent{ID: 7, Attempts: 1}}
+	store := &retryStore{event: usermemory.PrivacyInvalidationEvent{ID: 7, Attempts: 1, LeaseOwner: "lease"}}
 	bus := privacyruntime.NewBus()
 	bus.SubscribeError(func(privacyruntime.Event) error { return errors.New("offline") })
 	dispatcher := privacyruntime.NewService(store, bus, config.NewLogger(config.LevelError))

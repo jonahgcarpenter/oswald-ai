@@ -18,6 +18,7 @@ func maintenanceTestPolicy() config.RetentionPolicy {
 		ContentFreeTombstoneRetention:   2 * time.Hour,
 		RetiredIndexRetention:           time.Hour,
 		SessionInactivity:               24 * time.Hour,
+		PendingDeliveryTimeout:          15 * time.Minute,
 		CandidateContentRetention:       time.Hour,
 		SuccessfulJobRetention:          24 * time.Hour,
 		DeadJobRetention:                48 * time.Hour,
@@ -26,6 +27,166 @@ func maintenanceTestPolicy() config.RetentionPolicy {
 		DatabaseOptimizeInterval:        24 * time.Hour,
 		BatchSize:                       100,
 	}
+}
+
+func TestMaintenanceFailsPendingDeliveriesAtBoundaryInBatchesAndUnblocksCompaction(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	profile, err := store.ResolveSessionProfile(ctx, "user", "session", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "pending one", "answer", nil, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "pending two", "answer", nil, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "delivered", "answer", nil, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSessionTurnDelivered(ctx, "user", delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+	policy := maintenanceTestPolicy()
+	policy.BatchSize = 1
+	now := time.Now().UTC()
+	created := formatTime(now.Add(-policy.PendingDeliveryTimeout))
+	if _, err := store.sql.Exec(`UPDATE session_turns SET created_at = ? WHERE id IN (?, ?)`, created, first.ID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.MaintenanceSweep(ctx, now.Add(-time.Second), policy)
+	if err != nil || before.PendingDeliveriesFailed != 0 {
+		t.Fatalf("pre-boundary counts=%+v err=%v", before, err)
+	}
+	blocked, err := store.DeliveredSessionTurnsAfter(ctx, "user", "session", profile.Generation, 0, 10)
+	if err != nil || blocked.TotalCount != 0 {
+		t.Fatalf("pending turn did not block compaction: turns=%+v err=%v", blocked, err)
+	}
+	for sweep := 0; sweep < 2; sweep++ {
+		counts, err := store.MaintenanceSweep(ctx, now, policy)
+		if err != nil || counts.PendingDeliveriesFailed != 1 {
+			t.Fatalf("sweep %d counts=%+v err=%v", sweep, counts, err)
+		}
+	}
+	unblocked, err := store.DeliveredSessionTurnsAfter(ctx, "user", "session", profile.Generation, 0, 10)
+	if err != nil || unblocked.TotalCount != 1 || len(unblocked.Turns) != 1 || unblocked.Turns[0].ID != delivered.ID {
+		t.Fatalf("terminal failures did not unblock compaction: turns=%+v err=%v", unblocked, err)
+	}
+}
+
+func TestMarkFormationEligibleClearsPendingDeliveryTimeoutFailure(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	profile, err := store.ResolveSessionProfile(ctx, "user", "session", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "late delivery", "answer", nil, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkFormationEligible(ctx, "user", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	var deliveredAt, failedAt any
+	if err := store.sql.QueryRow(`SELECT delivered_at, delivery_failed_at FROM session_turns WHERE id = ?`, turn.ID).Scan(&deliveredAt, &failedAt); err != nil {
+		t.Fatal(err)
+	}
+	if deliveredAt == nil || failedAt != nil {
+		t.Fatalf("late delivery state: delivered=%v failed=%v", deliveredAt, failedAt)
+	}
+}
+
+func TestMaintenanceSupersededMemoryLifecyclePreservesReplacement(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	tea := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.8, "preference.drink", "tea")
+	old, _, err := store.ProposeCandidate(ctx, "user", CandidateProposal{Output: tea, IdempotencyKey: "retention-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coffee := evaluatedClaimCandidate(t, "I prefer coffee", "The user prefers coffee.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.95, "preference.drink", "coffee")
+	replacement, _, err := store.ProposeCandidate(ctx, "user", CandidateProposal{Output: coffee, IdempotencyKey: "retention-coffee"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := maintenanceTestPolicy()
+	now := time.Now().UTC()
+	changed := formatTime(now.Add(-policy.CandidateContentRetention))
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET status_changed_at = ? WHERE id = ?`, changed, old.PublishedMemoryID); err != nil {
+		t.Fatal(err)
+	}
+	pre, err := store.MaintenanceSweep(ctx, now.Add(-time.Second), policy)
+	if err != nil || pre.SupersededMemoriesRedacted != 0 {
+		t.Fatalf("pre-boundary counts=%+v err=%v", pre, err)
+	}
+	counts, err := store.MaintenanceSweep(ctx, now, policy)
+	if err != nil || counts.SupersededMemoriesRedacted != 1 || counts.SupersedesLinksCleared < 1 {
+		t.Fatalf("redaction counts=%+v err=%v", counts, err)
+	}
+	var oldStatement, oldSlot, oldValue, oldEvidence, replacementStatement, replacementEvidence string
+	if err := store.sql.QueryRow(`SELECT memory.statement, memory.claim_slot, memory.claim_value, candidate.evidence FROM memory_entries memory JOIN memory_candidates candidate ON candidate.published_memory_id = memory.id WHERE memory.id = ?`, old.PublishedMemoryID).Scan(&oldStatement, &oldSlot, &oldValue, &oldEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT memory.statement, candidate.evidence FROM memory_entries memory JOIN memory_candidates candidate ON candidate.published_memory_id = memory.id WHERE memory.id = ?`, replacement.PublishedMemoryID).Scan(&replacementStatement, &replacementEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatement != "" || oldSlot != "" || oldValue != "" || oldEvidence != "" {
+		t.Fatalf("superseded content retained: %q %q %q %q", oldStatement, oldSlot, oldValue, oldEvidence)
+	}
+	if replacementStatement == "" || replacementEvidence == "" {
+		t.Fatal("active replacement content was redacted")
+	}
+	if _, err := store.MaintenanceSweep(ctx, now.Add(policy.ContentFreeTombstoneRetention), policy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MaintenanceSweep(ctx, now.Add(2*policy.ContentFreeTombstoneRetention), policy); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, old.PublishedMemoryID)
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ? AND status = 'active'`, 1, replacement.PublishedMemoryID)
+}
+
+func TestMaintenancePrunesDerivedHistoryAndRetainsLiveReceipt(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(t.TempDir()+"/oswald.db", config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Statement: "live receipt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	old := formatTime(now.Add(-48 * time.Hour))
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'succeeded', completed_at = ?, updated_at = ? WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ?`, old, old, memory.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,state,entity_kind,entity_id,operation,available_at,completed_at,created_at,updated_at) VALUES ('derived_index','older-receipt','user','succeeded','memory',?,'upsert',?,?,?,?)`, memory.ID, old, old, old, old); err != nil {
+		t.Fatal(err)
+	}
+	policy := maintenanceTestPolicy()
+	counts, err := store.MaintenanceSweep(ctx, now, policy)
+	if err != nil || counts.DerivedIndexJobsDeleted != 1 {
+		t.Fatalf("counts=%+v err=%v", counts, err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND state = 'succeeded' AND entity_kind = 'memory' AND entity_id = ?`, 1, memory.ID)
+	if err := store.ReconcileDerivedIndexChanges(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ?`, 1, memory.ID)
 }
 
 func TestMaintenanceSweepErasesDueForgottenMemoryAtBoundary(t *testing.T) {
@@ -320,9 +481,12 @@ func TestMaintenanceSweepRedactsAndPrunesRetentionArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.MarkFormationEligible(ctx, "user", turn.ID); err != nil {
+		t.Fatal(err)
+	}
 	_, err = store.sql.Exec(`
 INSERT INTO memory_events(canonical_user_id,event_kind,idempotency_key,event_type,request_id,session_id,actor_type,actor_id,created_at,metadata) VALUES ('user','formation_audit','audit','formed','request','session','system','actor',?, 'sensitive');
-INSERT INTO durable_jobs(job_kind,canonical_user_id,idempotency_key,state,source_request_id,source_session_id,source_session_generation,source_turn_id,extractor_version,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('memory_formation','user','job','succeeded','request','session',?,?,'test-v1','payload',?,?,?,?);
+INSERT INTO durable_jobs(job_kind,canonical_user_id,idempotency_key,state,source_request_id,source_session_id,source_session_generation,source_turn_id,extractor_version,extraction_payload,available_at,completed_at,created_at,updated_at) VALUES ('memory_formation','user','job','succeeded','','old-session',?,?,'test-v1','payload',?,?,?,?);
 INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,session_id,session_generation,covered_from_turn_id,covered_through_turn_id,state,artifact_payload,available_at,completed_at,created_at,updated_at) VALUES ('session_compaction','compaction-job','user','old-session',?,?,?,'succeeded','artifact',?,?,?,?);
 INSERT INTO memory_events(canonical_user_id,event_type,request_id,session_id,created_at,metadata) VALUES ('user','deleted','request','session',?,'metadata');
 INSERT INTO account_link_challenges(id,code_hash,initiator_user_id,initiator_gateway,initiator_identifier,created_at,expires_at) VALUES ('challenge','code','user','discord','external',?,?);
