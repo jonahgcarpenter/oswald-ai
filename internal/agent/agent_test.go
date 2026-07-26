@@ -71,8 +71,8 @@ func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
 	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "search" || userPayload.GlobalMemory != nil {
 		t.Fatalf("unexpected user memory payload: %+v", userPayload)
 	}
-	globalPayload := toolStreamPayload(toolnames.GlobalMemorySave, map[string]interface{}{"statement": "Oswald is written in Go.", "evidence": "language: Go"}, "accepted", time.Millisecond, false)
-	if globalPayload.GlobalMemory == nil || globalPayload.GlobalMemory.Action != "save" || globalPayload.UserMemory != nil {
+	globalPayload := toolStreamPayload(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "implementation language"}, "search result", time.Millisecond, false)
+	if globalPayload.GlobalMemory == nil || globalPayload.GlobalMemory.Action != "search" || globalPayload.GlobalMemory.Query != "implementation language" || globalPayload.UserMemory != nil {
 		t.Fatalf("unexpected global memory payload: %+v", globalPayload)
 	}
 
@@ -144,14 +144,14 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}
 }
 
-func TestProcessOffersRetrievalOnlyUserMemoryToolsAndGlobalSave(t *testing.T) {
+func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := builtin.Register(reg, &config.Config{}, nil, nil, nil, log); err != nil {
+	if err := builtin.Register(reg, &config.Config{}, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
@@ -160,7 +160,7 @@ func TestProcessOffersRetrievalOnlyUserMemoryToolsAndGlobalSave(t *testing.T) {
 	}
 
 	request := primaryRequests(chat.requests)[0]
-	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySave} {
+	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
 		if !requestHasTool(request, name) {
 			t.Fatalf("expected tool missing from primary request: %s", name)
 		}
@@ -544,7 +544,7 @@ func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := indexruntime.NewService(store, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := indexruntime.NewService(store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -880,33 +880,32 @@ func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
 	}
 }
 
-func TestProcessLoadsGlobalMemoryFromIndependentProvider(t *testing.T) {
+func TestProcessDoesNotAutomaticallyInjectGlobalMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	defer store.Close()
-	agent.globalMemory = fakeGlobalMemoryPromptProvider{prompt: `<global_memory authority="lower">global memory fact</global_memory>`}
 	if _, err := processAgent(agent, "request", "websocket", "session", "user-1", "User", "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	if len(requests) != 1 || !messagesContain(requests[0].Messages, "global memory fact") {
-		t.Fatalf("global memory prompt missing: %+v", requests)
+	if len(requests) != 1 {
+		t.Fatalf("request count=%d", len(requests))
 	}
 	for _, message := range requests[0].Messages {
-		if strings.Contains(strings.ToLower(message.Content), "deployment_memory") {
-			t.Fatalf("stale global memory vocabulary in prompt: %q", message.Content)
+		if strings.Contains(strings.ToLower(message.Content), "<global_memory") {
+			t.Fatalf("automatic global memory block in prompt: %q", message.Content)
 		}
 	}
 }
 
-func TestAgentKeepsDefaultVisibleGlobalMemoryAfterGlobalMCPResult(t *testing.T) {
+func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("discover", "home.tools", nil),
 		toolCallResponse("global-call", "home.turn_on", map[string]interface{}{"entity": "light"}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterSpec(registry.Spec{Name: toolnames.GlobalMemorySave, Source: registry.ToolSourceBuiltin}); err != nil {
+	if err := reg.RegisterSpec(registry.Spec{Name: toolnames.GlobalMemorySearch, Source: registry.ToolSourceBuiltin}); err != nil {
 		t.Fatal(err)
 	}
 	agent, store := newTestAgent(t, chat, nil, reg)
@@ -920,8 +919,8 @@ func TestAgentKeepsDefaultVisibleGlobalMemoryAfterGlobalMCPResult(t *testing.T) 
 		t.Fatalf("request count=%d", len(requests))
 	}
 	for i, request := range requests {
-		if !requestHasTool(request, toolnames.GlobalMemorySave) {
-			t.Fatalf("global memory proposal missing from request %d: %+v", i, toolNames(request))
+		if !requestHasTool(request, toolnames.GlobalMemorySearch) {
+			t.Fatalf("global memory search missing from request %d: %+v", i, toolNames(request))
 		}
 	}
 }
@@ -939,15 +938,6 @@ type fakeChatter struct {
 type fakeChatOutcome struct {
 	response *llm.ChatResponse
 	err      error
-}
-
-type fakeGlobalMemoryPromptProvider struct {
-	prompt string
-	err    error
-}
-
-func (f fakeGlobalMemoryPromptProvider) GlobalMemoryPrompt(context.Context) (string, error) {
-	return f.prompt, f.err
 }
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
@@ -1107,7 +1097,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, nil, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
 	return agent, userStore, soulPath
 }
 

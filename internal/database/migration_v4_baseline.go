@@ -231,7 +231,7 @@ CREATE INDEX idx_account_users_lifecycle ON account_users(lifecycle_state, updat
 
 CREATE TABLE derived_index_revisions (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	index_kind TEXT NOT NULL CHECK (index_kind IN ('memory_fts', 'transcript_fts', 'memory_vector')),
+	index_kind TEXT NOT NULL CHECK (index_kind IN ('memory_fts', 'transcript_fts', 'memory_vector', 'global_memory_fts', 'global_memory_vector')),
 	provider TEXT NOT NULL DEFAULT '',
 	model TEXT NOT NULL DEFAULT '',
 	dimension INTEGER NOT NULL DEFAULT 0 CHECK (dimension >= 0),
@@ -347,66 +347,13 @@ CREATE TABLE websocket_bootstrap_state (
 	CHECK (permanent_admin_user_id IS NULL OR permanent_admin_user_id != default_user_id)
 );
 
-CREATE TABLE global_memory_claims (
+CREATE TABLE global_memories (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	idempotency_key TEXT NOT NULL UNIQUE,
-	lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('staged', 'active', 'superseded', 'rejected', 'deleted')),
-	statement TEXT NOT NULL,
-	statement_key TEXT NOT NULL,
-	evidence TEXT NOT NULL DEFAULT '',
-	confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
-	importance INTEGER NOT NULL CHECK (importance BETWEEN 1 AND 5),
-	provenance_type TEXT NOT NULL DEFAULT '',
-	source_authority TEXT NOT NULL DEFAULT '',
-	claim_key TEXT NOT NULL,
-	claim_slot TEXT NOT NULL,
-	claim_value TEXT NOT NULL,
-	evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (evidence_count >= 0),
-	supersedes_id INTEGER REFERENCES global_memory_claims(id) ON DELETE SET NULL,
-	source_request_id TEXT NOT NULL DEFAULT '',
-	source_session_id TEXT NOT NULL DEFAULT '',
-	source_turn_id INTEGER,
-	actor_user_id TEXT NOT NULL DEFAULT '',
-	source_kind TEXT NOT NULL CHECK (source_kind IN ('global_mcp_tool', 'administrator_statement')),
-	source_tool_call_id TEXT NOT NULL DEFAULT '',
-	mcp_server_id TEXT NOT NULL DEFAULT '',
-	mcp_server_name TEXT NOT NULL DEFAULT '',
-	mcp_tool_name TEXT NOT NULL DEFAULT '',
-	mcp_remote_tool_name TEXT NOT NULL DEFAULT '',
-	mcp_arguments_digest TEXT NOT NULL DEFAULT '',
-	mcp_result_digest TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	published_at TEXT,
-	CHECK (
-		(source_kind = 'global_mcp_tool' AND source_tool_call_id != '' AND mcp_server_id != '' AND mcp_tool_name != '')
-		OR (source_kind = 'administrator_statement' AND source_tool_call_id = '' AND mcp_server_id = '' AND mcp_server_name = '' AND mcp_tool_name = '' AND mcp_remote_tool_name = '' AND mcp_arguments_digest = '' AND mcp_result_digest = '')
-	)
+	memory TEXT NOT NULL CHECK (length(trim(memory)) BETWEEN 1 AND 1000),
+	memory_key TEXT NOT NULL UNIQUE CHECK (length(memory_key) BETWEEN 1 AND 1000),
+	created_at TEXT NOT NULL
 );
-CREATE UNIQUE INDEX idx_global_memory_claims_active_key ON global_memory_claims(claim_key) WHERE lifecycle_state = 'active';
-CREATE UNIQUE INDEX idx_global_memory_claims_active_slot ON global_memory_claims(claim_slot) WHERE lifecycle_state = 'active';
-CREATE UNIQUE INDEX idx_global_memory_claims_active_statement ON global_memory_claims(statement_key) WHERE lifecycle_state = 'active';
-CREATE INDEX idx_global_memory_claims_request ON global_memory_claims(source_request_id, actor_user_id, lifecycle_state);
-CREATE INDEX idx_global_memory_claims_serving ON global_memory_claims(lifecycle_state, importance DESC, confidence DESC, id);
-
-CREATE TABLE global_memory_evidence (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	claim_id INTEGER NOT NULL REFERENCES global_memory_claims(id) ON DELETE CASCADE,
-	idempotency_key TEXT NOT NULL UNIQUE,
-	evidence TEXT NOT NULL,
-	confidence_contribution REAL NOT NULL CHECK (confidence_contribution >= 0 AND confidence_contribution <= 1),
-	source_kind TEXT NOT NULL CHECK (source_kind IN ('global_mcp_tool', 'administrator_statement')),
-	source_tool_call_id TEXT NOT NULL DEFAULT '',
-	mcp_server_id TEXT NOT NULL DEFAULT '',
-	mcp_tool_name TEXT NOT NULL DEFAULT '',
-	mcp_result_digest TEXT NOT NULL DEFAULT '',
-	created_at TEXT NOT NULL,
-	published_at TEXT,
-	CHECK (
-		(source_kind = 'global_mcp_tool' AND source_tool_call_id != '' AND mcp_server_id != '' AND mcp_tool_name != '')
-		OR (source_kind = 'administrator_statement' AND source_tool_call_id = '' AND mcp_server_id = '' AND mcp_tool_name = '' AND mcp_result_digest = '')
-	)
-);
+CREATE INDEX idx_global_memories_created ON global_memories(created_at, id);
 
 CREATE TABLE sessions (
 	canonical_user_id TEXT NOT NULL,
@@ -471,11 +418,15 @@ CREATE TABLE durable_jobs (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	UNIQUE (job_kind, idempotency_key),
-	CHECK ((job_kind = 'privacy_invalidation' AND canonical_user_id IS NULL) OR (job_kind != 'privacy_invalidation' AND canonical_user_id IS NOT NULL)),
+	CHECK (
+		(job_kind = 'privacy_invalidation' AND canonical_user_id IS NULL)
+		OR (job_kind = 'derived_index' AND entity_kind = 'global_memory' AND canonical_user_id IS NULL)
+		OR (job_kind != 'privacy_invalidation' AND NOT (job_kind = 'derived_index' AND entity_kind = 'global_memory') AND canonical_user_id IS NOT NULL)
+	),
 	CHECK (job_kind != 'memory_formation' OR (source_session_generation > 0 AND extractor_version != '')),
 	CHECK (job_kind != 'session_compaction' OR (session_id IS NOT NULL AND session_generation > 0 AND covered_from_turn_id > 0 AND covered_through_turn_id >= covered_from_turn_id)),
 	CHECK (job_kind != 'session_compaction' OR attempt_count <= 3),
-	CHECK (job_kind != 'derived_index' OR (entity_kind IN ('memory', 'session_turn') AND entity_id > 0 AND operation IN ('upsert', 'delete'))),
+	CHECK (job_kind != 'derived_index' OR (entity_kind IN ('memory', 'session_turn', 'global_memory') AND entity_id > 0 AND operation IN ('upsert', 'delete'))),
 	CHECK (job_kind != 'privacy_invalidation' OR (privacy_operation_id IS NOT NULL AND json_valid(external_identities) AND json_type(external_identities) = 'array' AND json_valid(session_ids) AND json_type(session_ids) = 'array' AND close_connections IN (0, 1)))
 );
 CREATE UNIQUE INDEX idx_durable_jobs_compaction_range ON durable_jobs(canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id) WHERE job_kind = 'session_compaction';
@@ -678,13 +629,6 @@ WHEN EXISTS (
 )
 BEGIN
 	SELECT RAISE(ABORT, 'delete session summaries before source turns');
-END;
-
-CREATE TRIGGER account_users_discard_staged_global_memory
-AFTER DELETE ON account_users
-BEGIN
-	DELETE FROM global_memory_claims
-	WHERE lifecycle_state = 'staged' AND actor_user_id = OLD.canonical_user_id;
 END;
 
 CREATE TRIGGER durable_jobs_formation_source_insert

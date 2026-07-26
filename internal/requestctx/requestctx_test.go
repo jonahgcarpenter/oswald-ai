@@ -9,11 +9,7 @@ import (
 
 type testExposer struct{ names []string }
 
-func (e *testExposer) ExposeTools(names []string)                  { e.names = append(e.names, names...) }
-func (e *testExposer) RecordGlobalToolEvidence(GlobalToolEvidence) {}
-func (e *testExposer) GlobalToolEvidence(string) (GlobalToolEvidence, bool) {
-	return GlobalToolEvidence{}, false
-}
+func (e *testExposer) ExposeTools(names []string) { e.names = append(e.names, names...) }
 
 func TestPrincipalAndMetadataRoundTrip(t *testing.T) {
 	principal := identity.Principal{CanonicalUserID: "sender-1", Gateway: "websocket", ExternalID: "external-1", Assurance: identity.AssuranceSelfAsserted}

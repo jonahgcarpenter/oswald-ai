@@ -817,6 +817,9 @@ ORDER BY 2, 1`, memoryVectorTableV2)
 	}
 	rows.Close()
 	for _, item := range targets {
+		if item.kind == IndexKindGlobalMemoryFTS || item.kind == IndexKindGlobalMemoryVector {
+			continue
+		}
 		if entityKind == "memory" && item.kind == IndexKindTranscriptFTS || entityKind == "session_turn" && item.kind != IndexKindTranscriptFTS {
 			continue
 		}

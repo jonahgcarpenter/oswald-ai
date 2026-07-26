@@ -220,11 +220,6 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	err = responder.SendAgentResponse(result.Response)
 	if err != nil {
 		log.Error("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.ErrorField(err))
-		if deps.GlobalMemory != nil {
-			if discardErr := deps.GlobalMemory.DiscardGlobalMemories(context.Background(), userID, req.RequestID); discardErr != nil {
-				log.Warn("global_memory.discard_failed", "failed to discard undelivered global memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("status", "degraded"), config.ErrorField(discardErr))
-			}
-		}
 		if deps.Compaction != nil && result.Response != nil && result.Response.SourceTurnID > 0 {
 			if markErr := deps.Compaction.MarkDeliveryFailed(context.Background(), userID, result.Response.SourceTurnID); markErr != nil {
 				log.Warn("session.delivery.failure_mark_failed", "failed to mark terminal response delivery failure", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(markErr))
@@ -239,11 +234,6 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
-		if deps.GlobalMemory != nil && result.Response.SourceTurnID > 0 {
-			if _, publishErr := deps.GlobalMemory.PublishGlobalMemories(context.Background(), userID, req.RequestID, result.Response.SourceTurnID); publishErr != nil {
-				log.Warn("global_memory.publish_failed", "failed to publish delivered global memory", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(publishErr))
-			}
-		}
 		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
 			source := usermemory.FormationSource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,

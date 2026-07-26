@@ -65,7 +65,7 @@ func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
 	if version != 1 || name != "v4_compact_baseline" || len(checksum) != 64 {
 		t.Fatalf("unexpected baseline ledger: %d %q %q", version, name, checksum)
 	}
-	for _, removed := range []string{"schema_migrations", "memory_confirmation_presentations", "memory_relations", "maintenance_runs", "tenant_profile_versions", "tenant_profile_version_facts", "tenant_profile_version_counters", "tenant_sessions", "tenant_session_generations", "deployment_memory_candidates", "deployment_memory_entries", "deployment_memory_evidence"} {
+	for _, removed := range []string{"schema_migrations", "memory_confirmation_presentations", "memory_relations", "maintenance_runs", "tenant_profile_versions", "tenant_profile_version_facts", "tenant_profile_version_counters", "tenant_sessions", "tenant_session_generations", "deployment_memory_candidates", "deployment_memory_entries", "deployment_memory_evidence", "global_memory_claims", "global_memory_evidence"} {
 		var count int
 		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, removed).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -77,7 +77,7 @@ func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
 	toolAnnotations := strings.Join([]string{
 		toolnames.UserMemorySearch,
 		toolnames.UserMemoryList,
-		toolnames.GlobalMemorySave,
+		toolnames.GlobalMemorySearch,
 		toolnames.SessionTranscriptSearch,
 	}, ",")
 	if _, err := db.SQL().Exec(`
@@ -120,7 +120,7 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 	defer db.Close()
 	expected := []string{
 		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
-		"global_memory_claims", "global_memory_evidence", "linked_accounts", "mcp_servers", "memory_candidates",
+		"global_memories", "linked_accounts", "mcp_servers", "memory_candidates",
 		"memory_entries", "memory_events",
 		"privacy_operations", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions", "websocket_bootstrap_state",
@@ -151,7 +151,7 @@ func TestCompactV4CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 18, "index": 52, "trigger": 23, "view": 0} {
+	for objectType, want := range map[string]int{"table": 17, "index": 48, "trigger": 22, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master
@@ -290,32 +290,30 @@ func TestCompactV4BaselineForeignKeysAreValid(t *testing.T) {
 	}
 }
 
-func TestGlobalMemoryProvenanceConstraints(t *testing.T) {
+func TestGlobalMemoryCanonicalConstraints(t *testing.T) {
 	db := openTestDB(t)
-	baseInsert := `INSERT INTO global_memory_claims (
-		idempotency_key, lifecycle_state, statement, statement_key, confidence, importance,
-		claim_key, claim_slot, claim_value, source_kind, source_tool_call_id, mcp_server_id,
-		mcp_tool_name, created_at, updated_at
-	) VALUES (?, 'staged', 'Fact.', 'fact.', 0.9, 3, ?, ?, 'value', ?, ?, ?, ?, '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`
-	if _, err := db.SQL().Exec(baseInsert, "bad-mcp", "bad-mcp-key", "bad-mcp-slot", "global_mcp_tool", "", "", ""); err == nil {
-		t.Fatal("expected incomplete global MCP provenance to fail")
+	if _, err := db.SQL().Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('', 'empty', '2026-07-21T00:00:00Z')`); err == nil {
+		t.Fatal("expected empty global memory to fail")
 	}
-	if _, err := db.SQL().Exec(baseInsert, "bad-admin", "bad-admin-key", "bad-admin-slot", "administrator_statement", "call", "server", "tool"); err == nil {
-		t.Fatal("expected administrator claim with MCP provenance to fail")
+	if _, err := db.SQL().Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES (?, 'long', '2026-07-21T00:00:00Z')`, strings.Repeat("x", 1001)); err == nil {
+		t.Fatal("expected overlong global memory to fail")
 	}
-	result, err := db.SQL().Exec(baseInsert, "admin", "admin-key", "admin-slot", "administrator_statement", "", "", "")
+	result, err := db.SQL().Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('Oswald uses Go.', 'oswald uses go.', '2026-07-21T00:00:00Z')`)
 	if err != nil {
-		t.Fatalf("insert valid administrator claim: %v", err)
+		t.Fatalf("insert valid global memory: %v", err)
 	}
-	claimID, err := result.LastInsertId()
+	memoryID, err := result.LastInsertId()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO global_memory_evidence (
-		claim_id, idempotency_key, evidence, confidence_contribution, source_kind,
-		source_tool_call_id, mcp_server_id, mcp_tool_name, created_at
-	) VALUES (?, 'bad-admin-evidence', 'Fact.', 0.9, 'administrator_statement', 'call', 'server', 'tool', '2026-07-21T00:00:00Z')`, claimID); err == nil {
-		t.Fatal("expected administrator evidence with MCP provenance to fail")
+	if _, err := db.SQL().Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('Duplicate key.', 'oswald uses go.', '2026-07-21T00:00:00Z')`); err == nil {
+		t.Fatal("expected duplicate normalized key to fail")
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'global-upsert', NULL, 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err != nil {
+		t.Fatalf("insert global-memory index job: %v", err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'bad-global-upsert', 'missing-user', 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err == nil {
+		t.Fatal("expected tenant-owned global-memory index job to fail")
 	}
 }
 

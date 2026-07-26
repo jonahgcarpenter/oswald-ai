@@ -14,7 +14,7 @@ import (
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, globalMemoryAuthorizer globalmemory.GlobalMemoryAuthorizer, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
 	if err := reg.RegisterHandler("web.search", registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
@@ -41,11 +41,11 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.SessionTranscriptSearch, err)
 	}
 
-	if err := reg.RegisterHandler(toolnames.GlobalMemorySave, registry.Handler(globalmemory.NewGlobalMemoryProposeHandler(globalMemStore, globalMemoryAuthorizer, log))); err != nil {
-		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.GlobalMemorySave, err)
+	if err := reg.RegisterHandler(toolnames.GlobalMemorySearch, registry.Handler(globalmemory.NewSearchHandler(globalMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.GlobalMemorySearch, err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured session transcript tool", config.F("tool_name", toolnames.SessionTranscriptSearch))
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured global memory tool", config.F("tool_name", toolnames.GlobalMemorySave))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured global memory tool", config.F("tool_name", toolnames.GlobalMemorySearch))
 
 	return nil
 }

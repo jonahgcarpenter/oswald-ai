@@ -22,13 +22,13 @@ It combines tools, private long-term memory, conversation continuity, image unde
 Oswald’s memory keeps useful context without treating every conversation detail as permanent.
 
 - The operator-managed soul file defines Oswald’s shared personality, behavior, and standing policy. It is used as the system prompt and can only be changed by manually editing `data/memory/soul/soul.md` outside Oswald.
-- Global memory stores evidence-backed facts Oswald learns about its own implementation, version, architecture, and capabilities from globally configured MCP tools. These facts are shared with every tenant but cannot override policy or authorization.
+- Global memory stores administrator-curated facts about Oswald's implementation, hardware, deployment, version, architecture, and capabilities. These facts are shared with authenticated users but are not injected automatically; the model searches them when a question needs that information.
 - Personal memory stores private details such as your preferences, projects, relationships, and environment. Relevant memories are recalled automatically and follow you across linked accounts.
 - Conversation memory preserves recent exchanges and summarizes longer conversations. Oswald can search earlier details from the current conversation when needed.
 
 Oswald automatically extracts useful direct facts from unambiguous exact first-person clauses, including multiple facts embedded in a longer message, and also forms cautiously qualified hypotheses from indirect signals. User-memory saving is handled only by always-on, post-delivery background extraction; the primary agent can retrieve personal memory but cannot save or forget it through model tools. Background model work runs only while the foreground request broker is idle and is preempted when new user work arrives. Direct evidence must begin in first person and express a positive, current, non-modal fact. Exact model wording is retained when grounded; otherwise a safe exact-evidence statement is generated without relaxing quote, question, negation, obsolete wording, condition, attribution, instruction, or claim-value checks. Sound candidates below confidence `0.35` remain proposed, sound candidates at or above it are approved, and unsound candidates are rejected regardless of confidence. Session compaction applies the same policy and can publish approved candidates under its live job lease. Conflicts, publication, expiry, deletion, and retention are tracked separately from policy state. A relationship name is eligible only when explicitly phrased as `is named` or `name is` with a compatible relationship identity slot. Every published memory retains confidence, provenance, evidence, and sensitivity metadata. Inferred memories remain explicitly uncertain and do not enter the always-present user profile until direct evidence supports them.
 
-After any user triggers a successful tool on a globally configured MCP server, Oswald may propose an exact evidence-backed global fact. User-owned MCP results and user prompt text cannot become global evidence. Global MCP servers are therefore part of the global-memory trust boundary and should be configured only when their results are suitable for shared memory.
+Administrators manage the canonical `global_memories` table explicitly with `/global-memory add <memory text>`, `/global-memory list [page]`, and `/global-memory forget <id>`. Adding an exact normalized duplicate is rejected, and forgetting a global memory permanently deletes it. For authenticated tenants, the model can only read this shared store through `global_memory_search`; it cannot add, list, or forget global memory through model tools. Search combines full-text and vector retrieval when embeddings are configured through `LLM_GATEWAY_EMBEDDING_MODEL`, degrades either channel independently, and uses a bounded canonical fallback if both indexes are unavailable.
 `/reset` starts a fresh conversation without deleting personal memory. You can also inspect, export, forget, or delete retained data through the `/privacy` commands.
 
 ## Usage
@@ -151,6 +151,9 @@ Bulk memory deletion and account deletion require confirmation. Confirmation cod
 | `/ban` | `/ban <canonical_id> [reason]` | Ban a user from using Oswald. |
 | `/unban` | `/unban <canonical_id>` | Unban a user. |
 | `/deleteuser` | `/deleteuser <canonical_id>` | Immediately delete another user and their retained Oswald data. |
+| `/global-memory add` | `/global-memory add <memory text>` | Add an administrator-curated fact shared with authenticated users; exact normalized duplicates are rejected. |
+| `/global-memory list` | `/global-memory list [page]` | List global memories and their stable IDs. |
+| `/global-memory forget` | `/global-memory forget <id>` | Permanently delete one global memory. |
 | `/mcp global servers` | `/mcp global servers` | List MCP servers visible to all users. |
 | `/mcp global add` | `/mcp global add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]` | Add or update a global MCP server. |
 | `/mcp global remove` | `/mcp global remove <name>` | Remove a global MCP server. |

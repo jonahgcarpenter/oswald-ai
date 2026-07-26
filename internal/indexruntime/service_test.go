@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -30,7 +32,7 @@ func TestMissingLiveTableTriggersShadowRebuild(t *testing.T) {
 	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Rebuild missing physical table."}); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store, nil, "", config.NewLogger(config.LevelError))
+	service := NewService(store, nil, nil, "", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func TestMaintenanceDuringBuildDoesNotBlockPublication(t *testing.T) {
 			t.Errorf("maintenance during build: %v", err)
 		}
 	}
-	if err := NewService(store, embedder, "model", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	live, err := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
@@ -104,7 +106,11 @@ func (f *lifecycleEmbedder) Embed(_ context.Context, req llm.EmbedRequest) (*llm
 		return nil, errors.New("unknown model")
 	}
 	vector := make([]float64, dimension)
-	vector[0] = 1
+	if dimension > 1 && (strings.Contains(strings.ToLower(req.Input), "hardware") || strings.Contains(strings.ToLower(req.Input), "rtx")) {
+		vector[1] = 1
+	} else {
+		vector[0] = 1
+	}
 	return &llm.EmbedResponse{Model: req.Model, Embeddings: [][]float64{vector}}, nil
 }
 
@@ -120,7 +126,7 @@ func TestVectorDimensionProbeCachedAcrossCycles(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
-	service := NewService(store, embedder, "model", config.NewLogger(config.LevelError))
+	service := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +147,7 @@ func TestVectorDimensionProbeCachedAcrossCycles(t *testing.T) {
 func TestVectorDimensionProbeFailureRetriesUntilSuccess(t *testing.T) {
 	store := newLifecycleStore(t, "user")
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}, failProbe: true}
-	service := NewService(store, embedder, "model", config.NewLogger(config.LevelError))
+	service := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +175,7 @@ func TestVectorRevisionModelAndDimensionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model-a": 2, "model-b": 3}}
-	service := NewService(store, embedder, "model-a", config.NewLogger(config.LevelError))
+	service := NewService(store, nil, embedder, "model-a", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +193,7 @@ func TestVectorRevisionModelAndDimensionLifecycle(t *testing.T) {
 	if same.Revision != first.Revision {
 		t.Fatalf("same configuration rebuilt revision: %d -> %d", first.Revision, same.Revision)
 	}
-	service = NewService(store, embedder, "model-b", config.NewLogger(config.LevelError))
+	service = NewService(store, nil, embedder, "model-b", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +224,7 @@ func TestMatchingLegacyVectorRevisionRebuildsToCurrentSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
-	if err := NewService(store, embedder, "model", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	live, err := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
@@ -241,7 +247,7 @@ func TestWriteArrivingDuringVectorBuildIsReconciled(t *testing.T) {
 			t.Errorf("write during build: %v", err)
 		}
 	}
-	service := NewService(store, embedder, "model", config.NewLogger(config.LevelError))
+	service := NewService(store, nil, embedder, "model", config.NewLogger(config.LevelError))
 	if err := service.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +267,7 @@ func TestWriteDuringModelChangeUpdatesOldLiveAndNewShadow(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder := &lifecycleEmbedder{dimensions: map[string]int{"old": 2, "new": 3}}
-	if err := NewService(store, embedder, "old", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, embedder, "old", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	old, err := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
@@ -273,7 +279,7 @@ func TestWriteDuringModelChangeUpdatesOldLiveAndNewShadow(t *testing.T) {
 			t.Errorf("write during model change: %v", err)
 		}
 	}
-	if err := NewService(store, embedder, "new", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, embedder, "new", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -304,12 +310,12 @@ func TestFailedShadowBuildPreservesOldLiveRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := &lifecycleEmbedder{dimensions: map[string]int{"old": 2}}
-	if err := NewService(store, good, "old", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, good, "old", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	old, _ := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
 	failing := &lifecycleEmbedder{dimensions: map[string]int{"new": 3}, failContent: true}
-	if err := NewService(store, failing, "new", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
+	if err := NewService(store, nil, failing, "new", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	live, err := store.LiveIndexRevision(context.Background(), usermemory.IndexKindMemoryVector)
@@ -351,6 +357,125 @@ func TestRevisionValidationRejectsCrossTenantAndOrphanRows(t *testing.T) {
 	}
 	if err := store.WriteMemoryIndexRecord(context.Background(), revision, usermemory.MemoryIndexRecord{ID: 99999, UserID: "user-a", Statement: "orphan"}, nil); !errors.Is(err, usermemory.ErrStaleIndexRecord) {
 		t.Fatalf("orphan write error = %v, want stale record", err)
+	}
+}
+
+func TestGlobalMemoryFTSAndVectorLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	store := newLifecycleStoreAt(t, path)
+	embedder := &lifecycleEmbedder{dimensions: map[string]int{"model": 2}}
+	globalStore, err := globalmemory.NewStore(path, embedder, "model", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+	first, err := globalStore.Add(ctx, "Oswald uses a shared derived index.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := globalStore.Add(ctx, "Global facts are searchable."); err != nil {
+		t.Fatal(err)
+	}
+	hardware, err := globalStore.Add(ctx, "Oswald runs on an RTX 4090 with 64 GB of system memory.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, globalStore, embedder, "model", config.NewLogger(config.LevelError))
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fts, err := store.LiveIndexRevision(ctx, usermemory.IndexKindGlobalMemoryFTS)
+	if err != nil || fts.ExpectedCount != 3 || fts.IndexedCount != 3 {
+		t.Fatalf("global FTS revision=%+v err=%v", fts, err)
+	}
+	vector, err := store.LiveIndexRevision(ctx, usermemory.IndexKindGlobalMemoryVector)
+	if err != nil || vector.ExpectedCount != 3 || vector.IndexedCount != 3 || vector.Model != "model" || vector.Dimension != 2 {
+		t.Fatalf("global vector revision=%+v err=%v", vector, err)
+	}
+	results, stats := globalStore.Search(ctx, "searchable", 5)
+	if !stats.LexicalAvailable || len(results) == 0 {
+		t.Fatalf("global search results=%+v stats=%+v", results, stats)
+	}
+	semanticResults, semanticStats := globalStore.Search(ctx, "hardware specifications", 1)
+	if !semanticStats.SemanticAvailable || len(semanticResults) != 1 || semanticResults[0].Memory.ID != hardware.Memory.ID || semanticResults[0].LexicalScore != 0 || semanticResults[0].SemanticScore == 0 {
+		t.Fatalf("semantic hardware results=%+v stats=%+v", semanticResults, semanticStats)
+	}
+	added, err := globalStore.Add(ctx, "A post-build global fact.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(path, config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() // nolint:errcheck
+	for _, revision := range []usermemory.DerivedIndexRevision{fts, vector} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, added.Memory.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("new global memory missing from %s", revision.TableName)
+		}
+	}
+	if forgotten, err := globalStore.Forget(ctx, first.Memory.ID); err != nil || !forgotten {
+		t.Fatalf("forget=%v err=%v", forgotten, err)
+	}
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, revision := range []usermemory.DerivedIndexRevision{fts, vector} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, first.Memory.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("deleted global memory remains in %s", revision.TableName)
+		}
+	}
+}
+
+func TestGlobalVectorValidationRejectsStaleCanonicalVersion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	store := newLifecycleStoreAt(t, path)
+	globalStore, err := globalmemory.NewStore(path, nil, "", config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = globalStore.Close() })
+	added, err := globalStore.Add(ctx, "Version-fenced global fact.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GlobalMemoryIndexRecordByID(ctx, added.Memory.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, usermemory.IndexKindGlobalMemoryVector, "llm_gateway", "model", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteGlobalMemoryIndexRecord(ctx, revision, record, []float64{1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := database.Open(path, config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`UPDATE `+revision.TableName+` SET canonical_version = 'stale' WHERE rowid = ?`, record.ID); err != nil {
+		db.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err == nil {
+		t.Fatal("global vector revision with stale canonical version was published")
 	}
 }
 
