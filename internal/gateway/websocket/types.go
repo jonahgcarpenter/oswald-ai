@@ -12,7 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
@@ -61,8 +61,8 @@ func (c *trackedConnection) closeWithReason(reason string) {
 	c.writeMu.Unlock()
 }
 
-// HandlePrivacyInvalidation closes authenticated connections only for deleted accounts.
-func (wg *Gateway) HandlePrivacyInvalidation(event privacyruntime.Event) {
+// HandleRuntimeInvalidation closes authenticated connections when requested.
+func (wg *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
 	if !event.CloseConnections {
 		return
 	}

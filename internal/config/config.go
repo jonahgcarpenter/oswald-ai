@@ -37,19 +37,15 @@ type Config struct {
 
 // RetentionPolicy controls content expiry and periodic memory maintenance.
 type RetentionPolicy struct {
-	ForgottenContentGrace           time.Duration
-	ContentBearingAuditJobRetention time.Duration
-	ContentFreeTombstoneRetention   time.Duration
-	RetiredIndexRetention           time.Duration
-	SessionInactivity               time.Duration
-	PendingDeliveryTimeout          time.Duration
-	CandidateContentRetention       time.Duration
-	SuccessfulJobRetention          time.Duration
-	DeadJobRetention                time.Duration
-	AccountChallengeGrace           time.Duration
-	MaintenanceInterval             time.Duration
-	DatabaseOptimizeInterval        time.Duration
-	BatchSize                       int
+	RetiredIndexRetention    time.Duration
+	SessionInactivity        time.Duration
+	PendingDeliveryTimeout   time.Duration
+	SuccessfulJobRetention   time.Duration
+	DeadJobRetention         time.Duration
+	AccountChallengeGrace    time.Duration
+	MaintenanceInterval      time.Duration
+	DatabaseOptimizeInterval time.Duration
+	BatchSize                int
 }
 
 const (
@@ -105,13 +101,9 @@ func loadRetentionPolicy() (RetentionPolicy, error) {
 		defaultValue time.Duration
 		destination  *time.Duration
 	}{
-		{key: "MEMORY_FORGOTTEN_CONTENT_GRACE", defaultValue: 720 * time.Hour, destination: &policy.ForgottenContentGrace},
-		{key: "MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.ContentBearingAuditJobRetention},
-		{key: "MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION", defaultValue: 8760 * time.Hour, destination: &policy.ContentFreeTombstoneRetention},
 		{key: "MEMORY_RETIRED_INDEX_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.RetiredIndexRetention},
 		{key: "MEMORY_SESSION_INACTIVITY", defaultValue: 24 * time.Hour, destination: &policy.SessionInactivity},
 		{key: "MEMORY_PENDING_DELIVERY_TIMEOUT", defaultValue: 15 * time.Minute, destination: &policy.PendingDeliveryTimeout},
-		{key: "MEMORY_CANDIDATE_CONTENT_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.CandidateContentRetention},
 		{key: "MEMORY_SUCCESSFUL_JOB_RETENTION", defaultValue: 168 * time.Hour, destination: &policy.SuccessfulJobRetention},
 		{key: "MEMORY_DEAD_JOB_RETENTION", defaultValue: 720 * time.Hour, destination: &policy.DeadJobRetention},
 		{key: "MEMORY_ACCOUNT_CHALLENGE_GRACE", defaultValue: 24 * time.Hour, destination: &policy.AccountChallengeGrace},
@@ -133,9 +125,6 @@ func loadRetentionPolicy() (RetentionPolicy, error) {
 	}
 	policy.BatchSize = batchSize
 
-	if policy.ContentFreeTombstoneRetention < policy.ContentBearingAuditJobRetention {
-		return RetentionPolicy{}, fmt.Errorf("MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION must be greater than or equal to MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION")
-	}
 	if policy.DeadJobRetention < policy.SuccessfulJobRetention {
 		return RetentionPolicy{}, fmt.Errorf("MEMORY_DEAD_JOB_RETENTION must be greater than or equal to MEMORY_SUCCESSFUL_JOB_RETENTION")
 	}

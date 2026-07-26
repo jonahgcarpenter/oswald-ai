@@ -146,8 +146,8 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | Command                 | Description                                                                                                                |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `/memories list`        | Attach a complete text file containing every active memory's stable ID, category, and statement.                           |
-| `/memories forget <id>` | Stop using one memory immediately and schedule its retained content and linked source exchange for grace-period scrubbing. |
-| `/memories forget all`  | Immediately purge all memories, candidates, linked source exchanges, profiles, indexes, and pending formation work.        |
+| `/memories forget <id>` | Permanently hard-delete one durable memory and its memory-only artifacts. Conversation transcripts remain unchanged.       |
+| `/memories forget all`  | Permanently delete all stored user information, reset every session, and preserve only account and authentication state.   |
 
 ### Admin Commands
 

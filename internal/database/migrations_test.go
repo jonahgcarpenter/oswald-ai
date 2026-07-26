@@ -121,8 +121,7 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 	expected := []string{
 		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
 		"global_memories", "linked_accounts", "mcp_servers", "memory_candidates",
-		"memory_entries", "memory_events",
-		"privacy_operations", "schema_migration_versions", "session_summaries",
+		"memory_entries", "memory_events", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions", "websocket_bootstrap_state",
 		"websocket_clients", "websocket_device_authorizations",
 	}
@@ -151,7 +150,7 @@ func TestCompactV4CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 17, "index": 49, "trigger": 22, "view": 0} {
+	for objectType, want := range map[string]int{"table": 16, "index": 44, "trigger": 18, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master
@@ -325,7 +324,6 @@ func TestDurableJobRunningLeaseConstraints(t *testing.T) {
 	for _, statement := range []string{
 		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, source_session_generation, extractor_version, available_at, created_at, updated_at) VALUES ('memory_formation', 'formation', 'user', 'running', 1, 'v1', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
 		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'index', 'user', 'running', 'memory', 1, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
-		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, privacy_operation_id, subject_canonical_user_id, external_identities, session_ids, close_connections, available_at, created_at, updated_at) VALUES ('privacy_invalidation', 'privacy', NULL, 'running', 'operation', 'deleted-user', '[]', '[]', 0, '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
 	} {
 		if _, err := db.SQL().Exec(statement); err == nil {
 			t.Fatalf("running durable job without lease was accepted: %s", statement)
@@ -336,14 +334,8 @@ func TestDurableJobRunningLeaseConstraints(t *testing.T) {
 	}
 }
 
-func TestPrivacyInvalidationSubjectFenceAndIndexTableIdentityConstraints(t *testing.T) {
+func TestIndexTableIdentityConstraints(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, privacy_operation_id, subject_canonical_user_id, external_identities, session_ids, close_connections, available_at, created_at, updated_at) VALUES ('privacy_invalidation', 'erased', NULL, 'erased', 'nonexistent-incarnation', '[]', '[]', 1, '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err != nil {
-		t.Fatalf("non-FK privacy subject fence rejected: %v", err)
-	}
-	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, privacy_operation_id, external_identities, session_ids, close_connections, available_at, created_at, updated_at) VALUES ('privacy_invalidation', 'missing-subject', NULL, 'missing-subject', '[]', '[]', 1, '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err == nil {
-		t.Fatal("privacy invalidation without a subject fence was accepted")
-	}
 	if _, err := db.SQL().Exec(`INSERT INTO derived_index_revisions(index_kind, provider, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_fts', 'sqlite_fts5', 1, 1, 'unique_table', 'failed', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}

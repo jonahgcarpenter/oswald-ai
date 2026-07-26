@@ -345,7 +345,7 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Forget("user", "all", ""); err != nil {
+	if _, err := store.HardDeleteAllUserData(context.Background(), "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	latest, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
@@ -353,11 +353,11 @@ func TestForgetAllRemovesSupersededFrozenProfileFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(latest.Content, "Paris") || strings.Contains(latest.Content, "Rome") {
-		t.Fatalf("forgotten facts survived profile reset: frozen=%+v latest=%+v", frozen, latest)
+		t.Fatalf("deleted facts survived profile reset: frozen=%+v latest=%+v", frozen, latest)
 	}
 	var copied int
 	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM sessions, json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) IN (?, ?)`, paris.ID, rome.ID).Scan(&copied); err != nil || copied != 0 {
-		t.Fatalf("forgotten profile copies=%d err=%v", copied, err)
+		t.Fatalf("deleted profile copies=%d err=%v", copied, err)
 	}
 }
 

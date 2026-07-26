@@ -24,15 +24,15 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
-func TestPrivacyInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
+func TestRuntimeInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
 	g := &Gateway{
 		messageIndex: map[string]messageContext{
 			"session": {SessionKey: "imessage:chat:one", SenderID: "+15550000001"},
@@ -44,7 +44,7 @@ func TestPrivacyInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
 			"+15550000002": {DisplayName: "Two"},
 		},
 	}
-	g.HandlePrivacyInvalidation(privacyruntime.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
+	g.HandleRuntimeInvalidation(runtimeinvalidation.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
 	if _, ok := g.messageIndex["session"]; ok {
 		t.Fatal("matching session message context remained")
 	}

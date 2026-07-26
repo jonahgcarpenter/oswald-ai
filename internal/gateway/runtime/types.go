@@ -9,20 +9,20 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
-	Broker     *broker.Broker
-	Commands   *commands.Service
-	Access     AccessChecker
-	Log        *config.Logger
-	Formation  FormationEnqueuer
-	Compaction CompactionEnqueuer
-	PrivacyBus *privacyruntime.Bus
+	Broker                 *broker.Broker
+	Commands               *commands.Service
+	Access                 AccessChecker
+	Log                    *config.Logger
+	Formation              FormationEnqueuer
+	Compaction             CompactionEnqueuer
+	RuntimeInvalidationBus *runtimeinvalidation.Bus
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.

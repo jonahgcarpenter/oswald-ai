@@ -20,7 +20,6 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	globalmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -45,7 +44,7 @@ func TestV4Issue80ReleaseEvaluation(t *testing.T) {
 	gate("injection_credentials_and_authorization_are_rejected", evaluateIssue80UnsafeInputs)
 	gate("admin_global_lifecycle_and_account_independence", evaluateIssue80GlobalMemory)
 	gate("summary_tail_and_transcript_continuity", evaluateIssue80SessionContinuity)
-	gate("forget_is_immediate_and_grace_scrubs_content", evaluateIssue80ForgetLifecycle)
+	gate("forget_hard_deletes_memory_and_preserves_transcript", evaluateIssue80ForgetLifecycle)
 
 	percentage := 100 * float64(passed) / float64(total)
 	t.Logf("issue_80_release_safety_gates passed=%d total=%d score=%.0f%%", passed, total, percentage)
@@ -206,10 +205,6 @@ func evaluateIssue80FailedDelivery(t *testing.T) {
 		t.Fatalf("failed delivery invoked extractor %d times", extractor.calls)
 	}
 	assertIssue80MemoryCount(t, store, "user", 0)
-	page, err := store.InspectPrivacy(context.Background(), "user", "candidates", 1)
-	if err != nil || len(page.Items) != 0 {
-		t.Fatalf("failed delivery candidates=%+v err=%v", page.Items, err)
-	}
 	profile, err := store.ResolveSessionProfile(context.Background(), "user", "new-session", time.Hour)
 	if err != nil || strings.Contains(profile.Content, "NEVER-SERVE") {
 		t.Fatalf("failed delivery profile=%q err=%v", profile.Content, err)
@@ -479,49 +474,29 @@ func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	if results, _ := store.Recall(context.Background(), userID, "GRACE-SCRUB", usermemory.RecallRequest{ExplicitSearch: true}); len(results) != 1 {
 		t.Fatalf("pre-forget index recall=%+v", results)
 	}
-	policy := issue80RetentionPolicy(time.Hour)
-	privacyService, err := privacy.NewService(accounts, store, policy, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := privacy.Request{RequestID: "forget", Principal: issue80Principal(userID, "actor"), SessionKey: "session"}
-	before := time.Now().UTC()
-	state, err := privacyService.ForgetMemory(context.Background(), req, memory.ID)
-	if err != nil || state != "forgotten" {
-		t.Fatalf("forget state=%q err=%v", state, err)
+	if err := store.HardDeleteMemory(context.Background(), userID, memory.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("hard delete memory: %v", err)
 	}
 	assertIssue80MemoryCount(t, store, userID, 0)
 	results, _ := store.Recall(context.Background(), userID, "GRACE-SCRUB", usermemory.RecallRequest{ExplicitSearch: true})
 	if len(results) != 0 {
-		t.Fatalf("forgotten memory remained recallable: %+v", results)
+		t.Fatalf("deleted memory remained recallable: %+v", results)
 	}
-	if recent, err := store.RecentCompletedExchanges(context.Background(), userID, "session", candidate.SourceGeneration, 5); err != nil || len(recent) != 0 {
-		t.Fatalf("forgotten source remained replayable: %+v err=%v", recent, err)
+	if recent, err := store.RecentCompletedExchanges(context.Background(), userID, "session", candidate.SourceGeneration, 5); err != nil || len(recent) != 1 {
+		t.Fatalf("hard delete changed source transcript: %+v err=%v", recent, err)
 	}
-	if transcript, err := store.SearchTranscript(context.Background(), userID, "session", candidate.SourceGeneration, "GRACE-SCRUB", 5); err != nil || len(transcript) != 0 {
-		t.Fatalf("forgotten source remained transcript-indexed: %+v err=%v", transcript, err)
+	if transcript, err := store.SearchTranscript(context.Background(), userID, "session", candidate.SourceGeneration, "GRACE-SCRUB", 5); err != nil || len(transcript) != 1 {
+		t.Fatalf("hard delete changed transcript index: %+v err=%v", transcript, err)
 	}
 	profile, err = store.ResolveSessionProfile(context.Background(), userID, "forget-profile", time.Hour)
 	if err != nil || strings.Contains(profile.Content, "GRACE-SCRUB") {
-		t.Fatalf("forgotten memory remained in bound profile=%q err=%v", profile.Content, err)
+		t.Fatalf("deleted memory remained in bound profile=%q err=%v", profile.Content, err)
 	}
-	if count := issue80RowCount(t, path, `SELECT COUNT(*) FROM session_turns WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NOT NULL`, turnID, userID); count != 1 {
-		t.Fatalf("forgotten exact source suppression count=%d", count)
+	if count := issue80RowCount(t, path, `SELECT COUNT(*) FROM memory_entries WHERE id = ? AND canonical_user_id = ?`, memory.ID, userID); count != 0 {
+		t.Fatalf("hard-deleted memory row count=%d", count)
 	}
-	exported, err := store.ExportPrivacy(context.Background(), userID, before.Add(time.Minute))
-	if err != nil || !strings.Contains(string(exported), "GRACE-SCRUB") {
-		t.Fatalf("grace content missing before scrub err=%v", err)
-	}
-	counts, err := store.MaintenanceSweep(context.Background(), before.Add(2*time.Hour), policy)
-	if err != nil || counts.ForgottenMemories != 1 {
-		t.Fatalf("grace sweep counts=%+v err=%v", counts, err)
-	}
-	exported, err = store.ExportPrivacy(context.Background(), userID, before.Add(3*time.Hour))
-	if err != nil || strings.Contains(string(exported), "GRACE-SCRUB") {
-		t.Fatalf("grace content survived scrub err=%v", err)
-	}
-	if count := issue80RowCount(t, path, `SELECT COUNT(*) FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID); count != 0 {
-		t.Fatalf("grace sweep retained exact source turn count=%d", count)
+	if count := issue80RowCount(t, path, `SELECT COUNT(*) FROM memory_candidates WHERE id = ? AND canonical_user_id = ?`, candidate.ID, userID); count != 0 {
+		t.Fatalf("hard-deleted candidate row count=%d", count)
 	}
 }
 
@@ -803,18 +778,14 @@ func issue80MessagesContain(messages []llm.ChatMessage, value string) bool {
 
 func issue80RetentionPolicy(grace time.Duration) config.RetentionPolicy {
 	return config.RetentionPolicy{
-		ForgottenContentGrace:           grace,
-		ContentBearingAuditJobRetention: grace,
-		ContentFreeTombstoneRetention:   2 * grace,
-		RetiredIndexRetention:           grace,
-		SessionInactivity:               24 * time.Hour,
-		PendingDeliveryTimeout:          time.Hour,
-		CandidateContentRetention:       grace,
-		SuccessfulJobRetention:          grace,
-		DeadJobRetention:                2 * grace,
-		AccountChallengeGrace:           grace,
-		MaintenanceInterval:             time.Hour,
-		DatabaseOptimizeInterval:        2 * time.Hour,
-		BatchSize:                       100,
+		RetiredIndexRetention:    grace,
+		SessionInactivity:        24 * time.Hour,
+		PendingDeliveryTimeout:   time.Hour,
+		SuccessfulJobRetention:   grace,
+		DeadJobRetention:         2 * grace,
+		AccountChallengeGrace:    grace,
+		MaintenanceInterval:      time.Hour,
+		DatabaseOptimizeInterval: 2 * time.Hour,
+		BatchSize:                100,
 	}
 }

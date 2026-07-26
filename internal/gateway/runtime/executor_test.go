@@ -17,9 +17,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -181,7 +181,7 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 }
 
 func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
-	event := privacyruntime.Event{ExternalIdentities: []string{"websocket:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+	event := runtimeinvalidation.Event{ExternalIdentities: []string{"websocket:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
 	service, err := commands.NewService(commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
@@ -191,21 +191,21 @@ func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	bus := privacyruntime.NewBus()
+	bus := runtimeinvalidation.NewBus()
 	responder := &fakeResponder{}
 	published := 0
-	bus.Subscribe(func(got privacyruntime.Event) {
+	bus.Subscribe(func(got runtimeinvalidation.Event) {
 		published++
 		if responder.command.Text != "deleted" || !got.CloseConnections {
 			t.Fatalf("invalidation published before delivery or with wrong event: response=%+v event=%+v", responder.command, got)
 		}
 	})
-	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), PrivacyBus: bus}, responder)
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
 	if published != 1 {
 		t.Fatalf("published=%d want 1", published)
 	}
 	responder.sendErr = errors.New("offline")
-	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), PrivacyBus: bus}, responder)
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
 	if published != 2 || !errors.Is(outcome.Err, responder.sendErr) {
 		t.Fatalf("failed delivery invalidation count=%d outcome=%+v", published, outcome)
 	}
@@ -334,7 +334,7 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	}()
 	<-activeStarted
 
-	event := privacyruntime.Event{SessionIDs: []string{"target-session"}}
+	event := runtimeinvalidation.Event{SessionIDs: []string{"target-session"}}
 	commandStarted := make(chan struct{})
 	service, err := commands.NewService(commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
@@ -354,9 +354,9 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 		fakeResponder: &fakeResponder{}, broker: b, target: target,
 		laterTargetStarted: laterTargetStarted,
 	}
-	bus := privacyruntime.NewBus()
+	bus := runtimeinvalidation.NewBus()
 	heldAtBus := false
-	bus.Subscribe(func(privacyruntime.Event) {
+	bus.Subscribe(func(runtimeinvalidation.Event) {
 		select {
 		case <-laterTargetStarted:
 		case <-time.After(30 * time.Millisecond):
@@ -365,7 +365,7 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	})
 	done := make(chan Outcome, 1)
 	go func() {
-		done <- Execute(Request{Principal: actor, SessionKey: "admin-session", Text: "/deleteuser target"}, Dependencies{Broker: b, Commands: service, Log: log, PrivacyBus: bus}, responder)
+		done <- Execute(Request{Principal: actor, SessionKey: "admin-session", Text: "/deleteuser target"}, Dependencies{Broker: b, Commands: service, Log: log, RuntimeInvalidationBus: bus}, responder)
 	}()
 	select {
 	case <-commandStarted:

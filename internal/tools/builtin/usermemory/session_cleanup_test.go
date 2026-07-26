@@ -108,21 +108,19 @@ func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.MemoryEntriesExpired != 1 || counts.CandidatesErased != 1 || counts.FormationJobsDeleted != 0 {
+	if counts.MemoryEntriesExpired != 1 || counts.CandidatesErased != 1 || counts.FormationJobsDeleted != 1 {
 		t.Fatalf("cleanup counts=%+v", counts)
 	}
-	var status, candidateStatement, evidence string
+	var status string
 	if err := store.sql.QueryRow(`SELECT status FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT statement FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&candidateStatement); err != nil {
+	var candidateCount int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&candidateCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT evidence FROM memory_candidates WHERE id = ?`, candidate.ID).Scan(&evidence); err != nil {
-		t.Fatal(err)
-	}
-	if status != "expired" || candidateStatement != "" || evidence != "" {
-		t.Fatalf("status=%s candidate=%q evidence=%q", status, candidateStatement, evidence)
+	if status != "expired" || candidateCount != 0 {
+		t.Fatalf("status=%s candidate_count=%d", status, candidateCount)
 	}
 	var deleteChanges int
 	if err := store.sql.QueryRow(`SELECT count(*) FROM durable_jobs WHERE job_kind = 'derived_index' AND entity_kind = 'memory' AND entity_id = ? AND operation = 'delete'`, memory.ID).Scan(&deleteChanges); err != nil {

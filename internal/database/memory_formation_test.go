@@ -10,7 +10,7 @@ func TestNormalizedUserMemorySchema(t *testing.T) {
 		{"table", "memory_candidates"}, {"table", "memory_entries"}, {"table", "memory_events"}, {"table", "durable_jobs"},
 		{"index", "idx_memory_candidates_publication"}, {"index", "idx_memory_candidates_published"}, {"index", "idx_memory_candidates_claim_identity"},
 		{"index", "idx_memory_entries_active_serving"}, {"index", "idx_memory_entries_claim_identity"}, {"index", "idx_memory_events_audit_key"},
-		{"trigger", "memory_events_formation_identity_immutable"}, {"trigger", "memory_events_formation_no_delete"},
+		{"trigger", "memory_events_formation_identity_immutable"},
 	} {
 		assertSchemaObject(t, db, object.kind, object.name)
 	}
@@ -19,10 +19,10 @@ func TestNormalizedUserMemorySchema(t *testing.T) {
 	} {
 		assertNoSchemaObject(t, db, removed.kind, removed.name)
 	}
-	for _, column := range []string{"evidence", "source_turn_id", "published_memory_id", "publication_status", "redacted_at", "redaction_reason", "updated_at"} {
+	for _, column := range []string{"evidence", "source_turn_id", "published_memory_id", "publication_status", "updated_at"} {
 		assertTableColumn(t, db, "memory_candidates", column)
 	}
-	for _, column := range []string{"status_changed_at", "status_reason", "lifecycle_request_id", "hard_delete_after"} {
+	for _, column := range []string{"status_changed_at", "status_reason"} {
 		assertTableColumn(t, db, "memory_entries", column)
 	}
 	for _, removed := range []struct{ table, column string }{
@@ -36,6 +36,9 @@ func TestNormalizedUserMemorySchema(t *testing.T) {
 		{"session_turns", "formation_eligible_at"}, {"session_turns", "topic_tags"},
 		{"durable_jobs", "job_type"}, {"durable_jobs", "last_error_message"},
 		{"memory_events", "updated_at"}, {"memory_events", "content_expires_at"},
+		{"memory_candidates", "redacted_at"}, {"memory_candidates", "redaction_reason"},
+		{"memory_entries", "lifecycle_request_id"}, {"memory_entries", "hard_delete_after"},
+		{"memory_events", "redacted_at"}, {"session_turns", "privacy_suppressed_at"},
 	} {
 		assertNoTableColumn(t, db, removed.table, removed.column)
 	}
@@ -66,12 +69,9 @@ func TestCandidatePublicationConsistencyAndTenantFences(t *testing.T) {
 	if _, err := db.SQL().Exec(candidateInsertSQL, "user-b", "cross-memory", "approved", "published", "Candidate", "candidate-6", "evidence", nil, memoryA); err == nil {
 		t.Fatal("cross-tenant candidate publication accepted")
 	}
-	if _, err := db.SQL().Exec(candidateInsertSQL, "user-a", "redacted", "rejected", "none", "", "redacted:1", "", nil, nil); err != nil {
-		t.Fatalf("content-free candidate tombstone rejected: %v", err)
-	}
 }
 
-func TestFormationAuditIsAppendOnlyForActiveTenant(t *testing.T) {
+func TestFormationAuditIdentityIsImmutableAndRowsCanBeDeleted(t *testing.T) {
 	db := openTestDB(t)
 	insertFormationUser(t, db, "user-a")
 	if _, err := db.SQL().Exec(`INSERT INTO memory_events(canonical_user_id,event_kind,idempotency_key,event_type,created_at,metadata) VALUES ('user-a','formation_audit','audit','candidate.approved',?,'content')`, formationTestTime); err != nil {
@@ -80,14 +80,8 @@ func TestFormationAuditIsAppendOnlyForActiveTenant(t *testing.T) {
 	if _, err := db.SQL().Exec(`UPDATE memory_events SET event_type = 'changed' WHERE idempotency_key = 'audit'`); err == nil {
 		t.Fatal("formation audit identity update succeeded")
 	}
-	if _, err := db.SQL().Exec(`DELETE FROM memory_events WHERE idempotency_key = 'audit'`); err == nil {
-		t.Fatal("content-bearing formation audit deletion succeeded")
-	}
-	if _, err := db.SQL().Exec(`UPDATE memory_events SET metadata = '', request_id = '', session_id = '' WHERE idempotency_key = 'audit'`); err != nil {
-		t.Fatalf("formation audit redaction failed: %v", err)
-	}
 	if _, err := db.SQL().Exec(`DELETE FROM memory_events WHERE idempotency_key = 'audit'`); err != nil {
-		t.Fatalf("content-free formation audit tombstone deletion failed: %v", err)
+		t.Fatalf("formation audit hard deletion failed: %v", err)
 	}
 }
 

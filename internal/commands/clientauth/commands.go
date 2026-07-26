@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
@@ -111,7 +111,7 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 		if err != nil {
 			return authResult("", err)
 		}
-		return commands.Result{Text: "WebSocket client revoked.", Invalidation: &privacyruntime.Event{ExternalIdentities: []string{"websocket-client:" + req.Args[1]}, CloseConnections: true}}, nil
+		return commands.Result{Text: "WebSocket client revoked.", Invalidation: &runtimeinvalidation.Event{ExternalIdentities: []string{"websocket-client:" + req.Args[1]}, CloseConnections: true}}, nil
 	default:
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}

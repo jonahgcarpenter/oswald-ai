@@ -29,7 +29,7 @@ func MergeUsersTx(ctx context.Context, tx *sql.Tx, winner, loser string) error {
 	return nil
 }
 
-// ExternalIdentitiesTx returns privacy invalidation scopes for a canonical
+// ExternalIdentitiesTx returns runtime invalidation scopes for a canonical
 // user's WebSocket linked identities and durable clients.
 func ExternalIdentitiesTx(ctx context.Context, tx *sql.Tx, userID string) ([]string, error) {
 	if tx == nil || userID == "" {

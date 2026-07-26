@@ -47,8 +47,6 @@ type FormationCandidate struct {
 	UserID              string
 	State               string
 	PublicationStatus   string
-	RedactedAt          time.Time
-	RedactionReason     string
 	UpdatedAt           time.Time
 	Scope               string
 	Category            string
@@ -100,7 +98,6 @@ const formationSourceFenceSQL = `
 			AND source.source_request_id = durable_jobs.source_request_id
 			AND source.delivered_at IS NOT NULL
 			AND source.delivery_failed_at IS NULL
-			AND source.privacy_suppressed_at IS NULL
 	)`
 
 // StoredSessionTurn identifies an exchange that was actually persisted.
@@ -242,7 +239,6 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 			AND source.session_id = durable_jobs.session_id
 			AND source.session_generation = durable_jobs.session_generation
 			AND source.delivered_at IS NOT NULL
-			AND source.privacy_suppressed_at IS NULL
 	)`,
 			job.ID, job.UserID, job.SessionID, job.SessionGeneration,
 			job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner,
@@ -548,8 +544,7 @@ func (s *Store) publishCandidateTx(ctx context.Context, tx *sql.Tx, candidate Fo
 		err = tx.QueryRowContext(ctx, `
 UPDATE memory_entries SET category = ?, statement = ?, confidence = ?, importance = ?,
 	status = 'active', status_changed_at = ?, status_reason = '', updated_at = ?, expires_at = ?, supersedes_id = ?,
-	provenance_type = ?, sensitivity = ?, hard_delete_after = NULL,
-	lifecycle_request_id = '', claim_slot = ?, claim_value = ?
+	provenance_type = ?, sensitivity = ?, claim_slot = ?, claim_value = ?
 WHERE id = ? AND canonical_user_id = ?
 RETURNING id
 `, candidate.Category, candidate.Statement, candidate.Confidence,
@@ -622,7 +617,7 @@ func (s *Store) EnqueueFormationJob(ctx context.Context, source FormationSource,
 	}
 	var storedRequestID, storedSessionID string
 	var storedGeneration int
-	if err := s.sql.QueryRowContext(ctx, `SELECT source_request_id, session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL`, source.TurnID, userID).Scan(&storedRequestID, &storedSessionID, &storedGeneration); err != nil {
+	if err := s.sql.QueryRowContext(ctx, `SELECT source_request_id, session_id, session_generation FROM session_turns WHERE id = ? AND canonical_user_id = ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL`, source.TurnID, userID).Scan(&storedRequestID, &storedSessionID, &storedGeneration); err != nil {
 		return 0, fmt.Errorf("resolve formation job source turn: %w", err)
 	}
 	if source.RequestID == "" {
@@ -671,7 +666,7 @@ func (s *Store) MarkFormationEligible(ctx context.Context, userID string, turnID
 	if err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET delivered_at = COALESCE(delivered_at, ?), delivery_failed_at = NULL WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NULL`, now, turnID, userID)
+	result, err := tx.ExecContext(ctx, `UPDATE session_turns SET delivered_at = COALESCE(delivered_at, ?), delivery_failed_at = NULL WHERE id = ? AND canonical_user_id = ?`, now, turnID, userID)
 	if err != nil {
 		return fmt.Errorf("mark turn eligible for memory formation: %w", err)
 	}
@@ -708,7 +703,7 @@ INSERT INTO durable_jobs (
 SELECT 'memory_formation', turns.canonical_user_id, 'turn:' || turns.id || ':' || ?, 'queued',
 	turns.source_request_id, turns.session_id, turns.session_generation, turns.id, ?, ?, ?, ?, ?
 FROM session_turns turns
-WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND turns.privacy_suppressed_at IS NULL
+WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL
 	AND NOT EXISTS (
 		SELECT 1 FROM durable_jobs jobs
 		WHERE jobs.job_kind = 'memory_formation' AND jobs.canonical_user_id = turns.canonical_user_id
@@ -888,11 +883,11 @@ func (s *Store) FormationJobState(ctx context.Context, userID string, jobID int6
 // SessionTurnByID reloads a source turn under canonical tenant scope.
 func (s *Store) SessionTurnByID(ctx context.Context, userID string, turnID int64) (StoredSessionTurn, error) {
 	var turn StoredSessionTurn
-	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text FROM session_turns WHERE id = ? AND canonical_user_id = ? AND privacy_suppressed_at IS NULL`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText)
+	err := s.sql.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, user_text FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turnID, userID).Scan(&turn.ID, &turn.UserID, &turn.SessionID, &turn.Generation, &turn.UserText)
 	return turn, err
 }
 
-const candidateSelect = `SELECT memory_candidates.id, memory_candidates.canonical_user_id, memory_candidates.state, memory_candidates.publication_status, memory_candidates.redacted_at, memory_candidates.redaction_reason, memory_candidates.updated_at, memory_candidates.scope, memory_candidates.category, memory_candidates.statement, memory_candidates.evidence, memory_candidates.confidence, memory_candidates.importance, memory_candidates.provenance_type, memory_candidates.sensitivity, memory_candidates.formation_mode, memory_candidates.decision_reason, COALESCE(source.source_request_id, ''), COALESCE(source.session_id, ''), COALESCE(source.session_generation, 0), COALESCE(memory_candidates.source_turn_id, 0), memory_candidates.extraction_model, memory_candidates.extractor_version, COALESCE(memory_candidates.supersedes_memory_id, 0), COALESCE((SELECT statement FROM memory_entries WHERE id = memory_candidates.supersedes_memory_id), ''), COALESCE(memory_candidates.published_memory_id, 0), memory_candidates.expires_at, memory_candidates.claim_slot, memory_candidates.claim_value FROM memory_candidates LEFT JOIN session_turns source ON source.id = memory_candidates.source_turn_id AND source.canonical_user_id = memory_candidates.canonical_user_id`
+const candidateSelect = `SELECT memory_candidates.id, memory_candidates.canonical_user_id, memory_candidates.state, memory_candidates.publication_status, memory_candidates.updated_at, memory_candidates.scope, memory_candidates.category, memory_candidates.statement, memory_candidates.evidence, memory_candidates.confidence, memory_candidates.importance, memory_candidates.provenance_type, memory_candidates.sensitivity, memory_candidates.formation_mode, memory_candidates.decision_reason, COALESCE(source.source_request_id, ''), COALESCE(source.session_id, ''), COALESCE(source.session_generation, 0), COALESCE(memory_candidates.source_turn_id, 0), memory_candidates.extraction_model, memory_candidates.extractor_version, COALESCE(memory_candidates.supersedes_memory_id, 0), COALESCE((SELECT statement FROM memory_entries WHERE id = memory_candidates.supersedes_memory_id), ''), COALESCE(memory_candidates.published_memory_id, 0), memory_candidates.expires_at, memory_candidates.claim_slot, memory_candidates.claim_value FROM memory_candidates LEFT JOIN session_turns source ON source.id = memory_candidates.source_turn_id AND source.canonical_user_id = memory_candidates.canonical_user_id`
 
 func loadCandidateByKeyTx(ctx context.Context, tx *sql.Tx, userID, key string) (FormationCandidate, error) {
 	return scanFormationCandidate(tx.QueryRowContext(ctx, candidateSelect+` WHERE memory_candidates.canonical_user_id = ? AND memory_candidates.idempotency_key = ?`, userID, key))
@@ -909,9 +904,9 @@ func loadCandidateSQL(ctx context.Context, db *sql.DB, userID string, id int64) 
 func scanFormationCandidate(row interface{ Scan(...any) error }) (FormationCandidate, error) {
 	var candidate FormationCandidate
 	var updated string
-	var expires, redacted sql.NullString
+	var expires sql.NullString
 	err := row.Scan(&candidate.ID, &candidate.UserID, &candidate.State,
-		&candidate.PublicationStatus, &redacted, &candidate.RedactionReason, &updated, &candidate.Scope, &candidate.Category,
+		&candidate.PublicationStatus, &updated, &candidate.Scope, &candidate.Category,
 		&candidate.Statement, &candidate.Evidence, &candidate.Confidence, &candidate.Importance,
 		&candidate.Provenance, &candidate.Sensitivity,
 		&candidate.FormationMode, &candidate.DecisionReason,
@@ -924,9 +919,6 @@ func scanFormationCandidate(row interface{ Scan(...any) error }) (FormationCandi
 	}
 	if expires.Valid {
 		candidate.ExpiresAt = parseTime(expires.String)
-	}
-	if redacted.Valid {
-		candidate.RedactedAt = parseTime(redacted.String)
 	}
 	candidate.UpdatedAt = parseTime(updated)
 	candidate.SourceAuthority = sourceAuthorityForProvenance(candidate.Provenance)

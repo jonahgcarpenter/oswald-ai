@@ -110,8 +110,8 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				}
 				sendErr = responder.SendCommandResponse(response)
 				deliveryAttempted = true
-				if response.Invalidation != nil && deps.PrivacyBus != nil {
-					_ = deps.PrivacyBus.Publish(*response.Invalidation)
+				if response.Invalidation != nil && deps.RuntimeInvalidationBus != nil {
+					_ = deps.RuntimeInvalidationBus.Publish(*response.Invalidation)
 				}
 				return commandErr
 			}

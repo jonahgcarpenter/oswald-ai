@@ -11,7 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
@@ -197,8 +197,8 @@ func (g *Gateway) httpClient() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second}
 }
 
-// HandlePrivacyInvalidation purges message and contact context owned by the invalidated tenant.
-func (g *Gateway) HandlePrivacyInvalidation(event privacyruntime.Event) {
+// HandleRuntimeInvalidation purges message and contact context owned by the invalidated tenant.
+func (g *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
 	sessions := make(map[string]bool, len(event.SessionIDs))
 	for _, sessionID := range event.SessionIDs {
 		sessions[sessionID] = true

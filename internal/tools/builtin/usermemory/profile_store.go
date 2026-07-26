@@ -270,7 +270,7 @@ func rebindProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memor
 	if err != nil {
 		return fmt.Errorf("encode rebound profile sources: %w", err)
 	}
-	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status IN ('deleted','expired','forgotten'))`
+	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status IN ('deleted','expired'))`
 	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now), userID, userID}
 	if memoryID > 0 {
 		condition = `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?)`

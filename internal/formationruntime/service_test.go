@@ -263,17 +263,6 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 	if err != nil || len(memories) != 1 || memories[0].ClaimValue != "tea" {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
-	page, err := store.InspectPrivacy(context.Background(), "user-1", "candidates", 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundBlocked := false
-	for _, item := range page.Items {
-		foundBlocked = foundBlocked || item.State == "approved/blocked_conflict"
-	}
-	if !foundBlocked {
-		t.Fatalf("blocked candidate missing from lifecycle inspection: %+v", page.Items)
-	}
 }
 
 func TestServiceLeavesFailedJobRetryable(t *testing.T) {

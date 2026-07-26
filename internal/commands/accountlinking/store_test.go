@@ -128,75 +128,6 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	}
 }
 
-func TestDisconnectDurablyInvalidatesRemovedIdentityAndAllSessionsAfterCloseDelay(t *testing.T) {
-	links := newTestService(t)
-	userID, _ := links.EnsureAccount("discord", "701", "Durable")
-	otherID, _ := links.EnsureAccount("websocket", "durable-local", "Durable Local")
-	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "701", Assurance: identity.AssuranceDiscordGateway}
-	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: otherID, Gateway: "websocket", ExternalID: "durable-local", Assurance: identity.AssuranceWebSocketSignedToken})
-	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "session-b", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "session-a", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
-	links.now = func() time.Time { return now }
-
-	descriptor, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "durable-local", "req-durable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(descriptor.SessionIDs, ",") != "session-a,session-b" {
-		t.Fatalf("unexpected session scope: %+v", descriptor)
-	}
-	if event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second-time.Nanosecond), time.Minute); err != nil || event != nil {
-		t.Fatalf("close invalidation became available early: event=%+v err=%v", event, err)
-	}
-	event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second), time.Minute)
-	if err != nil || event == nil {
-		t.Fatalf("claim delayed invalidation: event=%+v err=%v", event, err)
-	}
-	if event.OperationID != "disconnect:req-durable" || !event.CloseConnections || strings.Join(event.ExternalIdentities, ",") != "websocket:durable-local" || strings.Join(event.SessionIDs, ",") != "session-a,session-b" {
-		t.Fatalf("unexpected durable invalidation: %+v", event)
-	}
-}
-
-func TestDisconnectDelayedInvalidationDoesNotTargetRecreatedTenant(t *testing.T) {
-	links := newTestService(t)
-	userID, _ := links.EnsureAccount("discord", "704", "Original")
-	disconnectedID, _ := links.EnsureAccount("websocket", "recreated-local", "Original Local")
-	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "704", Assurance: identity.AssuranceDiscordGateway}
-	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: disconnectedID, Gateway: "websocket", ExternalID: "recreated-local", Assurance: identity.AssuranceWebSocketSignedToken})
-	if _, err := links.memories.ResolveSessionProfile(context.Background(), userID, "recreated-session", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
-	links.now = func() time.Time { return now }
-	descriptor, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "recreated-local", "req-recreated")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(descriptor.ExternalIdentities) != 1 || len(descriptor.SessionIDs) != 1 {
-		t.Fatalf("immediate invalidation changed: %+v", descriptor)
-	}
-
-	newUserID, err := links.EnsureAccount("websocket", "recreated-local", "New Tenant")
-	if err != nil || newUserID == userID {
-		t.Fatalf("recreate identity user=%q err=%v", newUserID, err)
-	}
-	if _, err := links.memories.ResolveSessionProfile(context.Background(), newUserID, "recreated-session", time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	event, err := links.memories.ClaimPrivacyInvalidation(context.Background(), now.Add(30*time.Second), time.Minute)
-	if err != nil || event == nil {
-		t.Fatalf("claim delayed invalidation: event=%+v err=%v", event, err)
-	}
-	if len(event.ExternalIdentities) != 0 || len(event.SessionIDs) != 0 || !event.CloseConnections {
-		t.Fatalf("delayed replay retained recreated socket/cache scope: %+v", event)
-	}
-}
-
 func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
 	links := newTestService(t)
 	userID, _ := links.EnsureAccount("discord", "702", "Owner")
@@ -216,36 +147,6 @@ func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil || len(accounts) != 2 {
 		t.Fatalf("rejected disconnect mutated accounts: accounts=%+v err=%v", accounts, err)
-	}
-}
-
-func TestDisconnectRollsBackAccountAndSpeakerIntroWhenInvalidationEnqueueFails(t *testing.T) {
-	links := newTestService(t)
-	userID, _ := links.EnsureAccount("discord", "703", "Rollback")
-	localID, _ := links.EnsureAccount("websocket", "rollback-local", "Rollback Local")
-	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "703", Assurance: identity.AssuranceDiscordGateway}
-	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "rollback-local", Assurance: identity.AssuranceWebSocketSignedToken})
-	before, err := links.memories.ReadIntro(userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	if err := links.db.WithTx(context.Background(), func(tx *sql.Tx) error {
-		return links.memories.EnqueuePrivacyInvalidationTx(context.Background(), tx, userID, "disconnect:req-conflict", []string{"websocket:different"}, nil, true, now)
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := links.DisconnectAccountAs(context.Background(), principal, "websocket", "rollback-local", "req-conflict"); err == nil || !strings.Contains(err.Error(), "idempotency payload mismatch") {
-		t.Fatalf("expected enqueue conflict, got %v", err)
-	}
-	accounts, err := links.AccountsForUser(userID)
-	if err != nil || len(accounts) != 2 {
-		t.Fatalf("rollback did not preserve accounts: accounts=%+v err=%v", accounts, err)
-	}
-	after, err := links.memories.ReadIntro(userID)
-	if err != nil || after != before {
-		t.Fatalf("rollback changed speaker intro: before=%q after=%q err=%v", before, after, err)
 	}
 }
 

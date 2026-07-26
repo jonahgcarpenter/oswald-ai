@@ -69,7 +69,7 @@ VALUES ('mcp-1', 'user', 'user-1', 'server', 'streamable_http', ?, ?, 'mcp-creat
 			if !bytes.Equal(gotURL, ciphertext) || !bytes.Equal(gotHeaders, ciphertext) {
 				t.Fatalf("MCP ciphertext changed: url=%v headers=%v", gotURL, gotHeaders)
 			}
-			for _, table := range []string{"memory_entries", "memory_candidates", "session_turns", "session_summaries", "memory_events", "durable_jobs", "derived_index_revisions", "privacy_operations", "websocket_clients", "websocket_device_authorizations", "websocket_bootstrap_state", "global_memories", "sessions"} {
+			for _, table := range []string{"memory_entries", "memory_candidates", "session_turns", "session_summaries", "memory_events", "durable_jobs", "derived_index_revisions", "websocket_clients", "websocket_device_authorizations", "websocket_bootstrap_state", "global_memories", "sessions"} {
 				var count int
 				if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 					t.Fatalf("count reset table %s: %v", table, err)

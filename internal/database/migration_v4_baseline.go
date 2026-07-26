@@ -70,14 +70,13 @@ CREATE TABLE session_turns (
 	delivered_at TEXT,
 	source_request_id TEXT NOT NULL DEFAULT '',
 	delivery_failed_at TEXT,
-	privacy_suppressed_at TEXT,
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_session_turns_session_created ON session_turns(session_id, created_at);
 CREATE INDEX idx_session_turns_user_created ON session_turns(canonical_user_id, created_at);
 CREATE INDEX idx_session_turns_context ON session_turns(canonical_user_id, session_id, session_generation, created_at DESC, id DESC);
 CREATE INDEX idx_session_turns_expiry ON session_turns(expires_at) WHERE expires_at IS NOT NULL;
-CREATE INDEX idx_session_turns_pending_delivery ON session_turns(created_at, id) WHERE delivered_at IS NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL;
+CREATE INDEX idx_session_turns_pending_delivery ON session_turns(created_at, id) WHERE delivered_at IS NULL AND delivery_failed_at IS NULL;
 CREATE UNIQUE INDEX idx_session_turns_tenant_id ON session_turns(canonical_user_id, id);
 
 CREATE TABLE mcp_servers (
@@ -104,8 +103,6 @@ CREATE TABLE memory_candidates (
 	idempotency_key TEXT NOT NULL,
 	state TEXT NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed', 'approved', 'rejected')),
 	publication_status TEXT NOT NULL DEFAULT 'none' CHECK (publication_status IN ('none', 'published', 'blocked_conflict')),
-	redacted_at TEXT,
-	redaction_reason TEXT NOT NULL DEFAULT '',
 	scope TEXT NOT NULL CHECK (scope IN ('short_term', 'long_term')),
 	category TEXT NOT NULL CHECK (category IN ('identity', 'communication_preferences', 'durable_preferences', 'projects', 'relationships', 'environment', 'notes')),
 	statement TEXT NOT NULL,
@@ -133,7 +130,7 @@ CREATE TABLE memory_candidates (
 	UNIQUE (canonical_user_id, idempotency_key),
 	UNIQUE (canonical_user_id, id),
 	CHECK ((publication_status = 'published') = (published_memory_id IS NOT NULL)),
-	CHECK (statement != '' OR evidence = ''),
+	CHECK (length(trim(statement)) > 0),
 	CHECK (publication_status != 'blocked_conflict' OR (state = 'approved' AND published_memory_id IS NULL)),
 	CHECK (state = 'approved' OR publication_status = 'none')
 );
@@ -151,7 +148,7 @@ CREATE TABLE memory_entries (
 	statement TEXT NOT NULL,
 	confidence REAL NOT NULL DEFAULT 0.8,
 	importance INTEGER NOT NULL DEFAULT 3,
-	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'superseded', 'deleted', 'forgotten')),
+	status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'expired', 'superseded', 'deleted')),
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	last_used_at TEXT,
@@ -161,8 +158,6 @@ CREATE TABLE memory_entries (
 	sensitivity TEXT NOT NULL DEFAULT 'unknown',
 	status_changed_at TEXT NOT NULL DEFAULT '',
 	status_reason TEXT NOT NULL DEFAULT '',
-	hard_delete_after TEXT,
-	lifecycle_request_id TEXT NOT NULL DEFAULT '',
 	claim_slot TEXT NOT NULL DEFAULT '',
 	claim_value TEXT NOT NULL DEFAULT '',
 	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
@@ -173,8 +168,6 @@ CREATE INDEX idx_memory_entries_user_scope_category ON memory_entries(canonical_
 CREATE INDEX idx_memory_entries_user_updated ON memory_entries(canonical_user_id, updated_at);
 CREATE INDEX idx_memory_entries_expiry ON memory_entries(expires_at, status);
 CREATE INDEX idx_memory_entries_active_serving ON memory_entries(canonical_user_id, scope, category, updated_at DESC, id DESC) WHERE status = 'active';
-CREATE INDEX idx_memory_entries_hard_delete ON memory_entries(hard_delete_after, id) WHERE hard_delete_after IS NOT NULL;
-CREATE INDEX idx_memory_entries_lifecycle_request ON memory_entries(canonical_user_id, lifecycle_request_id) WHERE lifecycle_request_id != '';
 CREATE INDEX idx_memory_entries_claim_identity ON memory_entries(canonical_user_id, scope, claim_slot, claim_value);
 CREATE INDEX idx_memory_entries_claim_slot_status ON memory_entries(canonical_user_id, scope, claim_slot, status);
 
@@ -214,7 +207,6 @@ CREATE TABLE memory_events (
 	session_id TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	metadata TEXT NOT NULL DEFAULT '',
-	redacted_at TEXT,
 	event_kind TEXT NOT NULL DEFAULT 'lifecycle' CHECK (event_kind IN ('lifecycle', 'formation_audit')),
 	idempotency_key TEXT NOT NULL DEFAULT '',
 	candidate_id INTEGER,
@@ -255,30 +247,6 @@ CREATE TABLE derived_index_revisions (
 );
 CREATE UNIQUE INDEX idx_derived_index_revisions_live_kind ON derived_index_revisions(index_kind) WHERE state = 'live';
 CREATE INDEX idx_derived_index_revisions_state ON derived_index_revisions(state, updated_at, id);
-
-CREATE TABLE privacy_operations (
-	operation_id TEXT PRIMARY KEY,
-	idempotency_key TEXT NOT NULL,
-	actor_hash TEXT NOT NULL CHECK (length(actor_hash) = 64),
-	target_user_id TEXT,
-	target_hash TEXT NOT NULL CHECK (length(target_hash) = 64),
-	operation_type TEXT NOT NULL CHECK (operation_type IN ('forget_memory', 'delete_memory', 'delete_candidate', 'delete_session', 'delete_all_memories', 'delete_user', 'export_user')),
-	target_digest TEXT NOT NULL CHECK (length(target_digest) = 64),
-	challenge_hash TEXT NOT NULL DEFAULT '',
-	challenge_expires_at TEXT,
-	status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'expired')),
-	created_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL,
-	started_at TEXT,
-	completed_at TEXT,
-	last_error_code TEXT NOT NULL DEFAULT '',
-	FOREIGN KEY (target_user_id) REFERENCES account_users(canonical_user_id) ON DELETE SET NULL,
-	UNIQUE (actor_hash, idempotency_key),
-	CHECK ((challenge_hash = '') = (challenge_expires_at IS NULL)),
-	CHECK (status NOT IN ('pending', 'running') OR target_user_id IS NOT NULL)
-);
-CREATE INDEX idx_privacy_operations_status ON privacy_operations(status, updated_at, operation_id);
-CREATE INDEX idx_privacy_operations_target ON privacy_operations(target_user_id, created_at) WHERE target_user_id IS NOT NULL;
 
 CREATE TABLE websocket_device_authorizations (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -383,7 +351,7 @@ CREATE INDEX idx_sessions_profile_source ON sessions(canonical_user_id, profile_
 
 CREATE TABLE durable_jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	job_kind TEXT NOT NULL CHECK (job_kind IN ('memory_formation', 'session_compaction', 'derived_index', 'privacy_invalidation')),
+	job_kind TEXT NOT NULL CHECK (job_kind IN ('memory_formation', 'session_compaction', 'derived_index')),
 	idempotency_key TEXT NOT NULL,
 	canonical_user_id TEXT REFERENCES account_users(canonical_user_id) ON DELETE CASCADE,
 	state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued', 'running', 'retry', 'succeeded', 'skipped', 'dead')),
@@ -405,11 +373,6 @@ CREATE TABLE durable_jobs (
 	entity_kind TEXT,
 	entity_id INTEGER,
 	operation TEXT,
-	privacy_operation_id TEXT,
-	subject_canonical_user_id TEXT,
-	external_identities TEXT,
-	session_ids TEXT,
-	close_connections INTEGER,
 	attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
 	redrive_count INTEGER NOT NULL DEFAULT 0 CHECK (redrive_count >= 0),
 	available_at TEXT NOT NULL,
@@ -421,18 +384,13 @@ CREATE TABLE durable_jobs (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	UNIQUE (job_kind, idempotency_key),
-	CHECK (
-		(job_kind = 'privacy_invalidation' AND canonical_user_id IS NULL)
-		OR (job_kind = 'derived_index' AND entity_kind = 'global_memory' AND canonical_user_id IS NULL)
-		OR (job_kind != 'privacy_invalidation' AND NOT (job_kind = 'derived_index' AND entity_kind = 'global_memory') AND canonical_user_id IS NOT NULL)
-	),
+	CHECK ((job_kind = 'derived_index' AND entity_kind = 'global_memory' AND canonical_user_id IS NULL)
+		OR (NOT (job_kind = 'derived_index' AND entity_kind = 'global_memory') AND canonical_user_id IS NOT NULL)),
 	CHECK (job_kind != 'memory_formation' OR (source_session_generation > 0 AND extractor_version != '')),
-	CHECK (job_kind NOT IN ('memory_formation', 'derived_index', 'privacy_invalidation') OR ((state = 'running' AND lease_owner != '' AND lease_until IS NOT NULL) OR (state != 'running' AND lease_owner = '' AND lease_until IS NULL))),
+	CHECK (job_kind NOT IN ('memory_formation', 'derived_index') OR ((state = 'running' AND lease_owner != '' AND lease_until IS NOT NULL) OR (state != 'running' AND lease_owner = '' AND lease_until IS NULL))),
 	CHECK (job_kind != 'session_compaction' OR (session_id IS NOT NULL AND session_generation > 0 AND covered_from_turn_id > 0 AND covered_through_turn_id >= covered_from_turn_id)),
 	CHECK (job_kind != 'session_compaction' OR attempt_count <= 3),
-	CHECK (job_kind != 'derived_index' OR (entity_kind IN ('memory', 'session_turn', 'global_memory') AND entity_id > 0 AND operation IN ('upsert', 'delete'))),
-	CHECK ((job_kind = 'privacy_invalidation') = (subject_canonical_user_id IS NOT NULL)),
-	CHECK (job_kind != 'privacy_invalidation' OR (length(trim(subject_canonical_user_id)) > 0 AND privacy_operation_id IS NOT NULL AND json_valid(external_identities) AND json_type(external_identities) = 'array' AND json_valid(session_ids) AND json_type(session_ids) = 'array' AND close_connections IN (0, 1)))
+	CHECK (job_kind != 'derived_index' OR (entity_kind IN ('memory', 'session_turn', 'global_memory') AND entity_id > 0 AND operation IN ('upsert', 'delete')))
 );
 CREATE UNIQUE INDEX idx_durable_jobs_compaction_range ON durable_jobs(canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id) WHERE job_kind = 'session_compaction';
 CREATE INDEX idx_durable_jobs_ready ON durable_jobs(job_kind, state, available_at, id);
@@ -440,7 +398,6 @@ CREATE INDEX idx_durable_jobs_tenant ON durable_jobs(canonical_user_id, job_kind
 CREATE INDEX idx_durable_jobs_session ON durable_jobs(canonical_user_id, session_id, session_generation, state, id) WHERE job_kind = 'session_compaction';
 CREATE INDEX idx_durable_jobs_source_turn ON durable_jobs(canonical_user_id, source_turn_id, id) WHERE job_kind = 'memory_formation';
 CREATE INDEX idx_durable_jobs_entity ON durable_jobs(canonical_user_id, entity_kind, entity_id, id) WHERE job_kind = 'derived_index';
-CREATE INDEX idx_durable_jobs_privacy_completed ON durable_jobs(completed_at, id) WHERE job_kind = 'privacy_invalidation' AND state = 'succeeded';
 
 CREATE TRIGGER session_summaries_range_insert
 BEFORE INSERT ON session_summaries
@@ -463,7 +420,6 @@ WHEN json_array_length(NEW.source_turn_ids) = 0
 			SELECT 1 FROM session_turns turn
 			WHERE turn.id = source.value AND turn.canonical_user_id = NEW.canonical_user_id
 				AND turn.session_id = NEW.session_id AND turn.session_generation = NEW.session_generation
-				AND turn.privacy_suppressed_at IS NULL
 		)
 	)
 BEGIN
@@ -568,34 +524,6 @@ BEGIN
 	SELECT RAISE(ABORT, 'invalid session profile memory sources');
 END;
 
-CREATE TRIGGER privacy_operations_identity_immutable
-BEFORE UPDATE ON privacy_operations
-WHEN NEW.operation_id != OLD.operation_id
-	OR NEW.idempotency_key != OLD.idempotency_key
-	OR NEW.actor_hash != OLD.actor_hash
-	OR NEW.target_hash != OLD.target_hash
-	OR NEW.operation_type != OLD.operation_type
-	OR NEW.target_digest != OLD.target_digest
-	OR NEW.created_at != OLD.created_at
-BEGIN
-	SELECT RAISE(ABORT, 'privacy operation identity is immutable');
-END;
-CREATE TRIGGER privacy_operations_no_delete
-BEFORE DELETE ON privacy_operations
-WHEN OLD.status IN ('pending', 'running')
-BEGIN
-	SELECT RAISE(ABORT, 'active privacy operation records must be retained');
-END;
-CREATE TRIGGER memory_events_redaction_timestamp
-AFTER UPDATE OF metadata, request_id, session_id ON memory_events
-WHEN NEW.redacted_at IS NULL
-	AND NEW.metadata = '' AND NEW.request_id = '' AND NEW.session_id = ''
-	AND (OLD.metadata != '' OR OLD.request_id != '' OR OLD.session_id != '')
-BEGIN
-	UPDATE memory_events
-	SET redacted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-	WHERE id = NEW.id;
-END;
 CREATE TRIGGER memory_events_formation_identity_immutable
 BEFORE UPDATE ON memory_events
 WHEN OLD.event_kind = 'formation_audit'
@@ -608,14 +536,6 @@ WHEN OLD.event_kind = 'formation_audit'
 		OR COALESCE(NEW.turn_id, 0) != COALESCE(OLD.turn_id, 0) OR NEW.created_at != OLD.created_at)
 BEGIN
 	SELECT RAISE(ABORT, 'memory formation audit identity is immutable');
-END;
-CREATE TRIGGER memory_events_formation_no_delete
-BEFORE DELETE ON memory_events
-WHEN OLD.event_kind = 'formation_audit'
-	AND EXISTS (SELECT 1 FROM account_users WHERE canonical_user_id = OLD.canonical_user_id AND lifecycle_state = 'active')
-	AND NOT (OLD.redacted_at IS NOT NULL AND OLD.metadata = '' AND OLD.request_id = '' AND OLD.session_id = '' AND OLD.actor_id = '')
-BEGIN
-	SELECT RAISE(ABORT, 'memory formation audit is append-only');
 END;
 
 CREATE TRIGGER session_turns_summary_content_update
@@ -645,7 +565,7 @@ WHEN NEW.job_kind = 'memory_formation' AND NOT EXISTS (
 		AND session_id = NEW.source_session_id
 		AND session_generation = NEW.source_session_generation
 		AND source_request_id = NEW.source_request_id
-		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL
+		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid memory formation source turn');
@@ -658,7 +578,7 @@ WHEN NEW.job_kind = 'memory_formation' AND NEW.source_turn_id IS NOT NULL AND NO
 		AND session_id = NEW.source_session_id
 		AND session_generation = NEW.source_session_generation
 		AND source_request_id = NEW.source_request_id
-		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND privacy_suppressed_at IS NULL
+		AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid memory formation source turn');
@@ -666,8 +586,8 @@ END;
 CREATE TRIGGER durable_jobs_compaction_range_insert
 BEFORE INSERT ON durable_jobs
 WHEN NEW.job_kind = 'session_compaction' AND (
-	NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_from_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation AND privacy_suppressed_at IS NULL)
-	OR NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_through_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation AND privacy_suppressed_at IS NULL)
+	NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_from_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation)
+	OR NOT EXISTS (SELECT 1 FROM session_turns WHERE id = NEW.covered_through_turn_id AND canonical_user_id = NEW.canonical_user_id AND session_id = NEW.session_id AND session_generation = NEW.session_generation)
 )
 BEGIN
 	SELECT RAISE(ABORT, 'invalid session compaction job turn range');

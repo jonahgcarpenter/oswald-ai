@@ -146,7 +146,7 @@ func TestDeleteIndexRecordCannotCrossTenant(t *testing.T) {
 	if err := store.DeleteIndexRecord(ctx, revision, memory.ID, "user-a"); err != nil {
 		t.Fatal(err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
 }
 
 func TestStalePrivateIndexWriteCannotDeleteAnotherTenantRow(t *testing.T) {
@@ -175,11 +175,11 @@ func TestStalePrivateIndexWriteCannotDeleteAnotherTenantRow(t *testing.T) {
 	if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); !errors.Is(err, ErrStaleIndexRecord) {
 		t.Fatalf("stale write error=%v", err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ? AND canonical_user_id = 'user-b'`, 1, memory.ID)
 }
 
-func TestStaleMemoryIndexWriteCannotRepublishAfterPrivacyMutation(t *testing.T) {
-	for _, mutation := range []string{"forget", "delete", "erase_user"} {
+func TestStaleMemoryIndexWriteCannotRepublishAfterHardDelete(t *testing.T) {
+	for _, mutation := range []string{"memory", "user"} {
 		t.Run(mutation, func(t *testing.T) {
 			ctx := context.Background()
 			store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
@@ -199,16 +199,14 @@ func TestStaleMemoryIndexWriteCannotRepublishAfterPrivacyMutation(t *testing.T) 
 			}
 			now := time.Now().UTC()
 			switch mutation {
-			case "forget":
-				_, err = store.ForgetMemory(ctx, "user", hashText("actor"), memory.ID, "request", now, config.RetentionPolicy{ForgottenContentGrace: time.Hour})
-			case "delete":
-				_, err = store.DeleteMemory(ctx, "user", hashText("actor"), memory.ID, "request", now)
-			case "erase_user":
+			case "memory":
+				err = store.HardDeleteMemory(ctx, "user", memory.ID, now)
+			case "user":
 				tx, beginErr := store.sql.BeginTx(ctx, nil)
 				if beginErr != nil {
 					t.Fatal(beginErr)
 				}
-				_, _, _, err = eraseUserTx(ctx, tx, "user", "", now)
+				_, err = store.DeleteUserTx(ctx, tx, "user", now)
 				if err == nil {
 					err = tx.Commit()
 				} else {
@@ -221,12 +219,12 @@ func TestStaleMemoryIndexWriteCannotRepublishAfterPrivacyMutation(t *testing.T) 
 			if err := store.WriteMemoryIndexRecord(ctx, revision, record, nil); !errors.Is(err, ErrStaleIndexRecord) {
 				t.Fatalf("write error = %v, want stale record", err)
 			}
-			assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
+			assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
 		})
 	}
 }
 
-func TestPrivacyMutationSerializesWithIndexRecheck(t *testing.T) {
+func TestHardDeleteSerializesWithIndexRecheck(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
@@ -259,12 +257,11 @@ func TestPrivacyMutationSerializesWithIndexRecheck(t *testing.T) {
 	<-rechecked
 	forgetDone := make(chan error, 1)
 	go func() {
-		_, err := store.ForgetMemory(ctx, "user", hashText("actor"), memory.ID, "request", time.Now().UTC(), config.RetentionPolicy{ForgottenContentGrace: time.Hour})
-		forgetDone <- err
+		forgetDone <- store.HardDeleteMemory(ctx, "user", memory.ID, time.Now().UTC())
 	}()
 	select {
 	case err := <-forgetDone:
-		t.Fatalf("privacy transaction did not wait for index transaction: %v", err)
+		t.Fatalf("hard-delete transaction did not wait for index transaction: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
 	close(release)
@@ -274,7 +271,7 @@ func TestPrivacyMutationSerializesWithIndexRecheck(t *testing.T) {
 	if err := <-forgetDone; err != nil {
 		t.Fatal(err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
 }
 
 func TestStaleTranscriptIndexWriteCannotRepublishDeletedSession(t *testing.T) {
@@ -301,13 +298,13 @@ func TestStaleTranscriptIndexWriteCannotRepublishDeletedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DeleteSessionPrivacy(ctx, "user", hashText("actor"), "session", "request", time.Now().UTC()); err != nil {
+	if _, err := store.HardDeleteAllUserData(ctx, "user", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.WriteTranscriptIndexRecord(ctx, revision, record); !errors.Is(err, ErrStaleIndexRecord) {
 		t.Fatalf("write error = %v, want stale record", err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, turn.ID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, turn.ID)
 }
 
 func TestMaintenanceSkipsBuildingRevision(t *testing.T) {
@@ -329,7 +326,7 @@ func TestMaintenanceSkipsBuildingRevision(t *testing.T) {
 	if counts.RowsDeleted != 0 || counts.RevisionsDegraded != 0 {
 		t.Fatalf("maintenance touched building revision: %+v", counts)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = 999`, 1)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = 999`, 1)
 	var state, code string
 	if err := store.sql.QueryRow(`SELECT state, last_error_code FROM derived_index_revisions WHERE id = ?`, revision.ID).Scan(&state, &code); err != nil {
 		t.Fatal(err)
@@ -450,7 +447,7 @@ func TestRetiredCleanupDoesNotDropMismatchedGeneratedTableIdentity(t *testing.T)
 	if err != nil || counts.TablesDropped != 0 {
 		t.Fatalf("corrupt identity cleanup counts=%+v err=%v", counts, err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, wrongTable)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, wrongTable)
 }
 
 func TestMemoryVectorValidationRejectsCorruptedCanonicalMetadata(t *testing.T) {
@@ -523,7 +520,7 @@ func TestVectorMaintenanceDeletesCorruptedCanonicalMetadata(t *testing.T) {
 	if err != nil || counts.RowsDeleted != 1 || counts.RevisionsDegraded != 1 {
 		t.Fatalf("maintenance counts=%+v err=%v", counts, err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memory.ID)
 }
 
 func TestGlobalVectorMaintenanceDeletesStaleCanonicalVersion(t *testing.T) {
@@ -559,7 +556,7 @@ func TestGlobalVectorMaintenanceDeletesStaleCanonicalVersion(t *testing.T) {
 	if err != nil || counts.RowsDeleted != 1 || counts.RevisionsDegraded != 1 {
 		t.Fatalf("maintenance counts=%+v err=%v", counts, err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memoryID)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, memoryID)
 }
 
 func TestIndexMaintenanceNeverDropsLiveAndRetainsRetiredUntilDue(t *testing.T) {
@@ -581,7 +578,7 @@ func TestIndexMaintenanceNeverDropsLiveAndRetainsRetiredUntilDue(t *testing.T) {
 	if counts, err := store.MaintainDerivedIndexes(ctx, now, time.Hour, 100); err != nil || counts.TablesDropped != 0 {
 		t.Fatalf("live cleanup counts=%+v err=%v", counts, err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, first.TableName)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, first.TableName)
 
 	second, err := store.CreateIndexRevision(ctx, IndexKindMemoryFTS, "sqlite_fts5", "", 0)
 	if err != nil {
@@ -602,14 +599,14 @@ func TestIndexMaintenanceNeverDropsLiveAndRetainsRetiredUntilDue(t *testing.T) {
 	if counts, err := store.MaintainDerivedIndexes(ctx, now, time.Hour, 100); err != nil || counts.TablesDropped != 1 {
 		t.Fatalf("due retired cleanup counts=%+v err=%v", counts, err)
 	}
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 0, first.TableName)
-	assertPrivacyCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, second.TableName)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 0, first.TableName)
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, 1, second.TableName)
 	memory, err := store.SaveMemory(ctx, "user", SaveRequest{Scope: ScopeLongTerm, Statement: "delete after retired cleanup"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DeleteMemory(ctx, "user", hashText("actor"), memory.ID, "request", now); err != nil {
-		t.Fatalf("privacy deletion consulted dropped revision table: %v", err)
+	if err := store.HardDeleteMemory(ctx, "user", memory.ID, now); err != nil {
+		t.Fatalf("hard deletion consulted dropped revision table: %v", err)
 	}
 }
 
@@ -645,6 +642,17 @@ func TestPartialLiveRevisionRemainsQueryableWhileUnhealthy(t *testing.T) {
 	results, stats := store.Recall(ctx, "user", "surviving-index", RecallRequest{TopK: 2})
 	if !errors.Is(stats.LexicalError, ErrDerivedIndexDegraded) || len(results) != 1 || results[0].Entry.ID != first.ID {
 		t.Fatalf("partial live recall results=%+v stats=%+v", results, stats)
+	}
+}
+
+func assertStoreCount(t *testing.T, db *sql.DB, query string, want int, args ...any) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(query, args...).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("row count=%d want=%d query=%s", got, want, query)
 	}
 }
 

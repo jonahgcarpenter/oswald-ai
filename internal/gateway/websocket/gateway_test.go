@@ -22,9 +22,9 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -68,7 +68,7 @@ func TestWebSocketGatewayPlainTextAndCommand(t *testing.T) {
 	}
 }
 
-func TestPrivacyInvalidationClosesOnlyMatchingWebSocketConnections(t *testing.T) {
+func TestRuntimeInvalidationClosesOnlyMatchingWebSocketConnections(t *testing.T) {
 	wg, b, _ := newWebSocketTestGateway(t)
 	defer b.Shutdown()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { wg.handleConnections(w, r, b) }))
@@ -78,7 +78,7 @@ func TestPrivacyInvalidationClosesOnlyMatchingWebSocketConnections(t *testing.T)
 	foreign := dialWebSocket(t, server.URL, wg, "foreign")
 	defer foreign.Close()
 
-	wg.HandlePrivacyInvalidation(privacyruntime.Event{ExternalIdentities: []string{"websocket:matching"}, CloseConnections: true})
+	wg.HandleRuntimeInvalidation(runtimeinvalidation.Event{ExternalIdentities: []string{"websocket:matching"}, CloseConnections: true})
 	_ = matching.SetReadDeadline(time.Now().Add(time.Second))
 	if _, _, err := matching.ReadMessage(); err == nil {
 		t.Fatal("matching websocket connection remained open")

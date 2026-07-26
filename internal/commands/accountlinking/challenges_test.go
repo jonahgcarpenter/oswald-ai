@@ -243,15 +243,6 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	if _, err := mcpStore.Save(ctx, mcp.ServerConfig{Scope: mcp.ScopeUser, OwnerUserID: loserID, Name: "home", Transport: mcp.TransportStreamableHTTP, URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true}); err != nil {
 		t.Fatalf("save loser MCP: %v", err)
 	}
-	if _, err := links.db.SQL().Exec(`
-INSERT INTO privacy_operations(operation_id, idempotency_key, actor_hash, target_user_id, target_hash, operation_type, target_digest, status, created_at, updated_at, started_at, completed_at)
-VALUES ('completed-before-merge', 'completed-before-merge', ?, ?, ?, 'export_user', ?, 'completed', datetime('now'), datetime('now'), datetime('now'), datetime('now'));
-INSERT INTO privacy_operations(operation_id, idempotency_key, actor_hash, target_user_id, target_hash, operation_type, target_digest, challenge_hash, challenge_expires_at, status, created_at, updated_at)
-VALUES ('pending-before-merge', 'pending-before-merge', ?, ?, ?, 'delete_user', ?, ?, datetime('now', '+10 minutes'), 'pending', datetime('now'), datetime('now'))`,
-		strings.Repeat("a", 64), loserID, strings.Repeat("b", 64), strings.Repeat("c", 64),
-		strings.Repeat("d", 64), loserID, strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("1", 64)); err != nil {
-		t.Fatalf("save loser privacy operations: %v", err)
-	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "401", Assurance: identity.AssuranceDiscordGateway}
 	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "ws-401", Assurance: identity.AssuranceWebSocketSignedToken}
 	connectTestAccounts(t, links, winner, loser)
@@ -270,31 +261,6 @@ VALUES ('pending-before-merge', 'pending-before-merge', ?, ?, ?, 'delete_user', 
 	contextResult, err := memories.BuildContext(ctx, winnerID, "linked-session", "before", usermemory.ContextOptions{Generation: loserProfile.Generation, RecentTurns: 10, ContextBudgetChars: 4000})
 	if err != nil || !strings.Contains(contextResult.Block, "before link") {
 		t.Fatalf("merged linked-session context=%q err=%v", contextResult.Block, err)
-	}
-	rows, err := links.db.SQL().Query(`SELECT target_user_id, status, challenge_hash FROM privacy_operations WHERE operation_id IN ('completed-before-merge', 'pending-before-merge') ORDER BY operation_id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var privacyRows int
-	for rows.Next() {
-		var target, status, challengeHash string
-		if err := rows.Scan(&target, &status, &challengeHash); err != nil {
-			t.Fatal(err)
-		}
-		privacyRows++
-		if target != winnerID {
-			t.Fatalf("merged privacy target = %q, want %q", target, winnerID)
-		}
-		if status == "pending" || status == "running" || challengeHash != "" {
-			t.Fatalf("unsafe merged privacy operation status=%q challenge=%q", status, challengeHash)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if privacyRows != 2 {
-		t.Fatalf("merged privacy row count = %d, want 2", privacyRows)
 	}
 	var loserChallengeReferences int
 	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, loserID, loserID, loserID).Scan(&loserChallengeReferences); err != nil {

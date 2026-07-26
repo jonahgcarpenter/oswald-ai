@@ -49,7 +49,7 @@ Current layers:
 21. `internal/modelinfo/` — model metadata resolution with environment overrides and safe defaults
 22. `internal/indexruntime/` - serialized derived-index outbox and shadow-revision worker
 23. `internal/maintenanceruntime/` - serialized retention, consistency, and SQLite hygiene worker
-24. `internal/privacy/` and `internal/privacyruntime/` - authenticated privacy operations and durable runtime invalidation
+24. `internal/runtimeinvalidation/` - in-process authorization and gateway-cache invalidation
 
 ## Startup Flow
 
@@ -67,20 +67,20 @@ Current layers:
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
 11. Create the command service, including `/memories`, `/client`, `/bootstrap`, and administrator global-memory management
 12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
-13. Create the privacy invalidation bus, build enabled gateways, and start the durable invalidation dispatcher
+13. Create the runtime invalidation bus and build enabled gateways
 14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
 15. Start each gateway in its own goroutine
-16. Wait for shutdown signal, stop maintenance and privacy dispatch, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
+16. Wait for shutdown signal, stop maintenance, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
 
 ### Database Baseline
 
 The unreleased v4 baseline remains checksum-frozen and disposable during development. A fresh database receives one `v4_compact_baseline` row in `schema_migration_versions`. As the sole upgrade exception, startup structurally fingerprints the exact published v3.2 schema and the exact v3.1.2-upgraded schema, optionally including their recognized sqlite-vec object family, and selectively resets either into the compact v4 baseline. Unknown or modified schemas, development ledgers, checksum drift, malformed preserved ownership, and every other non-empty ledgerless database fail closed without commit.
 
-The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mcp_servers` columns, including canonical IDs, display names, admin/ban state, and MCP ciphertext. It deletes all memory, session, global-memory, privacy, derived-index, and WebSocket authorization state, then rebuilds speaker introductions and validates preserved row counts, ownership, the exact v4 schema fingerprint, and foreign keys in the migration transaction. Operators must take a WAL-safe backup and retain the original `MCP_CONFIG_ENCRYPTION_KEY` before upgrade. Old indexes are discarded and the index worker creates fresh revisions after startup.
+The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mcp_servers` columns, including canonical IDs, display names, admin/ban state, and MCP ciphertext. It deletes all memory, session, global-memory, derived-index, and WebSocket authorization state, then rebuilds speaker introductions and validates preserved row counts, ownership, the exact v4 schema fingerprint, and foreign keys in the migration transaction. Operators must take a WAL-safe backup and retain the original `MCP_CONFIG_ENCRYPTION_KEY` before upgrade. Old indexes are discarded and the index worker creates fresh revisions after startup.
 
 Baseline creation runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table construction. `PRAGMA foreign_key_check` must pass before commit and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
-The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, standalone formation-audit table, or persisted maintenance-run history. Formation audit records are content-bearing append-only `memory_events` rows selected directly by `event_kind = 'formation_audit'`; after redaction, their content-free tombstones may be deleted when retention permits. Formation, compaction, derived-index, and privacy-invalidation work share the typed `durable_jobs` table and are isolated by `job_kind`. A partial session-turn index covers only turns with no delivery outcome so timeout recovery remains bounded. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields plus compact events. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
+The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, standalone formation-audit table, or persisted maintenance-run history. Formation audit records are `memory_events` rows selected directly by `event_kind = 'formation_audit'` and may be hard-deleted with their candidate or by retention. Formation, compaction, and derived-index work share the typed `durable_jobs` table and are isolated by `job_kind`. A partial session-turn index covers only turns with no delivery outcome so timeout recovery remains bounded. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields plus compact events. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
 
 ## Request Lifecycle
 
@@ -220,8 +220,8 @@ Oswald keeps four distinct memory layers.
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
 - Active durable memories are indexed by FTS5 and, when embeddings are configured, by sqlite-vec with canonical-user metadata filtering before KNN ranking
-- Candidate policy state is semantic and immutable after same-turn reconciliation: `proposed` means sound but below confidence `0.35`, `approved` means sound at or above that threshold, and `rejected` means unsound regardless of confidence. Compact publication status is only `none`, `published`, or `blocked_conflict`; independent redaction metadata records later content scrubbing without rewriting policy or publication history. Published memories independently use the `active`, `superseded`, `expired`, `deleted`, and `forgotten` lifecycle
-- `memory_candidates` is the one-row-per-extracted-observation evidence ledger. Published candidates link to their consolidated `memory_entries` row; evidence count, source request/session/generation, correlation, representative evidence, and authority are derived through candidate and source-turn data. `memory_entries` retains only compact serving and conflict metadata such as confidence, importance, strongest provenance, and sensitivity. Privacy deletion, forget-grace expiry, and retention may later scrub candidate content and linked source exchanges
+- Candidate policy state is semantic and immutable after same-turn reconciliation: `proposed` means sound but below confidence `0.35`, `approved` means sound at or above that threshold, and `rejected` means unsound regardless of confidence. Compact publication status is only `none`, `published`, or `blocked_conflict`. Published memories independently use the `active`, `superseded`, `expired`, and `deleted` lifecycle
+- `memory_candidates` is the one-row-per-extracted-observation evidence ledger. Published candidates link to their consolidated `memory_entries` row; evidence count, source request/session/generation, correlation, representative evidence, and authority are derived through candidate and source-turn data. `memory_entries` retains only compact serving and conflict metadata such as confidence, importance, strongest provenance, and sensitivity. Candidate and event rows are directly deleted when their memory is deleted or retention expires
 - The serialized post-delivery extractor in `internal/memoryextractor/` exposes one private `user_memory_save`-shaped schema and forces one call containing at most five candidates. This schema is not loaded into the primary tool registry. Its prompt names all required fields, includes complete and empty JSON examples, and enumerates exact dotted claim-slot namespaces. Valid siblings are evaluated independently, malformed items are dropped, an entirely malformed non-empty batch is terminally skipped as invalid output, policy-rejected candidates are retained without a corrective model call, and the first decoded batch is persisted for idempotent replay. Non-retryable provider 4xx responses remain terminally skipped
 - Formation jobs use exact-token leases of at least five minutes, extended to the provider timeout plus 30 seconds when longer, and idempotency keys. They receive up to five immediate operational attempts and at most three delayed redrives only when the stored error code is explicitly transient; these retries recover calls that did not produce a persisted extractor batch and never ask the model to correct a policy result. Foreground preemption durably defers work without consuming this retry budget. Candidate proposal, publication, and completion require a transactionally checked live lease; retry and terminal skip may release a naturally expired lease only while its exact token remains stored. Startup reconciliation backfills missing jobs only for delivered turns created during the previous 24 hours
 - Unambiguous exact first-person evidence spans from longer turns and whole-turn direct statements become active when confidence is at least `0.35`; evidence must begin with a first-person marker and express a positive, current, non-modal fact. A lexically grounded canonical statement is retained. If only that model paraphrase check fails, policy substitutes a deterministic exact-evidence wrapper while grounding direct claim values against evidence alone; competing or ambiguous facts still fail closed. Rune-safe checks include quote state and containing-sentence context without splitting common abbreviations or decimals. A positive independent evidence clause may remain eligible when surrounding text asks a question, while an interrogative evidence clause remains ineligible. Direct identity facts receive deterministic minimum importance `3`. Quoted/reported, negative, obsolete, hypothetical/conditional, third-party-centered, publicly attributed, and instruction/policy/capability-like text fails closed in every mode. User-centered relationship identity requires explicit `is named`/`name is` grammar and a compatible relationship name/identity slot. Model inference remains whole-turn-only, positive, cautious, user-centered, and lexically relevant
@@ -231,8 +231,8 @@ Oswald keeps four distinct memory layers.
 - Sensitivity is retained independently from confidence and does not trigger a conversational approval prompt. Every extracted candidate remains source-turn-fenced, requires stable `claim_slot`/`claim_value`, and corrections supersede atomically only when ordinary authority and confidence comparison permits
 - Conflicting claim values use monotonic authority and confidence: stronger evidence may supersede a weaker active claim, while weak inference cannot replace a stronger direct fact
 - Candidate insertion or same-turn reconciliation, canonical publication or reinforcement, supersession, audit history, profile advancement, and a durable derived-index outbox entry commit in one lease-fenced SQLite transaction. Successful approved proposals therefore cannot remain unpublished; FTS/vector tables are derived asynchronously rather than part of canonical publication
-- Superseded memory statement and claim content, plus evidence on candidates published to that old memory, is scrubbed after `MEMORY_CANDIDATE_CONTENT_RETENTION`; safe supersedes links are then cleared. The active replacement and its evidence remain intact. Dependency-safe content-free candidate and memory tombstones become deletable only after the later tombstone-retention window
-- `/memories forget <id>` immediately removes profile and FTS/vector serving copies and marks canonical content forgotten; maintenance scrubs that content and its linked source exchange after the configured grace period, 30 days by default
+- Inactive candidate and event history is directly hard-deleted by bounded maintenance without an intermediate retention stage
+- `/memories forget <id>` atomically hard-deletes the selected memory, its candidates and events, frozen profile references, and physical/queued derived-index state. Its source conversation remains intact and may teach the same fact again later
 - Automatic recall combines lexical and semantic relevance with confidence, importance, recency, and provenance-derived authority, then applies a measured threshold, duplicate suppression, diversity, top-K, and character caps
 - Recalled memory is JSON-quoted in an explicitly untrusted lower-authority block on the current user turn; it is never added to deployment policy or persisted into session text
 - Index and embedding failures degrade to whichever retrieval channel remains available without relaxing tenant filters or blocking the model response
@@ -242,7 +242,7 @@ Oswald keeps four distinct memory layers.
 
 ### Canonical and Derived State
 
-- Canonical account, global-memory, user-memory, profile, candidate, audit, session, summary, job, privacy, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
+- Canonical account, global-memory, user-memory, profile, candidate, audit, session, summary, job, and MCP rows live in SQLite and remain authoritative when retrieval indexing is unavailable
 - FTS5 and sqlite-vec tables are rebuildable derived revisions. Index kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`; `durable_jobs` rows with `job_kind = 'derived_index'` form the leased, idempotent canonical-mutation outbox
 - Global-memory outbox rows use `entity_kind = 'global_memory'` and a `NULL` canonical user because the records are shared. Private memory and transcript outbox rows require a canonical user and remain tenant-fenced throughout indexing and retrieval
 - Startup bootstraps valid legacy index tables as revision one, removes legacy synchronization triggers, reconciles missing outbox entries, and then polls every 30 seconds in addition to mutation wakeups
@@ -263,7 +263,7 @@ Oswald keeps four distinct memory layers.
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` creates or confirms a hashed, expiring, one-time challenge in a direct authenticated conversation
 - Confirmation atomically moves linked accounts, memories, sessions, moderation references, and re-encrypted MCP ownership before deleting the losing canonical user
-- The merge preserves consolidated session rows and their profile/generation high-water, candidates/evidence, formation and compaction jobs/audit, summaries/source links, privacy-safe events, and pending derived-index changes; loser-owned rows are verified absent before commit
+- The merge preserves consolidated session rows and their profile/generation high-water, candidates/evidence, formation and compaction jobs/audit, summaries/source links, events, and pending derived-index changes; loser-owned rows are verified absent before commit
 - The profile that creates the challenge remains the canonical winner; admin state is preserved if either profile was admin
 - Both participating external accounts are marked verified only after successful confirmation
 - `/disconnect` requires an authenticated identity and cannot remove the final account
@@ -271,35 +271,31 @@ Oswald keeps four distinct memory layers.
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
 - `/connect`, `/disconnect`, `/memories`, and `/client` work in private and group conversations and require an authenticated identity; `/bootstrap` additionally requires the active temporary bootstrap client. Group slash commands still require an Oswald mention. Sensitive command output and credentials may be visible to other group members.
 
-### Memory Commands and Erasure
+### Memory Commands and Deletion
 
-`/memories` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and works in private or group conversations. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
+`/memories` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and works in private or group conversations. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account mutation.
 
 Commands:
 
 - `/memories list` returns every active, unexpired memory as UTF-8 text attachment data containing stable ID, category, and statement. The command is not capped at the model tool's 25-memory limit; large payloads are split at UTF-8 boundaries within the shared 10-part/80 MiB command-attachment limits
-- `/memories forget <id>` immediately removes one memory from profile and retrieval serving state, marks it forgotten, and schedules canonical/source-exchange scrubbing after `MEMORY_FORGOTTEN_CONTENT_GRACE` (`720h` by default)
-- `/memories forget all` immediately and atomically scrubs every memory and candidate, linked source exchanges, profile copies, derived serving rows, and pending memory-formation work. It requires no confirmation and preserves the canonical account and unrelated sessions
+- `/memories forget <id>` immediately hard-deletes one memory, its candidates and events, profile copies, physical derived rows, and pending derived-index state. Source conversation turns and summaries remain intact
+- `/memories forget all` immediately hard-deletes all memories, candidates, events, user MCP configuration, session turns, summaries, formation/compaction work, profiles, and derived serving rows. Every session generation is reset while the canonical account, linked identities, admin/ban state, and authentication clients remain
 
 Exact IDs reject non-positive or non-decimal values. A complete list that exceeds the UTF-8-safe multipart attachment limit fails rather than returning a partial result.
 
-Exact-ID forget is not immediate hard deletion. It removes all serving copies immediately, but canonical content remains during the configured grace period and is scrubbed by maintenance when due. Forget-all is an immediate full memory-data purge and does not use that grace period. Completed operations leave only dependency-safe content-free tombstones until retention permits removal.
+Exact-ID and forget-all deletion are physical row deletions in the command transaction. SQLite uses `secure_delete=ON`; WAL files and external backups remain subject to ordinary SQLite checkpointing and operator backup retention.
 
-Every privacy mutation durably enqueues its external-identity and session invalidation scope in the same transaction. Because the outbox row's FK-backed `canonical_user_id` remains null so erasure cannot cascade the work away, a dedicated non-FK subject canonical-user fence records the original incarnation. Claim filters identities and session IDs that have since become owned by another canonical user, while retaining unowned scope for account-erasure crash recovery. The dispatcher reconciles expired leases at startup, polls every second, retries subscriber failures with bounded exponential backoff, and scrubs the outbox payload on completion while retaining the subject fence. Account-erasure close events use a short recovery delay so the command path can deliver confirmation before immediately publishing the same invalidation; a crash still dispatches the durable event afterward. Gateways discard affected reply/session caches; account erasure also closes matching authenticated connections. If the erased external identity sends a later message, normal account resolution creates a new blank canonical user rather than restoring erased state.
+Runtime invalidation is in-process and transport-neutral. Account disconnect, client revocation, user deletion, and forget-all clear matching gateway caches; authorization mutations can also close matching WebSocket connections.
 
 Retention configuration uses positive Go durations and a positive batch size:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `MEMORY_FORGOTTEN_CONTENT_GRACE` | `720h` | Delay before forgotten canonical content and its source exchange are scrubbed. |
-| `MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION` | `720h` | Retain content-bearing audit/job payloads before redaction. |
-| `MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION` | `8760h` | Retain dependency-safe content-free tombstones. |
 | `MEMORY_RETIRED_INDEX_RETENTION` | `168h` | Retain internally generated retired/failed index tables. |
 | `MEMORY_SESSION_INACTIVITY` | `24h` | Active session lifetime before expiry cleanup. |
 | `MEMORY_PENDING_DELIVERY_TIMEOUT` | `15m` | Mark a persisted turn with no delivery outcome as terminally failed so it cannot indefinitely block compaction. |
-| `MEMORY_CANDIDATE_CONTENT_RETENTION` | `720h` | Retain non-published candidate content before redaction. |
-| `MEMORY_SUCCESSFUL_JOB_RETENTION` | `168h` | Retain redacted successful/skipped formation and compaction jobs. |
-| `MEMORY_DEAD_JOB_RETENTION` | `720h` | Retain redacted dead jobs. |
+| `MEMORY_SUCCESSFUL_JOB_RETENTION` | `168h` | Retain successful/skipped formation and compaction jobs. |
+| `MEMORY_DEAD_JOB_RETENTION` | `720h` | Retain permanently failed formation and compaction jobs. |
 | `MEMORY_ACCOUNT_CHALLENGE_GRACE` | `24h` | Additional retention after account-link challenge expiry. |
 | `MEMORY_MAINTENANCE_INTERVAL` | `1h` | Serialized sweep interval after the immediate startup sweep. |
 | `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h` | Minimum interval between `PRAGMA optimize` runs. |
@@ -307,13 +303,13 @@ Retention configuration uses positive Go durations and a positive batch size:
 
 Fallback memory extraction and session-compaction model calls are always enabled and share one broker-owned low-priority permit. They run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget.
 
-Startup rejects non-positive values. Tombstone retention must be at least content-bearing retention, dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
+Startup rejects non-positive values. Dead-job retention must be at least successful-job retention, and optimize interval must be at least maintenance interval.
 
-Maintenance is serialized and runs immediately, then at `MEMORY_MAINTENANCE_INTERVAL`. It checks foreign keys before any mutation, terminally fails stale turns that still have neither delivery outcome, expires inactive sessions and short-term memory, performs bounded superseded/candidate/audit content redaction and dependency-safe tombstone deletion, prunes derived-index history while retaining live receipts, hard-deletes due forgotten content/source exchanges, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. All categories are batch-bounded and reported only as aggregate counts. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades. A genuine late successful delivery clears a timeout failure before formation and compaction eligibility is restored.
+Maintenance is serialized and runs immediately, then at `MEMORY_MAINTENANCE_INTERVAL`. It checks foreign keys before any mutation, terminally fails stale turns that still have neither delivery outcome, expires inactive sessions and short-term memory, directly deletes stale candidates, events, and terminal jobs, prunes derived-index history while retaining live receipts, removes orphan or ineligible derived rows, validates live index physical availability/corruption/exact coverage, and drops only expired internally generated retired/failed tables. All categories are batch-bounded and reported only as aggregate counts. Canonical retention commits before optional index/database hygiene and wakes the index worker even if later hygiene degrades. A genuine late successful delivery clears a timeout failure before formation and compaction eligibility is restored.
 
 SQLite opens with foreign keys and `secure_delete=ON`, WAL mode, `synchronous=NORMAL`, a 5-second busy timeout, immediate write locks, and a 1000-page WAL auto-checkpoint. Each sweep performs a passive WAL checkpoint, runs `incremental_vacuum(100)` only if SQLite is already in incremental auto-vacuum mode, and records/runs `PRAGMA optimize` when due. Maintenance logs only aggregate counts and durations.
 
-Operator backup contract: `data/database/oswald.db` is canonical, but a live file copy is not safe in WAL mode. Use SQLite's online `.backup` command, or stop Oswald and copy the database with its `-wal` and `-shm` companions. Keep the exact `MCP_CONFIG_ENCRYPTION_KEY` separately because restored MCP ciphertext requires it. Restore only while Oswald is stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before startup. External backups and log sinks are outside application privacy erasure and need independent access, retention, and deletion controls.
+Operator backup contract: `data/database/oswald.db` is canonical, but a live file copy is not safe in WAL mode. Use SQLite's online `.backup` command, or stop Oswald and copy the database with its `-wal` and `-shm` companions. Keep the exact `MCP_CONFIG_ENCRYPTION_KEY` separately because restored MCP ciphertext requires it. Restore only while Oswald is stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before startup. External backups and log sinks require independent access, retention, and deletion controls.
 
 ### Session Chat Memory
 
@@ -327,18 +323,18 @@ Operator backup contract: `data/database/oswald.db` is canonical, but a live fil
 - Incremental checkpoints summarize the previous checkpoint plus newly covered role-correct exchanges; published checkpoints and their source links are historical session artifacts, not durable user memories or operator instructions
 - When budget permits, the agent injects the latest checkpoint only as explicitly labeled untrusted historical reference data, followed by a minimum recent verbatim tail and then any additional complete `user`/`assistant` exchanges that fit
 - If the budget cannot hold all optional context, selection preserves whole exchanges, reserves the minimum recent tail before the summary, and then considers durable recall and additional history; required policy, profile, and current turn still take precedence
-- Compaction does not delete covered turns. Delivered transcripts normally remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable, except when privacy operations or forgotten-memory grace expiry scrub linked source exchanges
+- Compaction does not delete covered turns. Delivered transcripts normally remain in SQLite and the FTS5 transcript index for the active session generation so exact episodic details remain searchable, except when forget-all or account deletion resets all user data
 - `session_transcript_search` derives canonical user, session, and generation from authenticated request context and returns bounded, role-preserving complete exchanges with session, generation, turn, creation, and delivery provenance, labeled as untrusted historical records
 - Transcript search is intentionally current-session and active-generation only; it is separate from `user_memory_search`, which searches stable durable user facts
 - Before publishing a checkpoint, the same model artifact may identify source-turn-specific durable-memory candidates with full claim identity from exact user evidence. They use the same soundness and confidence policy as post-delivery extraction; approved candidates publish only under the exact live compaction lease and delivered active-generation source-turn fence
 - Recent completed exchanges newer than the latest summary boundary are replayed chronologically as complete `user`/`assistant` message pairs when budget permits, with a compact `Tools used:` annotation on the assistant message when applicable
 - Successful MCP tools from the latest four exchanges are pre-exposed on the initial model call only when they remain available to the current canonical user
-- Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and periodic maintenance at `MEMORY_MAINTENANCE_INTERVAL` remove expired artifacts, while privacy operations may remove linked source exchanges earlier
+- Each stored turn has an optional `expires_at`, but delivered transcripts and summary sources normally remain retained while their matching session generation is active; startup and periodic maintenance at `MEMORY_MAINTENANCE_INTERVAL` remove expired artifacts
 - `/reset` advances the generation, deletes that tenant session's turns, summaries, and compaction jobs, and binds the latest tenant profile; the old transcript is no longer searchable
 - Session expiry causes the next request to use a new generation, while cleanup removes inactive summaries, compaction jobs, turns, and the expired session. Generation counters are preserved so reset or expired generations are never reused
 - `sessions` is the sole physical profile/session bookkeeping table: one row is retained per canonical user/session, including inactive rows, so generation high-water is never reused
 - Each session row stores active/expiry state and its frozen profile version, renderer, digest, speaker intro, rendered snapshot, size/count metadata, profile high-water, and exact source memory IDs as a checked JSON array
-- Cleanup deletes expired generation artifacts and marks the session inactive without deleting its row; privacy memory removal recompiles and rebinds snapshots whose JSON source membership contains the removed memory
+- Cleanup deletes expired generation artifacts and marks the session inactive without deleting its row; memory deletion recompiles and rebinds snapshots whose JSON source membership contains the removed memory
 - Tool messages and intermediate reasoning are intentionally not persisted
 
 Prompt-budget behavior:
@@ -403,7 +399,7 @@ Behavior:
 - Streams typed chunks during generation, then sends a final JSON response payload
 - Supports `/client approve`, `/client approve-new`, `/client list`, and `/client revoke`; revoking a client closes its live sockets without closing sibling clients
 - A zero-user database creates a temporary administrator with a stdout-only access JWT. `/bootstrap admin <code> <display_name>` approves a distinct permanent administrator, and the temporary client is revoked when that administrator first connects
-- Account merge and privacy erasure transfer or delete client state transactionally; privacy export includes client metadata but never refresh-token hashes
+- Account merge and administrator account deletion transfer or delete client state transactionally; token hashes are never exposed through commands
 
 WebSocket image payloads use the shape:
 
@@ -810,8 +806,7 @@ Current startup requirements:
 | `internal/sessionruntime/`                     | Durable background session compaction worker |
 | `internal/indexruntime/`                       | Derived-index lifecycle worker               |
 | `internal/maintenanceruntime/`                 | Retention and SQLite maintenance worker      |
-| `internal/privacy/`                            | Authenticated privacy operation service      |
-| `internal/privacyruntime/`                     | Durable gateway/cache invalidation           |
+| `internal/runtimeinvalidation/`                | Runtime authorization/cache invalidation     |
 | `internal/mcp/manager.go`                      | MCP client bootstrap and catalog             |
 | `internal/routing/routing.go`                  | Shared gateway routing policy                |
 | `internal/routing/types.go`                    | Gateway-neutral routing types                |
@@ -888,8 +883,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
 - Only six builtin model tools ship locally; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
-- Application privacy deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
-- Privacy export delivery is capped at 10 parts of 8 MiB each (80 MiB total)
+- Application hard deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication
 - After the first successful embedding-dimension probe, the dimension is cached for the process lifetime; gateway-side route or dimension changes are not recognized until restart
 - Discord GIFV contact sheets require external `ffmpeg` and `ffprobe`; general files, audio, and video attachments remain unsupported

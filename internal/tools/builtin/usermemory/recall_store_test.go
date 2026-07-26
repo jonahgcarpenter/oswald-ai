@@ -125,11 +125,11 @@ func TestRecallRemovesInactiveVectorsBeforeKNN(t *testing.T) {
 	}
 	for i := 0; i < 40; i++ {
 		statement := fmt.Sprintf("Obsolete home city %d", i)
-		_, err = store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: statement, Evidence: "obsolete"})
-		if err != nil {
-			t.Fatal(err)
+		obsolete, saveErr := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: statement, Evidence: "obsolete"})
+		if saveErr != nil {
+			t.Fatal(saveErr)
 		}
-		if _, err := store.Forget("user-1", statement, ScopeLongTerm); err != nil {
+		if err := store.HardDeleteMemory(ctx, "user-1", obsolete.ID, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}

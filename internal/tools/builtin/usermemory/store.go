@@ -608,22 +608,6 @@ WHERE job_kind = 'derived_index' AND canonical_user_id = ?;
 		return fmt.Errorf("move merged derived index changes: %w", err)
 	}
 
-	// Preserve completed privacy history under the surviving tenant, but never
-	// allow a challenge created before the merge to authorize deletion of the
-	// winner's newly combined data.
-	if _, err := tx.ExecContext(ctx, `
-UPDATE privacy_operations
-SET target_user_id = ?,
-	status = CASE WHEN status = 'pending' THEN 'expired' WHEN status = 'running' THEN 'failed' ELSE status END,
-	challenge_hash = '', challenge_expires_at = NULL,
-	completed_at = CASE WHEN status IN ('pending', 'running') THEN COALESCE(completed_at, ?) ELSE completed_at END,
-	updated_at = CASE WHEN status IN ('pending', 'running') THEN ? ELSE updated_at END,
-	last_error_code = CASE WHEN status IN ('pending', 'running') THEN 'account_merged' ELSE last_error_code END
-WHERE target_user_id = ?;
-`, winnerID, mergeNow, mergeNow, loserID); err != nil {
-		return fmt.Errorf("move merged privacy operations: %w", err)
-	}
-
 	var remaining int
 	if err := tx.QueryRowContext(ctx, `
 SELECT SUM(row_count) FROM (
@@ -634,9 +618,8 @@ SELECT SUM(row_count) FROM (
 	UNION ALL SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM privacy_operations WHERE target_user_id = ?
 )
-`, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
+`, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
 		return fmt.Errorf("verify merged tenant ownership: %w", err)
 	}
 	if remaining != 0 {
@@ -854,92 +837,6 @@ func (s *Store) ListMemories(userID, scope, category string, limit int) ([]Memor
 	return s.Search(context.Background(), userID, scope, category, "", limit)
 }
 
-// Forget marks one or more user memories deleted.
-func (s *Store) Forget(userID, target, scope string) (int64, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return 0, fmt.Errorf("memory target is required")
-	}
-	unlock := s.lockUsers(userID)
-	defer unlock()
-	tx, err := s.sql.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin memory deletion: %w", err)
-	}
-	defer tx.Rollback() // nolint:errcheck
-	if strings.EqualFold(target, "all") {
-		now := formatTime(time.Now())
-		ids, err := memoryIDsTx(tx, `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status != 'deleted'`, userID)
-		if err != nil {
-			return 0, err
-		}
-		res, err := tx.Exec(`UPDATE memory_entries SET status = 'deleted', statement = '', claim_slot = '', claim_value = '', status_changed_at = ?, status_reason = 'user_forget', updated_at = ? WHERE canonical_user_id = ? AND status != 'deleted'`, now, now, userID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to delete memories for %q: %w", userID, err)
-		}
-		count, err := res.RowsAffected()
-		if err != nil {
-			return 0, err
-		}
-		if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
-			return 0, err
-		}
-		for _, id := range ids {
-			if err := enqueueDerivedChangeTx(context.Background(), tx, userID, "memory", id, "delete", "forget:"+now); err != nil {
-				return 0, err
-			}
-		}
-		if err := eraseForgottenFormationTx(tx, userID, true); err != nil {
-			return 0, err
-		}
-		if err := tx.Commit(); err != nil {
-			return 0, err
-		}
-		s.signalDerivedIndex()
-		return count, nil
-	}
-	now := formatTime(time.Now())
-	_, targetClaimValue := memoryformation.NormalizeClaimIdentity(memoryformation.CategoryNotes, "", "", target)
-	stmt := `UPDATE memory_entries SET status = 'deleted', statement = '', claim_slot = '', claim_value = '', status_changed_at = ?, status_reason = 'user_forget', updated_at = ? WHERE canonical_user_id = ? AND claim_value = ? AND status != 'deleted'`
-	args := []any{now, now, userID, targetClaimValue}
-	selectStmt := `SELECT id FROM memory_entries WHERE canonical_user_id = ? AND claim_value = ? AND status != 'deleted'`
-	selectArgs := []any{userID, targetClaimValue}
-	if normalizeOptionalScope(scope) != "" {
-		stmt += ` AND scope = ?`
-		args = append(args, normalizeScope(scope))
-		selectStmt += ` AND scope = ?`
-		selectArgs = append(selectArgs, normalizeScope(scope))
-	}
-	ids, err := memoryIDsTx(tx, selectStmt, selectArgs...)
-	if err != nil {
-		return 0, err
-	}
-	res, err := tx.Exec(stmt, args...)
-	if err != nil {
-		return 0, fmt.Errorf("failed to delete memory for %q: %w", userID, err)
-	}
-	count, err := res.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	if err := deleteForgottenProfileVersionsTx(tx, userID); err != nil {
-		return 0, err
-	}
-	for _, id := range ids {
-		if err := enqueueDerivedChangeTx(context.Background(), tx, userID, "memory", id, "delete", "forget:"+now); err != nil {
-			return 0, err
-		}
-	}
-	if err := eraseForgottenFormationTx(tx, userID, false); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	s.signalDerivedIndex()
-	return count, nil
-}
-
 func memoryIDsTx(tx *sql.Tx, query string, args ...any) ([]int64, error) {
 	rows, err := tx.Query(query, args...)
 	if err != nil {
@@ -955,48 +852,6 @@ func memoryIDsTx(tx *sql.Tx, query string, args ...any) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
-}
-
-func eraseForgottenFormationTx(tx *sql.Tx, userID string, eraseAll bool) error {
-	now := formatTime(time.Now().UTC())
-	if eraseAll {
-		if _, err := tx.Exec(`
-UPDATE durable_jobs SET extraction_payload = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
-UPDATE memory_candidates
-SET statement = '', claim_slot = '', claim_value = '', evidence = '', source_turn_id = NULL,
-	supersedes_memory_id = NULL, redacted_at = ?, redaction_reason = 'user_forget_all', updated_at = ?
-WHERE canonical_user_id = ?;
-`, userID, now, now, userID); err != nil {
-			return fmt.Errorf("erase all tenant memory formation content: %w", err)
-		}
-		return nil
-	}
-	if _, err := tx.Exec(`UPDATE durable_jobs
-SET extraction_payload = ''
-WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_turn_id IN (
-	SELECT source_turn_id FROM memory_candidates
-	WHERE canonical_user_id = ? AND published_memory_id IN (
-		SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
-	) AND source_turn_id IS NOT NULL
-);
-
-UPDATE memory_candidates
-SET statement = '', claim_slot = '', claim_value = '', evidence = '', source_turn_id = NULL,
-	supersedes_memory_id = NULL, redacted_at = ?, redaction_reason = 'user_forget', updated_at = ?
-WHERE canonical_user_id = ? AND published_memory_id IN (
-	SELECT id FROM memory_entries WHERE canonical_user_id = ? AND status = 'deleted'
-);
-`, userID, userID, userID, now, now, userID, userID); err != nil {
-		return fmt.Errorf("erase forgotten memory formation content: %w", err)
-	}
-	return nil
-}
-
-func deleteForgottenProfileVersionsTx(tx *sql.Tx, userID string) error {
-	if err := rebindProfileCopiesTx(context.Background(), tx, userID, 0, time.Now().UTC()); err != nil {
-		return fmt.Errorf("failed to remove forgotten profile snapshots: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) lockUsers(userIDs ...string) func() {
@@ -1132,7 +987,7 @@ func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string
 	if count > 100 {
 		count = 100
 	}
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND privacy_suppressed_at IS NULL AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
 	args := []any{userID, sessionID, formatTime(time.Now())}
 	if generation > 0 {
 		query += ` AND session_generation = ?`

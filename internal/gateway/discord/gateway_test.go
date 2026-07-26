@@ -27,9 +27,9 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -63,13 +63,13 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	}
 }
 
-func TestPrivacyInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) {
+func TestRuntimeInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) {
 	dg := &Gateway{replyIndex: map[string]replyContext{
 		"session": {SessionKey: "discord:channel:one", SenderID: "one"},
 		"sender":  {SessionKey: "discord:other:one", SenderID: "one"},
 		"foreign": {SessionKey: "discord:channel:two", SenderID: "two"},
 	}}
-	dg.HandlePrivacyInvalidation(privacyruntime.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
+	dg.HandleRuntimeInvalidation(runtimeinvalidation.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
 	if _, ok := dg.replyIndex["session"]; ok {
 		t.Fatal("matching session reply context remained")
 	}

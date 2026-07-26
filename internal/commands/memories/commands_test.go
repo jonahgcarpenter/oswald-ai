@@ -12,7 +12,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	privacyservice "github.com/jonahgcarpenter/oswald-ai/internal/privacy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -45,11 +44,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	if _, err := memory.SaveMemory(ctx, otherID, usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Category: "identity", Statement: "other tenant secret"}); err != nil {
 		t.Fatal(err)
 	}
-	service, err := privacyservice.NewService(accounts, memory, config.RetentionPolicy{ForgottenContentGrace: 30 * 24 * time.Hour}, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := handler{service: service}
+	h := handler{accounts: accounts, memory: memory}
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}
 	request := commands.Request{RequestID: "list", Principal: principal, Args: []string{"list"}}
 	for _, args := range [][]string{nil, {"list", "extra"}, {"forget"}, {"unknown"}} {
@@ -81,17 +76,17 @@ func TestMemoriesListAndForget(t *testing.T) {
 	request.RequestID = "forget-one"
 	request.Args = []string{"forget", fmt.Sprint(first.ID)}
 	result, err = h.Execute(ctx, request)
-	if err != nil || result.Invalidation == nil || result.Text != fmt.Sprintf("Memory %d was forgotten.", first.ID) {
+	if err != nil || result.Invalidation != nil || result.Text != fmt.Sprintf("Memory %d was permanently deleted.", first.ID) {
 		t.Fatalf("forget result=%+v err=%v", result, err)
 	}
 
 	request.RequestID = "forget-all"
 	request.Args = []string{"forget", "all"}
 	result, err = h.Execute(ctx, request)
-	if err != nil || result.Invalidation == nil || !strings.Contains(result.Text, "All memories") {
+	if err != nil || result.Invalidation == nil || !strings.Contains(result.Text, "All stored information") {
 		t.Fatalf("forget all result=%+v err=%v", result, err)
 	}
-	remaining, err := service.ListMemories(ctx, privacyservice.Request{Principal: principal})
+	remaining, err := memory.ListActiveMemories(ctx, userID, time.Now().UTC())
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("remaining=%+v err=%v", remaining, err)
 	}
@@ -106,7 +101,7 @@ func TestMemoriesUsageValidation(t *testing.T) {
 	if definition.Name != "memories" || definition.Usage != usage || !definition.UserExclusive {
 		t.Fatalf("definition=%+v", definition)
 	}
-	if result, err := (handler{service: nil}).Execute(context.Background(), commands.Request{}); err == nil || result.Text != "" {
+	if result, err := (handler{}).Execute(context.Background(), commands.Request{}); err == nil || result.Text != "" {
 		t.Fatalf("nil service result=%+v err=%v", result, err)
 	}
 }

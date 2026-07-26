@@ -23,8 +23,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryextractor"
 	"github.com/jonahgcarpenter/oswald-ai/internal/modelinfo"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/sessionruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
@@ -133,7 +133,7 @@ func main() {
 	indexService.Start(context.Background())
 	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, commandbuiltin.PrivacyDeps{Policy: cfg.RetentionPolicy, Logger: rootLog.Server("privacy")}, commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
@@ -158,22 +158,19 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
 	}
 
-	privacyBus := privacyruntime.NewBus()
+	runtimeInvalidationBus := runtimeinvalidation.NewBus()
 	runtimeDeps := gatewayruntime.Dependencies{
-		Commands:   commandService,
-		Access:     accountLinkService,
-		Log:        rootLog,
-		Formation:  formationService,
-		Compaction: compactionService,
-		PrivacyBus: privacyBus,
+		Commands:               commandService,
+		Access:                 accountLinkService,
+		Log:                    rootLog,
+		Formation:              formationService,
+		Compaction:             compactionService,
+		RuntimeInvalidationBus: runtimeInvalidationBus,
 	}
 	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, webSocketAuth, runtimeDeps, rootLog)
 	if err != nil {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}
-	privacyDispatcher := privacyruntime.NewService(userMemStore, privacyBus, rootLog)
-	privacyDispatcher.Start(context.Background())
-
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
@@ -217,8 +214,6 @@ func main() {
 
 	log.Info("app.shutdown", "shutting down application")
 	maintenanceService.Stop()
-	privacyDispatcher.Stop()
-
 	// Drain the broker: stop accepting new requests and wait for all in-flight
 	// Process() calls to complete before the process exits.
 	requestBroker.Shutdown()

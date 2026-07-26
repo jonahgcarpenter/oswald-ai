@@ -1,4 +1,4 @@
-package privacyruntime
+package runtimeinvalidation
 
 import (
 	"errors"

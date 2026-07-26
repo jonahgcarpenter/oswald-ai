@@ -3,7 +3,6 @@ package builtin
 import (
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -25,22 +24,19 @@ func TestNewServiceAlwaysRegistersReset(t *testing.T) {
 	t.Fatal("reset command was not registered")
 }
 
-func TestNewServiceWithPrivacyRegistersMemories(t *testing.T) {
+func TestNewServiceRegistersMemories(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
 	memory := usermemory.NewStore(path, log)
 	defer memory.Close() // nolint:errcheck
 	users := accountlinking.NewService(path, memory, nil, log)
 	defer users.Close() // nolint:errcheck
-	service, err := NewServiceWithPrivacy(users, memory, PrivacyDeps{Policy: config.RetentionPolicy{ForgottenContentGrace: 30 * 24 * time.Hour}, Logger: log})
+	service, err := NewService(users, memory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	foundMemories := false
 	for _, definition := range service.Definitions() {
-		if definition.Name == "privacy" {
-			t.Fatal("privacy command remained registered")
-		}
 		if definition.Name == "memories" {
 			foundMemories = true
 		}

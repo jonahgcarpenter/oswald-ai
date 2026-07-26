@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	privacyservice "github.com/jonahgcarpenter/oswald-ai/internal/privacy"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -18,22 +20,30 @@ const usage = "/memories list | forget <id|all>"
 
 const maxMemoryListBytes = commands.MaxTotalAttachmentBytes - (utf8.UTFMax-1)*(commands.MaxAttachments-1)
 
-type handler struct{ service *privacyservice.Service }
+type handler struct {
+	accounts *accountlinking.Service
+	memory   *usermemory.Store
+}
 
 // New creates the memories command handler.
-func New(service *privacyservice.Service) commands.Handler { return handler{service: service} }
+func New(accounts *accountlinking.Service, memory *usermemory.Store) commands.Handler {
+	return handler{accounts: accounts, memory: memory}
+}
 
 func (handler) Definition() commands.Definition {
 	return commands.Definition{Name: "memories", Summary: "List or forget your memories.", Usage: usage, UserExclusive: true}
 }
 
 func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
-	if h.service == nil {
+	if h.accounts == nil || h.memory == nil {
 		return commands.Result{}, fmt.Errorf("memory service is unavailable")
 	}
-	serviceReq := privacyservice.Request{RequestID: req.RequestID, Principal: req.Principal, SessionKey: req.SessionKey}
 	if len(req.Args) == 1 && req.Args[0] == "list" {
-		memories, err := h.service.ListMemories(ctx, serviceReq)
+		userID, err := h.resolveUser(req)
+		if err != nil {
+			return commands.Result{}, err
+		}
+		memories, err := h.memory.ListActiveMemories(ctx, userID, time.Now().UTC())
 		if err != nil {
 			return commands.Result{}, err
 		}
@@ -43,21 +53,47 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 		return commands.Result{Text: commands.UsageText(h.Definition())}, nil
 	}
 	if strings.EqualFold(req.Args[1], "all") {
-		if err := h.service.DeleteAllMemories(ctx, serviceReq); err != nil {
+		var sessionIDs []string
+		if err := h.accounts.RunAuthenticatedCanonicalMutation(req.Principal, func(userID string) error {
+			if userID != req.Principal.CanonicalUserID {
+				return accountlinking.ErrPrincipalMismatch
+			}
+			var err error
+			sessionIDs, err = h.memory.HardDeleteAllUserData(ctx, userID, time.Now().UTC())
+			return err
+		}); err != nil {
 			return commands.Result{}, err
 		}
-		return h.invalidatingResult(ctx, serviceReq, "All memories and memory source data were forgotten.")
+		h.accounts.UserDataResetCommitted(req.Principal.CanonicalUserID)
+		return commands.Result{Text: "All stored information was permanently deleted. Your account was preserved and your sessions were reset.", Invalidation: &runtimeinvalidation.Event{SessionIDs: sessionIDs}}, nil
 	}
-	id, err := usermemory.ParsePrivacyID(req.Args[1])
+	id, err := usermemory.ParseMemoryID(req.Args[1])
 	if err != nil {
 		return commands.Result{Text: "ID must be an exact positive decimal stable ID, or all."}, nil
 	}
-	if _, err := h.service.ForgetMemory(ctx, serviceReq, id); errors.Is(err, sql.ErrNoRows) {
+	err = h.accounts.RunAuthenticatedCanonicalMutation(req.Principal, func(userID string) error {
+		if userID != req.Principal.CanonicalUserID {
+			return accountlinking.ErrPrincipalMismatch
+		}
+		return h.memory.HardDeleteMemory(ctx, userID, id, time.Now().UTC())
+	})
+	if errors.Is(err, sql.ErrNoRows) {
 		return commands.Result{Text: "Memory " + req.Args[1] + " was not found."}, nil
 	} else if err != nil {
 		return commands.Result{}, err
 	}
-	return h.invalidatingResult(ctx, serviceReq, "Memory "+req.Args[1]+" was forgotten.")
+	return commands.Result{Text: "Memory " + req.Args[1] + " was permanently deleted."}, nil
+}
+
+func (h handler) resolveUser(req commands.Request) (string, error) {
+	userID, err := h.accounts.ResolvePrincipal(req.Principal)
+	if err != nil {
+		return "", err
+	}
+	if userID != req.Principal.CanonicalUserID {
+		return "", accountlinking.ErrPrincipalMismatch
+	}
+	return userID, nil
 }
 
 func listResult(memories []usermemory.ListedMemory) (commands.Result, error) {
@@ -115,12 +151,4 @@ func splitUTF8(data []byte, limit int) [][]byte {
 		data = data[end:]
 	}
 	return append(parts, data)
-}
-
-func (h handler) invalidatingResult(ctx context.Context, req privacyservice.Request, text string) (commands.Result, error) {
-	event, err := h.service.Invalidation(ctx, req, nil)
-	if err != nil {
-		return commands.Result{}, err
-	}
-	return commands.Result{Text: text, Invalidation: &event}, nil
 }

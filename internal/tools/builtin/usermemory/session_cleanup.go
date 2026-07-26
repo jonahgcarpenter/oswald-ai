@@ -29,9 +29,8 @@ type SessionCleaner interface {
 // session row as the generation high-water record.
 func (s *Store) CleanupExpiredSessions(ctx context.Context, now time.Time) (SessionCleanupCounts, error) {
 	return s.cleanupExpiredSessions(ctx, now, config.RetentionPolicy{
-		CandidateContentRetention: 30 * 24 * time.Hour,
-		SuccessfulJobRetention:    7 * 24 * time.Hour,
-		DeadJobRetention:          30 * 24 * time.Hour,
+		SuccessfulJobRetention: 7 * 24 * time.Hour,
+		DeadJobRetention:       30 * 24 * time.Hour,
 	}, false)
 }
 
@@ -79,54 +78,17 @@ WHERE id IN (SELECT id FROM memory_entries WHERE status = 'active' AND expires_a
 			return counts, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE durable_jobs
-SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL
-WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND source_turn_id IN (
-	SELECT source_turn_id FROM memory_candidates
-	WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
-		AND source_turn_id IS NOT NULL
-) AND (extraction_payload != '' OR source_request_id != '' OR source_session_id != '' OR source_turn_id IS NOT NULL) ORDER BY id LIMIT ?);
-UPDATE memory_candidates
-SET statement = '', claim_slot = '', claim_value = '', evidence = '',
-	source_turn_id = NULL, extraction_model = '', redacted_at = ?, redaction_reason = 'published_memory_expired', updated_at = ?
-WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IN (SELECT id FROM memory_entries WHERE status = 'expired')
-	AND (statement != '' OR evidence != '' OR source_turn_id IS NOT NULL OR extraction_model != '') ORDER BY id LIMIT ?);
-`, batch, nowText, nowText, batch); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("erase expired published memory provenance: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (
-		SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id
-		WHERE jobs.job_kind = 'memory_formation' AND candidate.publication_status != 'published'
-			AND ((candidate.expires_at IS NOT NULL AND candidate.expires_at <= ?) OR candidate.created_at <= ?)
-			AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL)
-		ORDER BY jobs.id LIMIT ?)`, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("erase expiring candidate formation artifacts: %w", err)
-	}
-	result, err = tx.ExecContext(ctx, `
-UPDATE memory_candidates
-SET statement = '', claim_slot = '', claim_value = '', evidence = '',
-	source_turn_id = NULL, extraction_model = '',
-	redacted_at = ?, redaction_reason = 'candidate_retention_expired', updated_at = ?
-WHERE publication_status != 'published'
-	AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
-	AND id IN (SELECT id FROM memory_candidates WHERE publication_status != 'published' AND redacted_at IS NULL AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?)
-		AND (statement != '' OR evidence != '' OR source_turn_id IS NOT NULL OR extraction_model != '') ORDER BY id LIMIT ?)
-`, nowText, nowText, nowText, formatTime(now.Add(-policy.CandidateContentRetention)), nowText, formatTime(now.Add(-policy.CandidateContentRetention)), batch)
+	result, err = tx.ExecContext(ctx, `DELETE FROM memory_candidates WHERE id IN (SELECT id FROM memory_candidates WHERE publication_status != 'published' AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?) ORDER BY id LIMIT ?)`, nowText, formatTime(now.Add(-policy.DeadJobRetention)), batch)
 	if err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("erase expired memory candidates: %w", err)
+		return SessionCleanupCounts{}, fmt.Errorf("delete expired memory candidates: %w", err)
 	}
 	if counts.CandidatesErased, err = result.RowsAffected(); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("count erased memory candidates: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '', source_turn_id = NULL WHERE job_kind = 'memory_formation' AND id IN (SELECT jobs.id FROM durable_jobs jobs JOIN memory_candidates candidate ON candidate.source_turn_id = jobs.source_turn_id AND candidate.canonical_user_id = jobs.canonical_user_id WHERE jobs.job_kind = 'memory_formation' AND candidate.redacted_at IS NOT NULL AND (jobs.extraction_payload != '' OR jobs.source_request_id != '' OR jobs.source_session_id != '' OR jobs.source_turn_id IS NOT NULL) ORDER BY jobs.id LIMIT ?)`, batch); err != nil {
-		return SessionCleanupCounts{}, fmt.Errorf("erase retained formation artifacts: %w", err)
+		return SessionCleanupCounts{}, fmt.Errorf("count deleted memory candidates: %w", err)
 	}
 	result, err = tx.ExecContext(ctx, `
 DELETE FROM durable_jobs
 WHERE job_kind = 'memory_formation' AND id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND ((state IN ('succeeded', 'skipped') AND completed_at <= ?)
 	OR (state = 'dead' AND completed_at <= ?))
-	AND extraction_payload = '' AND source_request_id = '' AND source_session_id = '' AND source_turn_id IS NULL
 	ORDER BY id LIMIT ?)
 `, formatTime(now.Add(-policy.SuccessfulJobRetention)), formatTime(now.Add(-policy.DeadJobRetention)), batch)
 	if err != nil {

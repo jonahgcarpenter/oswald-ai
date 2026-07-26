@@ -8,7 +8,7 @@ import (
 	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
@@ -91,7 +91,7 @@ type Result struct {
 	Text         string
 	Attachment   *Attachment
 	Attachments  []Attachment
-	Invalidation *privacyruntime.Event `json:"-"`
+	Invalidation *runtimeinvalidation.Event `json:"-"`
 }
 
 // OrderedAttachments returns the attachments in delivery order. Attachments is
@@ -168,7 +168,7 @@ func (h HandlerFunc) Execute(ctx context.Context, req Request) (Result, error) {
 	return h.ExecuteFunc(ctx, req)
 }
 
-// ResolveFenceTargets resolves optional command-specific privacy fences.
+// ResolveFenceTargets resolves optional command-specific mutation fences.
 func (h HandlerFunc) ResolveFenceTargets(ctx context.Context, req Request) ([]string, error) {
 	if h.ResolveFenceTargetsFunc == nil {
 		return nil, nil

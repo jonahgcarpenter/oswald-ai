@@ -36,7 +36,7 @@ func (f *countingMemoryEmbedder) Embed(_ context.Context, req llm.EmbedRequest) 
 	return &llm.EmbedResponse{Embeddings: [][]float64{{0, 1}}}, nil
 }
 
-func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
+func TestStoreSaveSearchAndHardDeleteMemory(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "usr_test")
@@ -65,23 +65,21 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 		t.Fatalf("expected purple memory, got %+v", entries)
 	}
 
-	deleted, err := store.Forget("usr_test", "The user likes purple.", ScopeLongTerm)
-	if err != nil {
+	if err := store.HardDeleteMemory(context.Background(), "usr_test", entry.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if deleted != 1 {
-		t.Fatalf("expected one deleted row, got %d", deleted)
-	}
-	var erasedStatement, erasedEvidence string
-	if err := store.sql.QueryRow(`SELECT memory.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.published_memory_id = memory.id LIMIT 1), '') FROM memory_entries memory WHERE memory.id = ?`, entry.ID).Scan(&erasedStatement, &erasedEvidence); err != nil {
+	var memoryCount, candidateCount, ftsCount int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE id = ?`, entry.ID).Scan(&memoryCount); err != nil {
 		t.Fatal(err)
 	}
-	var ftsCount int
-	if err := store.sql.QueryRow(`SELECT count(*) FROM `+liveFTS.TableName+` WHERE rowid = ?`, entry.ID).Scan(&ftsCount); err != nil {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, entry.ID).Scan(&candidateCount); err != nil {
 		t.Fatal(err)
 	}
-	if erasedStatement != "" || erasedEvidence != "" || ftsCount != 1 {
-		t.Fatalf("forgotten content retained: statement=%q evidence=%q fts=%d", erasedStatement, erasedEvidence, ftsCount)
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM `+liveFTS.TableName+` WHERE rowid = ?`, entry.ID).Scan(&ftsCount); err != nil {
+		t.Fatal(err)
+	}
+	if memoryCount != 0 || candidateCount != 0 || ftsCount != 0 {
+		t.Fatalf("hard-deleted content retained: memory=%d candidates=%d fts=%d", memoryCount, candidateCount, ftsCount)
 	}
 	staleResults, staleStats := store.Recall(context.Background(), "usr_test", "purple", RecallRequest{TopK: 5})
 	if staleStats.LexicalError != nil || len(staleResults) != 0 {
@@ -96,7 +94,7 @@ func TestStoreSaveSearchAndForgetMemory(t *testing.T) {
 	}
 }
 
-func TestSaveMemoryAppendsObservationInsteadOfRelinkingRedactedCandidate(t *testing.T) {
+func TestSaveMemoryCreatesNewObservationAfterHardDelete(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
@@ -107,7 +105,7 @@ func TestSaveMemoryAppendsObservationInsteadOfRelinkingRedactedCandidate(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.DeleteMemory(ctx, "user", hashText("actor"), first.ID, "delete-first", time.Now().UTC()); err != nil {
+	if err := store.HardDeleteMemory(ctx, "user", first.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	second, err := store.SaveMemory(ctx, "user", request)
@@ -115,58 +113,26 @@ func TestSaveMemoryAppendsObservationInsteadOfRelinkingRedactedCandidate(t *test
 		t.Fatal(err)
 	}
 	if second.ID == first.ID {
-		t.Fatal("privacy-deleted memory was unexpectedly reused")
+		t.Fatal("hard-deleted memory was unexpectedly reused")
 	}
-
-	rows, err := store.sql.Query(`SELECT idempotency_key, publication_status, published_memory_id, redacted_at, scope, category, statement, evidence, confidence, importance FROM memory_candidates WHERE canonical_user_id = 'user' ORDER BY id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	type observation struct {
-		key, publication, scope, category, statement, evidence string
-		memoryID                                               int64
-		redacted                                               sql.NullString
-		confidence                                             float64
-		importance                                             int
-	}
-	var observations []observation
-	for rows.Next() {
-		var item observation
-		if err := rows.Scan(&item.key, &item.publication, &item.memoryID, &item.redacted, &item.scope, &item.category, &item.statement, &item.evidence, &item.confidence, &item.importance); err != nil {
-			t.Fatal(err)
-		}
-		observations = append(observations, item)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if len(observations) != 2 {
-		t.Fatalf("observation count = %d, want 2: %+v", len(observations), observations)
-	}
-	old, fresh := observations[0], observations[1]
-	if old.key == fresh.key || old.memoryID != first.ID || !old.redacted.Valid || old.statement != "" || old.evidence != "" {
-		t.Fatalf("redacted observation was mutated or relinked: %+v", old)
-	}
-	if fresh.memoryID != second.ID || fresh.publication != "published" || fresh.redacted.Valid || fresh.scope != request.Scope || fresh.category != request.Category || fresh.statement != request.Statement || fresh.evidence != request.Evidence || fresh.confidence != request.Confidence || fresh.importance != request.Importance {
-		t.Fatalf("fresh observation metadata mismatch: %+v", fresh)
+	var observations int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = 'user' AND published_memory_id = ?`, second.ID).Scan(&observations); err != nil || observations != 1 {
+		t.Fatalf("fresh observation count=%d err=%v", observations, err)
 	}
 }
 
-func TestSaveMemoryDoesNotReactivateForgottenMemory(t *testing.T) {
+func TestSaveMemoryDoesNotReuseHardDeletedMemory(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
 
 	request := SaveRequest{Scope: ScopeLongTerm, Category: "notes", Statement: "The user keeps a private journal.", Evidence: "original evidence"}
-	forgotten, err := store.SaveMemory(ctx, "user", request)
+	deleted, err := store.SaveMemory(ctx, "user", request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	policy := config.RetentionPolicy{ForgottenContentGrace: time.Hour}
-	if _, err := store.ForgetMemory(ctx, "user", hashText("actor"), forgotten.ID, "forget-request", now, policy); err != nil {
+	if err := store.HardDeleteMemory(ctx, "user", deleted.ID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -174,15 +140,12 @@ func TestSaveMemoryDoesNotReactivateForgottenMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.ID == forgotten.ID || fresh.Status != StatusActive {
-		t.Fatalf("fresh memory=%+v forgotten=%+v", fresh, forgotten)
+	if fresh.ID == deleted.ID || fresh.Status != StatusActive {
+		t.Fatalf("fresh memory=%+v deleted=%+v", fresh, deleted)
 	}
-	var status, hardDeleteAfter, lifecycleRequestID string
-	if err := store.sql.QueryRow(`SELECT status, hard_delete_after, lifecycle_request_id FROM memory_entries WHERE id = ?`, forgotten.ID).Scan(&status, &hardDeleteAfter, &lifecycleRequestID); err != nil {
-		t.Fatal(err)
-	}
-	if status != "forgotten" || hardDeleteAfter != formatTime(now.Add(policy.ForgottenContentGrace)) || lifecycleRequestID != "forget-request" {
-		t.Fatalf("forgotten lifecycle changed: status=%q hard_delete_after=%q request=%q", status, hardDeleteAfter, lifecycleRequestID)
+	var oldCount int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_entries WHERE id = ?`, deleted.ID).Scan(&oldCount); err != nil || oldCount != 0 {
+		t.Fatalf("deleted memory count=%d err=%v", oldCount, err)
 	}
 }
 

@@ -8,13 +8,9 @@ import (
 )
 
 var retentionEnvKeys = []string{
-	"MEMORY_FORGOTTEN_CONTENT_GRACE",
-	"MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION",
-	"MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION",
 	"MEMORY_RETIRED_INDEX_RETENTION",
 	"MEMORY_SESSION_INACTIVITY",
 	"MEMORY_PENDING_DELIVERY_TIMEOUT",
-	"MEMORY_CANDIDATE_CONTENT_RETENTION",
 	"MEMORY_SUCCESSFUL_JOB_RETENTION",
 	"MEMORY_DEAD_JOB_RETENTION",
 	"MEMORY_ACCOUNT_CHALLENGE_GRACE",
@@ -100,19 +96,15 @@ func TestLoadRetentionPolicyDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := RetentionPolicy{
-		ForgottenContentGrace:           720 * time.Hour,
-		ContentBearingAuditJobRetention: 720 * time.Hour,
-		ContentFreeTombstoneRetention:   8760 * time.Hour,
-		RetiredIndexRetention:           168 * time.Hour,
-		SessionInactivity:               24 * time.Hour,
-		PendingDeliveryTimeout:          15 * time.Minute,
-		CandidateContentRetention:       720 * time.Hour,
-		SuccessfulJobRetention:          168 * time.Hour,
-		DeadJobRetention:                720 * time.Hour,
-		AccountChallengeGrace:           24 * time.Hour,
-		MaintenanceInterval:             time.Hour,
-		DatabaseOptimizeInterval:        24 * time.Hour,
-		BatchSize:                       100,
+		RetiredIndexRetention:    168 * time.Hour,
+		SessionInactivity:        24 * time.Hour,
+		PendingDeliveryTimeout:   15 * time.Minute,
+		SuccessfulJobRetention:   168 * time.Hour,
+		DeadJobRetention:         720 * time.Hour,
+		AccountChallengeGrace:    24 * time.Hour,
+		MaintenanceInterval:      time.Hour,
+		DatabaseOptimizeInterval: 24 * time.Hour,
+		BatchSize:                100,
 	}
 	if cfg.RetentionPolicy != want {
 		t.Fatalf("RetentionPolicy = %+v, want %+v", cfg.RetentionPolicy, want)
@@ -122,19 +114,15 @@ func TestLoadRetentionPolicyDefaults(t *testing.T) {
 func TestLoadRetentionPolicyOverrides(t *testing.T) {
 	unsetRetentionEnv(t)
 	overrides := map[string]string{
-		"MEMORY_FORGOTTEN_CONTENT_GRACE":             "1h",
-		"MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION": "2h",
-		"MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION":    "3h",
-		"MEMORY_RETIRED_INDEX_RETENTION":             "4h",
-		"MEMORY_SESSION_INACTIVITY":                  "5h",
-		"MEMORY_PENDING_DELIVERY_TIMEOUT":            "6h",
-		"MEMORY_CANDIDATE_CONTENT_RETENTION":         "7h",
-		"MEMORY_SUCCESSFUL_JOB_RETENTION":            "8h",
-		"MEMORY_DEAD_JOB_RETENTION":                  "9h",
-		"MEMORY_ACCOUNT_CHALLENGE_GRACE":             "10h",
-		"MEMORY_MAINTENANCE_INTERVAL":                "11h",
-		"MEMORY_DATABASE_OPTIMIZE_INTERVAL":          "12h",
-		"MEMORY_MAINTENANCE_BATCH_SIZE":              "12",
+		"MEMORY_RETIRED_INDEX_RETENTION":    "4h",
+		"MEMORY_SESSION_INACTIVITY":         "5h",
+		"MEMORY_PENDING_DELIVERY_TIMEOUT":   "6h",
+		"MEMORY_SUCCESSFUL_JOB_RETENTION":   "8h",
+		"MEMORY_DEAD_JOB_RETENTION":         "9h",
+		"MEMORY_ACCOUNT_CHALLENGE_GRACE":    "10h",
+		"MEMORY_MAINTENANCE_INTERVAL":       "11h",
+		"MEMORY_DATABASE_OPTIMIZE_INTERVAL": "12h",
+		"MEMORY_MAINTENANCE_BATCH_SIZE":     "12",
 	}
 	for key, value := range overrides {
 		t.Setenv(key, value)
@@ -145,19 +133,15 @@ func TestLoadRetentionPolicyOverrides(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := RetentionPolicy{
-		ForgottenContentGrace:           time.Hour,
-		ContentBearingAuditJobRetention: 2 * time.Hour,
-		ContentFreeTombstoneRetention:   3 * time.Hour,
-		RetiredIndexRetention:           4 * time.Hour,
-		SessionInactivity:               5 * time.Hour,
-		PendingDeliveryTimeout:          6 * time.Hour,
-		CandidateContentRetention:       7 * time.Hour,
-		SuccessfulJobRetention:          8 * time.Hour,
-		DeadJobRetention:                9 * time.Hour,
-		AccountChallengeGrace:           10 * time.Hour,
-		MaintenanceInterval:             11 * time.Hour,
-		DatabaseOptimizeInterval:        12 * time.Hour,
-		BatchSize:                       12,
+		RetiredIndexRetention:    4 * time.Hour,
+		SessionInactivity:        5 * time.Hour,
+		PendingDeliveryTimeout:   6 * time.Hour,
+		SuccessfulJobRetention:   8 * time.Hour,
+		DeadJobRetention:         9 * time.Hour,
+		AccountChallengeGrace:    10 * time.Hour,
+		MaintenanceInterval:      11 * time.Hour,
+		DatabaseOptimizeInterval: 12 * time.Hour,
+		BatchSize:                12,
 	}
 	if cfg.RetentionPolicy != want {
 		t.Fatalf("RetentionPolicy = %+v, want %+v", cfg.RetentionPolicy, want)
@@ -170,10 +154,10 @@ func TestLoadRejectsInvalidRetentionValues(t *testing.T) {
 		key   string
 		value string
 	}{
-		{name: "empty duration", key: "MEMORY_FORGOTTEN_CONTENT_GRACE", value: ""},
+		{name: "empty duration", key: "MEMORY_RETIRED_INDEX_RETENTION", value: ""},
 		{name: "malformed duration", key: "MEMORY_SESSION_INACTIVITY", value: "tomorrow"},
 		{name: "zero pending delivery timeout", key: "MEMORY_PENDING_DELIVERY_TIMEOUT", value: "0s"},
-		{name: "zero duration", key: "MEMORY_CANDIDATE_CONTENT_RETENTION", value: "0s"},
+		{name: "zero duration", key: "MEMORY_SUCCESSFUL_JOB_RETENTION", value: "0s"},
 		{name: "negative duration", key: "MEMORY_MAINTENANCE_INTERVAL", value: "-1h"},
 		{name: "empty integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: ""},
 		{name: "malformed integer", key: "MEMORY_MAINTENANCE_BATCH_SIZE", value: "many"},
@@ -197,14 +181,6 @@ func TestLoadRejectsInvalidRetentionRelationships(t *testing.T) {
 		overrides map[string]string
 		wantKey   string
 	}{
-		{
-			name: "tombstone shorter than content",
-			overrides: map[string]string{
-				"MEMORY_CONTENT_BEARING_AUDIT_JOB_RETENTION": "2h",
-				"MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION":    "1h",
-			},
-			wantKey: "MEMORY_CONTENT_FREE_TOMBSTONE_RETENTION",
-		},
 		{
 			name: "dead job shorter than successful job",
 			overrides: map[string]string{

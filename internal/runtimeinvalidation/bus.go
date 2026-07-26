@@ -1,19 +1,19 @@
-// Package privacyruntime distributes transport-neutral runtime invalidations.
-package privacyruntime
+// Package runtimeinvalidation distributes transport-neutral runtime invalidations.
+package runtimeinvalidation
 
 import (
 	"errors"
 	"sync"
 )
 
-// Event identifies runtime state that must be discarded after a privacy mutation.
+// Event identifies runtime state that must be discarded after a security mutation.
 type Event struct {
 	ExternalIdentities []string
 	SessionIDs         []string
 	CloseConnections   bool
 }
 
-// Bus synchronously publishes privacy invalidations to runtime subscribers.
+// Bus synchronously publishes runtime invalidations to subscribers.
 type Bus struct {
 	mu          sync.RWMutex
 	nextID      uint64

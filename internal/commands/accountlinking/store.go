@@ -156,7 +156,7 @@ func (s *Service) ResolveAccount(gateway, identifier string) (string, bool, erro
 // canonical owner. The canonical ID carried by principal is intentionally ignored.
 func (s *Service) ResolvePrincipal(principal identity.Principal) (string, error) {
 	if !principal.Valid() || !principal.Authenticated() {
-		return "", fmt.Errorf("privacy operation requires an authenticated identity")
+		return "", fmt.Errorf("operation requires an authenticated identity")
 	}
 	owner, found, err := s.ResolveAccount(principal.Gateway, principal.ExternalID)
 	if err != nil {
@@ -168,12 +168,12 @@ func (s *Service) ResolvePrincipal(principal identity.Principal) (string, error)
 	return owner, nil
 }
 
-// RunAuthenticatedUserMutation serializes a privacy mutation with account
+// RunAuthenticatedCanonicalMutation serializes an authenticated mutation with account
 // creation, linking, merging, and display-name updates while re-resolving the
 // external identity under the same account graph lock.
-func (s *Service) RunAuthenticatedUserMutation(principal identity.Principal, fn func(string) error) error {
+func (s *Service) RunAuthenticatedCanonicalMutation(principal identity.Principal, fn func(string) error) error {
 	if !principal.Valid() || !principal.Authenticated() {
-		return fmt.Errorf("privacy operation requires an authenticated identity")
+		return fmt.Errorf("operation requires an authenticated identity")
 	}
 	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
 	if err != nil {
@@ -192,8 +192,8 @@ func (s *Service) RunAuthenticatedUserMutation(principal identity.Principal, fn 
 	return fn(owner)
 }
 
-// UserErasureCommitted invalidates runtime state after a committed self-erasure.
-func (s *Service) UserErasureCommitted(canonicalUserID string) {
+// UserDataResetCommitted clears runtime state for deleted user-owned MCP configuration.
+func (s *Service) UserDataResetCommitted(canonicalUserID string) {
 	if s.mcp != nil {
 		s.mcp.UserDeleteCommitted(canonicalUserID)
 	}
@@ -488,52 +488,44 @@ func (s *Service) deleteUser(actorID, targetID string) error {
 
 // DeleteUserAs deletes a user after atomically re-resolving the authenticated actor.
 func (s *Service) DeleteUserAs(principal identity.Principal, targetID string) error {
-	_, err := s.DeleteUserAsWithInvalidation(principal, targetID)
+	_, err := s.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
 	return err
 }
 
-// DeleteUserAsWithInvalidation deletes a user and returns its pre-erasure runtime scope.
-func (s *Service) DeleteUserAsWithInvalidation(principal identity.Principal, targetID string) (ErasureDescriptor, error) {
-	return s.DeleteUserAsWithDurableInvalidation(principal, targetID, "admin-delete:"+targetID+":"+time.Now().UTC().Format(time.RFC3339Nano))
-}
-
-// DeleteUserAsWithDurableInvalidation deletes a user and durably queues its runtime scope.
-func (s *Service) DeleteUserAsWithDurableInvalidation(principal identity.Principal, targetID, operationID string) (ErasureDescriptor, error) {
-	if strings.TrimSpace(operationID) == "" {
-		operationID = "admin-delete:" + strings.TrimSpace(targetID) + ":" + time.Now().UTC().Format(time.RFC3339Nano)
-	}
+// DeleteUserAsWithRuntimeInvalidation deletes a user and returns its runtime scope.
+func (s *Service) DeleteUserAsWithRuntimeInvalidation(principal identity.Principal, targetID string) (UserDeletionDescriptor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.loadLocked()
 	if err != nil {
-		return ErasureDescriptor{}, err
+		return UserDeletionDescriptor{}, err
 	}
 	actorID, err := authenticatedAdminActor(data, principal)
 	if err != nil {
-		return ErasureDescriptor{}, err
+		return UserDeletionDescriptor{}, err
 	}
-	return s.deleteUserLockedWithInvalidation(data, actorID, strings.TrimSpace(targetID), operationID)
+	return s.deleteUserLockedWithInvalidation(data, actorID, strings.TrimSpace(targetID))
 }
 
 func (s *Service) deleteUserLocked(data fileData, actorID, targetID string) error {
-	_, err := s.deleteUserLockedWithInvalidation(data, actorID, targetID, "admin-delete:"+targetID+":"+time.Now().UTC().Format(time.RFC3339Nano))
+	_, err := s.deleteUserLockedWithInvalidation(data, actorID, targetID)
 	return err
 }
 
-func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targetID, operationID string) (ErasureDescriptor, error) {
+func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targetID string) (UserDeletionDescriptor, error) {
 	if targetID == "" {
-		return ErasureDescriptor{}, fmt.Errorf("canonical user ID cannot be empty")
+		return UserDeletionDescriptor{}, fmt.Errorf("canonical user ID cannot be empty")
 	}
 	if actorID == targetID {
-		return ErasureDescriptor{}, fmt.Errorf("cannot delete yourself")
+		return UserDeletionDescriptor{}, fmt.Errorf("cannot delete yourself")
 	}
 	user, ok := data.Users[targetID]
 	if !ok {
-		return ErasureDescriptor{}, fmt.Errorf("canonical user %q not found", targetID)
+		return UserDeletionDescriptor{}, fmt.Errorf("canonical user %q not found", targetID)
 	}
 
 	ctx := context.Background()
-	var invalidation usermemory.UserErasureInvalidation
+	var invalidation usermemory.UserDeletionScope
 	if err := s.db.WithTx(ctx, func(tx *sql.Tx) error {
 		if s.mcp != nil {
 			if err := s.mcp.DeleteUserTx(ctx, tx, targetID); err != nil {
@@ -541,17 +533,17 @@ func (s *Service) deleteUserLockedWithInvalidation(data fileData, actorID, targe
 			}
 		}
 		var err error
-		invalidation, err = s.memories.EraseUserWithInvalidationTx(ctx, tx, targetID, operationID, time.Now().UTC())
+		invalidation, err = s.memories.DeleteUserTx(ctx, tx, targetID, time.Now().UTC())
 		return err
 	}); err != nil {
-		return ErasureDescriptor{}, err
+		return UserDeletionDescriptor{}, err
 	}
 	if s.mcp != nil {
 		s.mcp.UserDeleteCommitted(targetID)
 	}
 
 	s.log.Info("account_link.user.deleted", "deleted user", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("account_count", len(user.Accounts)), config.F("status", "ok"))
-	return ErasureDescriptor{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs}, nil
+	return UserDeletionDescriptor{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs}, nil
 }
 
 func authenticatedAdminActor(data fileData, principal identity.Principal) (string, error) {
@@ -688,7 +680,7 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 		if err := sessionRows.Err(); err != nil {
 			return err
 		}
-		return s.memories.EnqueuePrivacyInvalidationTx(ctx, tx, canonicalUserID, "disconnect:"+requestID, descriptor.ExternalIdentities, descriptor.SessionIDs, true, now)
+		return nil
 	})
 	if err != nil {
 		return DisconnectDescriptor{}, err

@@ -28,8 +28,8 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, au
 			Log:     log,
 		},
 	}
-	if runtimeDeps.PrivacyBus != nil {
-		runtimeDeps.PrivacyBus.Subscribe(services[0].(*localws.Gateway).HandlePrivacyInvalidation)
+	if runtimeDeps.RuntimeInvalidationBus != nil {
+		runtimeDeps.RuntimeInvalidationBus.Subscribe(services[0].(*localws.Gateway).HandleRuntimeInvalidation)
 	}
 
 	if cfg.DiscordToken != "" {
@@ -40,8 +40,8 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, au
 			Log:     log,
 		}
 		services = append(services, discordGateway)
-		if runtimeDeps.PrivacyBus != nil {
-			runtimeDeps.PrivacyBus.Subscribe(discordGateway.HandlePrivacyInvalidation)
+		if runtimeDeps.RuntimeInvalidationBus != nil {
+			runtimeDeps.RuntimeInvalidationBus.Subscribe(discordGateway.HandleRuntimeInvalidation)
 		}
 	}
 
@@ -56,8 +56,8 @@ func NewServicesFromConfig(cfg *config.Config, links *accountlinking.Service, au
 			Log:                 log,
 		}
 		services = append(services, iMessageGateway)
-		if runtimeDeps.PrivacyBus != nil {
-			runtimeDeps.PrivacyBus.Subscribe(iMessageGateway.HandlePrivacyInvalidation)
+		if runtimeDeps.RuntimeInvalidationBus != nil {
+			runtimeDeps.RuntimeInvalidationBus.Subscribe(iMessageGateway.HandleRuntimeInvalidation)
 		}
 	}
 

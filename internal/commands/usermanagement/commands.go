@@ -8,7 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const bannedMessage = "You are banned from using Oswald."
@@ -78,7 +78,7 @@ func (h *handler) Execute(_ context.Context, req commands.Request) (commands.Res
 	case "ban":
 		return h.handleBan(req.Principal, req.Args)
 	case "deleteuser":
-		return h.handleDeleteUser(req.Principal, req.RequestID, req.Args)
+		return h.handleDeleteUser(req.Principal, req.Args)
 	case "unban":
 		return h.handleUnban(req.Principal, req.Args)
 	default:
@@ -158,16 +158,16 @@ func (h *handler) handleUnban(principal identity.Principal, args []string) (comm
 	return commands.Result{Text: fmt.Sprintf("Unbanned %s.", targetID)}, nil
 }
 
-func (h *handler) handleDeleteUser(principal identity.Principal, requestID string, args []string) (commands.Result, error) {
+func (h *handler) handleDeleteUser(principal identity.Principal, args []string) (commands.Result, error) {
 	if len(args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil
 	}
 	targetID := strings.TrimSpace(args[0])
-	invalidation, err := h.users.DeleteUserAsWithDurableInvalidation(principal, targetID, requestID)
+	invalidation, err := h.users.DeleteUserAsWithRuntimeInvalidation(principal, targetID)
 	if err != nil {
 		return commands.Result{Text: fmt.Sprintf("Could not delete user: %v", err)}, nil
 	}
-	event := privacyruntime.Event{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs, CloseConnections: true}
+	event := runtimeinvalidation.Event{ExternalIdentities: invalidation.ExternalIdentities, SessionIDs: invalidation.SessionIDs, CloseConnections: true}
 	return commands.Result{Text: fmt.Sprintf("Deleted %s.", targetID), Invalidation: &event}, nil
 }
 

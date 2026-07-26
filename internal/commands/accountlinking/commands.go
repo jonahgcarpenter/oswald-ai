@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/privacyruntime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 type handler struct {
@@ -143,7 +143,7 @@ func (h *handler) handleDisconnect(ctx context.Context, req commands.Request) (c
 		return commands.Result{}, err
 	}
 	message := fmt.Sprintf("Disconnected %s: %s.\n\nRemaining linked accounts:\n%s", gatewayLabel(account.Gateway), account.Identifier, renderLinkedAccounts(remaining))
-	return commands.Result{Text: message, Invalidation: &privacyruntime.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}}, nil
+	return commands.Result{Text: message, Invalidation: &runtimeinvalidation.Event{ExternalIdentities: descriptor.ExternalIdentities, SessionIDs: descriptor.SessionIDs, CloseConnections: true}}, nil
 }
 
 func (h *handler) startDisconnect(canonicalUserID string) (commands.Result, error) {
