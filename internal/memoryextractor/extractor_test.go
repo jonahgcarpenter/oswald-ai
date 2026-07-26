@@ -23,6 +23,17 @@ func TestUserMemorySaveToolMatchesBatchContract(t *testing.T) {
 	if importance.Minimum == nil || importance.Maximum == nil || *importance.Minimum != 1 || *importance.Maximum != 5 {
 		t.Fatalf("private importance schema=%+v", importance)
 	}
+	for field, bounds := range map[string][2]float64{"confidence": {0, 1}, "ttl_days": {0, 30}} {
+		property := memories.Items.Properties[field]
+		if property.Minimum == nil || property.Maximum == nil || *property.Minimum != bounds[0] || *property.Maximum != bounds[1] {
+			t.Fatalf("private %s schema=%+v", field, property)
+		}
+	}
+	for _, field := range usermemory.MemorySaveRequiredFields() {
+		if _, ok := memories.Items.Properties[field]; !ok {
+			t.Fatalf("private schema missing %q", field)
+		}
+	}
 }
 
 func TestNewLLMExtractorValidatesDependencies(t *testing.T) {
@@ -44,26 +55,36 @@ func TestLLMExtractorParsesStrictJSON(t *testing.T) {
 	if len(client.request.Tools) != 1 || client.request.ToolChoice == nil || client.request.ToolChoice.Function.Name != userMemorySaveToolName {
 		t.Fatalf("request did not force the private memory save tool: %+v", client.request)
 	}
-	for _, required := range []string{"smallest unambiguous exact quote", "Inference evidence must be the complete user turn", "stable category-compatible dotted claim slots", "identity.name, never identity_name", "positive independent first-person assertion", "integer from 1 to 5"} {
+	for _, required := range []string{"all 13 fields", "Evidence must be the complete user turn", "identity -> identity.*", "identity.name, never identity_name", "topic mention does not establish", "importance must be an integer from 1 to 5", `"category":"communication_preferences"`, `"claim_slot":"communication.reply_style"`, `{"memories":[]}`} {
 		if !strings.Contains(client.request.Messages[0].Content, required) {
 			t.Fatalf("extractor policy prompt missing %q", required)
 		}
 	}
 }
 
-func TestLLMExtractorDiscardsMalformedCandidate(t *testing.T) {
+func TestLLMExtractorRejectsAllMalformedCandidates(t *testing.T) {
 	malformed := validCandidate()
 	delete(malformed, "claim_slot")
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed}}}
 	got, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got.Memories) != 0 || client.calls != 1 {
+	if !errors.Is(err, ErrPermanentExtraction) || len(got.Memories) != 0 || client.calls != 1 || !strings.Contains(err.Error(), "all 1 submitted candidates were malformed") {
 		t.Fatalf("extracted=%+v calls=%d err=%v", got, client.calls, err)
+	}
+}
+
+func TestLLMExtractorRejectsCandidateMissingCategory(t *testing.T) {
+	malformed := validCandidate()
+	delete(malformed, "category")
+	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed}}}
+	_, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "My name is Jonah"})
+	if !errors.Is(err, ErrPermanentExtraction) || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("error=%v", err)
 	}
 }
 
 func TestLLMExtractorPreservesValidCandidatesBesideMalformedCandidates(t *testing.T) {
 	malformed := validCandidate()
-	delete(malformed, "claim_value")
+	delete(malformed, "category")
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed, validCandidate()}}}
 	got, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
 	if err != nil || len(got.Memories) != 1 || got.Memories[0].Statement != "The user uses Go." {

@@ -14,6 +14,16 @@ import (
 
 const maxExtractedMemoryBatch = 5
 
+var memorySaveRequiredFields = []string{
+	"statement", "evidence", "scope", "category", "context", "provenance", "sensitivity",
+	"confidence", "importance", "ttl_days", "supersedes", "claim_slot", "claim_value",
+}
+
+// MemorySaveRequiredFields returns the complete private extraction item contract.
+func MemorySaveRequiredFields() []string {
+	return append([]string(nil), memorySaveRequiredFields...)
+}
+
 // MemorySaveItem is the untrusted candidate shape used by background extraction.
 type MemorySaveItem struct {
 	InputIndex  int     `json:"-"`
@@ -84,6 +94,23 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("encode item: %w", err)})
 			continue
 		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil || fields == nil {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("item must be an object")})
+			continue
+		}
+		missing := ""
+		for _, field := range memorySaveRequiredFields {
+			value, ok := fields[field]
+			if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				missing = field
+				break
+			}
+		}
+		if missing != "" {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("%s is required", missing)})
+			continue
+		}
 		decoder := json.NewDecoder(bytes.NewReader(encoded))
 		decoder.DisallowUnknownFields()
 		var item MemorySaveItem
@@ -95,14 +122,32 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("trailing JSON")})
 			continue
 		}
-		if strings.TrimSpace(item.Statement) == "" || strings.TrimSpace(item.Evidence) == "" || strings.TrimSpace(item.ClaimSlot) == "" || strings.TrimSpace(item.ClaimValue) == "" {
-			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("statement, evidence, claim_slot, and claim_value are required")})
+		if strings.TrimSpace(item.Statement) == "" || strings.TrimSpace(item.Evidence) == "" || strings.TrimSpace(item.Scope) == "" || strings.TrimSpace(item.Category) == "" || strings.TrimSpace(item.Context) == "" || strings.TrimSpace(item.Provenance) == "" || strings.TrimSpace(item.Sensitivity) == "" || strings.TrimSpace(item.ClaimSlot) == "" || strings.TrimSpace(item.ClaimValue) == "" {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("required string fields except supersedes must be non-empty")})
+			continue
+		}
+		if item.Confidence < 0 || item.Confidence > 1 || item.Importance < 1 || item.Importance > 5 || item.TTLDays < 0 || item.TTLDays > 30 {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("confidence, importance, or ttl_days is outside the schema range")})
 			continue
 		}
 		item.InputIndex = index
 		batch.Memories = append(batch.Memories, item)
 	}
 	return batch, itemErrors, nil
+}
+
+// DecodeMemorySaveBatchJSON strictly decodes a persisted extraction artifact.
+func DecodeMemorySaveBatchJSON(data []byte) (MemorySaveBatch, []MemorySaveItemError, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var arguments map[string]interface{}
+	if err := decoder.Decode(&arguments); err != nil {
+		return MemorySaveBatch{}, nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return MemorySaveBatch{}, nil, fmt.Errorf("trailing JSON")
+	}
+	return DecodeMemorySaveBatch(arguments)
 }
 
 // SubmitMemorySaveBatch evaluates and atomically applies each item independently.

@@ -181,8 +181,13 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		return artifactErr
 	}
 	if artifact != "" {
-		if err := json.Unmarshal([]byte(artifact), &extracted); err != nil {
-			return fmt.Errorf("decode persisted memory formation artifact: %w", err)
+		var itemErrors []usermemory.MemorySaveItemError
+		extracted, itemErrors, err = usermemory.DecodeMemorySaveBatchJSON([]byte(artifact))
+		if err != nil {
+			return errors.Join(errPermanentExtraction, fmt.Errorf("decode persisted memory formation artifact: %w", err))
+		}
+		if len(itemErrors) > 0 && len(extracted.Memories) == 0 {
+			return errors.Join(errPermanentExtraction, fmt.Errorf("decode persisted memory formation artifact: all %d candidates were malformed", len(itemErrors)))
 		}
 	} else if s.extractor != nil {
 		extractParent := ctx

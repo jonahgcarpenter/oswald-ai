@@ -343,7 +343,7 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 	}
 }
 
-func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
+func TestServiceSkipsAllMalformedCandidatesWithoutRetry(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0", "req")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
@@ -354,7 +354,27 @@ func TestServiceCompletesMalformedCandidateArtifactWithoutRetry(t *testing.T) {
 	}
 	service.drain(context.Background())
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
-	if err != nil || state != "succeeded" || client.calls != 1 {
+	if err != nil || state != "skipped" || client.calls != 1 {
+		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+}
+
+func TestServiceSkipsCandidateMissingCategoryWithoutRetry(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "My name is Jonah", "missing-category")
+	client := &fakeExtractionChatter{content: `{"memories":[{"statement":"The user's name is Jonah.","evidence":"My name is Jonah","scope":"long_term","context":"direct_assertion","provenance":"user_statement","sensitivity":"identity_or_contact","confidence":1,"importance":5,"ttl_days":0,"supersedes":"","claim_slot":"identity.name","claim_value":"Jonah"}]}`}
+	service := NewService(store, newTestLLMExtractor(t, client), "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "missing-category", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "skipped" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -383,7 +403,7 @@ func TestServiceDoesNotRetryPolicyRejectedCandidate(t *testing.T) {
 	}
 }
 
-func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandidate(t *testing.T) {
+func TestServiceDropsMalformedPersistedArtifactBesideValidCandidate(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "I use Go.", "mixed-artifact")
 	source := usermemory.FormationSource{RequestID: "mixed-artifact", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}
@@ -394,7 +414,7 @@ func TestServiceDropsMissingClaimIdentityFromPersistedArtifactBesideValidCandida
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := `{"memories":[{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"claim_slot":"project.language","claim_value":"go"}]}`
+	artifact := `{"memories":[{"statement":"Malformed sibling.","evidence":"I use Go.","scope":"long_term","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.language","claim_value":"go"},{"statement":"The user uses Go.","evidence":"I use Go.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.language","claim_value":"go"}]}`
 	if err := store.SaveFormationJobArtifact(context.Background(), job, artifact); err != nil {
 		t.Fatal(err)
 	}
