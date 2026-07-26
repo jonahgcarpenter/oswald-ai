@@ -152,7 +152,7 @@ func (s *Service) ensureFTS(ctx context.Context, kind string) {
 	}
 	if err != nil {
 		_ = s.store.FailIndexRevision(ctx, revision.ID, err.Error())
-		s.health("index.rebuild.failed", revision, 0, 0, "failed", time.Since(started), err)
+		s.health("index.rebuild.failed", revision, 0, 0, "degraded", time.Since(started), err)
 		return
 	}
 	live, _ := s.store.LiveIndexRevision(ctx, kind)
@@ -200,7 +200,7 @@ func (s *Service) ensureVector(ctx context.Context, kind string) {
 	}
 	if err != nil {
 		_ = s.store.FailIndexRevision(ctx, revision.ID, err.Error())
-		s.health("index.rebuild.failed", revision, 0, 0, "failed", time.Since(started), err)
+		s.health("index.rebuild.failed", revision, 0, 0, "degraded", time.Since(started), err)
 		return
 	}
 	live, _ = s.store.LiveIndexRevision(ctx, kind)

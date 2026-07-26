@@ -403,8 +403,8 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 		if attempt == maxImageModelAttempts {
 			log.Error("agent.model.image_retry_exhausted", "model runner stopped after resized image retries",
 				config.F("attempt_count", attempt), config.F("image_count", imageCount),
-				config.F("status", "error"), config.F("original_error", firstErr.Error()),
-				config.F("last_error", err.Error()))
+				config.F("status", "error"), config.F("original_error", config.SafeErrorText(firstErr)),
+				config.F("last_error", config.SafeErrorText(err)))
 			return nil, err, true
 		}
 		log.Warn("agent.model.image_retry", "retrying model call with smaller images",
@@ -923,7 +923,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		config.F("thinking_chars", len(finalThinking)),
 		config.F("tool_call_count", toolExecutionCount),
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
-		config.F("tool_failure_budget_exhausted", toolFailureBudgetExhausted),
+		config.F("is_tool_failure_budget_exhausted", toolFailureBudgetExhausted),
 		config.F("status", responseStatus),
 	)
 

@@ -18,7 +18,7 @@ type schemaMigration struct {
 
 func orderedMigrations() []schemaMigration {
 	return []schemaMigration{
-		{version: 1, name: "v4_compact_baseline", definition: compactV4BaselineDefinition, apply: applyCompactV4Baseline},
+		{version: 1, name: "v4_compact_baseline", definition: compactV4MigrationDefinition, apply: applyCompactV4Baseline},
 	}
 }
 
@@ -65,7 +65,14 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 		return fmt.Errorf("inspect existing database schema: %w", err)
 	}
 	if ledgerExists == 0 && schemaObjectCount != 0 {
-		return fmt.Errorf("database predates the disposable v4 baseline; reset the development database")
+		matched, err := resetPublishedV3(ctx, conn, registry)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return fmt.Errorf("database predates the disposable v4 baseline; reset the development database")
+		}
+		ledgerExists = 1
 	}
 	if ledgerExists != 0 {
 		if err := validateFrozenV4Ledger(ctx, conn, registry); err != nil {
