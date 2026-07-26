@@ -484,7 +484,7 @@ func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := privacy.Request{RequestID: "forget", Principal: issue80Principal(userID, "actor"), IsDirect: true, SessionKey: "session"}
+	req := privacy.Request{RequestID: "forget", Principal: issue80Principal(userID, "actor"), SessionKey: "session"}
 	before := time.Now().UTC()
 	state, err := privacyService.ForgetMemory(context.Background(), req, memory.ID)
 	if err != nil || state != "forgotten" {
@@ -785,7 +785,7 @@ func issue80SetAdmin(t *testing.T, path, userID string) {
 
 func issue80Command(t *testing.T, service *commands.Service, principal identity.Principal, raw string) string {
 	t.Helper()
-	result, err := service.Execute(context.Background(), commands.Request{RequestID: "issue80-command", Principal: principal, IsDirect: true, Raw: raw})
+	result, err := service.Execute(context.Background(), commands.Request{RequestID: "issue80-command", Principal: principal, Raw: raw})
 	if err != nil {
 		t.Fatal(err)
 	}

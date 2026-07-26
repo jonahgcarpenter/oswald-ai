@@ -18,7 +18,6 @@ const (
 
 // Input is the gateway-neutral representation of an inbound user message.
 type Input struct {
-	IsDirect           bool
 	IsGroup            bool
 	IsMention          bool
 	IsReplyToBot       bool

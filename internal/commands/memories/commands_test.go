@@ -51,7 +51,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	}
 	h := handler{service: service}
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}
-	request := commands.Request{RequestID: "list", Principal: principal, IsDirect: true, Args: []string{"list"}}
+	request := commands.Request{RequestID: "list", Principal: principal, Args: []string{"list"}}
 	for _, args := range [][]string{nil, {"list", "extra"}, {"forget"}, {"unknown"}} {
 		invalid := request
 		invalid.Args = args
@@ -64,11 +64,6 @@ func TestMemoriesListAndForget(t *testing.T) {
 	invalidID.Args = []string{"forget", "01"}
 	if result, err := h.Execute(ctx, invalidID); err != nil || !strings.Contains(result.Text, "exact positive decimal") {
 		t.Fatalf("invalid ID result=%+v err=%v", result, err)
-	}
-	group := request
-	group.IsDirect = false
-	if _, err := h.Execute(ctx, group); err == nil || !strings.Contains(err.Error(), "direct conversation") {
-		t.Fatalf("group list err=%v", err)
 	}
 	result, err := h.Execute(ctx, request)
 	if err != nil {
@@ -96,7 +91,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	if err != nil || result.Invalidation == nil || !strings.Contains(result.Text, "All memories") {
 		t.Fatalf("forget all result=%+v err=%v", result, err)
 	}
-	remaining, err := service.ListMemories(ctx, privacyservice.Request{Principal: principal, IsDirect: true})
+	remaining, err := service.ListMemories(ctx, privacyservice.Request{Principal: principal})
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("remaining=%+v err=%v", remaining, err)
 	}
@@ -106,7 +101,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 	}
 }
 
-func TestMemoriesUsageValidationAndDirectRequirement(t *testing.T) {
+func TestMemoriesUsageValidation(t *testing.T) {
 	definition := (handler{}).Definition()
 	if definition.Name != "memories" || definition.Usage != usage || !definition.UserExclusive {
 		t.Fatalf("definition=%+v", definition)

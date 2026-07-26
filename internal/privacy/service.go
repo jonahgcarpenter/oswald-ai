@@ -24,11 +24,10 @@ const challengeTTL = 10 * time.Minute
 
 var codeEncoding = base32.NewEncoding("0123456789ABCDEFGHJKMNPQRSTVWXYZ").WithPadding(base32.NoPadding)
 
-// Request contains transport facts that cannot be inferred from the principal.
+// Request contains operation context that cannot be inferred from the principal.
 type Request struct {
 	RequestID  string
 	Principal  identity.Principal
-	IsDirect   bool
 	SessionKey string
 }
 
@@ -346,9 +345,6 @@ func (s *Service) begin(ctx context.Context, req Request, operation string) (Cha
 }
 
 func (s *Service) authorize(req Request) (string, string, error) {
-	if !req.IsDirect {
-		return "", "", fmt.Errorf("memory commands require a direct conversation")
-	}
 	if !req.Principal.Valid() || !req.Principal.Authenticated() {
 		return "", "", fmt.Errorf("memory commands require an authenticated identity")
 	}

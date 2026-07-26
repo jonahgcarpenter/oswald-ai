@@ -43,12 +43,18 @@ func TestClientCommandsApproveAndRevoke(t *testing.T) {
 	service := &fakeService{clients: []websocketauth.Client{{ClientID: "other_client", ClientName: "Laptop"}}}
 	handler := New(service, fakeAuthorizer(true))
 	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "subject", Assurance: identity.AssuranceWebSocketSignedToken}
-	if _, err := handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"approve", "ABCD-EFGH"}, Principal: principal, IsDirect: true}); err != nil || service.approvedCode != "ABCD-EFGH" {
+	if _, err := handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"approve", "ABCD-EFGH"}, Principal: principal}); err != nil || service.approvedCode != "ABCD-EFGH" {
 		t.Fatalf("approve result: code=%q err=%v", service.approvedCode, err)
 	}
-	result, err := handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"revoke", "other_client"}, Principal: principal, ClientID: "current_client", IsDirect: true})
+	result, err := handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"revoke", "other_client"}, Principal: principal, ClientID: "current_client"})
 	if err != nil || service.revokedClient != "other_client" || result.Invalidation == nil || result.Invalidation.ExternalIdentities[0] != "websocket-client:other_client" {
 		t.Fatalf("revoke result: result=%+v client=%q err=%v", result, service.revokedClient, err)
+	}
+	unauthenticated := principal
+	unauthenticated.Assurance = identity.AssuranceSelfAsserted
+	result, err = handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"list"}, Principal: unauthenticated})
+	if err != nil || result.Text != "This command requires an authenticated identity." {
+		t.Fatalf("unauthenticated result=%+v err=%v", result, err)
 	}
 }
 
@@ -56,7 +62,7 @@ func TestBootstrapCommandRequiresTemporaryClient(t *testing.T) {
 	service := &fakeService{}
 	handler := NewBootstrap(service)
 	principal := identity.Principal{CanonicalUserID: "bootstrap_user", Gateway: "websocket", ExternalID: "subject", Assurance: identity.AssuranceWebSocketSignedToken}
-	result, err := handler.Execute(context.Background(), commands.Request{Name: "bootstrap", Args: []string{"admin", "ABCD-EFGH", "Permanent", "Admin"}, Principal: principal, ClientID: "bootstrap_client", IsDirect: true})
+	result, err := handler.Execute(context.Background(), commands.Request{Name: "bootstrap", Args: []string{"admin", "ABCD-EFGH", "Permanent", "Admin"}, Principal: principal, ClientID: "bootstrap_client"})
 	if err != nil || service.bootstrapCode != "ABCD-EFGH" || result.Text == "" {
 		t.Fatalf("bootstrap result=%+v code=%q err=%v", result, service.bootstrapCode, err)
 	}

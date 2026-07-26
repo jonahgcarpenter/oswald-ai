@@ -48,8 +48,8 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if h.service == nil {
 		return commands.Result{}, fmt.Errorf("websocket client authorization is unavailable")
 	}
-	if !req.Principal.Authenticated() || !req.IsDirect || req.IsGroup {
-		return commands.Result{Text: "Use this command in an authenticated direct conversation with Oswald."}, nil
+	if !req.Principal.Authenticated() {
+		return commands.Result{Text: "This command requires an authenticated identity."}, nil
 	}
 	if req.Name == "bootstrap" {
 		return h.bootstrap(ctx, req)

@@ -112,7 +112,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 		t.Fatalf("unexpected disconnect menu: %q", response)
 	}
 
-	result, err := service.Execute(context.Background(), commands.Request{Principal: confirmer, IsDirect: true, Raw: "/disconnect 2", RequestID: "req_disconnect"})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: confirmer, Raw: "/disconnect 2", RequestID: "req_disconnect"})
 	if err != nil {
 		t.Fatalf("disconnect err=%v", err)
 	}
@@ -250,7 +250,7 @@ func TestDisconnectRollsBackAccountAndSpeakerIntroWhenInvalidationEnqueueFails(t
 }
 
 func executeAccountCommand(service *commands.Service, principal identity.Principal, raw string) (string, error) {
-	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, IsDirect: true, Raw: raw, RequestID: "req_test"})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, Raw: raw, RequestID: "req_test"})
 	return result.Text, err
 }
 

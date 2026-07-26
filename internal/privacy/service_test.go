@@ -49,13 +49,9 @@ func TestPrivacyAuthExportForgetChallengeAndErasure(t *testing.T) {
 	service.random = bytes.NewReader(sequentialBytes(128))
 	stalePrincipal := identity.Principal{CanonicalUserID: "stale-caller-value", Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}
-	req := Request{RequestID: "request-1", Principal: principal, IsDirect: true, SessionKey: "websocket:actor"}
-	if _, err := service.Inspect(ctx, Request{Principal: stalePrincipal, IsDirect: true}, "all", 1); err == nil {
+	req := Request{RequestID: "request-1", Principal: principal, SessionKey: "websocket:actor"}
+	if _, err := service.Inspect(ctx, Request{Principal: stalePrincipal}, "all", 1); err == nil {
 		t.Fatal("stale canonical privacy identity succeeded")
-	}
-
-	if _, err := service.Inspect(ctx, Request{Principal: principal, IsDirect: false}, "all", 1); err == nil {
-		t.Fatal("group privacy operation succeeded")
 	}
 	unauthenticated := req
 	unauthenticated.Principal.Assurance = identity.AssuranceSelfAsserted
@@ -146,7 +142,7 @@ func TestPrivacyChallengeExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	service.random = bytes.NewReader(sequentialBytes(128))
-	req := Request{RequestID: "request", IsDirect: true, Principal: identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}}
+	req := Request{RequestID: "request", Principal: identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}}
 	challenge, err := service.BeginDeleteAllMemories(ctx, req)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +172,7 @@ func TestPrivacyOversizeExportIsNotRecordedCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	service, _ := NewService(accounts, memory, config.RetentionPolicy{}, log)
-	req := Request{RequestID: "oversize-export", SessionKey: "session", IsDirect: true, Principal: identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}}
+	req := Request{RequestID: "oversize-export", SessionKey: "session", Principal: identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}}
 	if _, err := service.Export(ctx, req); err == nil || !strings.Contains(err.Error(), "total attachment limit") {
 		t.Fatalf("oversize export err=%v", err)
 	}

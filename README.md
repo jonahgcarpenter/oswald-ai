@@ -72,7 +72,7 @@ curl -sS http://127.0.0.1:8000/auth/device \
   -d '{"client_name":"Laptop"}'
 ```
 
-Approve the returned code from an authenticated direct conversation:
+Approve the returned code from an authenticated conversation:
 
 ```bash
 /client approve ABCD-EFGH
@@ -139,7 +139,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/mcp disable` | `/mcp disable <name>`                                                                                               | Disable one of your MCP servers.                                                |
 | `/mcp test`    | `/mcp test <name>`                                                                                                  | Connect to one of your MCP servers and report its tool count.                   |
 
-`/connect`, `/disconnect`, `/client`, and every `/memories` operation require an authenticated direct conversation. `/bootstrap` additionally requires the temporary WebSocket bootstrap client. In Discord servers and iMessage groups, slash commands must mention Oswald. MCP commands can contain credentials, so use `/mcp add` only in a private conversation.
+`/connect`, `/disconnect`, `/client`, and every `/memories` operation require an authenticated identity and can be used in private or group conversations. `/bootstrap` additionally requires the temporary WebSocket bootstrap client. In Discord servers and iMessage groups, slash commands must mention Oswald. Account-link codes, memory lists, client details, and MCP credentials may be visible to other group members, so use sensitive commands in a private conversation when appropriate.
 
 ### Memory Commands
 

@@ -30,7 +30,8 @@ type Definition struct {
 	UserExclusive bool
 }
 
-// Request is the gateway-neutral command execution context.
+// Request is the gateway-neutral command execution context. Conversation scope
+// is resolved before dispatch so handlers cannot distinguish groups from DMs.
 type Request struct {
 	RequestID   string
 	Principal   identity.Principal
@@ -38,8 +39,6 @@ type Request struct {
 	SessionKey  string
 	DisplayName string
 	ClientID    string
-	IsDirect    bool
-	IsGroup     bool
 
 	Raw      string
 	Name     string

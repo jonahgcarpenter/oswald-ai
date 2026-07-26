@@ -51,7 +51,7 @@ func TestChallengeLifecycleRejectsExpiryCancellationAndSameAccount(t *testing.T)
 	}
 }
 
-func TestConnectCommandRequiresAuthenticatedDirectPrincipal(t *testing.T) {
+func TestConnectCommandRequiresAuthenticatedPrincipal(t *testing.T) {
 	links := newTestService(t)
 	userID, _ := links.EnsureAccount("websocket", "local", "Local")
 	service, err := commands.NewService(New(links)...)
@@ -59,18 +59,14 @@ func TestConnectCommandRequiresAuthenticatedDirectPrincipal(t *testing.T) {
 		t.Fatalf("new command service: %v", err)
 	}
 	selfAsserted := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "local", Assurance: identity.AssuranceSelfAsserted}
-	result, err := service.Execute(context.Background(), commands.Request{Principal: selfAsserted, IsDirect: true, Raw: "/connect"})
+	result, err := service.Execute(context.Background(), commands.Request{Principal: selfAsserted, Raw: "/connect"})
 	if err != nil || result.Text != "Account changes require an authenticated identity." {
 		t.Fatalf("self-asserted result=%q err=%v", result.Text, err)
 	}
 	authenticated := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "local", Assurance: identity.AssuranceWebSocketSignedToken}
-	result, err = service.Execute(context.Background(), commands.Request{Principal: authenticated, IsGroup: true, Raw: "/connect"})
-	if err != nil || result.Text != "Use this account command in a direct conversation with Oswald." {
-		t.Fatalf("group result=%q err=%v", result.Text, err)
-	}
-	result, err = service.Execute(context.Background(), commands.Request{Principal: authenticated, IsDirect: true, IsGroup: true, Raw: "/connect"})
-	if err != nil || result.Text != "Use this account command in a direct conversation with Oswald." {
-		t.Fatalf("contradictory scope result=%q err=%v", result.Text, err)
+	result, err = service.Execute(context.Background(), commands.Request{Principal: authenticated, Raw: "/connect"})
+	if err != nil || !strings.Contains(result.Text, "On the other account, send:") || !strings.Contains(result.Text, "/connect OSW-") {
+		t.Fatalf("authenticated result=%q err=%v", result.Text, err)
 	}
 }
 
@@ -112,6 +108,16 @@ func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) 
 	fenceTargets, err := links.ResolveChallengeFenceTargets(context.Background(), websocket, challenge.Code)
 	if err != nil {
 		t.Fatalf("resolve challenge fence targets: %v", err)
+	}
+	commandTargets, err := (&handler{links: links}).ResolveFenceTargets(context.Background(), commands.Request{
+		Name: "connect", Principal: websocket, Args: []string{challenge.Code},
+	})
+	commandTargetSet := make(map[string]bool, len(commandTargets))
+	for _, target := range commandTargets {
+		commandTargetSet[target] = true
+	}
+	if err != nil || !commandTargetSet[discordID] || !commandTargetSet[websocketID] {
+		t.Fatalf("resolve command fence targets=%v err=%v", commandTargets, err)
 	}
 	targetSet := make(map[string]bool, len(fenceTargets))
 	for _, target := range fenceTargets {

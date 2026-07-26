@@ -17,7 +17,6 @@ import (
 func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	log := deps.Log.Server("gateway.runtime", config.F("gateway", req.Principal.Gateway))
 	decision := routing.Decide(routing.Input{
-		IsDirect:           req.IsDirect,
 		IsGroup:            req.IsGroup,
 		IsMention:          req.IsMention,
 		IsReplyToBot:       req.IsReplyToBot,
@@ -80,7 +79,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 			commandReq := commands.Request{
 				RequestID: req.RequestID, Principal: req.Principal, ChatID: req.ChatID,
 				SessionKey: req.SessionKey, DisplayName: req.DisplayName, ClientID: req.ClientID,
-				IsDirect: req.IsDirect, IsGroup: req.IsGroup, Raw: decision.Prompt,
+				Raw: decision.Prompt,
 			}
 			fenceTargets, resolveErr := deps.Commands.ResolveFenceTargets(context.Background(), commandReq)
 			executeCommand := func() error {

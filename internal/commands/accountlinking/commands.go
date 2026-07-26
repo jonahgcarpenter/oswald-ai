@@ -32,7 +32,7 @@ func (h *handler) Definition() commands.Definition {
 // ResolveFenceTargets resolves both current account owners before a connection
 // confirmation enters the broker fence.
 func (h *handler) ResolveFenceTargets(ctx context.Context, req commands.Request) ([]string, error) {
-	if req.Name != "connect" || !req.Principal.Authenticated() || !req.IsDirect || req.IsGroup || len(req.Args) != 1 || strings.EqualFold(req.Args[0], "cancel") {
+	if req.Name != "connect" || !req.Principal.Authenticated() || len(req.Args) != 1 || strings.EqualFold(req.Args[0], "cancel") {
 		return nil, nil
 	}
 	return h.links.ResolveChallengeFenceTargets(ctx, req.Principal, req.Args[0])
@@ -42,9 +42,6 @@ func (h *handler) ResolveFenceTargets(ctx context.Context, req commands.Request)
 func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
 	if !req.Principal.Authenticated() {
 		return commands.Result{Text: "Account changes require an authenticated identity."}, nil
-	}
-	if !req.IsDirect || req.IsGroup {
-		return commands.Result{Text: "Use this account command in a direct conversation with Oswald."}, nil
 	}
 	switch req.Name {
 	case "connect":
@@ -62,7 +59,7 @@ func (h *handler) handleConnect(ctx context.Context, req commands.Request) (comm
 		if err != nil {
 			return linkErrorResult(err)
 		}
-		return commands.Result{Text: fmt.Sprintf("Open a direct conversation with Oswald on the other account and send:\n\n/connect %s\n\nThis code expires in 10 minutes and can be used once. Do not share it.", challenge.Code)}, nil
+		return commands.Result{Text: fmt.Sprintf("On the other account, send:\n\n/connect %s\n\nThis code expires in 10 minutes and can be used once. Do not share it.", challenge.Code)}, nil
 	}
 	if len(req.Args) != 1 {
 		return commands.Result{Text: commands.UsageText(h.definition)}, nil

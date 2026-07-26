@@ -17,13 +17,42 @@ func TestDecideIgnoresUninvokedGroupMessage(t *testing.T) {
 	}
 }
 
-func TestDecideHandlesMentionedGroupCommand(t *testing.T) {
-	decision := Decide(Input{IsGroup: true, IsMention: true, IsCommandAttempt: true, Text: " /connect "})
-	if decision.Action != ActionCommand {
-		t.Fatalf("expected command, got %q", decision.Action)
+func TestCommandRoutingRequiresMentionOnlyInGroups(t *testing.T) {
+	tests := []struct {
+		name         string
+		isGroup      bool
+		isMention    bool
+		isReplyToBot bool
+		wantAction   Action
+	}{
+		{name: "direct", wantAction: ActionCommand},
+		{name: "mentioned group", isGroup: true, isMention: true, wantAction: ActionCommand},
+		{name: "unmentioned group", isGroup: true, wantAction: ActionIgnore},
+		{name: "unmentioned group reply", isGroup: true, isReplyToBot: true, wantAction: ActionIgnore},
+		{name: "mentioned group reply", isGroup: true, isMention: true, isReplyToBot: true, wantAction: ActionCommand},
 	}
-	if decision.Prompt != "/connect" {
-		t.Fatalf("expected trimmed prompt, got %q", decision.Prompt)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision := Decide(Input{
+				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot,
+				IsCommandAttempt: true, Text: " /connect ",
+			})
+			if decision.Action != test.wantAction {
+				t.Fatalf("action = %q, want %q", decision.Action, test.wantAction)
+			}
+			preflight := Preflight(PreflightInput{
+				IsGroup: test.isGroup, IsMention: test.isMention, IsReplyToBot: test.isReplyToBot, Text: " /connect ",
+			})
+			if test.wantAction == ActionIgnore && preflight.Action != ActionIgnore {
+				t.Fatalf("preflight action = %q, want ignore", preflight.Action)
+			}
+			if test.wantAction == ActionCommand && preflight.Action == ActionIgnore {
+				t.Fatalf("preflight unexpectedly ignored command: %+v", preflight)
+			}
+			if test.wantAction == ActionCommand && decision.Prompt != "/connect" {
+				t.Fatalf("prompt = %q, want /connect", decision.Prompt)
+			}
+		})
 	}
 }
 

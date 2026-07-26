@@ -31,7 +31,7 @@ func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Re
 	if h.service == nil {
 		return commands.Result{}, fmt.Errorf("memory service is unavailable")
 	}
-	serviceReq := privacyservice.Request{RequestID: req.RequestID, Principal: req.Principal, IsDirect: req.IsDirect, SessionKey: req.SessionKey}
+	serviceReq := privacyservice.Request{RequestID: req.RequestID, Principal: req.Principal, SessionKey: req.SessionKey}
 	if len(req.Args) == 1 && req.Args[0] == "list" {
 		memories, err := h.service.ListMemories(ctx, serviceReq)
 		if err != nil {

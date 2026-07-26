@@ -170,6 +170,7 @@ Gateway-neutral routing policy lives in `internal/routing/` and shared gateway e
 - `runtime.Request` carries normalized text, channel type, mention state, reply-to-bot state, current-turn images, unsupported attachment labels, and optional reply context; the runtime derives command-attempt state
 - `routing.Decide()` returns one of: ignore, submit to the LLM, handle a command, or send a gateway fallback response directly
 - Ordinary group messages are ignored unless they mention or reply to Oswald. Slash-command attempts in groups require a mention; an unmentioned group command is ignored even when syntactically valid
+- Conversation scope is not forwarded to command handlers, middleware, or fence resolvers, so an admitted group command executes identically to the same private command
 - `runtime.Execute()` applies routing decisions, executes commands, submits broker requests, and calls the gateway-specific responder
 - Empty prompts with no usable images get a direct gateway fallback response
 - Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for every gateway
@@ -265,14 +266,14 @@ Oswald keeps four distinct memory layers.
 - The merge preserves consolidated session rows and their profile/generation high-water, candidates/evidence, formation and compaction jobs/audit, summaries/source links, privacy-safe events, and pending derived-index changes; loser-owned rows are verified absent before commit
 - The profile that creates the challenge remains the canonical winner; admin state is preserved if either profile was admin
 - Both participating external accounts are marked verified only after successful confirmation
-- `/disconnect` requires an authenticated direct conversation and cannot remove the final account
+- `/disconnect` requires an authenticated identity and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, and `/deleteuser`
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
-- `/connect`, `/disconnect`, `/memories`, and `/client` explicitly require authenticated direct conversations; `/bootstrap` additionally requires the active temporary bootstrap client. MCP and other administrator commands currently have no direct-conversation guard; they rely on the resolved canonical principal and, where applicable, administrator status. MCP credentials must not be placed in group command text
+- `/connect`, `/disconnect`, `/memories`, and `/client` work in private and group conversations and require an authenticated identity; `/bootstrap` additionally requires the active temporary bootstrap client. Group slash commands still require an Oswald mention. Sensitive command output and credentials may be visible to other group members.
 
 ### Memory Commands and Erasure
 
-`/memories` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and a direct conversation. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
+`/memories` is a gateway command family, not a model tool. Every operation requires a valid authenticated principal and works in private or group conversations. The service re-resolves the principal to its active canonical user; destructive storage transactions fence that whole canonical user against concurrent account merge or erasure.
 
 Commands:
 

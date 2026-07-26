@@ -46,6 +46,16 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	if cmd.Action != routing.ActionCommand || cmdResponder.command.Text != "pong:user:/ping" {
 		t.Fatalf("unexpected command outcome=%+v responder=%+v", cmd, cmdResponder)
 	}
+	groupCmdResponder := &fakeResponder{}
+	groupCmd := Execute(Request{Principal: testPrincipal("user"), IsGroup: true, IsMention: true, Text: "/ping"}, deps, groupCmdResponder)
+	if groupCmd.Action != cmd.Action || groupCmdResponder.command.Text != cmdResponder.command.Text {
+		t.Fatalf("group command differs from direct: direct=%+v/%+v group=%+v/%+v", cmd, cmdResponder.command, groupCmd, groupCmdResponder.command)
+	}
+	unmentionedCmdResponder := &fakeResponder{}
+	unmentionedCmd := Execute(Request{Principal: testPrincipal("user"), IsGroup: true, Text: "/ping"}, deps, unmentionedCmdResponder)
+	if unmentionedCmd.Action != routing.ActionIgnore || unmentionedCmdResponder.command.Text != "" {
+		t.Fatalf("unmentioned group command was not ignored: outcome=%+v responder=%+v", unmentionedCmd, unmentionedCmdResponder)
+	}
 
 	unknownCmdResponder := &fakeResponder{}
 	unknownCmd := Execute(Request{Principal: testPrincipal("user"), Text: "/unknown arg"}, deps, unknownCmdResponder)
