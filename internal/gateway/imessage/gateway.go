@@ -412,7 +412,7 @@ func (g *Gateway) refreshBlueBubblesCapabilities() (bool, bool) {
 	g.helperConnected = result.Data.HelperConnected
 	g.capabilityMu.Unlock()
 
-	log.Info("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("private_api_enabled", result.Data.PrivateAPI), config.F("helper_connected", result.Data.HelperConnected), config.F("status", "ok"))
+	log.Info("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("is_private_api_enabled", result.Data.PrivateAPI), config.F("is_helper_connected", result.Data.HelperConnected), config.F("status", "ok"))
 	return true, result.Data.PrivateAPI && result.Data.HelperConnected
 }
 

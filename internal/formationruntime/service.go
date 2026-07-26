@@ -243,7 +243,17 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 	if s.log == nil {
 		return
 	}
-	fields = append(fields, config.F("status", "degraded"), config.ErrorField(err))
+	hasStatus := false
+	for _, field := range fields {
+		if field.Key == "status" {
+			hasStatus = true
+			break
+		}
+	}
+	if !hasStatus {
+		fields = append(fields, config.F("status", "degraded"))
+	}
+	fields = append(fields, config.ErrorField(err))
 	s.log.Server("user_memory.formation").Warn(event, message, fields...)
 }
 

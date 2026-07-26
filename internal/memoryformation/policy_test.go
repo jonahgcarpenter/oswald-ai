@@ -543,6 +543,53 @@ func TestEvaluateRejectsExpandedAuthorizationCapabilities(t *testing.T) {
 	}
 }
 
+func TestEvaluateCredentialMaterialPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		evidence  string
+		statement string
+		slot      string
+		value     string
+		want      PolicyDecision
+	}{
+		{name: "disabled sentinel", evidence: "My refresh token is disabled.", statement: "The user's refresh token is disabled.", slot: "environment.refresh_token", value: "disabled", want: DecisionAutomatic},
+		{name: "none sentinel", evidence: "My webhook secret is none.", statement: "The user's webhook secret is none.", slot: "environment.webhook_secret", value: "none", want: DecisionAutomatic},
+		{name: "redacted sentinel", evidence: "My signing key is redacted.", statement: "The user's signing key is redacted.", slot: "environment.signing_key", value: "redacted", want: DecisionAutomatic},
+		{name: "github fine grained token", evidence: "My GitHub token is github_pat_11AA22bb33CC44dd55.", statement: "The user's GitHub token is github_pat_11AA22bb33CC44dd55.", slot: "environment.github_token", value: "github_pat_11AA22bb33CC44dd55", want: DecisionDisallowed},
+		{name: "refresh token", evidence: "My refresh token is refresh-value-123456.", statement: "The user's refresh token is refresh-value-123456.", slot: "environment.refresh_token", value: "refresh-value-123456", want: DecisionDisallowed},
+		{name: "webhook secret", evidence: "My webhook_secret = hook-value-123456.", statement: "The user's webhook secret is hook-value-123456.", slot: "environment.webhook_secret", value: "hook-value-123456", want: DecisionDisallowed},
+		{name: "encryption key", evidence: "My encryption key is encrypt-value-123456.", statement: "The user's encryption key is encrypt-value-123456.", slot: "environment.encryption_key", value: "encrypt-value-123456", want: DecisionDisallowed},
+		{name: "signing key", evidence: "My signing key is signing-value-123456.", statement: "The user's signing key is signing-value-123456.", slot: "environment.signing_key", value: "signing-value-123456", want: DecisionDisallowed},
+		{name: "qualified password", evidence: "My database password for production is hunter2.", statement: "The user's production database password is hunter2.", slot: "environment.database_password", value: "hunter2", want: DecisionDisallowed},
+		{name: "qualified api key", evidence: "My API key for GitHub is abc123xyz.", statement: "The user's GitHub API key is abc123xyz.", slot: "environment.github_api_key", value: "abc123xyz", want: DecisionDisallowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := validCandidate()
+			in.SourceUserText, in.Evidence, in.Statement = tt.evidence, tt.evidence, tt.statement
+			in.Category, in.ClaimSlot, in.ClaimValue = CategoryEnvironment, tt.slot, tt.value
+			got, err := Evaluate(in)
+			if err != nil || got.Decision != tt.want {
+				t.Fatalf("credential policy output=%+v err=%v", got, err)
+			}
+			if tt.want == DecisionDisallowed && !strings.Contains(got.Reason, "credential material") {
+				t.Fatalf("credential rejection reason=%q", got.Reason)
+			}
+		})
+	}
+}
+
+func TestEvaluateCredentialCheckIsCandidateLocal(t *testing.T) {
+	in := validCandidate()
+	in.SourceUserText = "My refresh token is refresh-value-123456. I prefer dark mode."
+	in.Evidence = "I prefer dark mode."
+
+	got, err := Evaluate(in)
+	if err != nil || got.Decision != DecisionAutomatic {
+		t.Fatalf("safe sibling candidate output=%+v err=%v", got, err)
+	}
+}
+
 func TestEvaluateAllowsUserCenteredRelationshipIdentityAndCommunicationPreference(t *testing.T) {
 	for _, in := range []CandidateInput{
 		{SourceUserText: "My partner is named Sam.", Statement: "The user's partner is Sam.", Evidence: "My partner is named Sam.", Provenance: ProvenanceUserStatement, ClaimedAuthority: AuthorityUserDirect, Sensitivity: SensitivityLow, Mode: ModeAutomaticExtraction, Scope: ScopeLongTerm, Category: CategoryRelationships, Context: ContextDirectAssertion, Confidence: 0.9, Importance: 4, ClaimSlot: "relationship.partner_name", ClaimValue: "Sam"},

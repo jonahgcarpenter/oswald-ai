@@ -61,7 +61,7 @@ Current layers:
 4. Create the LLM gateway client
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
 6. Create the soul store
-7. Open the user-memory SQLite handle, install retention policy, and apply the checksum-frozen disposable v4 baseline
+7. Open the user-memory SQLite handle, install retention policy, and either apply the checksum-frozen v4 baseline to a fresh database or selectively reset an exact recognized published v3.2/v3.1.2-upgraded database into that baseline
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
@@ -74,7 +74,9 @@ Current layers:
 
 ### Database Baseline
 
-The unreleased v4 database is intentionally disposable. A fresh database receives one checksum-frozen `v4_compact_baseline` row in `schema_migration_versions`; startup rejects development ledgers, checksum drift, and non-empty databases without that ledger. Reset the development database instead of adding compatibility migrations or editing the ledger.
+The unreleased v4 baseline remains checksum-frozen and disposable during development. A fresh database receives one `v4_compact_baseline` row in `schema_migration_versions`. As the sole upgrade exception, startup structurally fingerprints the exact published v3.2 schema and the exact v3.1.2-upgraded schema, optionally including their recognized sqlite-vec object family, and selectively resets either into the compact v4 baseline. Unknown or modified schemas, development ledgers, checksum drift, malformed preserved ownership, and every other non-empty ledgerless database fail closed without commit.
+
+The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mcp_servers` columns, including canonical IDs, display names, admin/ban state, and MCP ciphertext. It deletes all memory, session, global-memory, privacy, derived-index, and WebSocket authorization state, then rebuilds speaker introductions and validates preserved row counts, ownership, the exact v4 schema fingerprint, and foreign keys in the migration transaction. Operators must take a WAL-safe backup and retain the original `MCP_CONFIG_ENCRYPTION_KEY` before upgrade. Old indexes are discarded and the index worker creates fresh revisions after startup.
 
 Baseline creation runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table construction. `PRAGMA foreign_key_check` must pass before commit and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
@@ -607,7 +609,7 @@ Tests run in GitHub Actions without project secrets or local `.env` variables, s
 
 ## Logging
 
-Production logging uses structured single-line JSON for Grafana/Loki dashboards.
+Production logging uses Loki-ready structured single-line JSON. The repository does not yet ship dashboards or additional periodic memory-quality aggregate emitters; those release-observability assets are deferred.
 
 ### Shared Envelope
 
@@ -874,7 +876,7 @@ Current startup requirements:
 
 ### Changing The Baseline
 
-Until v4 ships, update the single frozen baseline definition and reset development databases. Keep fresh-create, checksum-drift, foreign-key, and reopen coverage. After v4 ships, freeze this baseline and append migrations rather than editing its definition.
+Until v4 ships, update the single frozen baseline definition and reset development databases. Any change must also update the checksum-covered published-v3 fingerprint/import/reset contract; never broaden recognition beyond the exact published v3.2 and v3.1.2-upgraded schemas. Keep fresh-create, published-v3 preservation/destruction, unknown-schema rollback, checksum-drift, foreign-key, concurrency, and reopen coverage. After v4 ships, freeze this baseline and append migrations rather than editing its definition.
 
 ### Changing Personality
 

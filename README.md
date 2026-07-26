@@ -158,6 +158,12 @@ sqlite3 data/database/oswald.db "PRAGMA integrity_check; PRAGMA foreign_key_chec
 
 `integrity_check` must return `ok`, and `foreign_key_check` must return no rows. Restore into a compatible Oswald release and retain the original backup until startup and these checks succeed.
 
+### Upgrading Published v3 To v4
+
+The first v4 startup performs a selective destructive reset only for the exact published v3.2 schema or the exact schema produced by upgrading v3.1.2 through v3.2. It preserves canonical user IDs, linked account identifiers and display names, administrator and ban state, and encrypted MCP server configuration. It deletes all memory, session, global-memory, privacy, derived-index, and WebSocket authorization state; users must pair WebSocket clients again, and indexes rebuild after startup.
+
+Before upgrading, make the WAL-safe backup described above and retain the exact original `MCP_CONFIG_ENCRYPTION_KEY`, which is required to decrypt preserved MCP ciphertext. Unknown, modified, or experimental schemas fail closed rather than being reset. Review and execute the complete [v4 release validation and upgrade runbook](docs/v4-release-validation.md) before replacing a v3 deployment.
+
 ### Admin Commands
 
 | Command | Usage | Description |

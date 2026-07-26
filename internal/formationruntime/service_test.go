@@ -1,6 +1,7 @@
 package formationruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,39 @@ func TestFormationJobLeaseExtendsLongProviderTimeout(t *testing.T) {
 	service := NewService(nil, nil, "model", config.NewLogger(config.LevelError), 12*time.Minute)
 	if service.jobLease != 12*time.Minute+30*time.Second {
 		t.Fatalf("job lease=%s", service.jobLease)
+	}
+}
+
+func TestFormationWarningRetryAndDeadStatuses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		event  string
+		status string
+	}{
+		{name: "retry", event: "user_memory.formation.job.retry", status: "retry"},
+		{name: "dead", event: "user_memory.formation.job.dead", status: "degraded"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			logger := config.NewLogger(config.LevelDebug)
+			logger.SetOutput(&output)
+			service := NewService(nil, nil, "model", logger)
+			service.warn(test.event, "fixed warning", errors.New("provider failed with token=secret"), config.F("status", test.status))
+
+			var record map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+				t.Fatalf("decode warning log: %v; output=%q", err, output.String())
+			}
+			if record["event"] != test.event || record["status"] != test.status {
+				t.Fatalf("warning record=%#v", record)
+			}
+			if record["log_type"] != "server" || record["component"] != "user_memory.formation" {
+				t.Fatalf("unstable warning scope: %#v", record)
+			}
+			if strings.Contains(output.String(), "secret") {
+				t.Fatalf("warning leaked sanitized error: %s", output.String())
+			}
+		})
 	}
 }
 

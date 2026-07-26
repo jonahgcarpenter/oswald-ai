@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -11,6 +12,14 @@ import (
 )
 
 const serviceName = "oswald-ai"
+
+var reservedLogFields = map[string]struct{}{
+	"ts": {}, "level": {}, "service": {}, "log_type": {}, "component": {}, "event": {}, "msg": {},
+}
+
+var validLogStatuses = map[string]struct{}{
+	"ok": {}, "error": {}, "rejected": {}, "retry": {}, "degraded": {},
+}
 
 // Level represents a logging severity level.
 type Level int
@@ -74,17 +83,21 @@ func ErrorField(err error) Field {
 
 // Logger emits structured JSON logs to stderr.
 type Logger struct {
-	level  Level
-	logger *log.Logger
-	fields []Field
+	level     Level
+	logger    *log.Logger
+	logType   string
+	component string
+	fields    []Field
+	agent     []Field
 }
 
 // NewLogger creates a Logger that writes JSON to stderr at the given minimum level.
 func NewLogger(level Level) *Logger {
 	return &Logger{
-		level:  level,
-		logger: log.New(os.Stderr, "", 0),
-		fields: []Field{F("service", serviceName)},
+		level:     level,
+		logger:    log.New(os.Stderr, "", 0),
+		logType:   "server",
+		component: "app",
 	}
 }
 
@@ -93,34 +106,40 @@ func (l *Logger) With(fields ...Field) *Logger {
 	merged := make([]Field, 0, len(l.fields)+len(fields))
 	merged = append(merged, l.fields...)
 	for _, field := range fields {
-		if field.Key == "" {
+		if field.Key == "" || isReservedLogField(field.Key) {
 			continue
 		}
 		merged = append(merged, field)
 	}
-	return &Logger{level: l.level, logger: l.logger, fields: merged}
+	return &Logger{level: l.level, logger: l.logger, logType: l.logType, component: l.component, fields: merged, agent: l.agent}
+}
+
+// SetOutput changes the destination used by this logger and its scoped children.
+func (l *Logger) SetOutput(w io.Writer) {
+	l.logger.SetOutput(w)
 }
 
 // Server returns a server-scoped logger for the given component.
 func (l *Logger) Server(component string, fields ...Field) *Logger {
-	base := []Field{F("log_type", "server"), F("component", component)}
-	base = append(base, fields...)
-	return l.With(base...)
+	scoped := l.With(fields...)
+	scoped.logType = "server"
+	scoped.component = component
+	return scoped
 }
 
 // Agent returns an agent-scoped logger with the full agent foundation attached.
 func (l *Logger) Agent(component, requestID, sessionID, userID, gateway, model string, fields ...Field) *Logger {
-	base := []Field{
-		F("log_type", "agent"),
-		F("component", component),
+	scoped := l.With(fields...)
+	scoped.logType = "agent"
+	scoped.component = component
+	scoped.agent = []Field{
 		F("request_id", requestID),
 		F("session_id", sessionID),
 		F("user_id", userID),
 		F("gateway", gateway),
 		F("model", model),
 	}
-	base = append(base, fields...)
-	return l.With(base...)
+	return scoped
 }
 
 func (l *Logger) log(level Level, event, msg string, fields ...Field) {
@@ -129,39 +148,71 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 	}
 
 	payload := map[string]any{
-		"ts":    time.Now().UTC().Format(time.RFC3339Nano),
-		"level": level.String(),
-		"event": event,
-		"msg":   msg,
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"level":     level.String(),
+		"service":   serviceName,
+		"log_type":  l.logType,
+		"component": l.component,
+		"event":     event,
+		"msg":       msg,
 	}
 
 	for _, field := range l.fields {
-		if field.Key == "" || field.Value == nil {
+		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
-		payload[field.Key] = field.Value
+		addLogField(payload, field)
 	}
 	for _, field := range fields {
-		if field.Key == "" || field.Value == nil {
+		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
+		addLogField(payload, field)
+	}
+	for _, field := range l.agent {
 		payload[field.Key] = field.Value
 	}
 
 	line, err := json.Marshal(payload)
 	if err != nil {
 		fallback := map[string]any{
-			"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-			"level":   "error",
-			"service": serviceName,
-			"event":   "logger.marshal_failed",
-			"msg":     "failed to marshal log payload",
-			"error":   SafeErrorText(err),
+			"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+			"level":     "error",
+			"service":   serviceName,
+			"log_type":  l.logType,
+			"component": l.component,
+			"event":     "logger.marshal_failed",
+			"msg":       "failed to marshal log payload",
+			"status":    "error",
+			"error":     SafeErrorText(err),
+		}
+		for _, field := range l.agent {
+			fallback[field.Key] = field.Value
 		}
 		line, _ = json.Marshal(fallback)
 	}
 
 	l.logger.Print(string(line))
+}
+
+func isReservedLogField(key string) bool {
+	_, reserved := reservedLogFields[key]
+	return reserved
+}
+
+func addLogField(payload map[string]any, field Field) {
+	if field.Key == "status" {
+		status, ok := field.Value.(string)
+		if !ok {
+			payload[field.Key] = "degraded"
+			return
+		}
+		if _, valid := validLogStatuses[status]; !valid {
+			payload[field.Key] = "degraded"
+			return
+		}
+	}
+	payload[field.Key] = field.Value
 }
 
 // Debug logs a message at DEBUG level.

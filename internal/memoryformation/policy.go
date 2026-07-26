@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -24,6 +25,14 @@ const (
 )
 
 var errInvalidCandidate = errors.New("invalid memory candidate")
+
+var credentialTokenPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`),
+	regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}`),
+	regexp.MustCompile(`\b(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{10,}|sk-[A-Za-z0-9_-]{20,})\b`),
+}
+
+var namedCredentialMaterialPattern = regexp.MustCompile(`(?i)\b(api[ _-]?key|access[ _-]?token|auth[ _-]?token|refresh[ _-]?token|client[ _-]?secret|webhook[ _-]?secret|password|passwd|private[ _-]?key|encryption[ _-]?key|signing[ _-]?key|secret)(?:\s+for\s+[a-z0-9._ -]{1,64})?\s*(?:is|[:=])\s*([^\s,;]+)`)
 
 // Evaluate validates, normalizes, and deterministically classifies a candidate.
 func Evaluate(in CandidateInput) (CandidateOutput, error) {
@@ -66,6 +75,9 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	}
 	if containsPromptInjection(source) || containsPromptInjection(out.Statement) || containsPromptInjection(out.Evidence) {
 		return disallow(out, "instruction-like content cannot become user memory"), nil
+	}
+	if containsCredentialMaterial(evidenceContext) || containsCredentialMaterial(out.Statement) || containsCredentialMaterial(out.Evidence) || containsCredentialMaterial(in.ClaimValue) {
+		return disallow(out, "credential material cannot become user memory"), nil
 	}
 	if containsInstructionLikeContent(evidenceContext) || containsInstructionLikeContent(out.Statement) || containsInstructionLikeContent(in.ClaimSlot) || containsInstructionLikeContent(in.ClaimValue) {
 		return disallow(out, "instruction, policy, authorization, or capability content cannot become user memory"), nil
@@ -166,6 +178,24 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		out.Reason = "direct user fact meets the active memory threshold"
 	}
 	return out, nil
+}
+
+func containsCredentialMaterial(value string) bool {
+	for _, pattern := range credentialTokenPatterns {
+		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	for _, match := range namedCredentialMaterialPattern.FindAllStringSubmatch(value, -1) {
+		material := strings.ToLower(strings.Trim(strings.TrimSpace(match[2]), `"'<>[]{}().`))
+		switch material {
+		case "disabled", "none", "redacted":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // ClassifySensitivity derives the minimum sensitivity from canonical content;
