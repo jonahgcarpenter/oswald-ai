@@ -15,7 +15,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
 const (
@@ -308,9 +307,6 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE linked_accounts SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 			return fmt.Errorf("move linked accounts: %w", err)
-		}
-		if err := websocketauth.MergeUsersTx(ctx, tx, winnerID, loserID); err != nil {
-			return err
 		}
 		if err := markVerifiedTx(ctx, tx, challenge, principal); err != nil {
 			return err

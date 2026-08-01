@@ -44,12 +44,12 @@ func TestRejectedLaneOperationReleasesReaderReservation(t *testing.T) {
 	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
 	defer b.Shutdown()
 	for i := 0; i < requestQueueSize+b.workerCount; i++ {
-		principal := identity.Principal{CanonicalUserID: fmt.Sprintf("filler-%d", i), Gateway: "websocket", ExternalID: fmt.Sprintf("filler-%d", i), Assurance: identity.AssuranceSelfAsserted}
+		principal := identity.Principal{CanonicalUserID: fmt.Sprintf("filler-%d", i), Gateway: "homeassistant", ExternalID: fmt.Sprintf("filler-%d", i), Assurance: identity.AssuranceHomeAssistantToken}
 		if err := b.Submit(&Request{Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	if err := b.RunInLane(context.Background(), user, "session", func() error { return nil }); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("rejected lane error = %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLowPriorityPermitYieldsToAcceptedForegroundWork(t *testing.T) {
 	}
 
 	req := &Request{
-		RequestID: "foreground", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted},
+		RequestID: "foreground", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken},
 		SessionKey: "session", ResponseChan: make(chan Result, 1),
 	}
 	if err := b.Submit(req); err != nil {
@@ -137,12 +137,12 @@ func TestWorkerForwardsPrincipalToProcessor(t *testing.T) {
 	b.Start()
 	defer b.Shutdown()
 
-	principal := identity.Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "alice", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "alice", Assurance: identity.AssuranceHomeAssistantToken}
 	req := &Request{
 		RequestID:    "req-1",
 		Principal:    principal,
 		DisplayName:  "Alice",
-		SessionKey:   "websocket:alice",
+		SessionKey:   "homeassistant:alice",
 		Prompt:       "hello",
 		ResponseChan: make(chan Result, 1),
 	}
@@ -171,7 +171,7 @@ func TestBrokerSerializesSameLaneFIFO(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	secondStarted := make(chan struct{})
@@ -212,7 +212,7 @@ func TestBrokerRunsDifferentLanesInParallel(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	var wg sync.WaitGroup
@@ -242,7 +242,7 @@ func TestBrokerHotLaneDoesNotOccupyOtherWorker(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	firstStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
@@ -277,7 +277,7 @@ func TestBrokerSameSessionDifferentUsersRunInParallel(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	for _, userID := range []string{"one", "two"} {
-		principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: userID, Assurance: identity.AssuranceSelfAsserted}
+		principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
 		go func() {
 			_ = b.RunInLane(context.Background(), principal, "shared", func() error { started <- userID; <-release; return nil })
 		}()
@@ -296,7 +296,7 @@ func TestBrokerUserExclusiveFencesAllUserSessions(t *testing.T) {
 	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	activeStarted := make(chan struct{}, 2)
 	releaseActive := make(chan struct{})
 	for _, sessionID := range []string{"one", "two"} {
@@ -351,8 +351,8 @@ func TestBrokerUserExclusiveDoesNotOvertakeAcceptedReader(t *testing.T) {
 	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	blocker := identity.Principal{CanonicalUserID: "blocker", Gateway: "websocket", ExternalID: "blocker", Assurance: identity.AssuranceSelfAsserted}
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	blocker := identity.Principal{CanonicalUserID: "blocker", Gateway: "homeassistant", ExternalID: "blocker", Assurance: identity.AssuranceHomeAssistantToken}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	releaseBlocker := make(chan struct{})
 	blockerStarted := make(chan struct{})
 	go func() {
@@ -412,7 +412,7 @@ func TestBrokerUserExclusiveDoesNotOvertakeSameLaneFollower(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	headStarted := make(chan struct{})
 	releaseHead := make(chan struct{})
 	order := make(chan string, 2)
@@ -473,8 +473,8 @@ func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "websocket", ExternalID: "winner", Assurance: identity.AssuranceSelfAsserted}
-	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "websocket", ExternalID: "loser", Assurance: identity.AssuranceSelfAsserted}
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "homeassistant", ExternalID: "winner", Assurance: identity.AssuranceHomeAssistantToken}
+	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "homeassistant", ExternalID: "loser", Assurance: identity.AssuranceHomeAssistantToken}
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
@@ -518,8 +518,8 @@ func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "websocket", ExternalID: "winner", Assurance: identity.AssuranceSelfAsserted}
-	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "websocket", ExternalID: "loser", Assurance: identity.AssuranceSelfAsserted}
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "homeassistant", ExternalID: "winner", Assurance: identity.AssuranceHomeAssistantToken}
+	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "homeassistant", ExternalID: "loser", Assurance: identity.AssuranceHomeAssistantToken}
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
@@ -567,8 +567,8 @@ func TestBrokerUserExclusiveDoesNotFenceOtherUsersAndReleasesAfterPanic(t *testi
 	b := NewBroker(nil, 3, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
-	other := identity.Principal{CanonicalUserID: "other", Gateway: "websocket", ExternalID: "other", Assurance: identity.AssuranceSelfAsserted}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	other := identity.Principal{CanonicalUserID: "other", Gateway: "homeassistant", ExternalID: "other", Assurance: identity.AssuranceHomeAssistantToken}
 	exclusiveStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
@@ -597,8 +597,8 @@ func TestBrokerUsersExclusiveUsesStableOrderAndFencesEveryUser(t *testing.T) {
 	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	a := identity.Principal{CanonicalUserID: "a", Gateway: "websocket", ExternalID: "a", Assurance: identity.AssuranceSelfAsserted}
-	bUser := identity.Principal{CanonicalUserID: "b", Gateway: "websocket", ExternalID: "b", Assurance: identity.AssuranceSelfAsserted}
+	a := identity.Principal{CanonicalUserID: "a", Gateway: "homeassistant", ExternalID: "a", Assurance: identity.AssuranceHomeAssistantToken}
+	bUser := identity.Principal{CanonicalUserID: "b", Gateway: "homeassistant", ExternalID: "b", Assurance: identity.AssuranceHomeAssistantToken}
 
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -659,7 +659,7 @@ func TestBrokerUsersExclusiveReleasesAllFencesAfterPanic(t *testing.T) {
 		t.Fatal("exclusive panic was not returned")
 	}
 	for _, userID := range []string{"a", "b"} {
-		principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: userID, Assurance: identity.AssuranceSelfAsserted}
+		principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
 		if err := b.RunInLane(context.Background(), principal, "after", func() error { return nil }); err != nil {
 			t.Fatalf("fence %s remained locked: %v", userID, err)
 		}
@@ -669,7 +669,7 @@ func TestBrokerUsersExclusiveReleasesAllFencesAfterPanic(t *testing.T) {
 func TestBrokerShutdownDrainsLaneFollowers(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "user", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
 	firstStarted := make(chan struct{})
 	release := make(chan struct{})
 	completed := make(chan string, 2)

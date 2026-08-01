@@ -20,7 +20,7 @@ func TestTranscriptSearchHandlerUsesAuthenticatedContextScopeAndQuotesRecords(t 
 	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "marker "+injected, "quoted assistant reply", true, time.Hour)
 	rebuildTestIndexes(t, store)
 
-	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "websocket", ExternalID: "subject-1", Assurance: identity.AssuranceWebSocketSignedToken}
+	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "subject-1", Assurance: identity.AssuranceHomeAssistantToken}
 	ctx := requestctx.WithPrincipal(context.Background(), principal)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "req", SessionID: "session-1", SessionGeneration: generation, Model: "test"})
 	result, err := NewTranscriptSearchHandler(store, config.NewLogger(config.LevelError))(ctx, map[string]interface{}{
@@ -46,7 +46,7 @@ func TestTranscriptSearchHandlerUsesAuthenticatedContextScopeAndQuotesRecords(t 
 func TestTranscriptSearchHandlerRequiresAuthenticatedPrincipalAndContextScope(t *testing.T) {
 	store := newTranscriptTestStore(t)
 	handler := NewTranscriptSearchHandler(store, config.NewLogger(config.LevelError))
-	selfAsserted := identity.Principal{CanonicalUserID: "user-1", Gateway: "websocket", ExternalID: "subject-1", Assurance: identity.AssuranceSelfAsserted}
+	selfAsserted := identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "subject-1", Assurance: identity.AssuranceSelfAsserted}
 	ctx := requestctx.WithPrincipal(context.Background(), selfAsserted)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{SessionID: "session-1", SessionGeneration: 1})
 	if _, err := handler(ctx, map[string]interface{}{"query": "marker"}); err == nil || !strings.Contains(err.Error(), "authenticated") {
@@ -54,7 +54,7 @@ func TestTranscriptSearchHandlerRequiresAuthenticatedPrincipalAndContextScope(t 
 	}
 
 	authenticated := selfAsserted
-	authenticated.Assurance = identity.AssuranceWebSocketSignedToken
+	authenticated.Assurance = identity.AssuranceHomeAssistantToken
 	ctx = requestctx.WithPrincipal(context.Background(), authenticated)
 	if _, err := handler(ctx, map[string]interface{}{"query": "marker", "session_id": "model-selected", "generation": 1}); err == nil || !strings.Contains(err.Error(), "session scope") {
 		t.Fatalf("missing context scope error = %v", err)
@@ -73,7 +73,7 @@ func TestTranscriptSearchHandlerDegradesWhenFTSUnavailable(t *testing.T) {
 	if _, err := store.sql.Exec(`DROP TABLE ` + live.TableName); err != nil {
 		t.Fatal(err)
 	}
-	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "websocket", ExternalID: "subject-1", Assurance: identity.AssuranceWebSocketSignedToken}
+	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "subject-1", Assurance: identity.AssuranceHomeAssistantToken}
 	ctx := requestctx.WithPrincipal(context.Background(), principal)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{SessionID: "session-1", SessionGeneration: generation})
 	result, err := NewTranscriptSearchHandler(store, config.NewLogger(config.LevelError))(ctx, map[string]interface{}{"query": "marker"})

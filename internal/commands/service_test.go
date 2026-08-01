@@ -60,12 +60,12 @@ func TestRequireAdminRejectsUnauthenticatedPrincipalBeforeLookup(t *testing.T) {
 	}
 	principal := identity.Principal{
 		CanonicalUserID: "admin",
-		Gateway:         "websocket",
+		Gateway:         "homeassistant",
 		ExternalID:      "admin",
 		Assurance:       identity.AssuranceSelfAsserted,
 	}
 	result, err := service.Execute(context.Background(), Request{Principal: principal, Raw: "/secret"})
-	if err != nil || result.Text != adminDeniedMessage || auth.calls != 0 {
+	if err == nil || result.Text != "" || auth.calls != 0 {
 		t.Fatalf("result=%+v err=%v admin lookups=%d", result, err, auth.calls)
 	}
 }

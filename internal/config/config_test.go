@@ -68,23 +68,30 @@ func TestParseLevelAndRequestID(t *testing.T) {
 	}
 }
 
-func TestLoadReadsWebSocketAuthenticationConfig(t *testing.T) {
-	t.Setenv("WEBSOCKET_AUTH_SIGNING_KEY", "0123456789abcdef0123456789abcdef")
-	t.Setenv("WEBSOCKET_AUTH_MAX_TOKEN_TTL", "10m")
+func TestLoadReadsHomeAssistantConfig(t *testing.T) {
+	t.Setenv("HOME_ASSISTANT_AUTH_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HOME_ASSISTANT_LISTEN_PORT", "8124")
+	t.Setenv("BLUEBUBBLES_LISTEN_PORT", "8125")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.WebSocketAuthSigningKey != "0123456789abcdef0123456789abcdef" || cfg.WebSocketAuthMaxTokenTTL != 10*time.Minute {
-		t.Fatalf("unexpected websocket auth config: key_set=%t ttl=%s", cfg.WebSocketAuthSigningKey != "", cfg.WebSocketAuthMaxTokenTTL)
+	if cfg.HomeAssistantAuthToken != "0123456789abcdef0123456789abcdef" || cfg.HomeAssistantListenPort != "8124" || cfg.BlueBubblesListenPort != "8125" {
+		t.Fatalf("unexpected gateway config: token_set=%t home_assistant_port=%s bluebubbles_port=%s", cfg.HomeAssistantAuthToken != "", cfg.HomeAssistantListenPort, cfg.BlueBubblesListenPort)
 	}
 }
 
-func TestLoadRejectsInvalidWebSocketTokenTTL(t *testing.T) {
-	t.Setenv("WEBSOCKET_AUTH_MAX_TOKEN_TTL", "invalid")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected invalid websocket token TTL error")
+func TestLoadLeavesOptionalGatewayPortsDisabledByDefault(t *testing.T) {
+	t.Setenv("HOME_ASSISTANT_AUTH_TOKEN", "")
+	t.Setenv("HOME_ASSISTANT_LISTEN_PORT", "")
+	t.Setenv("BLUEBUBBLES_LISTEN_PORT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeAssistantAuthToken != "" || cfg.HomeAssistantListenPort != "" || cfg.BlueBubblesListenPort != "" {
+		t.Fatalf("unexpected gateway defaults: token_set=%t home_assistant_port=%q bluebubbles_port=%q", cfg.HomeAssistantAuthToken != "", cfg.HomeAssistantListenPort, cfg.BlueBubblesListenPort)
 	}
 }
 

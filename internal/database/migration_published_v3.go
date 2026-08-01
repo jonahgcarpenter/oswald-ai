@@ -137,7 +137,7 @@ vector definition pattern: ` + publishedV3VectorSQLPattern + `
 
 const publishedV3SpeakerIntroRenderingContract = `
 version: ` + publishedV3SpeakerIntroRenderingContractVersion + `
-gateway priority: imessage, discord, websocket
+gateway priority: imessage, discord, homeassistant
 equal imessage/discord names: single name, case-insensitive
 fallback: ` + publishedV3SpeakerIntroFallback + `
 single-name format: ` + publishedV3SpeakerIntroSingleFormat + `
@@ -205,7 +205,7 @@ Preserve every account_users column from v3, every linked_accounts column, and
 every mcp_servers column. Require linked and user-scoped MCP owners to exist.
 Replace every main-schema object with compactV4BaselineDefinition, set all
 preserved users active, and derive speaker_intro from linked display names in
-imessage, discord, websocket priority. Record only v4_compact_baseline.
+imessage, discord, homeassistant priority. Record only v4_compact_baseline.
 `
 
 func resetPublishedV3(ctx context.Context, conn *sql.Conn, registry []schemaMigration) (bool, error) {
@@ -250,6 +250,13 @@ func resetPublishedV3(ctx context.Context, conn *sql.Conn, registry []schemaMigr
 	}
 	if err := validatePublishedV3Ownership(ctx, conn); err != nil {
 		return false, err
+	}
+	var legacyWebSocketAccounts int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM linked_accounts WHERE gateway = 'websocket'`).Scan(&legacyWebSocketAccounts); err != nil {
+		return false, fmt.Errorf("count legacy websocket accounts: %w", err)
+	}
+	if legacyWebSocketAccounts != 0 {
+		return false, fmt.Errorf("published v3 contains unsupported websocket accounts; remove them or start with a fresh database")
 	}
 
 	counts := make(map[string]int, 3)
@@ -373,8 +380,8 @@ func rebuildPublishedV3SpeakerIntros(ctx context.Context, conn *sql.Conn) error 
 			intro = fmt.Sprintf(publishedV3SpeakerIntroSingleFormat, names["imessage"])
 		case names["discord"] != "":
 			intro = fmt.Sprintf(publishedV3SpeakerIntroSingleFormat, names["discord"])
-		case names["websocket"] != "":
-			intro = fmt.Sprintf(publishedV3SpeakerIntroSingleFormat, names["websocket"])
+		case names["homeassistant"] != "":
+			intro = fmt.Sprintf(publishedV3SpeakerIntroSingleFormat, names["homeassistant"])
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, intro, userID); err != nil {
 			return fmt.Errorf("rebuild speaker intro: %w", err)

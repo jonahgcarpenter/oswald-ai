@@ -1,5 +1,5 @@
 // Package bootstrap implements first-administrator bootstrap through an
-// authenticated Discord or iMessage account.
+// authenticated Discord, iMessage, or Home Assistant account.
 package bootstrap
 
 import (
@@ -73,10 +73,10 @@ func (s *Service) Definition() commands.Definition {
 	return commands.Definition{Name: "bootstrap", Summary: "Claim the first administrator account.", Usage: "/bootstrap <code>", UserExclusive: true}
 }
 
-// Execute validates and consumes the bootstrap code for a Discord or iMessage principal.
+// Execute validates and consumes the bootstrap code for a supported authenticated principal.
 func (s *Service) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
-	if !req.Principal.Authenticated() || (req.Principal.Gateway != "discord" && req.Principal.Gateway != "imessage") {
-		return commands.Result{Text: "Bootstrap is available only from an authenticated Discord or iMessage account."}, nil
+	if !req.Principal.Authenticated() || (req.Principal.Gateway != "discord" && req.Principal.Gateway != "imessage" && req.Principal.Gateway != "homeassistant") {
+		return commands.Result{Text: "Bootstrap is available only from an authenticated Discord, iMessage, or Home Assistant account."}, nil
 	}
 	if len(req.Args) != 1 {
 		return commands.Result{Text: commands.UsageText(s.Definition())}, nil

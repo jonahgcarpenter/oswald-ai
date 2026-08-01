@@ -33,19 +33,19 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("expected same canonical user, got %q then %q", userID, again)
 	}
 
-	localID, err := links.EnsureAccount("websocket", "alice-local", "")
+	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
 	connectTestAccounts(t, links,
 		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
-		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken})
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken})
 
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts: %v", err)
 	}
-	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "websocket" {
+	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "homeassistant" {
 		t.Fatalf("unexpected sorted accounts: %+v", accounts)
 	}
 
@@ -57,11 +57,11 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("unexpected speaker line %q", line)
 	}
 
-	descriptor, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "websocket", "alice-local", "disconnect-store-test")
+	descriptor, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "homeassistant", "alice-local", "disconnect-store-test")
 	if err != nil {
 		t.Fatalf("disconnect websocket: %v", err)
 	}
-	if len(descriptor.ExternalIdentities) != 1 || descriptor.ExternalIdentities[0] != "websocket:alice-local" {
+	if len(descriptor.ExternalIdentities) != 1 || descriptor.ExternalIdentities[0] != "homeassistant:alice-local" {
 		t.Fatalf("unexpected invalidation descriptor: %+v", descriptor)
 	}
 	if _, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "discord", "123", "disconnect-last-test"); err == nil {
@@ -102,7 +102,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	otherID, err := links.EnsureAccount("websocket", "alice-local", "Alice Local")
+	otherID, err := links.EnsureAccount("homeassistant", "alice-local", "Alice Local")
 	if err != nil {
 		t.Fatalf("ensure other account: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	}
 
 	initiator := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
-	confirmer := identity.Principal{CanonicalUserID: otherID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken}
+	confirmer := identity.Principal{CanonicalUserID: otherID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken}
 	response, err := executeAccountCommand(service, initiator, "/connect")
 	if err != nil {
 		t.Fatalf("start connect err=%v", err)
@@ -143,10 +143,10 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("disconnect err=%v", err)
 	}
-	if !strings.Contains(result.Text, "Disconnected WebSocket: alice-local.") {
+	if !strings.Contains(result.Text, "Disconnected Home Assistant: alice-local.") {
 		t.Fatalf("unexpected disconnect response: %q", result.Text)
 	}
-	if result.Invalidation == nil || !result.Invalidation.CloseConnections || len(result.Invalidation.ExternalIdentities) != 1 || result.Invalidation.ExternalIdentities[0] != "websocket:alice-local" {
+	if result.Invalidation == nil || !result.Invalidation.CloseConnections || len(result.Invalidation.ExternalIdentities) != 1 || result.Invalidation.ExternalIdentities[0] != "homeassistant:alice-local" {
 		t.Fatalf("unexpected disconnect invalidation: %+v", result.Invalidation)
 	}
 	definition, ok := service.Definition("disconnect")
@@ -158,14 +158,14 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
 	links := newTestService(t)
 	userID, _ := links.EnsureAccount("discord", "702", "Owner")
-	localID, _ := links.EnsureAccount("websocket", "owner-local", "Owner Local")
+	localID, _ := links.EnsureAccount("homeassistant", "owner-local", "Owner Local")
 	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "702", Assurance: identity.AssuranceDiscordGateway}
-	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "owner-local", Assurance: identity.AssuranceWebSocketSignedToken})
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "owner-local", Assurance: identity.AssuranceHomeAssistantToken})
 	_, _ = links.EnsureAccount("imessage", "outsider@example.com", "Outsider")
 
 	stale := principal
 	stale.CanonicalUserID = "usr_stale"
-	if _, err := links.DisconnectAccountAs(context.Background(), stale, "websocket", "owner-local", "req-stale"); !errors.Is(err, ErrPrincipalMismatch) {
+	if _, err := links.DisconnectAccountAs(context.Background(), stale, "homeassistant", "owner-local", "req-stale"); !errors.Is(err, ErrPrincipalMismatch) {
 		t.Fatalf("stale principal error=%v", err)
 	}
 	if _, err := links.DisconnectAccountAs(context.Background(), principal, "imessage", "outsider@example.com", "req-target"); err == nil || !strings.Contains(err.Error(), "linked account not found") {
@@ -195,13 +195,13 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	localID, err := links.EnsureAccount("websocket", "alice-local", "")
+	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
 	connectTestAccounts(t, links,
 		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
-		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "alice-local", Assurance: identity.AssuranceWebSocketSignedToken})
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken})
 
 	reopened := NewService(dbPath, memories, nil, log)
 	reopened.legacyPath = legacyPath
@@ -209,7 +209,7 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accounts after reopen: %v", err)
 	}
-	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "websocket" {
+	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "homeassistant" {
 		t.Fatalf("unexpected persisted accounts: %+v", accounts)
 	}
 }
@@ -380,7 +380,7 @@ func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	sourceID, err := links.EnsureAccount("websocket", "source", "Source")
+	sourceID, err := links.EnsureAccount("homeassistant", "source", "Source")
 	if err != nil {
 		t.Fatalf("ensure source: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	}
 	result := connectTestAccounts(t, links,
 		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "300", Assurance: identity.AssuranceDiscordGateway},
-		identity.Principal{CanonicalUserID: sourceID, Gateway: "websocket", ExternalID: "source", Assurance: identity.AssuranceWebSocketSignedToken})
+		identity.Principal{CanonicalUserID: sourceID, Gateway: "homeassistant", ExternalID: "source", Assurance: identity.AssuranceHomeAssistantToken})
 	if !result.Merged {
 		t.Fatalf("expected merge result: %+v", result)
 	}
@@ -409,13 +409,13 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	localID, err := links.EnsureAccount("websocket", "target-local", "Target Local")
+	localID, err := links.EnsureAccount("homeassistant", "target-local", "Target Local")
 	if err != nil {
 		t.Fatalf("ensure websocket: %v", err)
 	}
 	connectTestAccounts(t, links,
 		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "500", Assurance: identity.AssuranceDiscordGateway},
-		identity.Principal{CanonicalUserID: localID, Gateway: "websocket", ExternalID: "target-local", Assurance: identity.AssuranceWebSocketSignedToken})
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "target-local", Assurance: identity.AssuranceHomeAssistantToken})
 	if err := links.SetAdmin(adminID, adminID, true); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}

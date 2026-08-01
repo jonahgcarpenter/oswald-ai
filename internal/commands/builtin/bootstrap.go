@@ -7,7 +7,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
-	clientauthcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/clientauth"
 	globalmemorycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/globalmemory"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
 	memoriescommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/memories"
@@ -25,20 +24,13 @@ type MCPDeps struct {
 	Manager *mcpmanager.Manager
 }
 
-// ClientAuthDeps contains client authorization and first-administrator bootstrap dependencies.
-type ClientAuthDeps struct {
-	Service    clientauthcommands.Service
-	Authorizer clientauthcommands.Authorizer
-	Bootstrap  commands.Handler
-}
-
 // NewService creates the application command service with all built-in commands.
 func NewService(users *accountlinking.Service, memory *usermemory.Store, optionalMCP ...MCPDeps) (*commands.Service, error) {
-	return NewServiceWithGlobalMemory(users, memory, nil, nil, ClientAuthDeps{}, optionalMCP...)
+	return NewServiceWithGlobalMemory(users, memory, nil, nil, nil, optionalMCP...)
 }
 
 // NewServiceWithGlobalMemory creates the full command service including global-memory administration.
-func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemory.Store, globalMemory *globalmemorystore.Store, log *config.Logger, clientAuth ClientAuthDeps, optionalMCP ...MCPDeps) (*commands.Service, error) {
+func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemory.Store, globalMemory *globalmemorystore.Store, log *config.Logger, bootstrap commands.Handler, optionalMCP ...MCPDeps) (*commands.Service, error) {
 	if memory == nil {
 		return nil, fmt.Errorf("user memory store is required for built-in commands")
 	}
@@ -50,11 +42,8 @@ func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemor
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
 	}
-	if clientAuth.Service != nil {
-		registrations = append(registrations, commands.Command{Handler: clientauthcommands.New(clientAuth.Service, clientAuth.Authorizer)})
-	}
-	if clientAuth.Bootstrap != nil {
-		registrations = append(registrations, commands.Command{Handler: clientAuth.Bootstrap})
+	if bootstrap != nil {
+		registrations = append(registrations, commands.Command{Handler: bootstrap})
 	}
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})

@@ -4,12 +4,12 @@
 
 ## Overview
 
-Oswald AI is a local-first, self-hosted assistant that brings your chosen language model to iMessage, Discord, WebSocket, and Home Assistant.
+Oswald AI is a local-first, self-hosted assistant that brings your chosen language model to iMessage, Discord, and Home Assistant.
 It combines tools, private long-term memory, conversation continuity, image understanding, and connected services into one assistant that follows you across linked accounts while keeping you in control of your data.
 
 ## Features
 
-- Chat through iMessage, Discord, WebSocket, or the [Home Assistant integration](https://github.com/jonahgcarpenter/has-oswald-conversation)
+- Chat through iMessage, Discord, or the [Home Assistant integration](https://github.com/jonahgcarpenter/has-oswald-conversation)
 - Send text, images, animated GIFs, and replies with quoted context
 - Search the web, check the current time, and use connected MCP tools
 - Remember your preferences, projects, and other useful details across conversations
@@ -60,94 +60,38 @@ Replies to Oswald do not need another mention:
 Can you elaborate on that?
 ```
 
-### WebSocket API
-
-The WebSocket gateway supports command-line clients, [Home Assistant](https://github.com/jonahgcarpenter/has-oswald-conversation), and other service integrations. It accepts plain-text prompts or JSON messages containing text and images.
-
-First, request a device code:
-
-```bash
-curl -sS http://127.0.0.1:8000/auth/device \
-  -H 'Content-Type: application/json' \
-  -d '{"client_name":"Laptop"}'
-```
-
-Approve the returned code from an authenticated conversation:
-
-```bash
-/client approve ABCD-EFGH
-```
-
-Then poll the token endpoint no faster than the interval returned with the device code:
-
-```bash
-curl -sS http://127.0.0.1:8000/auth/token \
-  -H 'Content-Type: application/json' \
-  -d '{"grant_type":"device_code","device_code":"<device_code>"}'
-```
-
-Connect using the returned access token:
-
-```bash
-websocat \
-  -H="Authorization: Bearer <access_token>" \
-  ws://127.0.0.1:8000/ws
-```
-
-Access tokens last 15 minutes. Store the refresh token securely and exchange it at `/auth/token` using `grant_type: "refresh_token"` before the access token expires. Each refresh returns a replacement refresh token.
-
-After connecting, send a plain-text prompt or a JSON message. Oswald streams typed events followed by a final response:
-
-```json
-{"type":"content","text":"Bitcoin is currently..."}
-{"model":"<gateway-route-or-model>","response":"..."}
-```
-
-Revoke a client with `/client revoke <client_id>` or `POST /auth/revoke` using its refresh token.
-
 ## Bootstrap
 
-When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord or iMessage conversation, run:
+When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord, iMessage, or Home Assistant conversation, run:
 
 ```text
 /bootstrap <code>
 ```
 
-The Discord or iMessage account that submits the code becomes the first administrator. The code is consumed only after the account update succeeds. If the code is lost, restart Oswald to generate a replacement while no administrator exists. Once any administrator exists, startup no longer generates bootstrap codes.
-
-Bootstrap commands may be used in direct or group conversations; groups retain their normal Oswald mention requirement. Anyone who can see the code can attempt to claim it, so prefer a direct conversation. First-run WebSocket bootstrap is not currently supported; after bootstrap, the administrator can approve WebSocket clients through `/client`.
+The account that submits the code becomes the first administrator. The code is consumed only after the account update succeeds. If the code is lost, restart Oswald to generate a replacement while no administrator exists. Once any administrator exists, startup no longer generates bootstrap codes.
 
 ## Commands
 
 Commands are gateway-level slash commands. They are handled before requests reach the model.
 
+In Discord servers and iMessage groups, slash commands must mention Oswald
+
 ### User Commands
 
-| Command        | Usage                                                                                                               | Description                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `/help`        | `/help [command]`                                                                                                   | List available commands or show usage for one command.                          |
-| `/bootstrap`   | `/bootstrap <code>`                                                                                                 | Claim initial administrator access from Discord or iMessage.                    |
-| `/connect`     | `/connect [code\|cancel]`                                                                                           | Create, confirm, or cancel a 10-minute account-link code.                       |
-| `/disconnect`  | `/disconnect [account_number]`                                                                                      | List or disconnect linked accounts. The final account cannot be removed.        |
-| `/reset`       | `/reset`                                                                                                            | Clear the current conversation history and load the latest user profile.        |
-| `/memories`    | `/memories list`, `/memories forget <id\|all>`                                                                      | List or forget your personal memories.                                          |
-| `/client`      | `/client approve <code>`, `/client approve-new <code> <display_name>`, `/client list`, `/client revoke <client_id>` | Approve and manage WebSocket clients.                                           |
-| `/mcp servers` | `/mcp servers`                                                                                                      | List your user-scoped MCP servers.                                              |
-| `/mcp add`     | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]`                                         | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
-| `/mcp remove`  | `/mcp remove <name>`                                                                                                | Remove one of your MCP servers.                                                 |
-| `/mcp enable`  | `/mcp enable <name>`                                                                                                | Enable one of your MCP servers.                                                 |
-| `/mcp disable` | `/mcp disable <name>`                                                                                               | Disable one of your MCP servers.                                                |
-| `/mcp test`    | `/mcp test <name>`                                                                                                  | Connect to one of your MCP servers and report its tool count.                   |
-
-`/connect`, `/disconnect`, `/client`, `/bootstrap`, and every `/memories` operation require an authenticated identity and can be used in private or group conversations. `/bootstrap` accepts only Discord and iMessage identities and only succeeds while the process-local code is active and no administrator exists. In Discord servers and iMessage groups, slash commands must mention Oswald. Bootstrap and account-link codes, memory lists, client details, and MCP credentials may be visible to other group members, so use sensitive commands in a private conversation when appropriate.
-
-### Memory Commands
-
-| Command                 | Description                                                                                                                |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `/memories list`        | Attach a complete text file containing every active memory's stable ID, category, and statement.                           |
-| `/memories forget <id>` | Permanently hard-delete one durable memory and its memory-only artifacts. Conversation transcripts remain unchanged.       |
-| `/memories forget all`  | Permanently delete all stored user information, reset every session, and preserve only account and authentication state.   |
+| Command        | Usage                                                                       | Description                                                                     |
+| -------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `/help`        | `/help [command]`                                                           | List available commands or show usage for one command.                          |
+| `/bootstrap`   | `/bootstrap <code>`                                                         | Claim initial administrator access.                                             |
+| `/connect`     | `/connect [code\|cancel]`                                                   | Create, confirm, or cancel a 10-minute account-link code.                       |
+| `/disconnect`  | `/disconnect [account_number]`                                              | List or disconnect linked accounts. The final account cannot be removed.        |
+| `/reset`       | `/reset`                                                                    | Clear the current conversation history and load the latest user profile.        |
+| `/memories`    | `/memories list`, `/memories forget <id\|all>`                              | List or forget your personal memories.                                          |
+| `/mcp servers` | `/mcp servers`                                                              | List your user-scoped MCP servers.                                              |
+| `/mcp add`     | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]` | Add or update a user-scoped MCP server. URLs and headers are encrypted at rest. |
+| `/mcp remove`  | `/mcp remove <name>`                                                        | Remove one of your MCP servers.                                                 |
+| `/mcp enable`  | `/mcp enable <name>`                                                        | Enable one of your MCP servers.                                                 |
+| `/mcp disable` | `/mcp disable <name>`                                                       | Disable one of your MCP servers.                                                |
+| `/mcp test`    | `/mcp test <name>`                                                          | Connect to one of your MCP servers and report its tool count.                   |
 
 ### Admin Commands
 

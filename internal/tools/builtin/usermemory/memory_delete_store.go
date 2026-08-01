@@ -193,15 +193,6 @@ func (s *Store) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string, now
 	if err != nil {
 		return scope, err
 	}
-	clientRows, err := tx.QueryContext(ctx, `SELECT 'websocket-client:' || client_id FROM websocket_clients WHERE canonical_user_id = ? ORDER BY client_id`, userID)
-	if err != nil {
-		return scope, err
-	}
-	clients, err := scanStringRows(clientRows)
-	if err != nil {
-		return scope, err
-	}
-	scope.ExternalIdentities = append(scope.ExternalIdentities, clients...)
 	sessionRows, err := tx.QueryContext(ctx, `SELECT session_id FROM sessions WHERE canonical_user_id = ? ORDER BY session_id`, userID)
 	if err != nil {
 		return scope, err

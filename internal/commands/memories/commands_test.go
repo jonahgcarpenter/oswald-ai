@@ -23,11 +23,11 @@ func TestMemoriesListAndForget(t *testing.T) {
 	defer memory.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	userID, err := accounts.EnsureAccount("websocket", "actor", "Actor")
+	userID, err := accounts.EnsureAccount("homeassistant", "actor", "Actor")
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherID, err := accounts.EnsureAccount("websocket", "other", "Other")
+	otherID, err := accounts.EnsureAccount("homeassistant", "other", "Other")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestMemoriesListAndForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := handler{accounts: accounts, memory: memory}
-	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "actor", Assurance: identity.AssuranceWebSocketSignedToken}
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "actor", Assurance: identity.AssuranceHomeAssistantToken}
 	request := commands.Request{RequestID: "list", Principal: principal, Args: []string{"list"}}
 	for _, args := range [][]string{nil, {"list", "extra"}, {"forget"}, {"unknown"}} {
 		invalid := request

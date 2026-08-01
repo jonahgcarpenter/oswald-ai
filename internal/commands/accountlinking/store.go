@@ -293,10 +293,10 @@ func (s *Service) HasAdmin() (bool, error) {
 	return false, nil
 }
 
-// ClaimBootstrapAdmin promotes the current owner of an authenticated Discord or
-// iMessage principal only while no administrator exists.
+// ClaimBootstrapAdmin promotes the current owner of a supported authenticated
+// principal only while no administrator exists.
 func (s *Service) ClaimBootstrapAdmin(principal identity.Principal) (string, bool, error) {
-	if !principal.Authenticated() || (principal.Gateway != "discord" && principal.Gateway != "imessage") {
+	if !principal.Authenticated() || (principal.Gateway != "discord" && principal.Gateway != "imessage" && principal.Gateway != "homeassistant") {
 		return "", false, nil
 	}
 	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
@@ -807,7 +807,7 @@ func summarizeUser(canonicalID string, user UserRecord) UserSummary {
 func FormatSpeakerLine(accounts []LinkedAccount) string {
 	var imessageName string
 	var discordName string
-	var websocketName string
+	var homeAssistantName string
 
 	for _, account := range accounts {
 		name := strings.TrimSpace(account.DisplayName)
@@ -824,9 +824,9 @@ func FormatSpeakerLine(accounts []LinkedAccount) string {
 			if discordName == "" {
 				discordName = name
 			}
-		case "websocket":
-			if websocketName == "" {
-				websocketName = name
+		case "homeassistant":
+			if homeAssistantName == "" {
+				homeAssistantName = name
 			}
 		}
 	}
@@ -841,8 +841,8 @@ func FormatSpeakerLine(accounts []LinkedAccount) string {
 		return fmt.Sprintf("You are speaking with %s.", imessageName)
 	case discordName != "":
 		return fmt.Sprintf("You are speaking with %s.", discordName)
-	case websocketName != "":
-		return fmt.Sprintf("You are speaking with %s.", websocketName)
+	case homeAssistantName != "":
+		return fmt.Sprintf("You are speaking with %s.", homeAssistantName)
 	default:
 		return "You are speaking with a returning user."
 	}

@@ -42,18 +42,10 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	}
 	g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
 
-	path := strings.TrimSpace(g.WebhookPath)
-	if path == "" {
-		path = defaultWebhookPath
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-
 	mux := http.NewServeMux()
-	mux.HandleFunc(path, g.handleWebhook)
+	mux.HandleFunc(webhookPath, g.handleWebhook)
 
-	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", path))
+	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", webhookPath))
 	return http.ListenAndServe(":"+g.Port, mux)
 }
 

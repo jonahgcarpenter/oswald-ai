@@ -14,7 +14,7 @@ func TestResetUsesCanonicalUserAndCurrentSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "external", Assurance: identity.AssuranceWebSocketSignedToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "external", Assurance: identity.AssuranceHomeAssistantToken}
 	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/reset"})
 	if err != nil {
 		t.Fatal(err)
@@ -33,9 +33,9 @@ func TestResetRejectsUnauthenticatedPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "websocket", ExternalID: "external", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "external", Assurance: identity.AssuranceSelfAsserted}
 	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/reset"})
-	if err != nil || resetter.userID != "" || result.Text != "Session reset requires an authenticated identity." {
+	if err == nil || resetter.userID != "" || result.Text != "" {
 		t.Fatalf("result=%q resetter=%+v err=%v", result.Text, resetter, err)
 	}
 }

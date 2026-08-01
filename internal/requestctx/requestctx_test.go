@@ -12,7 +12,7 @@ type testExposer struct{ names []string }
 func (e *testExposer) ExposeTools(names []string) { e.names = append(e.names, names...) }
 
 func TestPrincipalAndMetadataRoundTrip(t *testing.T) {
-	principal := identity.Principal{CanonicalUserID: "sender-1", Gateway: "websocket", ExternalID: "external-1", Assurance: identity.AssuranceSelfAsserted}
+	principal := identity.Principal{CanonicalUserID: "sender-1", Gateway: "homeassistant", ExternalID: "external-1", Assurance: identity.AssuranceSelfAsserted}
 	ctx := WithPrincipal(context.Background(), principal)
 	ctx = WithMetadata(ctx, Metadata{RequestID: "req-1", SessionID: "session-1", SessionGeneration: 3})
 

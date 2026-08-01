@@ -41,6 +41,7 @@ func TestBootstrapRedeemsOnceForChatGateways(t *testing.T) {
 	}{
 		{name: "discord", assurance: identity.AssuranceDiscordGateway},
 		{name: "imessage", assurance: identity.AssuranceBlueBubblesWebhook},
+		{name: "homeassistant", assurance: identity.AssuranceHomeAssistantToken},
 	} {
 		t.Run(gateway.name, func(t *testing.T) {
 			accounts := &fakeAccounts{}
@@ -61,7 +62,7 @@ func TestBootstrapRedeemsOnceForChatGateways(t *testing.T) {
 	}
 }
 
-func TestBootstrapRejectsInvalidCodeAndWebSocket(t *testing.T) {
+func TestBootstrapRejectsInvalidCodeAndUnauthenticatedPrincipal(t *testing.T) {
 	accounts := &fakeAccounts{}
 	service, code, err := New(accounts, WithRandom(bytes.NewReader(make([]byte, 8))))
 	if err != nil {
@@ -72,10 +73,10 @@ func TestBootstrapRejectsInvalidCodeAndWebSocket(t *testing.T) {
 	if err != nil || result.Text != "That bootstrap code is invalid." {
 		t.Fatalf("invalid result=%+v err=%v", result, err)
 	}
-	websocket := identity.Principal{CanonicalUserID: "ws-user", Gateway: "websocket", ExternalID: "subject", Assurance: identity.AssuranceWebSocketSignedToken}
-	result, err = service.Execute(context.Background(), commands.Request{Principal: websocket, Args: []string{code}})
-	if err != nil || result.Text != "Bootstrap is available only from an authenticated Discord or iMessage account." {
-		t.Fatalf("websocket result=%+v err=%v", result, err)
+	unauthenticated := identity.Principal{CanonicalUserID: "ha-user", Gateway: "homeassistant", ExternalID: "subject", Assurance: identity.AssuranceSelfAsserted}
+	result, err = service.Execute(context.Background(), commands.Request{Principal: unauthenticated, Args: []string{code}})
+	if err != nil || result.Text != "Bootstrap is available only from an authenticated Discord, iMessage, or Home Assistant account." {
+		t.Fatalf("unauthenticated result=%+v err=%v", result, err)
 	}
 	result, err = service.Execute(context.Background(), commands.Request{Principal: discord, Args: []string{code}})
 	if err != nil || result.Text != "Administrator access granted to account discord-user." || accounts.claimCall != 1 {

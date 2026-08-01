@@ -11,12 +11,10 @@ import (
 
 // Config holds all runtime configuration loaded from environment variables.
 type Config struct {
-	Port                     string          // HTTP port for the WebSocket gateway (default: "8000")
-	WebSocketAuthSigningKey  string          // Raw or base64-encoded HMAC key used to sign WebSocket access tokens
-	WebSocketAuthMaxTokenTTL time.Duration   // WebSocket access-token lifetime, capped at 15 minutes (default: 15m)
-	IMessagePort             string          // HTTP port for the BlueBubbles webhook listener (default: "8090")
-	IMessageWebhookPath      string          // HTTP path for incoming BlueBubbles webhooks (default: "/imessage/webhook")
-	BlueBubblesURL           string          // BlueBubbles server base URL; iMessage gateway disabled if empty
+	HomeAssistantListenPort  string          // Optional HTTP port for the Home Assistant gateway
+	HomeAssistantAuthToken   string          // Optional shared bearer token; gateway disabled if empty
+	BlueBubblesListenPort    string          // Optional HTTP port for the BlueBubbles webhook listener
+	BlueBubblesURL           string          // BlueBubbles HTTP(S) base URL
 	BlueBubblesPassword      string          // BlueBubbles server password/token for REST API auth
 	MCPConfigEncryptionKey   string          // Key used to encrypt MCP server URLs and headers at rest
 	LLMGatewayURL            string          // LLM gateway API base URL (default: "http://localhost:8080")
@@ -27,7 +25,7 @@ type Config struct {
 	LLMGatewayTimeout        time.Duration   // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
 	ModelContextWindow       int             // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
-	DiscordToken             string          // Discord bot token; Discord gateway disabled if empty
+	DiscordToken             string          // Optional Discord bot token
 	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
 	WorkerPoolSize           int             // Number of concurrent broker workers (default: 1)
@@ -60,20 +58,14 @@ const (
 func Load() (*Config, error) {
 	// Silently ignore missing .env — production environments use real env vars
 	godotenv.Load() // nolint: errcheck
-	webSocketMaxTTL, err := getEnvDurationStrict("WEBSOCKET_AUTH_MAX_TOKEN_TTL", 15*time.Minute)
-	if err != nil {
-		return nil, err
-	}
 	retentionPolicy, err := loadRetentionPolicy()
 	if err != nil {
 		return nil, err
 	}
 	return &Config{
-		Port:                     getEnv("PORT", "8000"),
-		WebSocketAuthSigningKey:  getEnv("WEBSOCKET_AUTH_SIGNING_KEY", ""),
-		WebSocketAuthMaxTokenTTL: webSocketMaxTTL,
-		IMessagePort:             getEnv("IMESSAGE_PORT", "8090"),
-		IMessageWebhookPath:      getEnv("IMESSAGE_WEBHOOK_PATH", "/imessage/webhook"),
+		HomeAssistantListenPort:  getEnv("HOME_ASSISTANT_LISTEN_PORT", ""),
+		HomeAssistantAuthToken:   getEnv("HOME_ASSISTANT_AUTH_TOKEN", ""),
+		BlueBubblesListenPort:    getEnv("BLUEBUBBLES_LISTEN_PORT", ""),
 		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:      getEnv("BLUEBUBBLES_PASSWORD", ""),
 		MCPConfigEncryptionKey:   getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
@@ -170,18 +162,6 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 		return defaultValue
 	}
 	return d
-}
-
-func getEnvDurationStrict(key string, defaultValue time.Duration) (time.Duration, error) {
-	value, exists := os.LookupEnv(key)
-	if !exists || value == "" {
-		return defaultValue, nil
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("%s must be a positive Go duration", key)
-	}
-	return d, nil
 }
 
 func getEnvPositiveDuration(key string, defaultValue time.Duration) (time.Duration, error) {

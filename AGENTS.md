@@ -5,7 +5,7 @@ This file is the internal technical reference for how Oswald AI works today. `RE
 ## Project Overview
 
 Oswald AI is a Go application built around a single LLM gateway-backed agent loop. SQLite and sqlite-vec use CGO-backed libraries, and Discord GIFV extraction optionally invokes external `ffmpeg` and `ffprobe` executables.
-It exposes that loop through Discord, a local WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin model tools:
+It exposes that loop through Discord, an optional Home Assistant WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin model tools:
 
 - `web.search`
 - `time.current`
@@ -16,7 +16,7 @@ It exposes that loop through Discord, a local WebSocket gateway, and an iMessage
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Remote MCP tools are not filtered for read-only behavior.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/memories`, `/client`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Memory and global-memory mutations are commands and are never exposed to the model as tools.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/memories`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Memory and global-memory mutations are commands and are never exposed to the model as tools.
 
 Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -62,10 +62,10 @@ Current layers:
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
 6. Create the soul store
 7. Open the user-memory SQLite handle, install retention policy, and either apply the checksum-frozen v4 baseline to a fresh database or selectively reset an exact recognized published v3.2/v3.1.2-upgraded database into that baseline
-8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
+8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
 9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Create the command service, including `/memories`, `/client`, `/bootstrap`, and administrator global-memory management
+11. Create the command service, including `/memories`, `/bootstrap`, and administrator global-memory management
 12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 13. Create the runtime invalidation bus and build enabled gateways
 14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
@@ -76,7 +76,7 @@ Current layers:
 
 The unreleased v4 baseline remains checksum-frozen and disposable during development. A fresh database receives one `v4_compact_baseline` row in `schema_migration_versions`. As the sole upgrade exception, startup structurally fingerprints the exact published v3.2 schema and the exact v3.1.2-upgraded schema, optionally including their recognized sqlite-vec object family, and selectively resets either into the compact v4 baseline. Unknown or modified schemas, development ledgers, checksum drift, malformed preserved ownership, and every other non-empty ledgerless database fail closed without commit.
 
-The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mcp_servers` columns, including canonical IDs, display names, admin/ban state, and MCP ciphertext. It deletes all memory, session, global-memory, derived-index, and WebSocket authorization state, then rebuilds speaker introductions and validates preserved row counts, ownership, the exact v4 schema fingerprint, and foreign keys in the migration transaction. Operators must take a WAL-safe backup and retain the original `MCP_CONFIG_ENCRYPTION_KEY` before upgrade. Old indexes are discarded and the index worker creates fresh revisions after startup.
+The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mcp_servers` columns, including canonical IDs, display names, admin/ban state, and MCP ciphertext, but fails closed when legacy `gateway = 'websocket'` links exist because no identity conversion is provided. It deletes all memory, session, global-memory, and derived-index state, then rebuilds speaker introductions and validates preserved row counts, ownership, the exact v4 schema fingerprint, and foreign keys in the migration transaction. Operators must take a WAL-safe backup and retain the original `MCP_CONFIG_ENCRYPTION_KEY` before upgrade. Old indexes are discarded and the index worker creates fresh revisions after startup.
 
 Baseline creation runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table construction. `PRAGMA foreign_key_check` must pass before commit and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
@@ -158,7 +158,7 @@ Multimodal request notes:
 
 Streaming behavior:
 
-- WebSocket clients can receive `thinking`, `content`, `status`, `tool_call`, and `tool_result` chunks while the request is running
+- Home Assistant receives correlated `thinking`, `content`, `tool_call`, and `tool_result` frames while the request is running
 - Discord does not stream token-by-token; it waits for the final response
 - iMessage does not stream token-by-token; it waits for the final response
 
@@ -175,7 +175,7 @@ Gateway-neutral routing policy lives in `internal/routing/` and shared gateway e
 - Empty prompts with no usable images get a direct gateway fallback response
 - Text-only, image-only, unsupported-attachment-only, and reply-context prompts are assembled in one shared format for every gateway
 - Reply context can include quoted text, replied-to images when image slots remain, unsupported attachment labels, and unavailable-message markers
-- WebSocket uses the same shared runtime as Discord and iMessage, with streaming delivered through its gateway-specific responder
+- Home Assistant uses the same shared runtime as Discord and iMessage, with streaming delivered through its gateway-specific responder
 
 ## Four-Layer Memory Model
 
@@ -259,7 +259,7 @@ Oswald keeps four distinct memory layers.
 ### Account Links
 
 - Stored in `data/database/oswald.db`
-- Maps external gateway accounts like Discord, WebSocket, and iMessage to canonical internal user IDs
+- Maps external gateway accounts like Discord, Home Assistant, and iMessage to canonical internal user IDs
 - Lets persistent memory stay shared across gateways while session chat memory remains gateway/thread scoped
 - `/connect` creates or confirms a hashed, expiring, one-time challenge in a direct authenticated conversation
 - Confirmation atomically moves linked accounts, memories, sessions, moderation references, and re-encrypted MCP ownership before deleting the losing canonical user
@@ -269,7 +269,7 @@ Oswald keeps four distinct memory layers.
 - `/disconnect` requires an authenticated identity and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, and `/deleteuser`
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
-- `/connect`, `/disconnect`, `/memories`, `/client`, and `/bootstrap` work in private and group conversations and require an authenticated identity. `/bootstrap <code>` accepts only Discord or iMessage principals, promotes the currently resolved canonical account only while no administrator exists, and consumes its process-local code after a successful update. Restart generates a replacement code only while no administrator exists. Group slash commands still require an Oswald mention, and bootstrap codes may be visible to other group members.
+- `/connect`, `/disconnect`, `/memories`, and `/bootstrap` require an authenticated identity. `/bootstrap <code>` accepts Discord, iMessage, or Home Assistant principals, promotes the currently resolved canonical account only while no administrator exists, and consumes its process-local code after a successful update. Restart generates a replacement code only while no administrator exists. Group slash commands still require an Oswald mention, and bootstrap codes may be visible to other group members.
 
 ### Memory Commands and Deletion
 
@@ -285,7 +285,7 @@ Exact IDs reject non-positive or non-decimal values. A complete list that exceed
 
 Exact-ID and forget-all deletion are physical row deletions in the command transaction. SQLite uses `secure_delete=ON`; WAL files and external backups remain subject to ordinary SQLite checkpointing and operator backup retention.
 
-Runtime invalidation is in-process and transport-neutral. Account disconnect, client revocation, user deletion, and forget-all clear matching gateway caches; authorization mutations can also close matching WebSocket connections.
+Runtime invalidation is in-process and transport-neutral. Account disconnect, user deletion, and forget-all clear matching gateway caches and can close matching Home Assistant connections.
 
 Retention configuration uses positive Go durations and a positive batch size:
 
@@ -364,48 +364,32 @@ The prompt budget is the context window minus reserves for:
 
 Gateway bootstrap is in `internal/gateway/bootstrap.go`.
 
-- WebSocket is always enabled and startup fails unless signed-token authentication is configured
-- Discord is enabled only when `DISCORD_TOKEN` is set
-- iMessage is enabled only when both `BLUEBUBBLES_URL` and `BLUEBUBBLES_PASSWORD` are set
+- Home Assistant is enabled only when `HOME_ASSISTANT_AUTH_TOKEN` and `HOME_ASSISTANT_LISTEN_PORT` are both present and valid
+- Discord is enabled only when `DISCORD_TOKEN` is non-empty after trimming
+- iMessage is enabled only when `BLUEBUBBLES_URL`, `BLUEBUBBLES_PASSWORD`, and `BLUEBUBBLES_LISTEN_PORT` are all present and valid
+- Incomplete or invalid configuration disables only that gateway; startup fails when zero gateways are configured correctly
 
-### WebSocket Gateway
+### Home Assistant Gateway
 
 Files:
 
-- `internal/gateway/websocket/gateway.go`
-- `internal/websocketauth/`
-- `internal/gateway/websocket/types.go`
+- `internal/gateway/homeassistant/gateway.go`
+- `internal/gateway/homeassistant/types.go`
+- `internal/gateway/homeassistant/responder.go`
 
 Behavior:
 
-- Listens on `/ws` and exposes `POST /auth/device`, `POST /auth/token`, and `POST /auth/revoke`
-- Device codes expire after 10 minutes and begin with a five-second polling interval; early polling returns `slow_down` and increases the interval
-- Successful pairing returns a 15-minute HS256 access JWT and a rotating opaque refresh token with a 90-day sliding expiry; the immediately previous refresh token has a 30-second concurrency grace period
-- Requires exactly one bearer access JWT with audience `oswald-websocket`, stable subject, durable client ID, token version, required `iat` and `exp`, and lifetime no greater than `WEBSOCKET_AUTH_MAX_TOKEN_TTL`
-- Binds the connection to both subject and client ID, revalidates durable client state and canonical ownership before every message, and closes connections at JWT expiry or revocation
-- Accepts either plain text or JSON input
-- JSON input fields:
-  - `user_id`
-  - `display_name`
-  - `prompt`
-  - `images`
-- Plain-text and JSON messages use the authenticated token subject for ownership and a subject-plus-client session identity
-- If `user_id` is present, it must match the authenticated subject; attempts to switch identity close the connection
-- WebSocket principals use `websocket_signed_token` assurance and are authenticated independently from account-link verification
-- Browser origins must match the request host; non-browser clients may omit `Origin`
-- Native browser WebSocket clients cannot set the required bearer header; this mode targets trusted service and command-line clients
-- Supports text-only, image-only, and text-plus-image JSON requests
-- Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
-- Streams typed chunks during generation, then sends a final JSON response payload
-- Supports `/client approve`, `/client approve-new`, `/client list`, and `/client revoke`; revoking a client closes its live sockets without closing sibling clients
-- WebSocket does not currently provide a first-administrator bootstrap path. The initial administrator must claim the process-local startup code through Discord or iMessage, then approve WebSocket clients through `/client`
-- Account merge and administrator account deletion transfer or delete client state transactionally; token hashes are never exposed through commands
-
-WebSocket image payloads use the shape:
-
-- `mime_type`
-- `data` (base64-encoded image bytes)
-- `source` (optional filename/label)
+- Listens on `/homeassistant/ws` at `HOME_ASSISTANT_LISTEN_PORT`
+- Requires exactly one bearer token matching `HOME_ASSISTANT_AUTH_TOKEN`; the configured token is hashed at startup and compared in constant time
+- Sends `{"type":"ready","protocol_version":1}` immediately after a successful upgrade
+- Accepts exactly one strict JSON conversation request per connection and rejects binary frames, unknown fields, anonymous users, missing conversation IDs, and empty text
+- Trusts the authenticated Home Assistant service to assert a required HA user ID, then resolves or creates `gateway = 'homeassistant'` ownership for that ID
+- Home Assistant principals use `home_assistant_token` assurance
+- Session keys are `homeassistant:<ha-user-id>:<conversation-id>`; different users and conversations remain isolated
+- Emits request-correlated `thinking`, `content`, `tool_call`, and `tool_result` frames followed by exactly one `result` or `error` frame
+- Closes the socket normally after the terminal frame; account invalidation can close an active matching user connection
+- Supports text requests only; images and command attachments are not supported
+- `/bootstrap <code>` may be claimed by an authenticated Home Assistant user
 
 ### Discord Gateway
 
@@ -453,7 +437,7 @@ Files:
 
 Behavior:
 
-- Listens for BlueBubbles webhook events on a dedicated HTTP port and path
+- Listens for BlueBubbles webhook events at the fixed `/bluebubbles/webhook` path on `BLUEBUBBLES_LISTEN_PORT`
 - Ignores self-authored messages and payloads with neither text nor attachments
 - Normalizes iMessage handles into canonical phone-number or email identifiers
 - Resolves account links using contact display names when available, with identifier fallback
@@ -573,7 +557,6 @@ Image validation is centralized in `internal/media/images.go`.
 - Maximum accepted source payload per image: `10 MiB`
 - Maximum normalized long edge before provider submission: `2560` pixels
 - Maximum normalized encoded payload before provider submission: `280 KiB`; images that still exceed this after initial normalization are downscaled further until they fit
-- WebSocket validates the declared MIME type and base64 payload supplied by the client
 - Discord and iMessage validate attachment metadata, enforce size limits, then validate the downloaded bytes using HTTP `Content-Type`, content sniffing, and HEIC/HEIF signature detection
 - Decoded images are re-encoded as PNG when transparency must be preserved; otherwise they are re-encoded as JPEG
 - Animated GIFs are sampled into one normalized contact-sheet image. Discord `gifv` embeds are converted from short video into a four-frame contact sheet using external `ffmpeg` and `ffprobe`, with static preview fallback when extraction fails
@@ -789,7 +772,10 @@ Use `.env.example` as the canonical configuration reference for variable names, 
 Current startup requirements:
 
 - `LLM_GATEWAY_MODEL` must be non-empty
-- `WEBSOCKET_AUTH_SIGNING_KEY` is required because WebSocket is always enabled
+- `HOME_ASSISTANT_AUTH_TOKEN` and `HOME_ASSISTANT_LISTEN_PORT` must both be configured to enable Home Assistant; the token must contain at least 32 characters and the port must be an integer from 1 through 65535
+- `BLUEBUBBLES_URL`, `BLUEBUBBLES_PASSWORD`, and `BLUEBUBBLES_LISTEN_PORT` must all be configured to enable iMessage; the URL must be absolute HTTP(S), the password non-empty, and the port an integer from 1 through 65535
+- `DISCORD_TOKEN` must be non-empty to enable Discord
+- Missing or invalid settings disable the affected gateway without failing immediately, but application startup fails if no gateway is configured correctly
 - `MCP_CONFIG_ENCRYPTION_KEY` is required because the MCP store is initialized unconditionally, even when no server is configured
 - `LLM_GATEWAY_URL` defaults to `http://localhost:8080`; API and virtual keys are optional
 
@@ -824,7 +810,6 @@ Current startup requirements:
 | `internal/commands/parser.go`                  | Slash-command parser                         |
 | `internal/commands/bootstrap/`                 | Process-local first-administrator bootstrap  |
 | `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
-| `internal/commands/clientauth/commands.go`     | WebSocket client authorization commands      |
 | `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
 | `internal/identity/principal.go`                | Typed request principal and assurance        |
 | `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
@@ -832,8 +817,7 @@ Current startup requirements:
 | `internal/media/video.go`                      | Discord GIFV contact-sheet extraction        |
 | `internal/gateway/runtime/`                    | Shared gateway request execution             |
 | `internal/gateway/bootstrap.go`                | Gateway bootstrap                            |
-| `internal/gateway/websocket/gateway.go`        | WebSocket transport                          |
-| `internal/websocketauth/`                      | Device, JWT, and refresh state               |
+| `internal/gateway/homeassistant/`              | Authenticated Home Assistant transport       |
 | `internal/gateway/discord/gateway.go`          | Discord transport                            |
 | `internal/gateway/imessage/gateway.go`         | iMessage BlueBubbles transport               |
 

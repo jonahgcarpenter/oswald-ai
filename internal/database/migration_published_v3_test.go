@@ -69,7 +69,7 @@ VALUES ('mcp-1', 'user', 'user-1', 'server', 'streamable_http', ?, ?, 'mcp-creat
 			if !bytes.Equal(gotURL, ciphertext) || !bytes.Equal(gotHeaders, ciphertext) {
 				t.Fatalf("MCP ciphertext changed: url=%v headers=%v", gotURL, gotHeaders)
 			}
-			for _, table := range []string{"memory_entries", "memory_candidates", "session_turns", "session_summaries", "memory_events", "durable_jobs", "derived_index_revisions", "websocket_clients", "websocket_device_authorizations", "global_memories", "sessions"} {
+			for _, table := range []string{"memory_entries", "memory_candidates", "session_turns", "session_summaries", "memory_events", "durable_jobs", "derived_index_revisions", "global_memories", "sessions"} {
 				var count int
 				if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 					t.Fatalf("count reset table %s: %v", table, err)
@@ -80,6 +80,23 @@ VALUES ('mcp-1', 'user', 'user-1', 'server', 'streamable_http', ?, ?, 'mcp-creat
 			}
 			assertCompactV4LedgerAndIntegrity(t, db.SQL())
 		})
+	}
+}
+
+func TestPublishedV3ResetRejectsLegacyWebSocketAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	raw := createPublishedV3Database(t, path, publishedV32SchemaDefinition)
+	if _, err := raw.Exec(`
+INSERT INTO account_users VALUES ('user-1', 'created', 'updated', 1, 0, '', '', '');
+INSERT INTO linked_accounts VALUES ('websocket', 'legacy', 'user-1', 'Legacy', 'linked', 1);`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, nil); err == nil || !strings.Contains(err.Error(), "unsupported websocket accounts") {
+		t.Fatalf("Open() error = %v", err)
 	}
 }
 

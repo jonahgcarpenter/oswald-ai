@@ -95,7 +95,7 @@ func TestStoreAddAllowsFactualCapabilityAndDeploymentStatements(t *testing.T) {
 	store := newTestStore(t)
 	for _, text := range []string{
 		"Oswald uses an OpenAI-compatible gateway for model requests.",
-		"WebSocket access requires authenticated bearer-token transport.",
+		"Home Assistant access requires authenticated bearer-token transport.",
 		"Administrator commands can configure global MCP servers.",
 		"The deployment runs Go with SQLite and supports image input.",
 		"The local password = disabled sentinel indicates password login is off.",
@@ -331,9 +331,9 @@ func newTestStore(t *testing.T) *Store {
 func authenticatedContext(userID string) context.Context {
 	ctx := requestctx.WithPrincipal(context.Background(), identity.Principal{
 		CanonicalUserID: userID,
-		Gateway:         "websocket",
+		Gateway:         "homeassistant",
 		ExternalID:      "external-" + userID,
-		Assurance:       identity.AssuranceWebSocketSignedToken,
+		Assurance:       identity.AssuranceHomeAssistantToken,
 	})
 	return requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "request-1", SessionID: "session-1", Model: "test-model"})
 }

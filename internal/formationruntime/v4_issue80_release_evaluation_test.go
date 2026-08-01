@@ -279,11 +279,11 @@ func evaluateIssue80GlobalMemory(t *testing.T) {
 	defer memory.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, memory, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	adminID, err := accounts.EnsureAccount("websocket", "admin", "Admin")
+	adminID, err := accounts.EnsureAccount("homeassistant", "admin", "Admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	targetID, err := accounts.EnsureAccount("websocket", "target", "Target")
+	targetID, err := accounts.EnsureAccount("homeassistant", "target", "Target")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	defer store.Close() // nolint:errcheck
 	accounts := accountlinking.NewService(path, store, nil, log)
 	defer accounts.Close() // nolint:errcheck
-	userID, err := accounts.EnsureAccount("websocket", "actor", "Actor")
+	userID, err := accounts.EnsureAccount("homeassistant", "actor", "Actor")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +743,7 @@ func (b issue80DeliveryBookkeeper) MarkDeliveryFailed(ctx context.Context, userI
 }
 
 func issue80Principal(userID, externalID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: externalID, Assurance: identity.AssuranceWebSocketSignedToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: externalID, Assurance: identity.AssuranceHomeAssistantToken}
 }
 
 func issue80SetAdmin(t *testing.T, path, userID string) {

@@ -231,7 +231,7 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 
 func TestIMessageWebhookRequiresBlueBubblesCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -243,7 +243,7 @@ func TestIMessageWebhookRequiresBlueBubblesCredential(t *testing.T) {
 
 func TestIMessageWebhookAcceptsPasswordCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -259,11 +259,11 @@ func TestIMessageWebhookAcceptsCredentialSources(t *testing.T) {
 		path   string
 		header string
 	}{
-		{name: "password query", path: "/imessage/webhook?password=pw"},
-		{name: "guid query", path: "/imessage/webhook?guid=pw"},
-		{name: "x-password header", path: "/imessage/webhook", header: "x-password"},
-		{name: "x-guid header", path: "/imessage/webhook", header: "x-guid"},
-		{name: "x-bluebubbles-guid header", path: "/imessage/webhook", header: "x-bluebubbles-guid"},
+		{name: "password query", path: "/bluebubbles/webhook?password=pw"},
+		{name: "guid query", path: "/bluebubbles/webhook?guid=pw"},
+		{name: "x-password header", path: "/bluebubbles/webhook", header: "x-password"},
+		{name: "x-guid header", path: "/bluebubbles/webhook", header: "x-guid"},
+		{name: "x-bluebubbles-guid header", path: "/bluebubbles/webhook", header: "x-bluebubbles-guid"},
 	}
 
 	for _, tt := range tests {
@@ -286,7 +286,7 @@ func TestIMessageWebhookAcceptsCredentialSources(t *testing.T) {
 
 func TestIMessageWebhookRejectsWrongCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=wrong", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=wrong", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -298,7 +298,7 @@ func TestIMessageWebhookRejectsWrongCredential(t *testing.T) {
 
 func TestIMessageWebhookMalformedJSONReturnsBadRequest(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(`{"type":`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -310,7 +310,7 @@ func TestIMessageWebhookMalformedJSONReturnsBadRequest(t *testing.T) {
 
 func TestIMessageWebhookWrongMethodReturnsMethodNotAllowed(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodGet, "/imessage/webhook?password=pw", nil)
+	req := httptest.NewRequest(http.MethodGet, "/bluebubbles/webhook?password=pw", nil)
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -490,7 +490,7 @@ func TestIMessageWebhookIgnoresTapback(t *testing.T) {
 	defer bb.server.Close()
 
 	body := `{"type":"new-message","data":{"guid":"tapback-1","text":"Liked an image","associatedMessageType":2001,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -797,7 +797,7 @@ func (f *imFakeChatter) primaryRequests() []llm.ChatRequest {
 
 func postIMessageWebhook(t *testing.T, g *Gateway, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	g.handleWebhook(rec, req)
 	return rec

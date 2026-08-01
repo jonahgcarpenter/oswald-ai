@@ -25,8 +25,8 @@ func TestMemoryHandlersRequireAuthenticatedPrincipal(t *testing.T) {
 	}
 	for principalName, ctx := range map[string]context.Context{
 		"missing":       context.Background(),
-		"invalid":       requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "alice", Assurance: identity.AssuranceDiscordGateway}),
-		"self_asserted": requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "alice", Assurance: identity.AssuranceSelfAsserted}),
+		"invalid":       requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "alice", Assurance: identity.AssuranceDiscordGateway}),
+		"self_asserted": requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "alice", Assurance: identity.AssuranceSelfAsserted}),
 	} {
 		for handlerName, handler := range handlers {
 			if _, err := handler(ctx, map[string]interface{}{}); err == nil || !strings.Contains(err.Error(), "authenticated user identity") {
@@ -71,7 +71,7 @@ func TestMemoryHandlersAllowAuthenticatedGatewaysInGroups(t *testing.T) {
 	principals := []identity.Principal{
 		{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "discord-user", Assurance: identity.AssuranceDiscordGateway},
 		{CanonicalUserID: "usr_1", Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook},
-		{CanonicalUserID: "usr_1", Gateway: "websocket", ExternalID: "signed-user", Assurance: identity.AssuranceWebSocketSignedToken},
+		{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "signed-user", Assurance: identity.AssuranceHomeAssistantToken},
 	}
 	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
 		"search": NewSearchHandler(store, log),
@@ -121,7 +121,7 @@ func TestMemorySearchReportsTotalAndPartialDegradation(t *testing.T) {
 }
 
 func principalContext(userID, externalID string) context.Context {
-	principal := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: externalID, Assurance: identity.AssuranceWebSocketSignedToken}
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: externalID, Assurance: identity.AssuranceHomeAssistantToken}
 	ctx := requestctx.WithPrincipal(context.Background(), principal)
 	return requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "req", SessionID: "session", Model: "test"})
 }

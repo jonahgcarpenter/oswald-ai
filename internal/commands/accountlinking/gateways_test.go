@@ -14,7 +14,8 @@ func TestNormalizeIdentifier(t *testing.T) {
 		{name: "imessage phone", gateway: "imessage", identifier: "(555) 123-4567", want: "+5551234567"},
 		{name: "imessage international prefix", gateway: "imessage", identifier: "0015551234567", want: "+15551234567"},
 		{name: "imessage email", gateway: "imessage", identifier: "User <Me@Example.COM>", want: "me@example.com"},
-		{name: "websocket preserves", gateway: "websocket", identifier: " alice local ", want: "alice local"},
+		{name: "home assistant", gateway: "homeassistant", identifier: " abc_123 ", want: "abc_123"},
+		{name: "bad home assistant", gateway: "homeassistant", identifier: "alice local", wantErr: true},
 		{name: "bad discord", gateway: "discord", identifier: "alice", wantErr: true},
 		{name: "unknown gateway", gateway: "irc", identifier: "alice", wantErr: true},
 	}

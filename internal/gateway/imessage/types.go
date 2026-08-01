@@ -17,7 +17,7 @@ import (
 const (
 	chatStyleGroup       = 43
 	chatStyleDirect      = 45
-	defaultWebhookPath   = "/imessage/webhook"
+	webhookPath          = "/bluebubbles/webhook"
 	defaultSendMethod    = "private-api"
 	capabilityAttempts   = 5
 	capabilityRetryDelay = 500 * time.Millisecond
@@ -31,7 +31,6 @@ var mentionRE = regexp.MustCompile(`@?Oswald\b`)
 // Gateway receives BlueBubbles webhooks and sends replies via its REST API.
 type Gateway struct {
 	Port                string
-	WebhookPath         string
 	BlueBubblesURL      string
 	BlueBubblesPassword string
 	Links               *accountlinking.Service

@@ -19,9 +19,9 @@ import (
 func TestChallengeLifecycleRejectsExpiryCancellationAndSameAccount(t *testing.T) {
 	links := newTestService(t)
 	discordID, _ := links.EnsureAccount("discord", "101", "Discord User")
-	websocketID, _ := links.EnsureAccount("websocket", "ws-user", "Web User")
+	websocketID, _ := links.EnsureAccount("homeassistant", "ws-user", "Web User")
 	discord := identity.Principal{CanonicalUserID: discordID, Gateway: "discord", ExternalID: "101", Assurance: identity.AssuranceDiscordGateway}
-	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "websocket", ExternalID: "ws-user", Assurance: identity.AssuranceWebSocketSignedToken}
+	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-user", Assurance: identity.AssuranceHomeAssistantToken}
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	links.now = func() time.Time { return now }
 
@@ -53,17 +53,17 @@ func TestChallengeLifecycleRejectsExpiryCancellationAndSameAccount(t *testing.T)
 
 func TestConnectCommandRequiresAuthenticatedPrincipal(t *testing.T) {
 	links := newTestService(t)
-	userID, _ := links.EnsureAccount("websocket", "local", "Local")
+	userID, _ := links.EnsureAccount("homeassistant", "local", "Local")
 	service, err := commands.NewService(New(links)...)
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
-	selfAsserted := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "local", Assurance: identity.AssuranceSelfAsserted}
+	selfAsserted := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "local", Assurance: identity.AssuranceSelfAsserted}
 	result, err := service.Execute(context.Background(), commands.Request{Principal: selfAsserted, Raw: "/connect"})
-	if err != nil || result.Text != "Account changes require an authenticated identity." {
+	if err == nil || result.Text != "" {
 		t.Fatalf("self-asserted result=%q err=%v", result.Text, err)
 	}
-	authenticated := identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "local", Assurance: identity.AssuranceWebSocketSignedToken}
+	authenticated := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "local", Assurance: identity.AssuranceHomeAssistantToken}
 	result, err = service.Execute(context.Background(), commands.Request{Principal: authenticated, Raw: "/connect"})
 	if err != nil || !strings.Contains(result.Text, "On the other account, send:") || !strings.Contains(result.Text, "/connect OSW-") {
 		t.Fatalf("authenticated result=%q err=%v", result.Text, err)
@@ -97,9 +97,9 @@ func TestChallengeCreationPrunesExpiredHistoryAfterRetention(t *testing.T) {
 func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) {
 	links := newTestService(t)
 	discordID, _ := links.EnsureAccount("discord", "201", "Discord User")
-	websocketID, _ := links.EnsureAccount("websocket", "ws-201", "Web User")
+	websocketID, _ := links.EnsureAccount("homeassistant", "ws-201", "Web User")
 	discord := identity.Principal{CanonicalUserID: discordID, Gateway: "discord", ExternalID: "201", Assurance: identity.AssuranceDiscordGateway}
-	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "websocket", ExternalID: "ws-201", Assurance: identity.AssuranceWebSocketSignedToken}
+	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-201", Assurance: identity.AssuranceHomeAssistantToken}
 
 	challenge, err := links.CreateChallenge(context.Background(), discord, "req")
 	if err != nil {
@@ -144,10 +144,10 @@ func TestChallengeConfirmationIsReplaySafeAndVerifiesParticipants(t *testing.T) 
 func TestChallengeReplayFollowsLaterCanonicalMerge(t *testing.T) {
 	links := newTestService(t)
 	firstID, _ := links.EnsureAccount("discord", "211", "First")
-	secondID, _ := links.EnsureAccount("websocket", "ws-211", "Second")
+	secondID, _ := links.EnsureAccount("homeassistant", "ws-211", "Second")
 	thirdID, _ := links.EnsureAccount("imessage", "+15550000211", "Third")
 	first := identity.Principal{CanonicalUserID: firstID, Gateway: "discord", ExternalID: "211", Assurance: identity.AssuranceDiscordGateway}
-	second := identity.Principal{CanonicalUserID: secondID, Gateway: "websocket", ExternalID: "ws-211", Assurance: identity.AssuranceWebSocketSignedToken}
+	second := identity.Principal{CanonicalUserID: secondID, Gateway: "homeassistant", ExternalID: "ws-211", Assurance: identity.AssuranceHomeAssistantToken}
 	third := identity.Principal{CanonicalUserID: thirdID, Gateway: "imessage", ExternalID: "+15550000211", Assurance: identity.AssuranceBlueBubblesWebhook}
 
 	challenge, err := links.CreateChallenge(context.Background(), first, "req")
@@ -170,12 +170,12 @@ func TestChallengeReplayFollowsLaterCanonicalMerge(t *testing.T) {
 func TestAdminMutationReResolvesMergedActor(t *testing.T) {
 	links := newTestService(t)
 	winnerID, _ := links.EnsureAccount("discord", "221", "Winner")
-	loserID, _ := links.EnsureAccount("websocket", "ws-221", "Admin")
+	loserID, _ := links.EnsureAccount("homeassistant", "ws-221", "Admin")
 	if err := links.SetAdmin(winnerID, loserID, true); err != nil {
 		t.Fatalf("grant loser admin: %v", err)
 	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "221", Assurance: identity.AssuranceDiscordGateway}
-	staleAdmin := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "ws-221", Assurance: identity.AssuranceWebSocketSignedToken}
+	staleAdmin := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "ws-221", Assurance: identity.AssuranceHomeAssistantToken}
 	connectTestAccounts(t, links, winner, staleAdmin)
 
 	if err := links.DeleteUserAs(staleAdmin, winnerID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
@@ -197,8 +197,8 @@ func TestChallengeRejectsGatewayConflictAndBanWithoutConsumption(t *testing.T) {
 		t.Fatalf("gateway conflict error = %v", err)
 	}
 
-	websocketID, _ := links.EnsureAccount("websocket", "ws-301", "Web")
-	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "websocket", ExternalID: "ws-301", Assurance: identity.AssuranceWebSocketSignedToken}
+	websocketID, _ := links.EnsureAccount("homeassistant", "ws-301", "Web")
+	websocket := identity.Principal{CanonicalUserID: websocketID, Gateway: "homeassistant", ExternalID: "ws-301", Assurance: identity.AssuranceHomeAssistantToken}
 	challenge, _ = links.CreateChallenge(context.Background(), first, "req")
 	if err := links.BanUser(firstID, websocketID, "blocked"); err != nil {
 		t.Fatalf("ban confirmer: %v", err)
@@ -229,7 +229,7 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	manager := mcp.NewManagerFromStore(mcpStore, log)
 	links := NewService(dbPath, memories, manager, log)
 	winnerID, _ := links.EnsureAccount("discord", "401", "Winner")
-	loserID, _ := links.EnsureAccount("websocket", "ws-401", "Loser")
+	loserID, _ := links.EnsureAccount("homeassistant", "ws-401", "Loser")
 	if _, err := memories.SaveMemory(ctx, loserID, usermemory.SaveRequest{Scope: "long_term", Category: "notes", Statement: "Loser fact", Evidence: "test"}); err != nil {
 		t.Fatalf("save loser memory: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 		t.Fatalf("save loser MCP: %v", err)
 	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "401", Assurance: identity.AssuranceDiscordGateway}
-	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "ws-401", Assurance: identity.AssuranceWebSocketSignedToken}
+	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "ws-401", Assurance: identity.AssuranceHomeAssistantToken}
 	connectTestAccounts(t, links, winner, loser)
 
 	entries, err := memories.ListMemories(winnerID, "", "", 10)
@@ -279,14 +279,14 @@ func TestChallengeConfirmationRollsBackConsumptionOnMergeFailure(t *testing.T) {
 	mcpMerger := &failingMCPMerger{fail: true}
 	links := NewService(dbPath, memories, mcpMerger, log)
 	winnerID, _ := links.EnsureAccount("discord", "501", "Winner")
-	loserID, _ := links.EnsureAccount("websocket", "ws-501", "Loser")
+	loserID, _ := links.EnsureAccount("homeassistant", "ws-501", "Loser")
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "501", Assurance: identity.AssuranceDiscordGateway}
-	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "ws-501", Assurance: identity.AssuranceWebSocketSignedToken}
+	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "ws-501", Assurance: identity.AssuranceHomeAssistantToken}
 	challenge, _ := links.CreateChallenge(context.Background(), winner, "req")
 	if _, err := links.ConfirmChallenge(context.Background(), loser, challenge.Code, "req"); err == nil {
 		t.Fatal("expected injected MCP merge failure")
 	}
-	if owner, ok, _ := links.ResolveAccount("websocket", "ws-501"); !ok || owner != loserID {
+	if owner, ok, _ := links.ResolveAccount("homeassistant", "ws-501"); !ok || owner != loserID {
 		t.Fatalf("failed merge changed owner: owner=%q ok=%v", owner, ok)
 	}
 	mcpMerger.fail = false
@@ -304,7 +304,7 @@ func TestChallengeMergeRollsBackPreservedStateWhenFinalDeleteFails(t *testing.T)
 	links := NewService(dbPath, memories, nil, log)
 	t.Cleanup(func() { links.Close() })
 	winnerID, _ := links.EnsureAccount("discord", "591", "Winner")
-	loserID, _ := links.EnsureAccount("websocket", "merge-fail-loser", "Loser")
+	loserID, _ := links.EnsureAccount("homeassistant", "merge-fail-loser", "Loser")
 	if _, err := memories.SaveMemory(ctx, loserID, usermemory.SaveRequest{Scope: "long_term", Category: "notes", Statement: "rollback fact", Evidence: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestChallengeMergeRollsBackPreservedStateWhenFinalDeleteFails(t *testing.T)
 		t.Fatal(err)
 	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "591", Assurance: identity.AssuranceDiscordGateway}
-	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "websocket", ExternalID: "merge-fail-loser", Assurance: identity.AssuranceWebSocketSignedToken}
+	loser := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "merge-fail-loser", Assurance: identity.AssuranceHomeAssistantToken}
 	challenge, err := links.CreateChallenge(ctx, winner, "req")
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestDeleteUserRollsBackWhenMCPDeletionFails(t *testing.T) {
 	links := NewService(dbPath, memories, mcpMerger, log)
 	t.Cleanup(func() { links.Close() })
 	actorID, _ := links.EnsureAccount("discord", "511", "Actor")
-	targetID, _ := links.EnsureAccount("websocket", "ws-511", "Target")
+	targetID, _ := links.EnsureAccount("homeassistant", "ws-511", "Target")
 
 	if err := links.deleteUser(actorID, targetID); err == nil {
 		t.Fatal("expected injected MCP deletion failure")

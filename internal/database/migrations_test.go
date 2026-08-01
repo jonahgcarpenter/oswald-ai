@@ -123,7 +123,6 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 		"global_memories", "linked_accounts", "mcp_servers", "memory_candidates",
 		"memory_entries", "memory_events", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions",
-		"websocket_clients", "websocket_device_authorizations",
 	}
 	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB 'memory_entries_fts*' AND name NOT GLOB 'session_turns_fts*' ORDER BY name`)
 	if err != nil {
@@ -150,7 +149,7 @@ func TestCompactV4CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 15, "index": 44, "trigger": 18, "view": 0} {
+	for objectType, want := range map[string]int{"table": 13, "index": 38, "trigger": 18, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

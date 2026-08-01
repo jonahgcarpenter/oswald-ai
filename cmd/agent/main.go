@@ -14,7 +14,6 @@ import (
 	bootstrapcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/bootstrap"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/commands/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/formationruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
@@ -31,7 +30,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/websocketauth"
 )
 
 func main() {
@@ -119,26 +117,14 @@ func main() {
 		log.Fatal("app.bootstrap.init_failed", "failed to initialize administrator bootstrap", config.ErrorField(err))
 	}
 	if bootstrapCode != "" {
-		fmt.Fprintf(os.Stdout, "\nOswald first-administrator bootstrap\n\nBootstrap code: %s\n\nRun /bootstrap %s from an authenticated Discord or iMessage account. The code is valid once for this process. Restart Oswald to replace a lost code while no administrator exists.\n\n", bootstrapCode, bootstrapCode)
+		fmt.Fprintf(os.Stdout, "\nOswald first-administrator bootstrap\n\nBootstrap code: %s\n\nRun /bootstrap %s from an authenticated Discord, iMessage, or Home Assistant account. The code is valid once for this process. Restart Oswald to replace a lost code while no administrator exists.\n\n", bootstrapCode, bootstrapCode)
 		log.Info("app.bootstrap.available", "generated first-administrator bootstrap code", config.F("status", "ok"))
-		if cfg.DiscordToken == "" && (cfg.BlueBubblesURL == "" || cfg.BlueBubblesPassword == "") {
-			log.Warn("app.bootstrap.gateway_unavailable", "administrator bootstrap requires Discord or iMessage", config.F("status", "degraded"))
-		}
-	}
-	webSocketDB, err := database.Open(config.DefaultAccountLinkPath, rootLog.Server("websocket.auth.store"))
-	if err != nil {
-		log.Fatal("app.websocket_auth.init_failed", "failed to open websocket authorization store", config.ErrorField(err))
-	}
-	defer webSocketDB.Close() // nolint:errcheck
-	webSocketAuth, err := websocketauth.New(webSocketDB.SQL(), cfg.WebSocketAuthSigningKey, cfg.WebSocketAuthMaxTokenTTL)
-	if err != nil {
-		log.Fatal("app.websocket_auth.init_failed", "failed to initialize websocket authorization", config.ErrorField(err))
 	}
 	indexService := indexruntime.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	indexService.Start(context.Background())
 	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService, Bootstrap: bootstrapCommand}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), bootstrapCommand, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
@@ -172,7 +158,7 @@ func main() {
 		Compaction:             compactionService,
 		RuntimeInvalidationBus: runtimeInvalidationBus,
 	}
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, webSocketAuth, runtimeDeps, rootLog)
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
 	if err != nil {
 		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
 	}

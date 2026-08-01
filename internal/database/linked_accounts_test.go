@@ -21,7 +21,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 			"usr_test": {
 				CreatedAt: now,
 				UpdatedAt: now,
-				Accounts:  []LinkedAccount{{Gateway: "websocket", Identifier: "user", LinkedAt: now}},
+				Accounts:  []LinkedAccount{{Gateway: "homeassistant", Identifier: "user", LinkedAt: now}},
 			},
 		},
 	}
@@ -38,7 +38,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	data.Users["usr_test"] = AccountUser{
 		CreatedAt: now,
 		UpdatedAt: now.Add(time.Minute),
-		Accounts:  []LinkedAccount{{Gateway: "websocket", Identifier: "user", DisplayName: "User", LinkedAt: now}},
+		Accounts:  []LinkedAccount{{Gateway: "homeassistant", Identifier: "user", DisplayName: "User", LinkedAt: now}},
 	}
 	if err := db.ReplaceAccountLinks(data); err != nil {
 		t.Fatalf("second replace: %v", err)

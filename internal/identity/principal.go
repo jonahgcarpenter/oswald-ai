@@ -8,8 +8,8 @@ type Assurance string
 const (
 	// AssuranceSelfAsserted identifies an unverified identity supplied by a client.
 	AssuranceSelfAsserted Assurance = "self_asserted"
-	// AssuranceWebSocketSignedToken identifies a subject bound to a verified token.
-	AssuranceWebSocketSignedToken Assurance = "websocket_signed_token"
+	// AssuranceHomeAssistantToken identifies a user asserted by the configured Home Assistant service.
+	AssuranceHomeAssistantToken Assurance = "home_assistant_token"
 	// AssuranceDiscordGateway identifies a Discord user asserted by Discord's gateway.
 	AssuranceDiscordGateway Assurance = "discord_gateway"
 	// AssuranceBlueBubblesWebhook identifies an iMessage sender asserted by an
@@ -33,8 +33,8 @@ func (p Principal) Valid() bool {
 		return false
 	}
 	switch p.Gateway {
-	case "websocket":
-		return p.Assurance == AssuranceSelfAsserted || p.Assurance == AssuranceWebSocketSignedToken
+	case "homeassistant":
+		return p.Assurance == AssuranceHomeAssistantToken
 	case "discord":
 		return p.Assurance == AssuranceDiscordGateway
 	case "imessage":
@@ -50,7 +50,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceWebSocketSignedToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook:
+	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook:
 		return true
 	default:
 		return false

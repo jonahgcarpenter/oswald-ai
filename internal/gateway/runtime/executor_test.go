@@ -181,7 +181,7 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 }
 
 func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
-	event := runtimeinvalidation.Event{ExternalIdentities: []string{"websocket:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+	event := runtimeinvalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
 	service, err := commands.NewService(commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
@@ -528,7 +528,7 @@ func (a *fakeAccess) BanStatus(userID string) (bool, string, error) {
 }
 
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "websocket", ExternalID: "external-" + userID, Assurance: identity.AssuranceWebSocketSignedToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "external-" + userID, Assurance: identity.AssuranceHomeAssistantToken}
 }
 
 type runtimeFakeChatter struct{}

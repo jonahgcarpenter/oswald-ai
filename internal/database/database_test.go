@@ -35,7 +35,7 @@ INSERT INTO account_link_challenges (
 INSERT INTO account_link_challenges (
 	id, code_hash, initiator_user_id, initiator_gateway, initiator_identifier, created_at, expires_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"challenge-2", "hash-1", "user-2", "websocket", "account-2",
+		"challenge-2", "hash-1", "user-2", "homeassistant", "account-2",
 		"2026-07-18T12:00:00Z", "2026-07-18T12:10:00Z",
 	); err == nil {
 		t.Fatal("expected duplicate code_hash to fail")

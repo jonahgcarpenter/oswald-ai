@@ -4,7 +4,6 @@ go 1.25.7
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
-	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/jdeng/goheif v0.0.0-20260407171156-9bf5264f67af
 	github.com/joho/godotenv v1.5.1
