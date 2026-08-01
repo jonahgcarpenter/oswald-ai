@@ -276,6 +276,63 @@ func (s *Service) IsAdmin(canonicalUserID string) (bool, error) {
 	return ok && user.IsAdmin, nil
 }
 
+// HasAdmin reports whether any canonical user currently has administrator access.
+func (s *Service) HasAdmin() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	for _, user := range data.Users {
+		if user.IsAdmin {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ClaimBootstrapAdmin promotes the current owner of an authenticated Discord or
+// iMessage principal only while no administrator exists.
+func (s *Service) ClaimBootstrapAdmin(principal identity.Principal) (string, bool, error) {
+	if !principal.Authenticated() || (principal.Gateway != "discord" && principal.Gateway != "imessage") {
+		return "", false, nil
+	}
+	identifier, err := NormalizeIdentifier(principal.Gateway, principal.ExternalID)
+	if err != nil {
+		return "", false, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := s.loadLocked()
+	if err != nil {
+		return "", false, err
+	}
+	for _, user := range data.Users {
+		if user.IsAdmin {
+			return "", false, nil
+		}
+	}
+	userID, ok := data.AccountIndex[accountKey(principal.Gateway, identifier)]
+	if !ok {
+		return "", false, nil
+	}
+	user, ok := data.Users[userID]
+	if !ok {
+		return "", false, nil
+	}
+	user.IsAdmin = true
+	user.UpdatedAt = s.now().UTC()
+	data.Users[userID] = user
+	if err := s.saveLocked(data); err != nil {
+		return "", false, err
+	}
+	s.log.Info("account_link.user.admin_bootstrapped", "granted initial administrator access", config.F("target_user_id", userID), config.F("gateway", principal.Gateway), config.F("status", "ok"))
+	return userID, true, nil
+}
+
 // IsAdminPrincipal checks admin status for the current owner of the principal's
 // authenticated external account, ignoring any stale canonical ID it carries.
 func (s *Service) IsAdminPrincipal(principal identity.Principal) (bool, error) {

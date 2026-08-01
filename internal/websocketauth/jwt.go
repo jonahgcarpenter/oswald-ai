@@ -92,13 +92,11 @@ func (s *Store) VerifyAccess(ctx context.Context, value string) (AuthenticatedCl
 	}
 	var client AuthenticatedClient
 	var revoked sql.NullString
-	var bootstrap int
-	err = s.db.QueryRowContext(ctx, `SELECT clients.canonical_user_id, clients.websocket_identifier, accounts.display_name, clients.client_name, clients.token_version, clients.is_bootstrap, clients.revoked_at FROM websocket_clients clients JOIN linked_accounts accounts ON accounts.gateway = 'websocket' AND accounts.identifier = clients.websocket_identifier AND accounts.canonical_user_id = clients.canonical_user_id WHERE clients.client_id = ?`, claims.ClientID).Scan(&client.UserID, &client.Subject, &client.DisplayName, &client.ClientName, &client.TokenVersion, &bootstrap, &revoked)
+	err = s.db.QueryRowContext(ctx, `SELECT clients.canonical_user_id, clients.websocket_identifier, accounts.display_name, clients.client_name, clients.token_version, clients.revoked_at FROM websocket_clients clients JOIN linked_accounts accounts ON accounts.gateway = 'websocket' AND accounts.identifier = clients.websocket_identifier AND accounts.canonical_user_id = clients.canonical_user_id WHERE clients.client_id = ?`, claims.ClientID).Scan(&client.UserID, &client.Subject, &client.DisplayName, &client.ClientName, &client.TokenVersion, &revoked)
 	if err != nil || revoked.Valid || client.Subject != claims.Subject || client.TokenVersion != claims.TokenVersion {
 		return AuthenticatedClient{}, ErrUnauthorized
 	}
 	client.ClientID = claims.ClientID
 	client.ExpiresAt = claims.ExpiresAt.Time
-	client.IsBootstrap = bootstrap == 1
 	return client, nil
 }

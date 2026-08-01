@@ -13,7 +13,6 @@ type fakeService struct {
 	clients       []websocketauth.Client
 	revokedClient string
 	approvedCode  string
-	bootstrapCode string
 }
 
 func (f *fakeService) ApproveForUser(_ context.Context, _, _, code string) (string, error) {
@@ -29,10 +28,6 @@ func (f *fakeService) ListClients(context.Context, string) ([]websocketauth.Clie
 func (f *fakeService) RevokeClient(_ context.Context, _, clientID string) error {
 	f.revokedClient = clientID
 	return nil
-}
-func (f *fakeService) BootstrapAdmin(_ context.Context, code, _, _, _ string) (string, error) {
-	f.bootstrapCode = code
-	return "permanent_admin", nil
 }
 
 type fakeAuthorizer bool
@@ -55,15 +50,5 @@ func TestClientCommandsApproveAndRevoke(t *testing.T) {
 	result, err = handler.Execute(context.Background(), commands.Request{Name: "client", Args: []string{"list"}, Principal: unauthenticated})
 	if err != nil || result.Text != "This command requires an authenticated identity." {
 		t.Fatalf("unauthenticated result=%+v err=%v", result, err)
-	}
-}
-
-func TestBootstrapCommandRequiresTemporaryClient(t *testing.T) {
-	service := &fakeService{}
-	handler := NewBootstrap(service)
-	principal := identity.Principal{CanonicalUserID: "bootstrap_user", Gateway: "websocket", ExternalID: "subject", Assurance: identity.AssuranceWebSocketSignedToken}
-	result, err := handler.Execute(context.Background(), commands.Request{Name: "bootstrap", Args: []string{"admin", "ABCD-EFGH", "Permanent", "Admin"}, Principal: principal, ClientID: "bootstrap_client"})
-	if err != nil || service.bootstrapCode != "ABCD-EFGH" || result.Text == "" {
-		t.Fatalf("bootstrap result=%+v code=%q err=%v", result, service.bootstrapCode, err)
 	}
 }

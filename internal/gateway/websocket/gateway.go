@@ -94,11 +94,6 @@ func (wg *Gateway) handleConnections(w http.ResponseWriter, r *http.Request, b *
 
 	remoteAddr := conn.RemoteAddr().String()
 	principal := identity.Principal{CanonicalUserID: owner, Gateway: "websocket", ExternalID: normalizedUserID, Assurance: identity.AssuranceWebSocketSignedToken}
-	if completion, completeErr := wg.Auth.CompleteBootstrapOnAdminConnection(r.Context(), owner); completeErr != nil {
-		log.Warn("gateway.bootstrap.complete_failed", "failed to complete websocket bootstrap", config.ErrorField(completeErr), config.F("status", "degraded"))
-	} else if completion != nil {
-		wg.closeClient(completion.ClientID, "bootstrap completed")
-	}
 
 	for {
 		requestID := config.NewRequestID()

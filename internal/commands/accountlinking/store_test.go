@@ -69,6 +69,33 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 	}
 }
 
+func TestClaimBootstrapAdminUsesAuthenticatedChatOwner(t *testing.T) {
+	links := newTestService(t)
+	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAdmin, err := links.HasAdmin(); err != nil || hasAdmin {
+		t.Fatalf("HasAdmin()=%t err=%v", hasAdmin, err)
+	}
+	principal := identity.Principal{CanonicalUserID: "stale-user", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
+	claimedID, claimed, err := links.ClaimBootstrapAdmin(principal)
+	if err != nil || !claimed || claimedID != userID {
+		t.Fatalf("ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
+	}
+	if admin, err := links.IsAdmin(userID); err != nil || !admin {
+		t.Fatalf("IsAdmin()=%t err=%v", admin, err)
+	}
+	otherID, err := links.EnsureAccount("imessage", "+15555550100", "Bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedID, claimed, err = links.ClaimBootstrapAdmin(identity.Principal{CanonicalUserID: otherID, Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook})
+	if err != nil || claimed || claimedID != "" {
+		t.Fatalf("second ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
+	}
+}
+
 func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	links := newTestService(t)
 	userID, err := links.EnsureAccount("discord", "123", "Alice")

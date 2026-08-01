@@ -28,7 +28,7 @@ Current layers:
 
 1. `cmd/agent/main.go` — startup wiring
 2. `internal/commands/` — shared command routing and command implementations
-3. `internal/commands/accountlinking/` — canonical user identity and cross-gateway account-link commands
+3. `internal/commands/bootstrap/` and `internal/commands/accountlinking/` — first-administrator bootstrap, canonical user identity, and cross-gateway account-link commands
 4. `internal/identity/` — typed request principals and identity assurance
 5. `internal/commands/usermanagement/` — admin, ban, and canonical-user inspection commands
 6. `internal/database/` — SQLite schema, account-link persistence, user memory tables, and sqlite-vec setup
@@ -63,7 +63,7 @@ Current layers:
 6. Create the soul store
 7. Open the user-memory SQLite handle, install retention policy, and either apply the checksum-frozen v4 baseline to a fresh database or selectively reset an exact recognized published v3.2/v3.1.2-upgraded database into that baseline
 8. Open separate MCP, account-link, and WebSocket-authorization handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
-9. If the account database is empty, create the temporary bootstrap administrator and print its 15-minute access JWT and setup instructions directly to stdout
+9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
 11. Create the command service, including `/memories`, `/client`, `/bootstrap`, and administrator global-memory management
 12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
@@ -80,7 +80,7 @@ The published-v3 reset preserves all `account_users`, `linked_accounts`, and `mc
 
 Baseline creation runs on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled for table construction. `PRAGMA foreign_key_check` must pass before commit and foreign keys are restored afterward. FTS5 and sqlite-vec tables are derived physical capabilities rather than canonical migration history.
 
-The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, standalone formation-audit table, or persisted maintenance-run history. Formation audit records are `memory_events` rows selected directly by `event_kind = 'formation_audit'` and may be hard-deleted with their candidate or by retention. Formation, compaction, and derived-index work share the typed `durable_jobs` table and are isolated by `job_kind`. A partial session-turn index covers only turns with no delivery outcome so timeout recovery remains bounded. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields plus compact events. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
+The baseline has no duplicate `schema_migrations` ledger, confirmation-presentation table, general memory relation graph, standalone formation-audit table, persisted administrator-bootstrap state, or persisted maintenance-run history. Formation audit records are `memory_events` rows selected directly by `event_kind = 'formation_audit'` and may be hard-deleted with their candidate or by retention. Formation, compaction, and derived-index work share the typed `durable_jobs` table and are isolated by `job_kind`. A partial session-turn index covers only turns with no delivery outcome so timeout recovery remains bounded. Confirmation is no longer conversational; claim supersession and duplicate outcomes are represented by claim lifecycle fields plus compact events. Maintenance is serialized in-process, logs aggregate results, and keeps only its process-local optimize interval marker.
 
 ## Request Lifecycle
 
@@ -269,7 +269,7 @@ Oswald keeps four distinct memory layers.
 - `/disconnect` requires an authenticated identity and cannot remove the final account
 - Admin and ban state is stored on canonical users and managed by `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, and `/deleteuser`
 - Linking rejects banned profiles and profiles containing different accounts for the same gateway
-- `/connect`, `/disconnect`, `/memories`, and `/client` work in private and group conversations and require an authenticated identity; `/bootstrap` additionally requires the active temporary bootstrap client. Group slash commands still require an Oswald mention. Sensitive command output and credentials may be visible to other group members.
+- `/connect`, `/disconnect`, `/memories`, `/client`, and `/bootstrap` work in private and group conversations and require an authenticated identity. `/bootstrap <code>` accepts only Discord or iMessage principals, promotes the currently resolved canonical account only while no administrator exists, and consumes its process-local code after a successful update. Restart generates a replacement code only while no administrator exists. Group slash commands still require an Oswald mention, and bootstrap codes may be visible to other group members.
 
 ### Memory Commands and Deletion
 
@@ -398,7 +398,7 @@ Behavior:
 - Invalid or unsupported `images` entries are downgraded into a prompt note instead of failing the request
 - Streams typed chunks during generation, then sends a final JSON response payload
 - Supports `/client approve`, `/client approve-new`, `/client list`, and `/client revoke`; revoking a client closes its live sockets without closing sibling clients
-- A zero-user database creates a temporary administrator with a stdout-only access JWT. `/bootstrap admin <code> <display_name>` approves a distinct permanent administrator, and the temporary client is revoked when that administrator first connects
+- WebSocket does not currently provide a first-administrator bootstrap path. The initial administrator must claim the process-local startup code through Discord or iMessage, then approve WebSocket clients through `/client`
 - Account merge and administrator account deletion transfer or delete client state transactionally; token hashes are never exposed through commands
 
 WebSocket image payloads use the shape:
@@ -822,8 +822,9 @@ Current startup requirements:
 | `internal/soul/store.go`                       | Read-only soul system-prompt loader          |
 | `internal/commands/service.go`                 | Shared command service                       |
 | `internal/commands/parser.go`                  | Slash-command parser                         |
+| `internal/commands/bootstrap/`                 | Process-local first-administrator bootstrap  |
 | `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
-| `internal/commands/clientauth/commands.go`     | WebSocket client and bootstrap commands      |
+| `internal/commands/clientauth/commands.go`     | WebSocket client authorization commands      |
 | `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
 | `internal/identity/principal.go`                | Typed request principal and assurance        |
 | `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
@@ -832,7 +833,7 @@ Current startup requirements:
 | `internal/gateway/runtime/`                    | Shared gateway request execution             |
 | `internal/gateway/bootstrap.go`                | Gateway bootstrap                            |
 | `internal/gateway/websocket/gateway.go`        | WebSocket transport                          |
-| `internal/websocketauth/`                      | Device, JWT, refresh, and bootstrap state    |
+| `internal/websocketauth/`                      | Device, JWT, and refresh state               |
 | `internal/gateway/discord/gateway.go`          | Discord transport                            |
 | `internal/gateway/imessage/gateway.go`         | iMessage BlueBubbles transport               |
 

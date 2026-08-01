@@ -25,10 +25,11 @@ type MCPDeps struct {
 	Manager *mcpmanager.Manager
 }
 
-// ClientAuthDeps contains dependencies for WebSocket client authorization commands.
+// ClientAuthDeps contains client authorization and first-administrator bootstrap dependencies.
 type ClientAuthDeps struct {
 	Service    clientauthcommands.Service
 	Authorizer clientauthcommands.Authorizer
+	Bootstrap  commands.Handler
 }
 
 // NewService creates the application command service with all built-in commands.
@@ -50,10 +51,10 @@ func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemor
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
 	}
 	if clientAuth.Service != nil {
-		registrations = append(registrations,
-			commands.Command{Handler: clientauthcommands.New(clientAuth.Service, clientAuth.Authorizer)},
-			commands.Command{Handler: clientauthcommands.NewBootstrap(clientAuth.Service)},
-		)
+		registrations = append(registrations, commands.Command{Handler: clientauthcommands.New(clientAuth.Service, clientAuth.Authorizer)})
+	}
+	if clientAuth.Bootstrap != nil {
+		registrations = append(registrations, commands.Command{Handler: clientAuth.Bootstrap})
 	}
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})

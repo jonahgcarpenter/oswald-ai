@@ -258,7 +258,7 @@ func (s *Store) RevokeRefreshClient(ctx context.Context, refreshToken string) (s
 
 // ListClients lists all clients belonging to a canonical user, including revoked clients.
 func (s *Store) ListClients(ctx context.Context, userID string) ([]Client, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT client_id, websocket_identifier, client_name, token_version, is_bootstrap, created_at, last_used_at, refresh_expires_at, revoked_at FROM websocket_clients WHERE canonical_user_id = ? ORDER BY created_at, client_id`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT client_id, websocket_identifier, client_name, token_version, created_at, last_used_at, refresh_expires_at, revoked_at FROM websocket_clients WHERE canonical_user_id = ? ORDER BY created_at, client_id`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list websocket clients: %w", err)
 	}
@@ -266,13 +266,11 @@ func (s *Store) ListClients(ctx context.Context, userID string) ([]Client, error
 	var clients []Client
 	for rows.Next() {
 		var client Client
-		var bootstrap int
 		var created string
 		var lastUsed, refreshExpires, revoked sql.NullString
-		if err := rows.Scan(&client.ClientID, &client.WebSocketIdentifier, &client.ClientName, &client.TokenVersion, &bootstrap, &created, &lastUsed, &refreshExpires, &revoked); err != nil {
+		if err := rows.Scan(&client.ClientID, &client.WebSocketIdentifier, &client.ClientName, &client.TokenVersion, &created, &lastUsed, &refreshExpires, &revoked); err != nil {
 			return nil, fmt.Errorf("scan websocket client: %w", err)
 		}
-		client.IsBootstrap = bootstrap == 1
 		client.CreatedAt, err = parseTime(created)
 		if err != nil {
 			return nil, err

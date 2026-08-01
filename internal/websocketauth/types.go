@@ -1,5 +1,5 @@
-// Package websocketauth implements durable WebSocket device authorization,
-// refresh-token rotation, and fresh-install bootstrap credentials.
+// Package websocketauth implements durable WebSocket device authorization and
+// refresh-token rotation.
 package websocketauth
 
 import (
@@ -29,8 +29,6 @@ var (
 	ErrInvalidUserCode = errors.New("invalid_user_code")
 	// ErrUnauthorized indicates invalid HTTP or JWT authentication.
 	ErrUnauthorized = errors.New("unauthorized websocket request")
-	// ErrBootstrapUnavailable indicates that bootstrap is absent, complete, or mismatched.
-	ErrBootstrapUnavailable = errors.New("websocket bootstrap unavailable")
 )
 
 // DeviceRequest contains the one-time secrets and polling parameters returned
@@ -59,7 +57,6 @@ type AuthenticatedClient struct {
 	ClientName   string
 	TokenVersion int64
 	ExpiresAt    time.Time
-	IsBootstrap  bool
 }
 
 // Client describes a durable client without exposing token hashes.
@@ -68,27 +65,10 @@ type Client struct {
 	WebSocketIdentifier string
 	ClientName          string
 	TokenVersion        int64
-	IsBootstrap         bool
 	CreatedAt           time.Time
 	LastUsedAt          *time.Time
 	RefreshExpiresAt    *time.Time
 	RevokedAt           *time.Time
-}
-
-// BootstrapCredentials identifies the temporary fresh-install administrator.
-type BootstrapCredentials struct {
-	AccessToken         string
-	ExpiresAt           time.Time
-	DefaultUserID       string
-	ClientID            string
-	WebSocketIdentifier string
-}
-
-// BootstrapCompletion identifies the temporary identity and client that callers
-// must disconnect after bootstrap completion.
-type BootstrapCompletion struct {
-	ClientID      string
-	DefaultUserID string
 }
 
 // Option customizes deterministic service dependencies.

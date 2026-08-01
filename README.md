@@ -107,16 +107,15 @@ Revoke a client with `/client revoke <client_id>` or `POST /auth/revoke` using i
 
 ## Bootstrap
 
-When starting with an empty database, Oswald creates a temporary administrator and prints a 15-minute WebSocket access token to the terminal.
+When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord or iMessage conversation, run:
 
-1. Connect to the WebSocket gateway using the printed token.
-2. Request a device code for the permanent administrator.
-3. From the temporary administrator connection, run:
-   `/bootstrap admin <user_code> <display_name>`
-4. Connect the newly approved permanent administrator.
-5. Delete the temporary user with:
-   `/deleteuser <canonical_id>`
-   The temporary bootstrap client is revoked after the permanent administrator connects.
+```text
+/bootstrap <code>
+```
+
+The Discord or iMessage account that submits the code becomes the first administrator. The code is consumed only after the account update succeeds. If the code is lost, restart Oswald to generate a replacement while no administrator exists. Once any administrator exists, startup no longer generates bootstrap codes.
+
+Bootstrap commands may be used in direct or group conversations; groups retain their normal Oswald mention requirement. Anyone who can see the code can attempt to claim it, so prefer a direct conversation. First-run WebSocket bootstrap is not currently supported; after bootstrap, the administrator can approve WebSocket clients through `/client`.
 
 ## Commands
 
@@ -127,6 +126,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | Command        | Usage                                                                                                               | Description                                                                     |
 | -------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `/help`        | `/help [command]`                                                                                                   | List available commands or show usage for one command.                          |
+| `/bootstrap`   | `/bootstrap <code>`                                                                                                 | Claim initial administrator access from Discord or iMessage.                    |
 | `/connect`     | `/connect [code\|cancel]`                                                                                           | Create, confirm, or cancel a 10-minute account-link code.                       |
 | `/disconnect`  | `/disconnect [account_number]`                                                                                      | List or disconnect linked accounts. The final account cannot be removed.        |
 | `/reset`       | `/reset`                                                                                                            | Clear the current conversation history and load the latest user profile.        |
@@ -139,7 +139,7 @@ Commands are gateway-level slash commands. They are handled before requests reac
 | `/mcp disable` | `/mcp disable <name>`                                                                                               | Disable one of your MCP servers.                                                |
 | `/mcp test`    | `/mcp test <name>`                                                                                                  | Connect to one of your MCP servers and report its tool count.                   |
 
-`/connect`, `/disconnect`, `/client`, and every `/memories` operation require an authenticated identity and can be used in private or group conversations. `/bootstrap` additionally requires the temporary WebSocket bootstrap client. In Discord servers and iMessage groups, slash commands must mention Oswald. Account-link codes, memory lists, client details, and MCP credentials may be visible to other group members, so use sensitive commands in a private conversation when appropriate.
+`/connect`, `/disconnect`, `/client`, `/bootstrap`, and every `/memories` operation require an authenticated identity and can be used in private or group conversations. `/bootstrap` accepts only Discord and iMessage identities and only succeeds while the process-local code is active and no administrator exists. In Discord servers and iMessage groups, slash commands must mention Oswald. Bootstrap and account-link codes, memory lists, client details, and MCP credentials may be visible to other group members, so use sensitive commands in a private conversation when appropriate.
 
 ### Memory Commands
 

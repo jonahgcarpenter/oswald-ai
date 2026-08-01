@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	bootstrapcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/bootstrap"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/commands/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
@@ -113,6 +114,17 @@ func main() {
 	}
 	defer accountLinkService.Close() // nolint:errcheck
 	userMemStore.SetSpeakerLineResolver(accountLinkService.SpeakerLine)
+	bootstrapCommand, bootstrapCode, err := bootstrapcommands.New(accountLinkService)
+	if err != nil {
+		log.Fatal("app.bootstrap.init_failed", "failed to initialize administrator bootstrap", config.ErrorField(err))
+	}
+	if bootstrapCode != "" {
+		fmt.Fprintf(os.Stdout, "\nOswald first-administrator bootstrap\n\nBootstrap code: %s\n\nRun /bootstrap %s from an authenticated Discord or iMessage account. The code is valid once for this process. Restart Oswald to replace a lost code while no administrator exists.\n\n", bootstrapCode, bootstrapCode)
+		log.Info("app.bootstrap.available", "generated first-administrator bootstrap code", config.F("status", "ok"))
+		if cfg.DiscordToken == "" && (cfg.BlueBubblesURL == "" || cfg.BlueBubblesPassword == "") {
+			log.Warn("app.bootstrap.gateway_unavailable", "administrator bootstrap requires Discord or iMessage", config.F("status", "degraded"))
+		}
+	}
 	webSocketDB, err := database.Open(config.DefaultAccountLinkPath, rootLog.Server("websocket.auth.store"))
 	if err != nil {
 		log.Fatal("app.websocket_auth.init_failed", "failed to open websocket authorization store", config.ErrorField(err))
@@ -122,18 +134,11 @@ func main() {
 	if err != nil {
 		log.Fatal("app.websocket_auth.init_failed", "failed to initialize websocket authorization", config.ErrorField(err))
 	}
-	bootstrap, err := webSocketAuth.EnsureBootstrap(context.Background())
-	if err != nil {
-		log.Fatal("app.websocket_auth.bootstrap_failed", "failed to initialize websocket bootstrap", config.ErrorField(err))
-	}
-	if bootstrap != nil {
-		fmt.Fprintf(os.Stdout, "\nOswald first-run administrator bootstrap\n\nWebSocket access token (expires %s):\n%s\n\n1. Connect to ws://localhost:%s/ws with Authorization: Bearer <token>.\n2. On the permanent client, request a device code with POST /auth/device.\n3. From this bootstrap connection, run /bootstrap admin <code> <display_name>.\n4. Poll POST /auth/token on the permanent client, then connect with its access token.\n5. After the permanent administrator connects, delete temporary user %s with /deleteuser %s.\n\n", bootstrap.ExpiresAt.Format(time.RFC3339), bootstrap.AccessToken, cfg.Port, bootstrap.DefaultUserID, bootstrap.DefaultUserID)
-	}
 	indexService := indexruntime.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	indexService.Start(context.Background())
 	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
+	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), commandbuiltin.ClientAuthDeps{Service: webSocketAuth, Authorizer: accountLinkService, Bootstrap: bootstrapCommand}, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
 	if err != nil {
 		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
 	}
