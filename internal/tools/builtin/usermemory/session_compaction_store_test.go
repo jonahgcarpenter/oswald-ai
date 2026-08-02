@@ -176,6 +176,10 @@ func TestSessionCompactionArtifactPublicationAndIncrementalSources(t *testing.T)
 	if err := store.SaveSessionCompactionArtifact(context.Background(), job, artifact); err != nil {
 		t.Fatal(err)
 	}
+	storedArtifact, err := store.SessionCompactionArtifact(context.Background(), job)
+	if err != nil || storedArtifact.GenerationModel != "model" || storedArtifact.GeneratorVersion != "summary-v1" {
+		t.Fatalf("stored artifact = %+v, err = %v", storedArtifact, err)
+	}
 	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "changed", GenerationModel: "model", GeneratorVersion: "summary-v1"}); err == nil {
 		t.Fatal("expected immutable artifact mismatch")
 	}
@@ -183,7 +187,7 @@ func TestSessionCompactionArtifactPublicationAndIncrementalSources(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(summary.SourceTurnIDs, []int64{first, second}) || summary.SourceDigest == "" || !reflect.DeepEqual(summary.OpenTasks, []string{"ship it"}) {
+	if !reflect.DeepEqual(summary.SourceTurnIDs, []int64{first, second}) || !reflect.DeepEqual(summary.OpenTasks, []string{"ship it"}) {
 		t.Fatalf("published summary = %+v", summary)
 	}
 	replayed, err := store.PublishSessionSummary(context.Background(), job)
@@ -318,11 +322,11 @@ func TestPreCompactionCandidateLifecyclePublicationAndStaleLeaseFence(t *testing
 		return candidate
 	}
 	below := propose("compact-below", belowTurn, evaluate("I work on Atlas.", "The user works on Atlas.", "I work on Atlas.", "projects", "project.name", "Atlas", 0.349))
-	if below.State != "proposed" || below.PublicationStatus != "none" {
+	if below.State != "proposed" || below.PublishedMemoryID != 0 {
 		t.Fatalf("below-threshold candidate=%+v", below)
 	}
 	approved := propose("compact-approved", approvedTurn, evaluate("I prefer tea.", "The user prefers tea.", "I prefer tea.", "durable_preferences", "preference.drink", "tea", 0.35))
-	if approved.State != "approved" || approved.PublicationStatus != "published" || approved.PublishedMemoryID == 0 {
+	if approved.State != "approved" || approved.PublishedMemoryID == 0 {
 		t.Fatalf("approved candidate=%+v", approved)
 	}
 	memory, err := store.EntryByID(approved.PublishedMemoryID)
@@ -330,11 +334,11 @@ func TestPreCompactionCandidateLifecyclePublicationAndStaleLeaseFence(t *testing
 		t.Fatalf("published memory=%+v err=%v", memory, err)
 	}
 	published, err := store.LoadCandidate(context.Background(), "user", approved.ID)
-	if err != nil || published.PublicationStatus != "published" || published.PublishedMemoryID != memory.ID {
+	if err != nil || published.PublishedMemoryID != memory.ID {
 		t.Fatalf("published candidate=%+v err=%v", published, err)
 	}
 	rejected := propose("compact-rejected", rejectedTurn, evaluate("My coworker prefers coffee.", "The user prefers coffee.", "My coworker prefers coffee.", "durable_preferences", "preference.drink", "coffee", 0.99))
-	if rejected.State != "rejected" || rejected.PublicationStatus != "none" {
+	if rejected.State != "rejected" || rejected.PublishedMemoryID != 0 {
 		t.Fatalf("unsound candidate=%+v", rejected)
 	}
 }
@@ -391,7 +395,7 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 		t.Fatalf("published memory mutated by stale reconciliation: %+v err=%v", loaded, err)
 	}
 	loadedCandidate, err := store.LoadCandidate(context.Background(), "user", candidate.ID)
-	if err != nil || loadedCandidate.PublicationStatus != "published" || loadedCandidate.Confidence != 0.7 {
+	if err != nil || loadedCandidate.PublishedMemoryID == 0 || loadedCandidate.Confidence != 0.7 {
 		t.Fatalf("published candidate mutated by stale reconciliation: %+v err=%v", loadedCandidate, err)
 	}
 }

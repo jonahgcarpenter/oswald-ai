@@ -60,10 +60,6 @@ func (s *Store) Save(ctx context.Context, cfg ServerConfig) (ServerConfig, error
 	cfg.Scope = strings.TrimSpace(cfg.Scope)
 	cfg.OwnerUserID = strings.TrimSpace(cfg.OwnerUserID)
 	cfg.Name = strings.TrimSpace(strings.ToLower(cfg.Name))
-	cfg.Type = strings.TrimSpace(strings.ToLower(cfg.Type))
-	if cfg.Type == "" {
-		cfg.Type = "generic"
-	}
 	cfg.Transport = strings.TrimSpace(strings.ToLower(cfg.Transport))
 	if cfg.Transport == "" {
 		cfg.Transport = TransportStreamableHTTP
@@ -77,7 +73,7 @@ func (s *Store) Save(ctx context.Context, cfg ServerConfig) (ServerConfig, error
 	if err := validateTransport(cfg.Transport); err != nil {
 		return ServerConfig{}, err
 	}
-	parsed, err := parseAndValidateURL(ctx, cfg.URL, s.resolver)
+	_, err := parseAndValidateURL(ctx, cfg.URL, s.resolver)
 	if err != nil {
 		return ServerConfig{}, err
 	}
@@ -92,16 +88,10 @@ func (s *Store) Save(ctx context.Context, cfg ServerConfig) (ServerConfig, error
 		return ServerConfig{}, err
 	} else if ok {
 		cfg.ID = existing.ID
-		cfg.CreatedAt = existing.CreatedAt
 	}
 	if cfg.ID == "" {
 		cfg.ID = newConfigID()
 	}
-	now := time.Now().UTC()
-	if cfg.CreatedAt.IsZero() {
-		cfg.CreatedAt = now
-	}
-	cfg.UpdatedAt = now
 	urlCiphertext, err := s.crypto.encrypt(strings.TrimSpace(cfg.URL), fieldAAD(cfg.Scope, cfg.OwnerUserID, cfg.Name, "url"))
 	if err != nil {
 		return ServerConfig{}, err
@@ -115,21 +105,18 @@ func (s *Store) Save(ctx context.Context, cfg ServerConfig) (ServerConfig, error
 		return ServerConfig{}, err
 	}
 	result, err := s.db.SQL().ExecContext(ctx, `
-INSERT INTO mcp_servers (id, scope, owner_user_id, name, type, transport, url_ciphertext, url_host_hash, headers_ciphertext, enabled, created_at, updated_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO mcp_servers (id, scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?
 WHERE ? != 'user' OR EXISTS (SELECT 1 FROM account_users WHERE canonical_user_id = ?)
 ON CONFLICT(id) DO UPDATE SET
 	scope = excluded.scope,
 	owner_user_id = excluded.owner_user_id,
 	name = excluded.name,
-	type = excluded.type,
 	transport = excluded.transport,
 	url_ciphertext = excluded.url_ciphertext,
-	url_host_hash = excluded.url_host_hash,
 	headers_ciphertext = excluded.headers_ciphertext,
-	enabled = excluded.enabled,
-	updated_at = excluded.updated_at
-`, cfg.ID, cfg.Scope, nullableOwner(cfg.OwnerUserID), cfg.Name, cfg.Type, cfg.Transport, urlCiphertext, s.crypto.hostHash(parsed.Hostname()), headersCiphertext, boolToInt(cfg.Enabled), formatTime(cfg.CreatedAt), formatTime(cfg.UpdatedAt), cfg.Scope, cfg.OwnerUserID)
+	enabled = excluded.enabled
+`, cfg.ID, cfg.Scope, nullableOwner(cfg.OwnerUserID), cfg.Name, cfg.Transport, urlCiphertext, headersCiphertext, boolToInt(cfg.Enabled), cfg.Scope, cfg.OwnerUserID)
 	if err != nil {
 		return ServerConfig{}, fmt.Errorf("save MCP server config: %w", err)
 	}
@@ -264,7 +251,7 @@ func (s *Store) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string) err
 
 func (s *Store) ListForUser(ctx context.Context, userID string) ([]ServerConfig, error) {
 	rows, err := s.db.SQL().QueryContext(ctx, `
-SELECT id, scope, owner_user_id, name, type, transport, url_ciphertext, url_host_hash, headers_ciphertext, enabled, created_at, updated_at
+SELECT id, scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled
 FROM mcp_servers
 WHERE scope = 'global' OR (scope = 'user' AND owner_user_id = ?)
 ORDER BY scope, name
@@ -278,7 +265,7 @@ ORDER BY scope, name
 
 func (s *Store) ListGlobal(ctx context.Context) ([]ServerConfig, error) {
 	rows, err := s.db.SQL().QueryContext(ctx, `
-SELECT id, scope, owner_user_id, name, type, transport, url_ciphertext, url_host_hash, headers_ciphertext, enabled, created_at, updated_at
+SELECT id, scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled
 FROM mcp_servers
 WHERE scope = 'global'
 ORDER BY name
@@ -292,7 +279,7 @@ ORDER BY name
 
 func (s *Store) Get(ctx context.Context, scope, ownerUserID, name string) (ServerConfig, bool, error) {
 	row := s.db.SQL().QueryRowContext(ctx, `
-SELECT id, scope, owner_user_id, name, type, transport, url_ciphertext, url_host_hash, headers_ciphertext, enabled, created_at, updated_at
+SELECT id, scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled
 FROM mcp_servers
 WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?
 `, scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
@@ -316,7 +303,7 @@ func (s *Store) Delete(ctx context.Context, scope, ownerUserID, name string) err
 }
 
 func (s *Store) SetEnabled(ctx context.Context, scope, ownerUserID, name string, enabled bool) error {
-	_, err := s.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET enabled = ?, updated_at = ? WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?`, boolToInt(enabled), formatTime(time.Now().UTC()), scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
+	_, err := s.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET enabled = ? WHERE scope = ? AND COALESCE(owner_user_id, '') = ? AND name = ?`, boolToInt(enabled), scope, strings.TrimSpace(ownerUserID), strings.TrimSpace(strings.ToLower(name)))
 	if err != nil {
 		return fmt.Errorf("update MCP server enabled state: %w", err)
 	}
@@ -348,22 +335,11 @@ func scanStored(row rowScanner) (storedServerConfig, error) {
 	var stored storedServerConfig
 	var owner sql.NullString
 	var enabled int
-	var createdRaw, updatedRaw string
-	if err := row.Scan(&stored.ID, &stored.Scope, &owner, &stored.Name, &stored.Type, &stored.Transport, &stored.URLCiphertext, &stored.URLHostHash, &stored.HeadersCiphertext, &enabled, &createdRaw, &updatedRaw); err != nil {
+	if err := row.Scan(&stored.ID, &stored.Scope, &owner, &stored.Name, &stored.Transport, &stored.URLCiphertext, &stored.HeadersCiphertext, &enabled); err != nil {
 		return storedServerConfig{}, err
 	}
 	stored.OwnerUserID = owner.String
 	stored.Enabled = enabled != 0
-	createdAt, err := time.Parse(time.RFC3339Nano, createdRaw)
-	if err != nil {
-		return storedServerConfig{}, fmt.Errorf("parse MCP server created_at: %w", err)
-	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, updatedRaw)
-	if err != nil {
-		return storedServerConfig{}, fmt.Errorf("parse MCP server updated_at: %w", err)
-	}
-	stored.CreatedAt = createdAt
-	stored.UpdatedAt = updatedAt
 	return stored, nil
 }
 
@@ -382,7 +358,7 @@ func (s *Store) decrypt(stored storedServerConfig) (ServerConfig, error) {
 			return ServerConfig{}, fmt.Errorf("unmarshal MCP headers: %w", err)
 		}
 	}
-	return ServerConfig{ID: stored.ID, Scope: stored.Scope, OwnerUserID: stored.OwnerUserID, Name: stored.Name, Type: stored.Type, Transport: stored.Transport, URL: urlText, Headers: headers, Enabled: stored.Enabled, CreatedAt: stored.CreatedAt, UpdatedAt: stored.UpdatedAt}, nil
+	return ServerConfig{ID: stored.ID, Scope: stored.Scope, OwnerUserID: stored.OwnerUserID, Name: stored.Name, Transport: stored.Transport, URL: urlText, Headers: headers, Enabled: stored.Enabled}, nil
 }
 
 func nullableOwner(owner string) any {
@@ -391,10 +367,6 @@ func nullableOwner(owner string) any {
 		return nil
 	}
 	return owner
-}
-
-func formatTime(t time.Time) string {
-	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func boolToInt(value bool) int {

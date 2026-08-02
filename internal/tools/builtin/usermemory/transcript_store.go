@@ -166,8 +166,7 @@ func transcriptFTSUnavailable(err error) bool {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "no such table: session_turns_fts") ||
-		strings.Contains(message, "no such table: derived_index_transcript_fts_") ||
+	return strings.Contains(message, "no such table: derived_index_transcript_fts_") ||
 		strings.Contains(message, "no such module: fts5") ||
 		strings.Contains(message, "unable to use function match")
 }

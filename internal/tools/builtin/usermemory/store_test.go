@@ -359,9 +359,6 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	if _, err := store.sql.Exec(`UPDATE memory_entries SET supersedes_id = ? WHERE id = ?`, loserDuplicate.ID, loserUnique.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`INSERT INTO memory_events (canonical_user_id, memory_id, event_type, created_at) VALUES ('loser', ?, 'saved', ?)`, loserDuplicate.ID, formatTime(time.Now())); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := store.sql.Exec(`CREATE TABLE memory_entry_vectors (rowid INTEGER PRIMARY KEY, embedding BLOB)`); err != nil {
 		t.Fatal(err)
 	}
@@ -400,15 +397,12 @@ func TestMergeUsersTxCoalescesDuplicatesAndMovesData(t *testing.T) {
 	if duplicateCount != 1 || loserCount != 0 || loserVectorCount != 1 || winnerVectorCount != 0 {
 		t.Fatalf("duplicate=%d loser entries=%d loser vectors=%d winner vectors=%d", duplicateCount, loserCount, loserVectorCount, winnerVectorCount)
 	}
-	var eventMemoryID, supersedesID int64
-	if err := store.sql.QueryRow(`SELECT memory_id FROM memory_events WHERE event_type = 'saved'`).Scan(&eventMemoryID); err != nil {
-		t.Fatal(err)
-	}
+	var supersedesID int64
 	if err := store.sql.QueryRow(`SELECT supersedes_id FROM memory_entries WHERE id = ?`, loserUnique.ID).Scan(&supersedesID); err != nil {
 		t.Fatal(err)
 	}
-	if eventMemoryID != winnerDuplicate.ID || supersedesID != winnerDuplicate.ID {
-		t.Fatalf("event memory=%d supersedes=%d, want %d", eventMemoryID, supersedesID, winnerDuplicate.ID)
+	if supersedesID != winnerDuplicate.ID {
+		t.Fatalf("supersedes=%d, want %d", supersedesID, winnerDuplicate.ID)
 	}
 	var turnOwner, intro string
 	if err := store.sql.QueryRow(`SELECT canonical_user_id FROM session_turns WHERE session_id = 'session'`).Scan(&turnOwner); err != nil {
@@ -476,7 +470,7 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 		if err != nil || !created {
 			t.Fatalf("propose %s candidate=%+v created=%v err=%v", userID, candidate, created, err)
 		}
-		if candidate.PublicationStatus != "published" || candidate.PublishedMemoryID == 0 {
+		if candidate.PublishedMemoryID == 0 {
 			t.Fatalf("candidate for %s was not atomically published: %+v", userID, candidate)
 		}
 		if userID == "winner" {
@@ -505,12 +499,9 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 	if owner != "winner" || !strings.HasPrefix(key, "merge:loser:same-key:") || publishedID != winnerMemoryID {
 		t.Fatalf("merged candidate owner=%q key=%q published=%d want=%d", owner, key, publishedID, winnerMemoryID)
 	}
-	for table, want := range map[string]int{"memory_candidates": 2, "memory_events": 4} {
+	for table, want := range map[string]int{"memory_candidates": 2} {
 		var got int
 		query := `SELECT COUNT(*) FROM ` + table + ` WHERE canonical_user_id = 'winner'`
-		if table == "memory_events" {
-			query += ` AND event_kind = 'formation_audit'`
-		}
 		if err := store.sql.QueryRow(query).Scan(&got); err != nil {
 			t.Fatal(err)
 		}
@@ -670,14 +661,18 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	if turnCount != 4 || summaryCount != 2 || jobCount != 2 || sessionCount != 1 {
 		t.Fatalf("turns=%d summaries=%d jobs=%d sessions=%d", turnCount, summaryCount, jobCount, sessionCount)
 	}
-	var jobState, leaseOwner string
+	var jobState, leaseOwner, artifactPayload string
 	var leaseUntil sql.NullString
 	var artifactSummaryID int64
-	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction'`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID); err != nil {
+	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction'`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID, &artifactPayload); err != nil {
 		t.Fatal(err)
 	}
 	if jobState != "retry" || leaseOwner != "" || leaseUntil.Valid || artifactSummaryID != loserSummary.ID {
 		t.Fatalf("loser job state=%q owner=%q lease=%v artifact=%d", jobState, leaseOwner, leaseUntil, artifactSummaryID)
+	}
+	artifact, err := decodeSummaryArtifact(artifactPayload)
+	if err != nil || artifact.GenerationModel != "test-model" || artifact.GeneratorVersion != "test-v1" {
+		t.Fatalf("merged summary artifact=%+v err=%v", artifact, err)
 	}
 	latest, err := store.LatestSessionSummary(ctx, "winner", "shared", activeGeneration)
 	if err != nil || latest.ID != loserSummary.ID || latest.Narrative != "loser checkpoint" {
@@ -752,9 +747,8 @@ func TestStoreDoesNotRecreateStaleAccountUser(t *testing.T) {
 
 func seedAccountUsers(t *testing.T, store *Store, userIDs ...string) {
 	t.Helper()
-	now := formatTime(time.Now())
 	for _, userID := range userIDs {
-		if _, err := store.sql.Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, userID, now, now); err != nil {
+		if _, err := store.sql.Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, userID); err != nil {
 			t.Fatalf("seed account user %q: %v", userID, err)
 		}
 	}

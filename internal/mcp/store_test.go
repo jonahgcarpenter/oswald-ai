@@ -32,7 +32,7 @@ func testStore(t *testing.T) *Store {
 func addTestUsers(t *testing.T, store *Store, userIDs ...string) {
 	t.Helper()
 	for _, userID := range userIDs {
-		if _, err := store.db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, userID, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"); err != nil {
+		if _, err := store.db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, userID); err != nil {
 			t.Fatalf("add test user %s: %v", userID, err)
 		}
 	}
@@ -54,12 +54,12 @@ func TestStoreEncryptsURLAndHeadersAtRest(t *testing.T) {
 		t.Fatalf("save config: %v", err)
 	}
 
-	row := store.db.SQL().QueryRow(`SELECT url_ciphertext, url_host_hash, headers_ciphertext FROM mcp_servers WHERE name = 'home'`)
-	var urlCiphertext, hostHash, headersCiphertext string
-	if err := row.Scan(&urlCiphertext, &hostHash, &headersCiphertext); err != nil {
+	row := store.db.SQL().QueryRow(`SELECT url_ciphertext, headers_ciphertext FROM mcp_servers WHERE name = 'home'`)
+	var urlCiphertext, headersCiphertext string
+	if err := row.Scan(&urlCiphertext, &headersCiphertext); err != nil {
 		t.Fatalf("read stored ciphertext: %v", err)
 	}
-	joined := urlCiphertext + " " + hostHash + " " + headersCiphertext
+	joined := urlCiphertext + " " + headersCiphertext
 	for _, leaked := range []string{"example.com", "/mcp", "secret", "Bearer"} {
 		if strings.Contains(joined, leaked) {
 			t.Fatalf("stored ciphertext leaked %q: %s", leaked, joined)
@@ -109,7 +109,7 @@ func TestStoreMergeUsersTxReencryptsForWinner(t *testing.T) {
 	store := testStore(t)
 	addTestUsers(t, store, "winner", "loser")
 	ctx := context.Background()
-	saved, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "loser", Name: "home", Type: "custom", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp?token=secret", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true})
+	saved, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "loser", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp?token=secret", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true})
 	if err != nil {
 		t.Fatalf("save loser config: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestStoreMergeUsersTxReencryptsForWinner(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("load transferred config ok=%v err=%v", ok, err)
 	}
-	if loaded.ID != saved.ID || loaded.Type != saved.Type || loaded.Transport != saved.Transport || loaded.Enabled != saved.Enabled || !loaded.CreatedAt.Equal(saved.CreatedAt) || !loaded.UpdatedAt.Equal(saved.UpdatedAt) {
+	if loaded.ID != saved.ID || loaded.Transport != saved.Transport || loaded.Enabled != saved.Enabled {
 		t.Fatalf("transferred config fields changed: before=%+v after=%+v", saved, loaded)
 	}
 	if loaded.URL != saved.URL || loaded.Headers["Authorization"] != saved.Headers["Authorization"] {

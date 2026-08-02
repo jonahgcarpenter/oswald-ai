@@ -8,12 +8,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 )
 
 const (
-	memoryVectorTableV2       = "memory_entry_vectors_v2"
 	defaultRecallCandidateCap = 32
 	maxRecallCandidateCap     = 100
 )
@@ -154,7 +151,7 @@ func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, cate
 	query := `
 SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, ` + table + `.evidence,
 	e.confidence, e.importance, e.status, e.created_at,
-	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
+	e.updated_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.provenance_type, e.sensitivity,
 	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id),
 	bm25(` + table + `, 0.0, 1.0, 0.5)
@@ -215,7 +212,7 @@ func (s *Store) semanticRecallCandidates(ctx context.Context, revision DerivedIn
 	query := `
 SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
 	e.confidence, e.importance, e.status, e.created_at,
-	e.updated_at, e.last_used_at, e.expires_at, COALESCE(e.supersedes_id, 0),
+	e.updated_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.provenance_type, e.sensitivity,
 	e.claim_slot, e.claim_value, (SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id), v.distance
 FROM ` + revision.TableName + ` v
@@ -332,17 +329,8 @@ var recallStopWords = map[string]bool{
 	"which": true, "who": true, "why": true, "with": true, "you": true, "your": true,
 }
 
-// RecordRecallUsage records only memories actually exposed to the active request.
+// RecordRecallUsage retains the retrieval API without persisting per-read state.
 func (s *Store) RecordRecallUsage(ctx context.Context, userID string, results []RecallResult) {
-	if len(results) == 0 {
-		return
-	}
-	now := formatTime(time.Now().UTC())
-	metadata := requestctx.MetadataFromContext(ctx)
-	for _, result := range results {
-		_, _ = s.sql.ExecContext(ctx, `UPDATE memory_entries SET last_used_at = ? WHERE id = ? AND canonical_user_id = ?`, now, result.Entry.ID, userID)
-		s.recordEvent(userID, result.Entry.ID, "retrieved", metadata.RequestID, metadata.SessionID, `{"method":"hybrid"}`)
-	}
 }
 
 func recallResultsToEntries(results []RecallResult) []MemoryEntry {

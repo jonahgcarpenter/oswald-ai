@@ -85,8 +85,8 @@ func main() {
 	soulStore := soul.NewStore(config.DefaultSoulPath)
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
-	// The user memory store shares the account-link database and migrates legacy
-	// memory categories into the current canonical schema at startup.
+	// The user memory store shares the account-link database and initializes its
+	// permanent schema before the other stores open their own handles.
 	userMemStore, err := usermemory.NewSQLiteStore(config.DefaultAccountLinkPath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.user"))
 	if err != nil {
 		log.Fatal("app.memory_user.init_failed", "failed to initialize user memory store", config.ErrorField(err))

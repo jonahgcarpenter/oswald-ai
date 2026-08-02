@@ -112,7 +112,7 @@ func (h handler) add(ctx context.Context, scope, owner string, args []string) (c
 	if err != nil {
 		return commands.Result{Text: err.Error()}, nil
 	}
-	_, err = h.store.Save(ctx, mcpmanager.ServerConfig{Scope: scope, OwnerUserID: owner, Name: name, Type: "generic", Transport: mcpmanager.TransportStreamableHTTP, URL: url, Headers: headers, Enabled: true})
+	_, err = h.store.Save(ctx, mcpmanager.ServerConfig{Scope: scope, OwnerUserID: owner, Name: name, Transport: mcpmanager.TransportStreamableHTTP, URL: url, Headers: headers, Enabled: true})
 	if err != nil {
 		return commands.Result{}, err
 	}

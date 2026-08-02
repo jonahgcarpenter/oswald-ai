@@ -2,9 +2,7 @@ package usermemory
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,12 +37,7 @@ type SessionSummary struct {
 	Entities             []string
 	Decisions            []string
 	TopicTags            []string
-	GenerationModel      string
-	GeneratorVersion     string
-	SourceDigest         string
 	SourceTurnIDs        []int64
-	CreatedAt            time.Time
-	ExpiresAt            time.Time
 }
 
 // RenderSessionSummary encodes generated history as explicitly untrusted reference data.
@@ -76,8 +69,6 @@ type SessionCompactionJob struct {
 	CoveredThroughTurnID int64
 	State                string
 	ArtifactSummaryID    int64
-	GenerationModel      string
-	GeneratorVersion     string
 	AttemptCount         int
 	RedriveCount         int
 	LeaseOwner           string
@@ -96,7 +87,6 @@ type SummaryArtifact struct {
 	TopicTags        []string                      `json:"topic_tags"`
 	GenerationModel  string                        `json:"generation_model"`
 	GeneratorVersion string                        `json:"generator_version"`
-	ExpiresAt        *time.Time                    `json:"expires_at,omitempty"`
 	Candidates       []CompactionCandidateArtifact `json:"candidates"`
 }
 
@@ -290,7 +280,7 @@ func (s *Store) RecentCompletedExchangesAfter(ctx context.Context, userID, sessi
 		return nil, err
 	}
 	rows, err := s.sql.QueryContext(ctx, `
-SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
+SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND id > ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL
@@ -357,7 +347,7 @@ func (s *Store) DeliveredSessionTurnsRange(ctx context.Context, userID, sessionI
 }
 
 func (s *Store) deliveredSessionTurnsRange(ctx context.Context, userID, sessionID string, generation int, afterTurnID, throughTurnID int64, limit int, stopAtUndelivered bool) ([]SessionTurn, error) {
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ?`
 	args := []any{userID, sessionID, generation, afterTurnID}
@@ -413,9 +403,9 @@ func (s *Store) EnqueueSessionCompactionJob(ctx context.Context, userID, session
 	result, err := s.sql.ExecContext(ctx, `
 INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id,
-	covered_through_turn_id, available_at, created_at, updated_at
+	covered_through_turn_id, available_at, updated_at
 )
-SELECT 'session_compaction', ? || ':' || ? || ':' || ? || ':' || ? || ':' || ?, ?, ?, ?, ?, ?, ?, ?, ?
+SELECT 'session_compaction', ? || ':' || ? || ':' || ? || ':' || ? || ':' || ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 		SELECT 1 FROM sessions
 		WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
@@ -435,7 +425,7 @@ WHERE EXISTS (
 			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL
 	)
 ON CONFLICT DO NOTHING`,
-		userID, sessionID, generation, fromTurnID, throughTurnID, userID, sessionID, generation, fromTurnID, throughTurnID, formatTime(now), formatTime(now), formatTime(now),
+		userID, sessionID, generation, fromTurnID, throughTurnID, userID, sessionID, generation, fromTurnID, throughTurnID, formatTime(now), formatTime(now),
 		userID, sessionID, generation, formatTime(now),
 		fromTurnID, userID, sessionID, generation,
 		userID, sessionID, generation, fromTurnID, throughTurnID,
@@ -559,8 +549,8 @@ ORDER BY available_at, id LIMIT 1`, formatTime(now), formatTime(now), formatTime
 	result, err := tx.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = 'running', attempt_count = attempt_count + 1, lease_owner = ?, lease_until = ?,
-	started_at = COALESCE(started_at, ?), updated_at = ?
-WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?`, owner, formatTime(now.Add(lease)), formatTime(now), formatTime(now), id, maxSessionCompactionAttempts)
+	updated_at = ?
+WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?`, owner, formatTime(now.Add(lease)), formatTime(now), id, maxSessionCompactionAttempts)
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -586,13 +576,11 @@ func (s *Store) SaveSessionCompactionArtifact(ctx context.Context, job SessionCo
 	result, err := s.sql.ExecContext(ctx, `
 UPDATE durable_jobs
 SET artifact_payload = CASE WHEN artifact_payload = '' THEN ? ELSE artifact_payload END,
-	generation_model = CASE WHEN artifact_payload = '' THEN ? ELSE generation_model END,
-	generator_version = CASE WHEN artifact_payload = '' THEN ? ELSE generator_version END,
 	updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND covered_from_turn_id = ? AND covered_through_turn_id = ?
 	AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`,
-		payload, artifact.GenerationModel, artifact.GeneratorVersion, formatTime(time.Now().UTC()),
+		payload, formatTime(time.Now().UTC()),
 		job.ID, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID, job.LeaseOwner, formatTime(time.Now().UTC()))
 	if err != nil {
 		return fmt.Errorf("save session compaction artifact: %w", err)
@@ -648,8 +636,8 @@ func (s *Store) PublishSessionSummary(ctx context.Context, job SessionCompaction
 	if current.State != "running" || current.LeaseOwner == "" || current.LeaseOwner != job.LeaseOwner || !current.LeaseUntil.After(time.Now().UTC()) {
 		return SessionSummary{}, fmt.Errorf("publish session summary: job is not owned by active lease")
 	}
-	var activeExpiry string
-	if err := tx.QueryRowContext(ctx, `SELECT expires_at FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1 AND julianday(expires_at) > julianday(?)`, current.UserID, current.SessionID, current.SessionGeneration, formatTime(time.Now().UTC())).Scan(&activeExpiry); err != nil {
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1 AND julianday(expires_at) > julianday(?)`, current.UserID, current.SessionID, current.SessionGeneration, formatTime(time.Now().UTC())).Scan(&active); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return SessionSummary{}, fmt.Errorf("publish session summary: stale session generation")
 		}
@@ -659,7 +647,7 @@ func (s *Store) PublishSessionSummary(ctx context.Context, job SessionCompaction
 	if err != nil {
 		return SessionSummary{}, err
 	}
-	sources, transcriptDigest, err := sessionSummarySourcesTx(ctx, tx, current)
+	sources, err := sessionSummarySourcesTx(ctx, tx, current)
 	if err != nil {
 		return SessionSummary{}, err
 	}
@@ -677,21 +665,19 @@ func (s *Store) PublishSessionSummary(ctx context.Context, job SessionCompaction
 	err = tx.QueryRowContext(ctx, `
 INSERT INTO session_summaries (
 	canonical_user_id, session_id, session_generation, covered_from_turn_id,
-	covered_through_turn_id, narrative, open_tasks, commitments, entities,
-	decisions, topic_tags, generation_model, generator_version, source_digest,
-	created_at, expires_at, source_turn_ids
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		covered_through_turn_id, narrative, open_tasks, commitments, entities,
+		decisions, topic_tags, source_turn_ids
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id`, current.UserID, current.SessionID, current.SessionGeneration,
 		current.CoveredFromTurnID, current.CoveredThroughTurnID, artifact.Narrative,
-		openTasks, commitments, entities, decisions, topicTags, artifact.GenerationModel,
-		artifact.GeneratorVersion, transcriptDigest, formatTime(now), activeExpiry, string(sourceTurnIDs)).Scan(&summaryID)
+		openTasks, commitments, entities, decisions, topicTags, string(sourceTurnIDs)).Scan(&summaryID)
 	if err != nil {
 		return SessionSummary{}, fmt.Errorf("insert session summary: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
-UPDATE durable_jobs SET artifact_summary_id = ?, generation_model = ?, generator_version = ?, updated_at = ?
+	UPDATE durable_jobs SET artifact_summary_id = ?, updated_at = ?
 WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND artifact_summary_id IS NULL
-	AND lease_owner = ? AND julianday(lease_until) > julianday(?)`, summaryID, artifact.GenerationModel, artifact.GeneratorVersion,
+		AND lease_owner = ? AND julianday(lease_until) > julianday(?)`, summaryID,
 		formatTime(now), current.ID, current.UserID, current.LeaseOwner, formatTime(now))
 	if err != nil {
 		return SessionSummary{}, fmt.Errorf("attach canonical session summary: %w", err)
@@ -804,9 +790,9 @@ WHERE job_kind = 'session_compaction' AND state = 'dead' AND redrive_count < 3
 	return result.RowsAffected()
 }
 
-const sessionSummarySelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, narrative, open_tasks, commitments, entities, decisions, topic_tags, generation_model, generator_version, source_digest, created_at, expires_at, source_turn_ids FROM session_summaries `
+const sessionSummarySelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, narrative, open_tasks, commitments, entities, decisions, topic_tags, source_turn_ids FROM session_summaries `
 
-const sessionCompactionJobSelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), generation_model, generator_version, attempt_count, redrive_count, available_at, lease_owner, lease_until FROM durable_jobs `
+const sessionCompactionJobSelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), attempt_count, redrive_count, available_at, lease_owner, lease_until FROM durable_jobs `
 
 func validateSessionScope(userID, sessionID string, generation int) error {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" || generation <= 0 {
@@ -883,10 +869,6 @@ func encodeSummaryArtifact(artifact SummaryArtifact) (string, SummaryArtifact, e
 			return "", SummaryArtifact{}, fmt.Errorf("session compaction artifact candidate %d text exceeds %d runes", i, maxSummaryCandidateRunes)
 		}
 	}
-	if artifact.ExpiresAt != nil {
-		value := artifact.ExpiresAt.UTC()
-		artifact.ExpiresAt = &value
-	}
 	payload, err := json.Marshal(artifact)
 	if err != nil {
 		return "", SummaryArtifact{}, fmt.Errorf("encode session compaction artifact: %w", err)
@@ -953,12 +935,9 @@ func loadSessionSummaryRow(ctx context.Context, row interface{ Scan(...any) erro
 }) (SessionSummary, error) {
 	var summary SessionSummary
 	var openTasks, commitments, entities, decisions, topicTags, sourceTurnIDs string
-	var createdAt string
-	var expiresAt sql.NullString
 	err := row.Scan(&summary.ID, &summary.UserID, &summary.SessionID, &summary.SessionGeneration,
 		&summary.CoveredFromTurnID, &summary.CoveredThroughTurnID, &summary.Narrative,
-		&openTasks, &commitments, &entities, &decisions, &topicTags, &summary.GenerationModel,
-		&summary.GeneratorVersion, &summary.SourceDigest, &createdAt, &expiresAt, &sourceTurnIDs)
+		&openTasks, &commitments, &entities, &decisions, &topicTags, &sourceTurnIDs)
 	if err != nil {
 		return SessionSummary{}, err
 	}
@@ -974,10 +953,6 @@ func loadSessionSummaryRow(ctx context.Context, row interface{ Scan(...any) erro
 		}
 		*field.dest = decoded
 	}
-	summary.CreatedAt = parseTime(createdAt)
-	if expiresAt.Valid {
-		summary.ExpiresAt = parseTime(expiresAt.String)
-	}
 	if err := json.Unmarshal([]byte(sourceTurnIDs), &summary.SourceTurnIDs); err != nil {
 		return SessionSummary{}, fmt.Errorf("decode session summary source ids: %w", err)
 	}
@@ -990,8 +965,7 @@ func scanSessionCompactionJob(row interface{ Scan(...any) error }) (SessionCompa
 	var leaseUntil sql.NullString
 	err := row.Scan(&job.ID, &job.UserID, &job.SessionID, &job.SessionGeneration,
 		&job.CoveredFromTurnID, &job.CoveredThroughTurnID, &job.State,
-		&job.ArtifactSummaryID, &job.GenerationModel, &job.GeneratorVersion,
-		&job.AttemptCount, &job.RedriveCount, &availableAt, &job.LeaseOwner, &leaseUntil)
+		&job.ArtifactSummaryID, &job.AttemptCount, &job.RedriveCount, &availableAt, &job.LeaseOwner, &leaseUntil)
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -1010,10 +984,10 @@ func loadSessionCompactionJobWithArtifactTx(ctx context.Context, tx *sql.Tx, exp
 	var job SessionCompactionJob
 	var payload, availableAt string
 	var leaseUntil sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), generation_model, generator_version, attempt_count, redrive_count, available_at, lease_owner, lease_until, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, expected.ID, expected.UserID).Scan(
+	err := tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), attempt_count, redrive_count, available_at, lease_owner, lease_until, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, expected.ID, expected.UserID).Scan(
 		&job.ID, &job.UserID, &job.SessionID, &job.SessionGeneration, &job.CoveredFromTurnID,
-		&job.CoveredThroughTurnID, &job.State, &job.ArtifactSummaryID, &job.GenerationModel,
-		&job.GeneratorVersion, &job.AttemptCount, &job.RedriveCount, &availableAt,
+		&job.CoveredThroughTurnID, &job.State, &job.ArtifactSummaryID,
+		&job.AttemptCount, &job.RedriveCount, &availableAt,
 		&job.LeaseOwner, &leaseUntil, &payload)
 	if err != nil {
 		return SessionCompactionJob{}, "", err
@@ -1031,17 +1005,17 @@ func loadSessionCompactionJobWithArtifactTx(ctx context.Context, tx *sql.Tx, exp
 	return job, payload, nil
 }
 
-func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompactionJob) ([]int64, string, error) {
+func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompactionJob) ([]int64, error) {
 	var priorThrough int64
 	var priorSourceIDs string
 	err := tx.QueryRowContext(ctx, `SELECT covered_through_turn_id, source_turn_ids FROM session_summaries WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id < ? ORDER BY covered_through_turn_id DESC LIMIT 1`, job.UserID, job.SessionID, job.SessionGeneration, job.CoveredFromTurnID, job.CoveredThroughTurnID).Scan(&priorThrough, &priorSourceIDs)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, "", err
+		return nil, err
 	}
 	sources := make([]int64, 0)
 	if err == nil {
 		if err := json.Unmarshal([]byte(priorSourceIDs), &sources); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 	}
 	boundary := job.CoveredFromTurnID - 1
@@ -1050,35 +1024,27 @@ func sessionSummarySourcesTx(ctx context.Context, tx *sql.Tx, job SessionCompact
 	}
 	var blocked int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND id > ? AND id <= ? AND delivered_at IS NULL AND delivery_failed_at IS NULL`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID).Scan(&blocked); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if blocked != 0 {
-		return nil, "", fmt.Errorf("publish session summary: range crosses an undelivered turn")
+		return nil, fmt.Errorf("publish session summary: range crosses an undelivered turn")
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ? AND id <= ? ORDER BY id`, job.UserID, job.SessionID, job.SessionGeneration, boundary, job.CoveredThroughTurnID)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			rows.Close() // nolint:errcheck
-			return nil, "", err
+			return nil, err
 		}
 		sources = append(sources, id)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	hash := sha256.New()
-	for _, id := range sources {
-		var userText, assistantText string
-		if err := tx.QueryRowContext(ctx, `SELECT user_text, assistant_text FROM session_turns WHERE id = ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?`, id, job.UserID, job.SessionID, job.SessionGeneration).Scan(&userText, &assistantText); err != nil {
-			return nil, "", err
-		}
-		fmt.Fprintf(hash, "%d\x00%s\x00%s\x00", id, userText, assistantText)
-	}
-	return sources, hex.EncodeToString(hash.Sum(nil)), nil
+	return sources, nil
 }
 
 func safeCompactionErrorMessage(value string) string {

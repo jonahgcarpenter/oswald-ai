@@ -82,7 +82,6 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 			}
 		}
 		if updated {
-			user.UpdatedAt = time.Now().UTC()
 			data.Users[canonicalID] = user
 			if err := s.saveLocked(data); err != nil {
 				return "", err
@@ -94,19 +93,15 @@ func (s *Service) EnsureAccount(gateway, identifier, displayName string) (string
 		return canonicalID, nil
 	}
 
-	now := time.Now().UTC()
 	canonicalID, err := newCanonicalUserID()
 	if err != nil {
 		return "", err
 	}
 	data.Users[canonicalID] = UserRecord{
-		CreatedAt: now,
-		UpdatedAt: now,
 		Accounts: []LinkedAccount{{
 			Gateway:     strings.ToLower(gateway),
 			Identifier:  identifier,
 			DisplayName: displayName,
-			LinkedAt:    now,
 			Verified:    false,
 		}},
 	}
@@ -318,7 +313,6 @@ func (s *Service) ClaimBootstrapAdmin(principal identity.Principal) (string, boo
 		return "", false, nil
 	}
 	user.IsAdmin = true
-	user.UpdatedAt = s.now().UTC()
 	data.Users[userID] = user
 	if err := s.saveLocked(data); err != nil {
 		return "", false, err
@@ -418,7 +412,6 @@ func (s *Service) setAdminLocked(data fileData, actorID, targetID string, isAdmi
 		return nil
 	}
 	user.IsAdmin = isAdmin
-	user.UpdatedAt = time.Now().UTC()
 	data.Users[targetID] = user
 	if err := s.saveLocked(data); err != nil {
 		return err
@@ -465,12 +458,8 @@ func (s *Service) banUserLocked(data fileData, actorID, targetID, reason string)
 	if !ok {
 		return fmt.Errorf("canonical user %q not found", targetID)
 	}
-	now := time.Now().UTC()
 	user.IsBanned = true
-	user.BannedAt = now
-	user.BannedBy = actorID
 	user.BanReason = strings.TrimSpace(reason)
-	user.UpdatedAt = now
 	data.Users[targetID] = user
 	if err := s.saveLocked(data); err != nil {
 		return err
@@ -510,14 +499,11 @@ func (s *Service) unbanUserLocked(data fileData, actorID, targetID string) error
 	if !ok {
 		return fmt.Errorf("canonical user %q not found", targetID)
 	}
-	if !user.IsBanned && user.BannedAt.IsZero() && user.BannedBy == "" && user.BanReason == "" {
+	if !user.IsBanned && user.BanReason == "" {
 		return nil
 	}
 	user.IsBanned = false
-	user.BannedAt = time.Time{}
-	user.BannedBy = ""
 	user.BanReason = ""
-	user.UpdatedAt = time.Now().UTC()
 	data.Users[targetID] = user
 	if err := s.saveLocked(data); err != nil {
 		return err
@@ -656,7 +642,6 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 	}
 
 	canonicalUserID := principal.CanonicalUserID
-	now := s.now().UTC()
 	descriptor := DisconnectDescriptor{
 		ExternalIdentities: []string{accountKey(gateway, identifier)},
 	}
@@ -709,7 +694,7 @@ func (s *Service) DisconnectAccountAs(ctx context.Context, principal identity.Pr
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, FormatSpeakerLine(remaining), now.Format(time.RFC3339Nano), canonicalUserID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, FormatSpeakerLine(remaining), canonicalUserID); err != nil {
 			return fmt.Errorf("update speaker intro: %w", err)
 		}
 
@@ -784,11 +769,8 @@ func summarizeUser(canonicalID string, user UserRecord) UserSummary {
 		CanonicalUserID: canonicalID,
 		Intro:           FormatSpeakerLine(accounts),
 		Accounts:        accounts,
-		CreatedAt:       user.CreatedAt,
-		UpdatedAt:       user.UpdatedAt,
 		IsAdmin:         user.IsAdmin,
 		IsBanned:        user.IsBanned,
-		BannedBy:        user.BannedBy,
 		BanReason:       user.BanReason,
 	}
 }

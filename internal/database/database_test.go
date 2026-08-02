@@ -17,26 +17,41 @@ func TestAccountLinkChallengesSchema(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer db.Close() // nolint:errcheck
+	removedColumns := map[string][]string{
+		"account_users":           {"created_at", "updated_at", "banned_at", "banned_by"},
+		"linked_accounts":         {"linked_at"},
+		"account_link_challenges": {"created_at", "consumed_by_user_id", "invalidated_by_user_id", "invalidated_reason"},
+		"mcp_servers":             {"type", "url_host_hash", "created_at", "updated_at"},
+	}
+	for table, columns := range removedColumns {
+		for _, column := range columns {
+			var count int
+			if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+				t.Fatalf("inspect %s.%s: %v", table, column, err)
+			}
+			if count != 0 {
+				t.Fatalf("removed column %s.%s still exists", table, column)
+			}
+		}
+	}
 
 	_, err = db.SQL().Exec(`
 INSERT INTO account_link_challenges (
 	id, code_hash, initiator_user_id, initiator_gateway, initiator_identifier,
-	created_at, expires_at, consumed_at, consumed_gateway, consumed_identifier,
-	consumed_by_user_id, result_user_id, invalidated_at, invalidated_by_user_id, invalidated_reason
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	expires_at, consumed_at, consumed_gateway, consumed_identifier, result_user_id, invalidated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		"challenge-1", "hash-1", "user-1", "discord", "account-1",
-		"2026-07-18T12:00:00Z", "2026-07-18T12:10:00Z", nil, nil, nil,
-		nil, nil, nil, nil, nil,
+		"2026-07-18T12:10:00Z", nil, nil, nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("insert challenge: %v", err)
 	}
 	if _, err := db.SQL().Exec(`
 INSERT INTO account_link_challenges (
-	id, code_hash, initiator_user_id, initiator_gateway, initiator_identifier, created_at, expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	id, code_hash, initiator_user_id, initiator_gateway, initiator_identifier, expires_at
+) VALUES (?, ?, ?, ?, ?, ?)`,
 		"challenge-2", "hash-1", "user-2", "homeassistant", "account-2",
-		"2026-07-18T12:00:00Z", "2026-07-18T12:10:00Z",
+		"2026-07-18T12:10:00Z",
 	); err == nil {
 		t.Fatal("expected duplicate code_hash to fail")
 	}
@@ -69,7 +84,7 @@ func TestWithTxCommitsAndRollsBack(t *testing.T) {
 	defer db.Close() // nolint:errcheck
 
 	err = db.WithTx(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, "committed", "2026-07-18T12:00:00Z", "2026-07-18T12:00:00Z")
+		_, err := tx.Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, "committed")
 		return err
 	})
 	if err != nil {
@@ -78,7 +93,7 @@ func TestWithTxCommitsAndRollsBack(t *testing.T) {
 
 	sentinel := errors.New("rollback")
 	err = db.WithTx(context.Background(), func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, "rolled-back", "2026-07-18T12:00:00Z", "2026-07-18T12:00:00Z"); err != nil {
+		if _, err := tx.Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, "rolled-back"); err != nil {
 			return err
 		}
 		return sentinel
@@ -141,18 +156,18 @@ func TestOpenConfiguresWALAndAllowsTruncateCheckpoint(t *testing.T) {
 	}
 }
 
-func TestMemoryFTS5InitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
+func TestOpenDoesNotCreateLegacyDerivedIndexTablesOrTriggers(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES ('user-a', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`); err != nil {
-		t.Fatalf("insert user: %v", err)
+	for _, name := range []string{"memory_entries_fts", "session_turns_fts"} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&count); err != nil {
+			t.Fatalf("inspect table %s: %v", name, err)
+		}
+		if count != 0 {
+			t.Fatalf("legacy table %s count = %d, want 0", name, count)
+		}
 	}
-	_, err := db.SQL().Exec(`
-INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, created_at, updated_at)
-VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'notes.fact', 'grows_orchids', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`)
-	if err != nil {
-		t.Fatalf("insert memory: %v", err)
-	}
-	for _, name := range []string{"memory_entries_fts_insert", "memory_entries_fts_update", "memory_entries_fts_delete"} {
+	for _, name := range []string{"memory_entries_fts_insert", "memory_entries_fts_update", "memory_entries_fts_delete", "session_turns_fts_insert", "session_turns_fts_update", "session_turns_fts_delete"} {
 		var count int
 		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name).Scan(&count); err != nil {
 			t.Fatalf("inspect trigger %s: %v", name, err)
@@ -161,7 +176,6 @@ VALUES ('user-a', 'long_term', 'notes', 'Grows orchids.', 'notes.fact', 'grows_o
 			t.Fatalf("trigger %s count = %d, want 0", name, count)
 		}
 	}
-	assertFTSMatchCount(t, db, "user-a", "orchids", 0)
 }
 
 func TestSessionsValidateProfileMemorySources(t *testing.T) {
@@ -174,11 +188,11 @@ func TestSessionsValidateProfileMemorySources(t *testing.T) {
 	insertSession := func(sessionID, sources string) error {
 		_, err := db.SQL().Exec(`
 INSERT INTO sessions (
-	canonical_user_id, session_id, generation, started_at, last_seen_at, expires_at,
+	canonical_user_id, session_id, generation, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest,
-	rendered_content, fact_count, profile_bytes, source_memory_ids, profile_created_at
-) VALUES ('user-a', ?, 1, ?, ?, ?, 1, 1, 'v1', 'digest', 'profile', 0, 0, ?, ?)`,
-			sessionID, formationTestTime, formationTestTime, "2026-07-19T12:00:00Z", sources, formationTestTime)
+	rendered_content, fact_count, profile_bytes, source_memory_ids
+) VALUES ('user-a', ?, 1, ?, ?, 1, 1, 'v1', 'digest', 'profile', 0, 0, ?)`,
+			sessionID, formationTestTime, "2026-07-19T12:00:00Z", sources)
 		return err
 	}
 	if err := insertSession("empty", `[]`); err != nil {
@@ -216,15 +230,4 @@ func openTestDB(t *testing.T) *DB {
 	}
 	t.Cleanup(func() { db.Close() }) // nolint:errcheck
 	return db
-}
-
-func assertFTSMatchCount(t *testing.T, db *DB, userID, query string, want int) {
-	t.Helper()
-	var got int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_entries_fts WHERE memory_entries_fts MATCH ? AND canonical_user_id = ?`, query, userID).Scan(&got); err != nil {
-		t.Fatalf("query FTS5 for %q: %v", query, err)
-	}
-	if got != want {
-		t.Fatalf("FTS5 match count for user %q and query %q = %d, want %d", userID, query, got, want)
-	}
 }

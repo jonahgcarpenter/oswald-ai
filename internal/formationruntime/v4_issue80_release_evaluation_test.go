@@ -94,7 +94,7 @@ func evaluateIssue80Formation(t *testing.T) {
 	extractor.memories = []usermemory.MemorySaveItem{item}
 	ordinaryTurn := issue80DeliverAndDrain(t, store, worker, "ordinary", "ordinary", "I prefer tea.")
 	ordinary := issue80CandidateForTurn(t, store, path, "ordinary", ordinaryTurn)
-	if ordinary.State != "proposed" || ordinary.PublicationStatus != "none" || ordinary.FormationMode != "automatic_extraction" || ordinary.Confidence != item.Confidence || ordinary.PublishedMemoryID != 0 {
+	if ordinary.State != "proposed" || ordinary.FormationMode != "automatic_extraction" || ordinary.Confidence != item.Confidence || ordinary.PublishedMemoryID != 0 {
 		t.Fatalf("ordinary candidate=%+v", ordinary)
 	}
 	assertIssue80MemoryCount(t, store, "ordinary", 0)
@@ -102,7 +102,7 @@ func evaluateIssue80Formation(t *testing.T) {
 	extractor.memories = []usermemory.MemorySaveItem{item}
 	explicitTurn := issue80DeliverAndDrain(t, store, worker, "explicit", "explicit", "Please remember that I prefer tea.")
 	explicit := issue80CandidateForTurn(t, store, path, "explicit", explicitTurn)
-	if explicit.State != "approved" || explicit.PublicationStatus != "published" || explicit.FormationMode != "explicit_remember" || explicit.Confidence != 0.9 || explicit.PublishedMemoryID == 0 {
+	if explicit.State != "approved" || explicit.FormationMode != "explicit_remember" || explicit.Confidence != 0.9 || explicit.PublishedMemoryID == 0 {
 		t.Fatalf("explicit candidate=%+v", explicit)
 	}
 	memories := issue80Memories(t, store, "explicit")
@@ -244,7 +244,7 @@ func evaluateIssue80UnsafeInputs(t *testing.T) {
 			extractor.memories = []usermemory.MemorySaveItem{scenario.memory}
 			turnID := issue80DeliverAndDrain(t, store, worker, "user", fmt.Sprintf("unsafe-%d", i), scenario.text)
 			candidate := issue80CandidateForTurn(t, store, path, "user", turnID)
-			if candidate.State != "rejected" || candidate.PublicationStatus != "none" || candidate.FormationMode != "automatic_extraction" || candidate.PublishedMemoryID != 0 || !strings.Contains(candidate.DecisionReason, scenario.wantReason) {
+			if candidate.State != "rejected" || candidate.FormationMode != "automatic_extraction" || candidate.PublishedMemoryID != 0 || !strings.Contains(candidate.DecisionReason, scenario.wantReason) {
 				t.Fatalf("unsafe candidate=%+v want_reason=%q", candidate, scenario.wantReason)
 			}
 		})
@@ -330,7 +330,7 @@ func evaluateIssue80GlobalMemory(t *testing.T) {
 	worker := NewService(memory, extractor, "issue80-model", log)
 	turnID := issue80DeliverAndDrain(t, memory, worker, targetID, "erasure-source", "My private marker is ERASURE-PRIVATE.")
 	candidate := issue80CandidateForTurn(t, memory, path, targetID, turnID)
-	if candidate.State != "approved" || candidate.PublicationStatus != "published" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "erasure-source" || candidate.SourceSessionID != "session" || candidate.PublishedMemoryID == 0 || candidate.Provenance != "user_statement" {
+	if candidate.State != "approved" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "erasure-source" || candidate.SourceSessionID != "session" || candidate.PublishedMemoryID == 0 || candidate.Provenance != "user_statement" {
 		t.Fatalf("source-linked erasure candidate=%+v", candidate)
 	}
 	memories := issue80Memories(t, memory, targetID)
@@ -363,7 +363,7 @@ func evaluateIssue80GlobalMemory(t *testing.T) {
 	if err := accounts.DeleteUserAs(admin, targetID); err != nil {
 		t.Fatal(err)
 	}
-	for _, table := range []string{"account_users", "linked_accounts", "memory_candidates", "memory_entries", "memory_events", "session_turns", "sessions", "durable_jobs"} {
+	for _, table := range []string{"account_users", "linked_accounts", "memory_candidates", "memory_entries", "session_turns", "sessions", "durable_jobs"} {
 		if count := issue80RowCount(t, path, `SELECT COUNT(*) FROM `+table+` WHERE canonical_user_id = ?`, targetID); count != 0 {
 			t.Fatalf("post-erasure private table %s count=%d", table, count)
 		}
@@ -453,7 +453,7 @@ func evaluateIssue80ForgetLifecycle(t *testing.T) {
 	worker := NewService(store, extractor, "issue80-model", log)
 	turnID := issue80DeliverAndDrain(t, store, worker, userID, "forget-source", "My private marker is GRACE-SCRUB.")
 	candidate := issue80CandidateForTurn(t, store, path, userID, turnID)
-	if candidate.State != "approved" || candidate.PublicationStatus != "published" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "forget-source" || candidate.PublishedMemoryID == 0 {
+	if candidate.State != "approved" || candidate.SourceTurnID != turnID || candidate.SourceRequestID != "forget-source" || candidate.PublishedMemoryID == 0 {
 		t.Fatalf("source-linked forget candidate=%+v", candidate)
 	}
 	memory, err := store.EntryByID(candidate.PublishedMemoryID)
@@ -509,9 +509,8 @@ func issue80Store(t *testing.T, embedder llm.Embedder, model string, users ...st
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, user := range users {
-		if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, user, now, now); err != nil {
+		if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES (?)`, user); err != nil {
 			t.Fatal(err)
 		}
 	}

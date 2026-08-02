@@ -19,9 +19,7 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	data := AccountLinkData{
 		Users: map[string]AccountUser{
 			"usr_test": {
-				CreatedAt: now,
-				UpdatedAt: now,
-				Accounts:  []LinkedAccount{{Gateway: "homeassistant", Identifier: "user", LinkedAt: now}},
+				Accounts: []LinkedAccount{{Gateway: "homeassistant", Identifier: "user"}},
 			},
 		},
 	}
@@ -31,14 +29,12 @@ func TestReplaceAccountLinksPreservesUserMemoryRows(t *testing.T) {
 	if _, err := db.SQL().Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, "You are speaking with Test User.", "usr_test"); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "durable_preferences.fact", "the_user_likes_purple", 0.9, 3, "active", formatDBTime(now), formatDBTime(now)); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "usr_test", "long_term", "durable_preferences", "The user likes purple.", "durable_preferences.fact", "the_user_likes_purple", 0.9, 3, "active", now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatalf("insert entry: %v", err)
 	}
 
 	data.Users["usr_test"] = AccountUser{
-		CreatedAt: now,
-		UpdatedAt: now.Add(time.Minute),
-		Accounts:  []LinkedAccount{{Gateway: "homeassistant", Identifier: "user", DisplayName: "User", LinkedAt: now}},
+		Accounts: []LinkedAccount{{Gateway: "homeassistant", Identifier: "user", DisplayName: "User"}},
 	}
 	if err := db.ReplaceAccountLinks(data); err != nil {
 		t.Fatalf("second replace: %v", err)

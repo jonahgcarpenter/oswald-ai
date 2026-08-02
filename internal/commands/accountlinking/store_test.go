@@ -395,7 +395,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 
 	db := links.db.SQL()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, "You are speaking with Target.", now, targetID); err != nil {
+	if _, err := db.Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, "You are speaking with Target.", targetID); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "durable_preferences.fact", "the_user_likes_green", 0.9, 3, "active", now, now); err != nil {
@@ -404,7 +404,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES (?, ?, ?, ?, ?)`, "session-target", targetID, "hello", "hi", now); err != nil {
 		t.Fatalf("insert session turn: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO mcp_servers (id, scope, owner_user_id, name, type, transport, url_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "mcp-target", "user", targetID, "target-tools", "generic", "streamable_http", "ciphertext", now, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO mcp_servers (id, scope, owner_user_id, name, transport, url_ciphertext) VALUES (?, ?, ?, ?, ?, ?)`, "mcp-target", "user", targetID, "target-tools", "streamable_http", "ciphertext"); err != nil {
 		t.Fatalf("insert mcp server: %v", err)
 	}
 

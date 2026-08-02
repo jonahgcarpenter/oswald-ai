@@ -3,11 +3,8 @@ package mcp
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -15,7 +12,6 @@ import (
 
 type cryptoBox struct {
 	aead cipher.AEAD
-	key  []byte
 }
 
 func newCryptoBox(keyText string) (*cryptoBox, error) {
@@ -38,7 +34,7 @@ func newCryptoBox(keyText string) (*cryptoBox, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create MCP config AEAD: %w", err)
 	}
-	return &cryptoBox{aead: aead, key: append([]byte(nil), key...)}, nil
+	return &cryptoBox{aead: aead}, nil
 }
 
 func (b *cryptoBox) encrypt(plaintext string, aad string) (string, error) {
@@ -72,12 +68,6 @@ func (b *cryptoBox) decrypt(encoded string, aad string) (string, error) {
 		return "", fmt.Errorf("decrypt MCP config field: %w", err)
 	}
 	return string(plaintext), nil
-}
-
-func (b *cryptoBox) hostHash(host string) string {
-	mac := hmac.New(sha256.New, b.key)
-	mac.Write([]byte(strings.ToLower(strings.TrimSpace(host))))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func fieldAAD(scope, ownerUserID, name, field string) string {

@@ -40,6 +40,9 @@ func TestMissingLiveTableTriggersShadowRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !strings.HasPrefix(old.TableName, "derived_index_memory_fts_r") {
+		t.Fatalf("startup did not create a generated FTS revision: %+v", old)
+	}
 	db, err := database.Open(path, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +209,7 @@ func TestVectorRevisionModelAndDimensionLifecycle(t *testing.T) {
 	}
 }
 
-func TestMatchingLegacyVectorRevisionRebuildsToCurrentSchema(t *testing.T) {
+func TestLegacyVectorRevisionIsRemovedAndRebuiltToCurrentSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	store := newLifecycleStoreAt(t, path, "user")
 	if _, err := store.SaveMemory(context.Background(), "user", usermemory.SaveRequest{Scope: usermemory.ScopeLongTerm, Statement: "Canonical vector record."}); err != nil {
@@ -216,7 +219,7 @@ func TestMatchingLegacyVectorRevisionRebuildsToCurrentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`CREATE VIRTUAL TABLE memory_entry_vectors_v2 USING vec0(canonical_user_id text, embedding_model text, scope text, category text, embedding float[2]); INSERT INTO derived_index_revisions(index_kind, provider, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_vector', 'llm_gateway', 'model', 2, 1, 1, 'memory_entry_vectors_v2', 'live', datetime('now'), datetime('now'))`); err != nil {
+	if _, err := db.SQL().Exec(`CREATE VIRTUAL TABLE memory_entry_vectors_v2 USING vec0(canonical_user_id text, embedding_model text, scope text, category text, embedding float[2]); INSERT INTO derived_index_revisions(index_kind, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_vector', 'model', 2, 1, 1, 'memory_entry_vectors_v2', 'live', datetime('now'), datetime('now'))`); err != nil {
 		db.Close() // nolint:errcheck
 		t.Fatal(err)
 	}
@@ -492,7 +495,7 @@ func newLifecycleStoreAt(t *testing.T, path string, users ...string) *usermemory
 		t.Fatal(err)
 	}
 	for _, user := range users {
-		if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES (?, datetime('now'), datetime('now'))`, user); err != nil {
+		if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES (?)`, user); err != nil {
 			t.Fatal(err)
 		}
 	}

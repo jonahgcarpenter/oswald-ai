@@ -67,7 +67,6 @@ type storedChallenge struct {
 	InitiatorGateway    string
 	InitiatorIdentifier string
 	ConsumedAt          sql.NullString
-	ConsumedByUserID    sql.NullString
 	ConsumedGateway     sql.NullString
 	ConsumedIdentifier  sql.NullString
 	ResultUserID        sql.NullString
@@ -150,17 +149,17 @@ func (s *Service) CreateChallenge(ctx context.Context, principal identity.Princi
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE account_link_challenges
-SET invalidated_at = ?, invalidated_by_user_id = ?, invalidated_reason = 'superseded'
+SET invalidated_at = ?
 WHERE initiator_user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL
-`, formatChallengeTime(now), principal.CanonicalUserID, principal.CanonicalUserID); err != nil {
+`, formatChallengeTime(now), principal.CanonicalUserID); err != nil {
 			return fmt.Errorf("invalidate prior account-link challenge: %w", err)
 		}
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO account_link_challenges (
+	INSERT INTO account_link_challenges (
 	id, code_hash, initiator_user_id, initiator_gateway, initiator_identifier,
-	created_at, expires_at
-) VALUES (?, ?, ?, ?, ?, ?, ?)
-`, challengeID, codeHash, principal.CanonicalUserID, principal.Gateway, principal.ExternalID, formatChallengeTime(now), formatChallengeTime(expiresAt))
+	expires_at
+) VALUES (?, ?, ?, ?, ?, ?)
+`, challengeID, codeHash, principal.CanonicalUserID, principal.Gateway, principal.ExternalID, formatChallengeTime(expiresAt))
 		if err != nil {
 			return fmt.Errorf("create account-link challenge: %w", err)
 		}
@@ -195,9 +194,9 @@ func (s *Service) CancelChallenge(ctx context.Context, principal identity.Princi
 		}
 		result, err := tx.ExecContext(ctx, `
 UPDATE account_link_challenges
-SET invalidated_at = ?, invalidated_by_user_id = ?, invalidated_reason = 'cancelled'
+SET invalidated_at = ?
 WHERE initiator_user_id = ? AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > ?
-`, formatChallengeTime(now), principal.CanonicalUserID, principal.CanonicalUserID, formatChallengeTime(now))
+`, formatChallengeTime(now), principal.CanonicalUserID, formatChallengeTime(now))
 		if err != nil {
 			return fmt.Errorf("cancel account-link challenge: %w", err)
 		}
@@ -318,20 +317,17 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		if err := s.memories.MergeUsersTx(ctx, tx, winnerID, loserID, intro); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET is_admin = ?, updated_at = ? WHERE canonical_user_id = ?`, boolInt(winnerAdmin || loserAdmin), formatChallengeTime(now), winnerID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET is_admin = ? WHERE canonical_user_id = ?`, boolInt(winnerAdmin || loserAdmin), winnerID); err != nil {
 			return fmt.Errorf("merge account authorization: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_users SET banned_by = ? WHERE banned_by = ?`, winnerID, loserID); err != nil {
-			return fmt.Errorf("rewrite merged moderation references: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET invalidated_at = ?, invalidated_by_user_id = ?, invalidated_reason = 'user_merged' WHERE initiator_user_id = ? AND id != ? AND consumed_at IS NULL AND invalidated_at IS NULL`, formatChallengeTime(now), winnerID, loserID, challenge.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET invalidated_at = ? WHERE initiator_user_id = ? AND id != ? AND consumed_at IS NULL AND invalidated_at IS NULL`, formatChallengeTime(now), loserID, challenge.ID); err != nil {
 			return fmt.Errorf("invalidate merged user challenges: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET initiator_user_id = CASE WHEN initiator_user_id = ? THEN ? ELSE initiator_user_id END, consumed_by_user_id = CASE WHEN consumed_by_user_id = ? THEN ? ELSE consumed_by_user_id END, result_user_id = CASE WHEN result_user_id = ? THEN ? ELSE result_user_id END, invalidated_by_user_id = CASE WHEN invalidated_by_user_id = ? THEN ? ELSE invalidated_by_user_id END WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, loserID, loserID, loserID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE account_link_challenges SET initiator_user_id = CASE WHEN initiator_user_id = ? THEN ? ELSE initiator_user_id END, result_user_id = CASE WHEN result_user_id = ? THEN ? ELSE result_user_id END WHERE initiator_user_id = ? OR result_user_id = ?`, loserID, winnerID, loserID, winnerID, loserID, loserID); err != nil {
 			return fmt.Errorf("rewrite merged account-link audit ownership: %w", err)
 		}
 		var remainingChallengeReferences int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, loserID, loserID, loserID).Scan(&remainingChallengeReferences); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR result_user_id = ?`, loserID, loserID).Scan(&remainingChallengeReferences); err != nil {
 			return fmt.Errorf("verify merged account-link audit ownership: %w", err)
 		}
 		if remainingChallengeReferences != 0 {
@@ -408,10 +404,10 @@ func hashChallengeCode(code string) (string, error) {
 func claimChallengeTx(ctx context.Context, tx *sql.Tx, codeHash string, principal identity.Principal, now time.Time) (storedChallenge, bool, error) {
 	row := tx.QueryRowContext(ctx, `
 UPDATE account_link_challenges
-SET consumed_at = ?, consumed_by_user_id = ?, consumed_gateway = ?, consumed_identifier = ?, result_user_id = initiator_user_id
+SET consumed_at = ?, consumed_gateway = ?, consumed_identifier = ?, result_user_id = initiator_user_id
 WHERE code_hash = ? AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > ?
-RETURNING id, initiator_user_id, initiator_gateway, initiator_identifier, consumed_at, consumed_by_user_id, consumed_gateway, consumed_identifier, result_user_id
-`, formatChallengeTime(now), principal.CanonicalUserID, principal.Gateway, principal.ExternalID, codeHash, formatChallengeTime(now))
+RETURNING id, initiator_user_id, initiator_gateway, initiator_identifier, consumed_at, consumed_gateway, consumed_identifier, result_user_id
+`, formatChallengeTime(now), principal.Gateway, principal.ExternalID, codeHash, formatChallengeTime(now))
 	challenge, err := scanStoredChallenge(row)
 	if err == nil {
 		return challenge, true, nil
@@ -420,7 +416,7 @@ RETURNING id, initiator_user_id, initiator_gateway, initiator_identifier, consum
 		return storedChallenge{}, false, fmt.Errorf("claim account-link challenge: %w", err)
 	}
 	challenge, err = scanStoredChallenge(tx.QueryRowContext(ctx, `
-SELECT id, initiator_user_id, initiator_gateway, initiator_identifier, consumed_at, consumed_by_user_id, consumed_gateway, consumed_identifier, result_user_id
+SELECT id, initiator_user_id, initiator_gateway, initiator_identifier, consumed_at, consumed_gateway, consumed_identifier, result_user_id
 FROM account_link_challenges WHERE code_hash = ?
 `, codeHash))
 	if err != nil {
@@ -431,7 +427,7 @@ FROM account_link_challenges WHERE code_hash = ?
 
 func scanStoredChallenge(row interface{ Scan(...any) error }) (storedChallenge, error) {
 	var c storedChallenge
-	err := row.Scan(&c.ID, &c.InitiatorUserID, &c.InitiatorGateway, &c.InitiatorIdentifier, &c.ConsumedAt, &c.ConsumedByUserID, &c.ConsumedGateway, &c.ConsumedIdentifier, &c.ResultUserID)
+	err := row.Scan(&c.ID, &c.InitiatorUserID, &c.InitiatorGateway, &c.InitiatorIdentifier, &c.ConsumedAt, &c.ConsumedGateway, &c.ConsumedIdentifier, &c.ResultUserID)
 	return c, err
 }
 
@@ -485,7 +481,7 @@ func markVerifiedTx(ctx context.Context, tx *sql.Tx, challenge storedChallenge, 
 }
 
 func speakerLineTx(ctx context.Context, tx *sql.Tx, userID string) (string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT gateway, identifier, display_name, linked_at, verified FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, userID)
+	rows, err := tx.QueryContext(ctx, `SELECT gateway, identifier, display_name, verified FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, userID)
 	if err != nil {
 		return "", fmt.Errorf("read merged linked accounts: %w", err)
 	}
@@ -493,12 +489,10 @@ func speakerLineTx(ctx context.Context, tx *sql.Tx, userID string) (string, erro
 	var accounts []LinkedAccount
 	for rows.Next() {
 		var account LinkedAccount
-		var linkedAt string
 		var verified int
-		if err := rows.Scan(&account.Gateway, &account.Identifier, &account.DisplayName, &linkedAt, &verified); err != nil {
+		if err := rows.Scan(&account.Gateway, &account.Identifier, &account.DisplayName, &verified); err != nil {
 			return "", err
 		}
-		account.LinkedAt, _ = time.Parse(time.RFC3339Nano, linkedAt)
 		account.Verified = verified != 0
 		accounts = append(accounts, account)
 	}

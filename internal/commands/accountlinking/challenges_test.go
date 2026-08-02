@@ -263,7 +263,7 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 		t.Fatalf("merged linked-session context=%q err=%v", contextResult.Block, err)
 	}
 	var loserChallengeReferences int
-	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, loserID, loserID, loserID, loserID).Scan(&loserChallengeReferences); err != nil {
+	if err := links.db.SQL().QueryRow(`SELECT COUNT(*) FROM account_link_challenges WHERE initiator_user_id = ? OR result_user_id = ?`, loserID, loserID).Scan(&loserChallengeReferences); err != nil {
 		t.Fatal(err)
 	}
 	if loserChallengeReferences != 0 {

@@ -562,8 +562,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err != nil {
 		t.Fatalf("open account database: %v", err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?)`, "user", now, now); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, "user"); err != nil {
 		db.Close() // nolint:errcheck
 		t.Fatalf("seed account user: %v", err)
 	}

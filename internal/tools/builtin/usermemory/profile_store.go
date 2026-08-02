@@ -172,22 +172,22 @@ func bindSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID str
 		return fmt.Errorf("encode tenant profile sources: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	fact_count, profile_bytes, source_memory_ids, profile_created_at)
-VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	fact_count, profile_bytes, source_memory_ids)
+VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
-	generation = excluded.generation, is_active = 1, started_at = excluded.started_at,
+	generation = excluded.generation, is_active = 1,
 	last_seen_at = excluded.last_seen_at, expires_at = excluded.expires_at,
 	profile_version = excluded.profile_version,
 	profile_version_high_water = MAX(sessions.profile_version_high_water, excluded.profile_version_high_water),
 	renderer_version = excluded.renderer_version, source_digest = excluded.source_digest,
 	speaker_intro = excluded.speaker_intro, rendered_content = excluded.rendered_content,
 	fact_count = excluded.fact_count, profile_bytes = excluded.profile_bytes,
-	source_memory_ids = excluded.source_memory_ids, profile_created_at = excluded.profile_created_at
-`, userID, sessionID, generation, formatTime(now), formatTime(now), formatTime(now.Add(ttl)),
+	source_memory_ids = excluded.source_memory_ids
+`, userID, sessionID, generation, formatTime(now), formatTime(now.Add(ttl)),
 		profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro,
-		profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now)); err != nil {
+		profile.Content, profile.FactCount, profile.Bytes, string(encoded)); err != nil {
 		return fmt.Errorf("bind tenant session profile: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET profile_version_high_water = MAX(profile_version_high_water, ?) WHERE canonical_user_id = ?`, profile.Version, userID); err != nil {
@@ -270,16 +270,16 @@ func rebindProfileCopiesTx(ctx context.Context, tx *sql.Tx, userID string, memor
 	if err != nil {
 		return fmt.Errorf("encode rebound profile sources: %w", err)
 	}
-	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status IN ('deleted','expired'))`
-	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now), userID, userID}
+	condition := `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source JOIN memory_entries memory ON memory.id = CAST(source.value AS INTEGER) WHERE memory.canonical_user_id = ? AND memory.status = 'expired')`
+	args := []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), userID, userID}
 	if memoryID > 0 {
 		condition = `EXISTS (SELECT 1 FROM json_each(sessions.source_memory_ids) source WHERE CAST(source.value AS INTEGER) = ?)`
-		args = []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), formatTime(now), userID, memoryID}
+		args = []any{profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro, profile.Content, profile.FactCount, profile.Bytes, string(encoded), userID, memoryID}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
 	profile_version = ?, profile_version_high_water = MAX(profile_version_high_water, ?), renderer_version = ?,
 	source_digest = ?, speaker_intro = ?, rendered_content = ?, fact_count = ?, profile_bytes = ?,
-	source_memory_ids = ?, profile_created_at = ?
+	source_memory_ids = ?
 WHERE canonical_user_id = ? AND `+condition, args...); err != nil {
 		return fmt.Errorf("rebind tenant profile snapshots: %w", err)
 	}

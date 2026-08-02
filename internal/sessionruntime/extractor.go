@@ -60,7 +60,6 @@ func (e *LLMExtractor) Compact(ctx context.Context, previous *usermemory.Session
 	}
 	artifact.GenerationModel = e.model
 	artifact.GeneratorVersion = SummaryGeneratorVersion
-	artifact.ExpiresAt = nil
 	return artifact, nil
 }
 

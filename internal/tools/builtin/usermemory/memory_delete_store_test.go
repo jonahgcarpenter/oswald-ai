@@ -35,7 +35,6 @@ func TestHardDeleteMemoryRemovesMemoryGraphAndKeepsTranscript(t *testing.T) {
 	}
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ?`, 0, target.ID)
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 0, target.ID)
-	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_events WHERE memory_id = ?`, 0, target.ID)
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = 'user' AND entity_kind = 'memory' AND entity_id = ?`, 0, target.ID)
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM session_turns WHERE id = ?`, 1, turn.ID)
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_entries WHERE id = ? AND canonical_user_id = 'other'`, 1, other.ID)
@@ -67,7 +66,7 @@ func TestHardDeleteAllUserDataPreservesAccountAndResetsEverySession(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.sql.Exec(`INSERT INTO mcp_servers(id,scope,owner_user_id,name,transport,url_ciphertext,created_at,updated_at) VALUES ('user-server','user','user','home','streamable_http',X'01',datetime('now'),datetime('now'))`); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO mcp_servers(id,scope,owner_user_id,name,transport,url_ciphertext) VALUES ('user-server','user','user','home','streamable_http',X'01')`); err != nil {
 		t.Fatal(err)
 	}
 	sessions, err := store.HardDeleteAllUserData(ctx, "user", time.Now().UTC())
@@ -77,7 +76,7 @@ func TestHardDeleteAllUserDataPreservesAccountAndResetsEverySession(t *testing.T
 	if len(sessions) != 2 || sessions[0] != "one" || sessions[1] != "two" {
 		t.Fatalf("reset sessions=%v", sessions)
 	}
-	for _, table := range []string{"memory_entries", "memory_candidates", "memory_events", "session_turns", "session_summaries"} {
+	for _, table := range []string{"memory_entries", "memory_candidates", "session_turns", "session_summaries"} {
 		assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+table+` WHERE canonical_user_id = 'user'`, 0)
 	}
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = 'user'`, 0)

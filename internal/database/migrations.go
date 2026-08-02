@@ -4,26 +4,101 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 )
 
+//go:embed migrations/*.sql
+var permanentMigrationFiles embed.FS
+
+var permanentMigrationName = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.sql$`)
+
 type schemaMigration struct {
-	version    int
-	name       string
-	definition string
-	apply      func(context.Context, *sql.Conn) error
+	version int
+	name    string
+	sql     string
+	major   int
+	minor   int
+	patch   int
 }
 
 func orderedMigrations() []schemaMigration {
-	return []schemaMigration{
-		{version: 1, name: "v4_compact_baseline", definition: compactV4MigrationDefinition, apply: applyCompactV4Baseline},
+	migrations, err := discoverPermanentMigrations(permanentMigrationFiles)
+	if err != nil {
+		panic(err)
 	}
+	return migrations
+}
+
+func discoverPermanentMigrations(files fs.FS) ([]schemaMigration, error) {
+	entries, err := fs.ReadDir(files, "migrations")
+	if err != nil {
+		return nil, fmt.Errorf("read permanent schema migrations: %w", err)
+	}
+	migrations := make([]schemaMigration, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return nil, fmt.Errorf("permanent migration directory contains subdirectory %q", entry.Name())
+		}
+		matches := permanentMigrationName.FindStringSubmatch(entry.Name())
+		if matches == nil {
+			return nil, fmt.Errorf("invalid permanent migration filename %q", entry.Name())
+		}
+		major, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid permanent migration major version in %q: %w", entry.Name(), err)
+		}
+		minor, err := strconv.Atoi(matches[2])
+		if err != nil {
+			return nil, fmt.Errorf("invalid permanent migration minor version in %q: %w", entry.Name(), err)
+		}
+		patch, err := strconv.Atoi(matches[3])
+		if err != nil {
+			return nil, fmt.Errorf("invalid permanent migration patch version in %q: %w", entry.Name(), err)
+		}
+		definition, err := fs.ReadFile(files, "migrations/"+entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read permanent migration %q: %w", entry.Name(), err)
+		}
+		if strings.TrimSpace(string(definition)) == "" {
+			return nil, fmt.Errorf("permanent migration %q is empty", entry.Name())
+		}
+		migrations = append(migrations, schemaMigration{
+			name:  strings.TrimSuffix(entry.Name(), ".sql"),
+			sql:   string(definition),
+			major: major,
+			minor: minor,
+			patch: patch,
+		})
+	}
+	sort.Slice(migrations, func(i, j int) bool {
+		left, right := migrations[i], migrations[j]
+		if left.major != right.major {
+			return left.major < right.major
+		}
+		if left.minor != right.minor {
+			return left.minor < right.minor
+		}
+		return left.patch < right.patch
+	})
+	for i := range migrations {
+		migrations[i].version = i + 1
+	}
+	if err := validateMigrationRegistry(migrations); err != nil {
+		return nil, err
+	}
+	return migrations, nil
 }
 
 func migrationChecksum(m schemaMigration) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\n%s\n%s", m.version, m.name, m.definition)))
+	sum := sha256.Sum256([]byte(m.name + "\n" + m.sql))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -37,8 +112,6 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 	}
 	defer conn.Close()
 
-	// Build the frozen baseline without applying foreign-key actions until every
-	// referenced table exists, then verify integrity before commit.
 	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
 		return fmt.Errorf("disable foreign keys for schema migrations: %w", err)
 	}
@@ -57,6 +130,7 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
+
 	var ledgerExists, schemaObjectCount int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration_versions'`).Scan(&ledgerExists); err != nil {
 		return fmt.Errorf("inspect schema migration ledger: %w", err)
@@ -64,19 +138,15 @@ func (d *DB) runSchemaMigrations(ctx context.Context, registry []schemaMigration
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`).Scan(&schemaObjectCount); err != nil {
 		return fmt.Errorf("inspect existing database schema: %w", err)
 	}
+
+	legacyMigrated := false
 	if ledgerExists == 0 && schemaObjectCount != 0 {
-		matched, err := resetPublishedV3(ctx, conn, registry)
+		legacyMigrated, err = migrateLegacyV320(ctx, conn, registry[0])
 		if err != nil {
 			return err
 		}
-		if !matched {
-			return fmt.Errorf("database predates the disposable v4 baseline; reset the development database")
-		}
-		ledgerExists = 1
-	}
-	if ledgerExists != 0 {
-		if err := validateFrozenV4Ledger(ctx, conn, registry); err != nil {
-			return err
+		if !legacyMigrated {
+			return fmt.Errorf("database has no recognized permanent migration ledger or exact v3.2.0 schema")
 		}
 	}
 
@@ -89,62 +159,25 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 )`); err != nil {
 		return fmt.Errorf("initialize ordered schema migration ledger: %w", err)
 	}
-	registered := make(map[int]schemaMigration, len(registry))
-	for _, migration := range registry {
-		registered[migration.version] = migration
+	if legacyMigrated {
+		migration := registry[0]
+		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migration_versions (version, name, checksum, applied_at) VALUES (1, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, migration.name, migrationChecksum(migration)); err != nil {
+			return fmt.Errorf("record v4.0.0 after legacy migration: %w", err)
+		}
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT version, name, checksum FROM schema_migration_versions ORDER BY version`)
+
+	appliedCount, err := validateAppliedMigrationPrefix(ctx, conn, registry)
 	if err != nil {
-		return fmt.Errorf("read applied schema migrations: %w", err)
+		return err
 	}
-	expectedAppliedVersion := 1
-	for rows.Next() {
-		var version int
-		var name, checksum string
-		if err := rows.Scan(&version, &name, &checksum); err != nil {
-			rows.Close() // nolint:errcheck
-			return fmt.Errorf("scan applied schema migration: %w", err)
-		}
-		if version != expectedAppliedVersion {
-			rows.Close() // nolint:errcheck
-			return fmt.Errorf("schema migration ledger is not contiguous: expected version %d, found %d", expectedAppliedVersion, version)
-		}
-		expectedAppliedVersion++
-		migration, ok := registered[version]
-		if !ok {
-			rows.Close() // nolint:errcheck
-			return fmt.Errorf("database has unknown schema migration version %d", version)
-		}
-		expected := migrationChecksum(migration)
-		if name != migration.name || checksum != expected {
-			rows.Close() // nolint:errcheck
-			return fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", version, name, checksum, migration.name, expected)
-		}
+	if ledgerExists != 0 && appliedCount == 0 && schemaObjectCount != 1 {
+		return fmt.Errorf("empty schema migration ledger accompanies an unknown nonempty schema")
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close() // nolint:errcheck
-		return fmt.Errorf("read applied schema migrations: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close applied schema migrations: %w", err)
-	}
-	for _, migration := range registry {
-		checksum := migrationChecksum(migration)
-		var appliedName, appliedChecksum string
-		err := conn.QueryRowContext(ctx, `SELECT name, checksum FROM schema_migration_versions WHERE version = ?`, migration.version).Scan(&appliedName, &appliedChecksum)
-		switch {
-		case err == nil:
-			if appliedName != migration.name || appliedChecksum != checksum {
-				return fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", migration.version, appliedName, appliedChecksum, migration.name, checksum)
-			}
-			continue
-		case !errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("inspect schema migration version %d: %w", migration.version, err)
-		}
-		if err := migration.apply(ctx, conn); err != nil {
+	for _, migration := range registry[appliedCount:] {
+		if _, err := conn.ExecContext(ctx, migration.sql); err != nil {
 			return fmt.Errorf("apply schema migration %d %q: %w", migration.version, migration.name, err)
 		}
-		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migration_versions (version, name, checksum, applied_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, migration.version, migration.name, checksum); err != nil {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migration_versions (version, name, checksum, applied_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
 			return fmt.Errorf("record schema migration %d %q: %w", migration.version, migration.name, err)
 		}
 	}
@@ -158,39 +191,54 @@ CREATE TABLE IF NOT EXISTS schema_migration_versions (
 	return nil
 }
 
-func validateFrozenV4Ledger(ctx context.Context, conn *sql.Conn, registry []schemaMigration) error {
-	var rowCount int
-	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migration_versions`).Scan(&rowCount); err != nil {
-		return fmt.Errorf("read frozen v4 schema migration ledger: %w", err)
+func validateAppliedMigrationPrefix(ctx context.Context, conn *sql.Conn, registry []schemaMigration) (int, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT version, name, checksum FROM schema_migration_versions ORDER BY version`)
+	if err != nil {
+		return 0, fmt.Errorf("read applied schema migrations: %w", err)
 	}
-	if rowCount != len(registry) {
-		return fmt.Errorf("invalid frozen v4 schema migration ledger: found %d rows, expected %d", rowCount, len(registry))
-	}
-	for _, migration := range registry {
+	defer rows.Close()
+	applied := 0
+	for rows.Next() {
+		var version int
 		var name, checksum string
-		if err := conn.QueryRowContext(ctx, `SELECT name, checksum FROM schema_migration_versions WHERE version = ?`, migration.version).Scan(&name, &checksum); err != nil {
-			return fmt.Errorf("read frozen v4 schema migration version %d: %w", migration.version, err)
+		if err := rows.Scan(&version, &name, &checksum); err != nil {
+			return 0, fmt.Errorf("scan applied schema migration: %w", err)
 		}
+		if version != applied+1 {
+			return 0, fmt.Errorf("schema migration ledger is not contiguous: expected version %d, found %d", applied+1, version)
+		}
+		if applied >= len(registry) {
+			return 0, fmt.Errorf("database has unknown schema migration version %d", version)
+		}
+		migration := registry[applied]
 		expected := migrationChecksum(migration)
 		if name != migration.name || checksum != expected {
-			return fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", migration.version, name, checksum, migration.name, expected)
+			return 0, fmt.Errorf("schema migration checksum drift at version %d: database has %q/%q, registry has %q/%q", version, name, checksum, migration.name, expected)
 		}
+		applied++
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("read applied schema migrations: %w", err)
+	}
+	return applied, nil
 }
 
 func validateMigrationRegistry(registry []schemaMigration) error {
-	previous := 0
-	names := make(map[string]struct{}, len(registry))
-	for _, migration := range registry {
-		if migration.version != previous+1 || migration.name == "" || migration.definition == "" || migration.apply == nil {
+	if len(registry) == 0 || registry[0].name != "v4.0.0" {
+		return errors.New("permanent schema migration history must start at v4.0.0")
+	}
+	for i, migration := range registry {
+		if migration.version != i+1 || strings.TrimSpace(migration.sql) == "" {
 			return fmt.Errorf("invalid schema migration registry entry at version %d", migration.version)
 		}
-		if _, exists := names[migration.name]; exists {
-			return fmt.Errorf("duplicate schema migration name %q", migration.name)
+		if i > 0 {
+			previous := registry[i-1]
+			if migration.major < previous.major ||
+				(migration.major == previous.major && migration.minor < previous.minor) ||
+				(migration.major == previous.major && migration.minor == previous.minor && migration.patch <= previous.patch) {
+				return fmt.Errorf("permanent schema migrations are not in strict semantic order at %q", migration.name)
+			}
 		}
-		names[migration.name] = struct{}{}
-		previous = migration.version
 	}
 	return nil
 }

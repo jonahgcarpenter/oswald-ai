@@ -17,11 +17,11 @@ func TestProposeCandidateAtomicallyPublishesApprovedPolicy(t *testing.T) {
 	store := newFormationTestStore(t)
 	output := evaluatedFormationCandidate(t, "I use Go for Atlas", "I use Go for Atlas", "The user uses Go for Atlas.", memoryformation.CategoryProjects)
 	candidate, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: "atomic"})
-	if err != nil || !created || candidate.State != "approved" || candidate.PublicationStatus != "published" || candidate.PublishedMemoryID == 0 {
+	if err != nil || !created || candidate.State != "approved" || candidate.PublishedMemoryID == 0 {
 		t.Fatalf("candidate=%+v created=%v err=%v", candidate, created, err)
 	}
 	var invalid int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE state = 'approved' AND publication_status = 'none'`).Scan(&invalid); err != nil || invalid != 0 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE state = 'approved' AND published_memory_id IS NULL`).Scan(&invalid); err != nil || invalid != 0 {
 		t.Fatalf("approved unpublished candidates=%d err=%v", invalid, err)
 	}
 	replayed, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: "atomic"})
@@ -31,7 +31,7 @@ func TestProposeCandidateAtomicallyPublishesApprovedPolicy(t *testing.T) {
 }
 
 func TestProposeCandidateRollsBackEveryPublicationStage(t *testing.T) {
-	for _, stage := range []string{"validated", "canonical_written", "vector_written", "supersession_written", "audit_written", "profile_written", "candidate_published"} {
+	for _, stage := range []string{"validated", "canonical_written", "vector_written", "supersession_written", "profile_written", "candidate_published"} {
 		t.Run(stage, func(t *testing.T) {
 			store := newFormationTestStore(t)
 			store.formationFailpoint = func(current string) error {
@@ -44,7 +44,7 @@ func TestProposeCandidateRollsBackEveryPublicationStage(t *testing.T) {
 			if _, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: stage}); err == nil {
 				t.Fatal("expected transaction failure")
 			}
-			for table, want := range map[string]int{"memory_candidates": 0, "memory_entries": 0, "memory_events": 0} {
+			for table, want := range map[string]int{"memory_candidates": 0, "memory_entries": 0} {
 				var count int
 				if err := store.sql.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != want {
 					t.Fatalf("%s count=%d err=%v", table, count, err)
@@ -91,12 +91,16 @@ func TestProposeCandidateBlocksWeakConflictAndSupersedesWithStrongerEvidence(t *
 	}
 	coffee := evaluatedClaimCandidate(t, "I prefer coffee", "The user prefers coffee.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.7, "preference.drink", "coffee")
 	blocked, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: coffee, IdempotencyKey: "weak-coffee"})
-	if err != nil || blocked.State != "approved" || blocked.PublicationStatus != "blocked_conflict" || blocked.PublishedMemoryID != 0 {
+	if err != nil || blocked.State != "approved" || blocked.PublishedMemoryID != 0 {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
+	}
+	replayed, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: coffee, IdempotencyKey: "weak-coffee"})
+	if err != nil || created || replayed.PublishedMemoryID != 0 {
+		t.Fatalf("blocked replay=%+v created=%v err=%v", replayed, created, err)
 	}
 	coffee = evaluatedClaimCandidate(t, "I prefer coffee", "The user prefers coffee.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.95, "preference.drink", "coffee")
 	replacement, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: coffee, IdempotencyKey: "strong-coffee"})
-	if err != nil || replacement.PublicationStatus != "published" || replacement.PublishedMemoryID == active.PublishedMemoryID {
+	if err != nil || replacement.PublishedMemoryID == 0 || replacement.PublishedMemoryID == active.PublishedMemoryID {
 		t.Fatalf("replacement=%+v active=%+v err=%v", replacement, active, err)
 	}
 	old, _ := store.EntryByID(active.PublishedMemoryID)
@@ -145,7 +149,7 @@ func TestFallbackFactSupersessionMatchesNormalizedStatement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replacement.PublicationStatus != "published" || replacement.SupersedesMemoryID != old.ID || old.Status != StatusSuperseded {
+	if replacement.PublishedMemoryID == 0 || replacement.SupersedesMemoryID != old.ID || old.Status != StatusSuperseded {
 		t.Fatalf("replacement=%+v old=%+v", replacement, old)
 	}
 }
@@ -177,7 +181,7 @@ func TestDirectEvidenceUpgradesInferenceAndInferenceCannotReplaceDirect(t *testi
 	inferredConflict.ClaimValue = "fedora_linux"
 	inferredConflict.Confidence = 1
 	blocked, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: inferredConflict, IdempotencyKey: "inferred-fedora"})
-	if err != nil || blocked.PublicationStatus != "blocked_conflict" {
+	if err != nil || blocked.State != "approved" || blocked.PublishedMemoryID != 0 {
 		t.Fatalf("blocked=%+v err=%v", blocked, err)
 	}
 }
@@ -187,14 +191,14 @@ func TestSameTurnPolicyPromotionPublishesInReconciliationTransaction(t *testing.
 	turnID := seedFormationTurn(t, store, "user", "session", "I use Go")
 	low := evaluatedClaimCandidate(t, "I use Go", "The user uses Go.", memoryformation.CategoryProjects, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "project.language", "go")
 	first, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: low, IdempotencyKey: "low", Source: FormationSource{TurnID: turnID}})
-	if err != nil || first.State != "proposed" || first.PublicationStatus != "none" {
+	if err != nil || first.State != "proposed" || first.PublishedMemoryID != 0 {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	high := low
 	high.Approval = memoryformation.ApprovalApproved
 	high.Confidence = 0.9
 	merged, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: high, IdempotencyKey: "high", Source: FormationSource{TurnID: turnID}})
-	if err != nil || created || merged.ID != first.ID || merged.State != "approved" || merged.PublicationStatus != "published" || merged.PublishedMemoryID == 0 {
+	if err != nil || created || merged.ID != first.ID || merged.State != "approved" || merged.PublishedMemoryID == 0 {
 		t.Fatalf("merged=%+v created=%v err=%v", merged, created, err)
 	}
 }

@@ -238,7 +238,7 @@ func TestServiceCompletesBlockedConflictWithoutPublicationRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if activeCandidate.PublicationStatus != "published" || activeCandidate.PublishedMemoryID == 0 {
+	if activeCandidate.PublishedMemoryID == 0 {
 		t.Fatalf("active candidate was not atomically published: %+v", activeCandidate)
 	}
 
@@ -482,8 +482,7 @@ func formationTestStore(t *testing.T) *usermemory.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('user-1', ?, ?)`, now, now); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close() // nolint:errcheck

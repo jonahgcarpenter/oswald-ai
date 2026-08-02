@@ -763,7 +763,7 @@ func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 		t.Fatalf("pending confirmation was injected: %+v", messages)
 	}
 	unchanged, err := store.LoadCandidate(context.Background(), "user-1", candidate.ID)
-	if err != nil || unchanged.PublicationStatus != "published" || unchanged.PublishedMemoryID != candidate.PublishedMemoryID {
+	if err != nil || unchanged.PublishedMemoryID != candidate.PublishedMemoryID {
 		t.Fatalf("conversational phrase changed candidate: %+v err=%v", unchanged, err)
 	}
 }
@@ -1275,11 +1275,10 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err != nil {
 		t.Fatalf("open account database: %v", err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, ?, ?), (?, ?, ?)`, "user-1", now, now, "user-2", now, now); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?), (?)`, "user-1", "user-2"); err != nil {
 		t.Fatalf("seed account user: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, linked_at, verified) VALUES ('homeassistant', 'user-1', 'user-1', 'User 1', ?, 1), ('homeassistant', 'user-2', 'user-2', 'User 2', ?, 1)`, now, now); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, verified) VALUES ('homeassistant', 'user-1', 'user-1', 'User 1', 1), ('homeassistant', 'user-2', 'user-2', 'User 2', 1)`); err != nil {
 		t.Fatalf("seed linked accounts: %v", err)
 	}
 	db.Close() // nolint:errcheck

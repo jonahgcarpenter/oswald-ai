@@ -7,13 +7,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 )
 
-func TestCompactV4BaselineDefinitionIsExecutedDirectly(t *testing.T) {
+func TestPermanentV400SQLIsExecutedDirectly(t *testing.T) {
+	migration := orderedMigrations()[0]
 	for _, forbidden := range []string{"ALTER TABLE", "DROP TABLE", "DROP TRIGGER", "data-transform:", "legacy-ledger:"} {
-		if strings.Contains(compactV4BaselineDefinition, forbidden) {
+		if strings.Contains(migration.sql, forbidden) {
 			t.Fatalf("direct baseline contains forbidden historical operation %q", forbidden)
 		}
 	}
@@ -23,35 +25,31 @@ func TestCompactV4BaselineDefinitionIsExecutedDirectly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer direct.Close()
-	if _, err := direct.Exec(compactV4BaselineDefinition); err != nil {
+	if _, err := direct.Exec(migration.sql + `
+CREATE TABLE schema_migration_versions (
+	version INTEGER PRIMARY KEY CHECK (version > 0),
+	name TEXT NOT NULL UNIQUE,
+	checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+	applied_at TEXT NOT NULL
+);`); err != nil {
 		t.Fatalf("execute baseline definition: %v", err)
 	}
 
-	applied, err := sql.Open("sqlite3", ":memory:")
+	path := filepath.Join(t.TempDir(), "applied.db")
+	appliedStore, err := Open(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer applied.Close()
-	conn, err := applied.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := applyCompactV4Baseline(context.Background(), conn); err != nil {
-		conn.Close() // nolint:errcheck
-		t.Fatalf("apply compact baseline: %v", err)
-	}
-	if err := conn.Close(); err != nil {
-		t.Fatal(err)
-	}
+	defer appliedStore.Close()
 
 	directSchema := schemaSnapshot(t, direct)
-	appliedSchema := schemaSnapshot(t, applied)
+	appliedSchema := schemaSnapshot(t, appliedStore.SQL())
 	if directSchema != appliedSchema {
-		t.Fatal("executed compact baseline differs from its checksum definition")
+		t.Fatal("fresh schema differs from directly executed v4.0.0 SQL")
 	}
 }
 
-func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
+func TestPermanentV400IsFreshAndIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	db, err := Open(path, nil)
 	if err != nil {
@@ -62,7 +60,7 @@ func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
 	if err := db.SQL().QueryRow(`SELECT version, name, checksum FROM schema_migration_versions`).Scan(&version, &name, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || name != "v4_compact_baseline" || len(checksum) != 64 {
+	if version != 1 || name != "v4.0.0" || checksum != migrationChecksum(orderedMigrations()[0]) {
 		t.Fatalf("unexpected baseline ledger: %d %q %q", version, name, checksum)
 	}
 	for _, removed := range []string{"schema_migrations", "memory_confirmation_presentations", "memory_relations", "maintenance_runs", "tenant_profile_versions", "tenant_profile_version_facts", "tenant_profile_version_counters", "tenant_sessions", "tenant_session_generations", "deployment_memory_candidates", "deployment_memory_entries", "deployment_memory_evidence", "global_memory_claims", "global_memory_evidence"} {
@@ -81,7 +79,7 @@ func TestCompactV4BaselineIsFreshAndIdempotent(t *testing.T) {
 		toolnames.SessionTranscriptSearch,
 	}, ",")
 	if _, err := db.SQL().Exec(`
-INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('restart-user', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z');
+INSERT INTO account_users(canonical_user_id) VALUES ('restart-user');
 INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, tool_names, created_at)
 VALUES ('restart-session', 'restart-user', 'remember this', 'saved', ?, '2026-07-21T00:00:00Z');
 INSERT INTO memory_candidates(
@@ -112,7 +110,7 @@ INSERT INTO memory_candidates(
 	}
 }
 
-func TestCompactV4CanonicalTableInventory(t *testing.T) {
+func TestPermanentV400CanonicalTableInventory(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "oswald.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +119,7 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 	expected := []string{
 		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
 		"global_memories", "linked_accounts", "mcp_servers", "memory_candidates",
-		"memory_entries", "memory_events", "schema_migration_versions", "session_summaries",
+		"memory_entries", "schema_migration_versions", "session_summaries",
 		"session_turns", "sessions",
 	}
 	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB 'memory_entries_fts*' AND name NOT GLOB 'session_turns_fts*' ORDER BY name`)
@@ -142,14 +140,14 @@ func TestCompactV4CanonicalTableInventory(t *testing.T) {
 	}
 }
 
-func TestCompactV4CanonicalObjectInventory(t *testing.T) {
+func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "oswald.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 13, "index": 38, "trigger": 18, "view": 0} {
+	for objectType, want := range map[string]int{"table": 12, "index": 24, "trigger": 15, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master
@@ -165,7 +163,7 @@ WHERE type = ? AND name NOT LIKE 'sqlite_%'
 	}
 }
 
-func TestCompactV4BaselineRejectsDevelopmentLedger(t *testing.T) {
+func TestPermanentV400RejectsDevelopmentLedger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	raw, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -186,7 +184,25 @@ func TestCompactV4BaselineRejectsDevelopmentLedger(t *testing.T) {
 	}
 }
 
-func TestCompactV4BaselineRejectsEmptyLedgerWithOtherObjects(t *testing.T) {
+func TestPermanentV4RejectsOldCompactBaselineLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old-v4.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migration_versions (version INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL, applied_at TEXT NOT NULL); INSERT INTO schema_migration_versions VALUES (1, 'v4_compact_baseline', ?, datetime('now'))`, strings.Repeat("0", 64)); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close() // nolint:errcheck
+	if db, err := Open(path, nil); err == nil {
+		db.Close() // nolint:errcheck
+		t.Fatal("expected old compact baseline ledger rejection")
+	} else if !strings.Contains(err.Error(), "checksum drift") {
+		t.Fatalf("unexpected rejection: %v", err)
+	}
+}
+
+func TestPermanentV400RejectsEmptyLedgerWithOtherObjects(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "partial.db")
 	raw, err := sql.Open("sqlite3", path)
 	if err != nil {
@@ -209,8 +225,6 @@ CREATE TABLE unrelated (id INTEGER PRIMARY KEY);`); err != nil {
 	if db, err := Open(path, nil); err == nil {
 		db.Close()
 		t.Fatal("expected empty migration ledger with other objects to be rejected")
-	} else if !strings.Contains(err.Error(), "invalid frozen v4 schema migration ledger") {
-		t.Fatalf("unexpected rejection: %v", err)
 	}
 }
 
@@ -223,13 +237,10 @@ func TestSchemaMigrationApplyFailureRollsBackEverything(t *testing.T) {
 	defer raw.Close()
 	db := &DB{path: path, db: raw}
 	registry := []schemaMigration{{
-		version:    1,
-		name:       "failing_baseline",
-		definition: "CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY); invalid statement;",
-		apply: func(ctx context.Context, conn *sql.Conn) error {
-			_, err := conn.ExecContext(ctx, "CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY); invalid statement;")
-			return err
-		},
+		version: 1,
+		name:    "v4.0.0",
+		sql:     "CREATE TABLE rollback_probe (id INTEGER PRIMARY KEY); invalid statement;",
+		major:   4,
 	}}
 	if err := db.runSchemaMigrations(context.Background(), registry); err == nil {
 		t.Fatal("expected schema migration failure")
@@ -243,7 +254,185 @@ func TestSchemaMigrationApplyFailureRollsBackEverything(t *testing.T) {
 	}
 }
 
-func TestCompactV4ConcurrentOpens(t *testing.T) {
+func TestPermanentMigrationRegistryValidation(t *testing.T) {
+	files := fstest.MapFS{
+		"migrations/v4.1.0.sql": &fstest.MapFile{Data: []byte("CREATE TABLE second (id INTEGER);")},
+		"migrations/v4.0.0.sql": &fstest.MapFile{Data: []byte("CREATE TABLE first (id INTEGER);")},
+	}
+	registry, err := discoverPermanentMigrations(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registry) != 2 || registry[0].version != 1 || registry[0].name != "v4.0.0" || registry[1].version != 2 || registry[1].name != "v4.1.0" {
+		t.Fatalf("unexpected semantic registry order: %+v", registry)
+	}
+	for name, files := range map[string]fstest.MapFS{
+		"bad filename": {"migrations/004.sql": &fstest.MapFile{Data: []byte("SELECT 1;")}},
+		"empty SQL":    {"migrations/v4.0.0.sql": &fstest.MapFile{Data: []byte(" \n")}},
+		"wrong start":  {"migrations/v4.0.1.sql": &fstest.MapFile{Data: []byte("SELECT 1;")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := discoverPermanentMigrations(files); err == nil {
+				t.Fatal("expected invalid permanent migration registry")
+			}
+		})
+	}
+}
+
+func TestMigrationChecksumCoversReleaseNameAndSQL(t *testing.T) {
+	migration := orderedMigrations()[0]
+	changedName := migration
+	changedName.name = "v4.0.1"
+	changedSQL := migration
+	changedSQL.sql += "\n-- changed"
+	if migrationChecksum(migration) == migrationChecksum(changedName) || migrationChecksum(migration) == migrationChecksum(changedSQL) {
+		t.Fatal("migration checksum does not cover release name and SQL content")
+	}
+}
+
+func TestPermanentMigrationRunnerAppliesMissingRegisteredFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	opened, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened.Close() // nolint:errcheck
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	db := &DB{path: path, db: raw}
+	registry := append(orderedMigrations(), schemaMigration{
+		version: 2,
+		name:    "v4.1.0",
+		sql:     "CREATE TABLE migration_two_probe (id INTEGER PRIMARY KEY);",
+		major:   4,
+		minor:   1,
+	})
+	if err := db.runSchemaMigrations(context.Background(), registry); err != nil {
+		t.Fatal(err)
+	}
+	var rows, probe int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'migration_two_probe'`).Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 || probe != 1 {
+		t.Fatalf("missing migration not applied: ledger=%d probe=%d", rows, probe)
+	}
+}
+
+func TestPermanentMigrationRejectsChecksumDriftWithoutChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "drift.db")
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close() // nolint:errcheck
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE schema_migration_versions SET checksum = ? WHERE version = 1`, strings.Repeat("f", 64)); err != nil {
+		t.Fatal(err)
+	}
+	before := schemaSnapshot(t, raw)
+	raw.Close() // nolint:errcheck
+	if reopened, err := Open(path, nil); err == nil {
+		reopened.Close() // nolint:errcheck
+		t.Fatal("expected checksum drift rejection")
+	} else if !strings.Contains(err.Error(), "checksum drift") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	raw, err = sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if after := schemaSnapshot(t, raw); after != before {
+		t.Fatal("checksum drift rejection changed schema")
+	}
+}
+
+func TestPermanentMigrationRejectsMalformedLedgerPrefixes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate string
+	}{
+		{name: "gap", mutate: `UPDATE schema_migration_versions SET version = 2 WHERE version = 1`},
+		{name: "unknown trailing version", mutate: `INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (2, 'v9.0.0', '` + strings.Repeat("f", 64) + `', datetime('now'))`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "malformed.db")
+			db, err := Open(path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close() // nolint:errcheck
+			raw, err := sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(test.mutate); err != nil {
+				t.Fatal(err)
+			}
+			before := schemaSnapshot(t, raw)
+			raw.Close() // nolint:errcheck
+			if reopened, err := Open(path, nil); err == nil {
+				reopened.Close() // nolint:errcheck
+				t.Fatal("expected malformed ledger rejection")
+			}
+			raw, err = sql.Open("sqlite3", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			if after := schemaSnapshot(t, raw); after != before {
+				t.Fatal("malformed ledger rejection changed schema")
+			}
+		})
+	}
+}
+
+func TestPermanentMigrationFailureRollsBackMissingPrefixOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix-rollback.db")
+	opened, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened.Close() // nolint:errcheck
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	db := &DB{path: path, db: raw}
+	registry := append(orderedMigrations(), schemaMigration{
+		version: 2,
+		name:    "v4.1.0",
+		sql:     "CREATE TABLE migration_two_probe (id INTEGER PRIMARY KEY); invalid statement;",
+		major:   4,
+		minor:   1,
+	})
+	if err := db.runSchemaMigrations(context.Background(), registry); err == nil {
+		t.Fatal("expected missing-prefix migration failure")
+	}
+	var ledgerRows, probe int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'migration_two_probe'`).Scan(&probe); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 1 || probe != 0 {
+		t.Fatalf("failed prefix migration changed database: ledger=%d probe=%d", ledgerRows, probe)
+	}
+}
+
+func TestPermanentV400ConcurrentOpens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "concurrent.db")
 	const openCount = 8
 	dbs := make([]*DB, openCount)
@@ -272,7 +461,7 @@ func TestCompactV4ConcurrentOpens(t *testing.T) {
 	}
 }
 
-func TestCompactV4BaselineForeignKeysAreValid(t *testing.T) {
+func TestPermanentV400ForeignKeysAreValid(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "oswald.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -307,38 +496,38 @@ func TestGlobalMemoryCanonicalConstraints(t *testing.T) {
 	if _, err := db.SQL().Exec(`INSERT INTO global_memories(memory, memory_key, created_at) VALUES ('Duplicate key.', 'oswald uses go.', '2026-07-21T00:00:00Z')`); err == nil {
 		t.Fatal("expected duplicate normalized key to fail")
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'global-upsert', NULL, 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at) VALUES ('derived_index', 'global-upsert', NULL, 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err != nil {
 		t.Fatalf("insert global-memory index job: %v", err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'bad-global-upsert', 'missing-user', 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err == nil {
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at) VALUES ('derived_index', 'bad-global-upsert', 'missing-user', 'global_memory', ?, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`, memoryID); err == nil {
 		t.Fatal("expected tenant-owned global-memory index job to fail")
 	}
 }
 
 func TestDurableJobRunningLeaseConstraints(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('user', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user')`); err != nil {
 		t.Fatal(err)
 	}
 	for _, statement := range []string{
-		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, source_session_generation, extractor_version, available_at, created_at, updated_at) VALUES ('memory_formation', 'formation', 'user', 'running', 1, 'v1', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
-		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', 'index', 'user', 'running', 'memory', 1, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
+		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, source_session_generation, extractor_version, available_at, updated_at) VALUES ('memory_formation', 'formation', 'user', 'running', 1, 'v1', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
+		`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, state, entity_kind, entity_id, operation, available_at, updated_at) VALUES ('derived_index', 'index', 'user', 'running', 'memory', 1, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`,
 	} {
 		if _, err := db.SQL().Exec(statement); err == nil {
 			t.Fatalf("running durable job without lease was accepted: %s", statement)
 		}
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, lease_owner, lease_until, available_at, created_at, updated_at) VALUES ('derived_index', 'queued-owned', 'user', 'memory', 1, 'upsert', 'owner', '2026-07-21T01:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err == nil {
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, lease_owner, lease_until, available_at, updated_at) VALUES ('derived_index', 'queued-owned', 'user', 'memory', 1, 'upsert', 'owner', '2026-07-21T01:00:00Z', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err == nil {
 		t.Fatal("non-running durable job with lease ownership was accepted")
 	}
 }
 
 func TestIndexTableIdentityConstraints(t *testing.T) {
 	db := openTestDB(t)
-	if _, err := db.SQL().Exec(`INSERT INTO derived_index_revisions(index_kind, provider, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_fts', 'sqlite_fts5', 1, 1, 'unique_table', 'failed', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO derived_index_revisions(index_kind, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('memory_fts', 1, 1, 'unique_table', 'failed', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO derived_index_revisions(index_kind, provider, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('transcript_fts', 'sqlite_fts5', 1, 1, 'unique_table', 'failed', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err == nil {
+	if _, err := db.SQL().Exec(`INSERT INTO derived_index_revisions(index_kind, schema_version, revision, table_name, state, created_at, updated_at) VALUES ('transcript_fts', 1, 1, 'unique_table', 'failed', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z')`); err == nil {
 		t.Fatal("duplicate derived-index table identity was accepted")
 	}
 }

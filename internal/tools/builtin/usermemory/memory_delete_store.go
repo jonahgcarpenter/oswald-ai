@@ -67,21 +67,8 @@ func (s *Store) HardDeleteMemory(ctx context.Context, userID string, memoryID in
 	if err := requireActiveUser(ctx, tx, userID); err != nil {
 		return err
 	}
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM memory_entries WHERE canonical_user_id = ? AND id = ?`, userID, memoryID).Scan(&status); err != nil {
-		return err
-	}
-	nowText := formatTime(now)
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'deleted', status_changed_at = ?, status_reason = 'hard_delete', updated_at = ? WHERE canonical_user_id = ? AND id = ?`, nowText, nowText, userID, memoryID); err != nil {
-		return err
-	}
-	if err := rebindProfileCopiesTx(ctx, tx, userID, memoryID, now); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE durable_jobs SET extraction_payload = '', source_request_id = '', source_session_id = '' WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND id IN (SELECT job_id FROM memory_events WHERE canonical_user_id = ? AND (memory_id = ? OR candidate_id IN (SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND published_memory_id = ?)) AND job_id IS NOT NULL)`, userID, userID, memoryID, userID, memoryID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE canonical_user_id = ? AND (memory_id = ? OR candidate_id IN (SELECT id FROM memory_candidates WHERE canonical_user_id = ? AND published_memory_id = ?))`, userID, memoryID, userID, memoryID); err != nil {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_entries WHERE canonical_user_id = ? AND id = ?`, userID, memoryID).Scan(&exists); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET supersedes_memory_id = NULL WHERE canonical_user_id = ? AND supersedes_memory_id = ? AND published_memory_id IS NOT ?`, userID, memoryID, memoryID); err != nil {
@@ -102,6 +89,9 @@ func (s *Store) HardDeleteMemory(ctx context.Context, userID string, memoryID in
 	}
 	if deleted, _ := result.RowsAffected(); deleted != 1 {
 		return sql.ErrNoRows
+	}
+	if err := rebindProfileCopiesTx(ctx, tx, userID, memoryID, now); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -133,19 +123,10 @@ func (s *Store) HardDeleteAllUserData(ctx context.Context, userID string, now ti
 		return nil, err
 	}
 	nowText := formatTime(now)
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'deleted', status_changed_at = ?, status_reason = 'hard_delete', updated_at = ? WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
-		return nil, err
-	}
-	if err := rebindProfileCopiesTx(ctx, tx, userID, 0, now); err != nil {
-		return nil, err
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE canonical_user_id = ?`, userID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_summaries WHERE canonical_user_id = ?`, userID); err != nil {
-		return nil, err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_events WHERE canonical_user_id = ?`, userID); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_candidates WHERE canonical_user_id = ?`, userID); err != nil {
@@ -160,13 +141,13 @@ func (s *Store) HardDeleteAllUserData(ctx context.Context, userID string, now ti
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_servers WHERE scope = 'user' AND owner_user_id = ?`, userID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, userID, userID, userID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_link_challenges WHERE initiator_user_id = ? OR result_user_id = ?`, userID, userID); err != nil {
 		return nil, err
 	}
 	if err := deleteDerivedRowsTx(ctx, tx, "all", nil, userID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, started_at = ?, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, fact_count = 0, profile_bytes = length(CAST(speaker_intro AS BLOB)), source_memory_ids = '[]', profile_created_at = ? WHERE canonical_user_id = ?`, nowText, nowText, nowText, nowText, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, fact_count = 0, profile_bytes = length(CAST(speaker_intro AS BLOB)), source_memory_ids = '[]' WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -182,7 +163,7 @@ func (s *Store) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string, now
 		now = time.Now().UTC()
 	}
 	var scope UserDeletionScope
-	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET lifecycle_state = 'erasing', updated_at = ? WHERE canonical_user_id = ? AND lifecycle_state = 'active'`, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET lifecycle_state = 'erasing' WHERE canonical_user_id = ? AND lifecycle_state = 'active'`, userID); err != nil {
 		return scope, err
 	}
 	accountRows, err := tx.QueryContext(ctx, `SELECT gateway || ':' || identifier FROM linked_accounts WHERE canonical_user_id = ? ORDER BY gateway, identifier`, userID)
@@ -204,13 +185,10 @@ func (s *Store) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string, now
 	if err := deleteDerivedRowsTx(ctx, tx, "all", nil, userID); err != nil {
 		return scope, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM account_link_challenges WHERE initiator_user_id = ? OR consumed_by_user_id = ? OR result_user_id = ? OR invalidated_by_user_id = ?`, userID, userID, userID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_link_challenges WHERE initiator_user_id = ? OR result_user_id = ?`, userID, userID); err != nil {
 		return scope, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_servers WHERE scope = 'user' AND owner_user_id = ?`, userID); err != nil {
-		return scope, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET banned_by = '' WHERE banned_by = ?`, userID); err != nil {
 		return scope, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM account_users WHERE canonical_user_id = ? AND lifecycle_state = 'erasing'`, userID)
@@ -239,10 +217,7 @@ func deleteDerivedRowsTx(ctx context.Context, tx *sql.Tx, entityKind string, ids
 SELECT revisions.table_name, revisions.index_kind
 FROM derived_index_revisions revisions
 JOIN sqlite_master tables ON tables.type = 'table' AND tables.name = revisions.table_name
-UNION SELECT name, 'memory_fts' FROM sqlite_master WHERE type = 'table' AND name = 'memory_entries_fts'
-UNION SELECT name, 'transcript_fts' FROM sqlite_master WHERE type = 'table' AND name = 'session_turns_fts'
-UNION SELECT name, 'memory_vector' FROM sqlite_master WHERE type = 'table' AND name = ?
-ORDER BY 2, 1`, memoryVectorTableV2)
+ORDER BY 2, 1`)
 	if err != nil {
 		return err
 	}

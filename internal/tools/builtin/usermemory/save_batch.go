@@ -52,7 +52,7 @@ type MemorySaveOutcome struct {
 	InputIndex        int
 	CandidateID       int64
 	State             string
-	PublicationStatus string
+	PublishedMemoryID int64
 	Reason            string
 	Err               error
 	Operational       bool
@@ -188,7 +188,7 @@ func (s *Store) SubmitMemorySaveBatch(ctx context.Context, userID, sourceText st
 			continue
 		}
 		reason := candidate.DecisionReason
-		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, PublicationStatus: candidate.PublicationStatus, Reason: reason})
+		outcomes = append(outcomes, MemorySaveOutcome{InputIndex: item.InputIndex, CandidateID: candidate.ID, State: candidate.State, PublishedMemoryID: candidate.PublishedMemoryID, Reason: reason})
 	}
 	return outcomes
 }

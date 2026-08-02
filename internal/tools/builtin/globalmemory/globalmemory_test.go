@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -196,8 +195,7 @@ func TestGlobalMemorySurvivesAccountDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := formatTime(time.Now())
-	if _, err := store.sql.Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('user-1', ?, ?)`, now, now); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.sql.Exec(`DELETE FROM account_users WHERE canonical_user_id = 'user-1'`); err != nil {

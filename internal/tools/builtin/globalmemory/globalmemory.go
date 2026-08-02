@@ -213,7 +213,7 @@ func (s *Store) Forget(ctx context.Context, id int64) (bool, error) {
 func enqueueIndexChange(ctx context.Context, tx *sql.Tx, id int64, operation, version string) error {
 	now := formatTime(time.Now().UTC())
 	key := fmt.Sprintf("global_memory:%d:%s:%s", id, operation, version)
-	_, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', ?, NULL, 'global_memory', ?, ?, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, key, id, operation, now, now, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at) VALUES ('derived_index', ?, NULL, 'global_memory', ?, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, key, id, operation, now, now)
 	if err != nil {
 		return fmt.Errorf("enqueue global memory index change: %w", err)
 	}

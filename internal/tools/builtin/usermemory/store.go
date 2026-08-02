@@ -25,7 +25,6 @@ const (
 	StatusActive     = "active"
 	StatusExpired    = "expired"
 	StatusSuperseded = "superseded"
-	StatusDeleted    = "deleted"
 
 	DefaultShortTermTTL = 30 * 24 * time.Hour
 )
@@ -46,7 +45,6 @@ type MemoryEntry struct {
 	Status          string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
-	LastUsedAt      time.Time
 	ExpiresAt       time.Time
 	SupersedesID    int64
 	ProvenanceType  string
@@ -67,7 +65,6 @@ type SessionTurn struct {
 	UserText      string
 	AssistantText string
 	ToolNames     []string
-	Importance    int
 	CreatedAt     time.Time
 	ExpiresAt     time.Time
 	Score         float64
@@ -192,7 +189,7 @@ func (s *Store) SyncSpeakerIntro(userID, intro string) error {
 	if err := s.ensureAccountUser(userID); err != nil {
 		return err
 	}
-	_, err := s.sql.Exec(`UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), formatTime(time.Now()), userID)
+	_, err := s.sql.Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), userID)
 	if err != nil {
 		return fmt.Errorf("failed to sync user memory intro for %q: %w", userID, err)
 	}
@@ -312,10 +309,10 @@ CREATE TEMP TABLE merge_compaction_jobs AS SELECT * FROM durable_jobs WHERE job_
 DROP TABLE IF EXISTS temp.merge_sessions;
 CREATE TEMP TABLE merge_sessions AS
 SELECT sessions.session_id, COALESCE(map.new_generation, sessions.generation) AS generation,
-	sessions.is_active, sessions.started_at, sessions.last_seen_at, sessions.expires_at,
+	sessions.is_active, sessions.last_seen_at, sessions.expires_at,
 	sessions.profile_version, sessions.profile_version_high_water, sessions.renderer_version,
 	sessions.source_digest, sessions.speaker_intro, sessions.rendered_content, sessions.fact_count,
-	sessions.profile_bytes, sessions.source_memory_ids, sessions.profile_created_at
+	sessions.profile_bytes, sessions.source_memory_ids
 FROM sessions
 LEFT JOIN merge_session_generation_map map
 	ON map.session_id = sessions.session_id AND map.old_generation = sessions.generation
@@ -358,13 +355,11 @@ WHERE job_kind = 'memory_formation' AND canonical_user_id = ?;
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO session_summaries (
 	id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	narrative, open_tasks, commitments, entities, decisions, topic_tags, generation_model,
-	generator_version, source_digest, created_at, expires_at, source_turn_ids
+	narrative, open_tasks, commitments, entities, decisions, topic_tags, source_turn_ids
 )
 SELECT summary.id, ?, summary.session_id, COALESCE(map.new_generation, summary.session_generation),
 	summary.covered_from_turn_id, summary.covered_through_turn_id, summary.narrative, summary.open_tasks,
-	summary.commitments, summary.entities, summary.decisions, summary.topic_tags, summary.generation_model,
-	summary.generator_version, summary.source_digest, summary.created_at, summary.expires_at, summary.source_turn_ids
+	summary.commitments, summary.entities, summary.decisions, summary.topic_tags, summary.source_turn_ids
 FROM merge_session_summaries summary
 LEFT JOIN merge_session_generation_map map
 	ON map.session_id = summary.session_id AND map.old_generation = summary.session_generation;
@@ -386,13 +381,13 @@ WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'run
 
 	mergeTurnNow := formatTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'merge:turn:' || ? || ':' || id || ':' || created_at, ?, 'session_turn', id, 'upsert', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'merge:turn:' || ? || ':' || id || ':' || created_at, ?, 'session_turn', id, 'upsert', ?, ?
 FROM session_turns WHERE canonical_user_id = ?
 ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
 	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
-	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeTurnNow, mergeTurnNow, mergeTurnNow, winnerID); err != nil {
+	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeTurnNow, mergeTurnNow, winnerID); err != nil {
 		return fmt.Errorf("enqueue merged transcript indexes: %w", err)
 	}
 
@@ -461,8 +456,6 @@ WHERE loser.canonical_user_id = ?`
 			return err
 		}
 	}
-	winnerForDuplicate := `
-SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_events.memory_id`
 	winnerForSuperseded := `
 SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_entries.supersedes_id`
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET supersedes_id = (`+winnerForSuperseded+`) WHERE supersedes_id IN (`+duplicateIDs+`)`, winnerID, loserID, winnerID, loserID); err != nil {
@@ -478,25 +471,15 @@ CREATE TEMP TABLE merge_candidate_links AS
 		CASE WHEN supersedes_memory_id IN (`+duplicateIDs+`) THEN (`+winnerForCandidateSupersedes+`) ELSE supersedes_memory_id END AS supersedes_memory_id,
 		source_turn_id
 	FROM memory_candidates WHERE canonical_user_id = ?;
-UPDATE memory_candidates SET publication_status = CASE WHEN published_memory_id IS NOT NULL THEN 'none' ELSE publication_status END, published_memory_id = NULL, supersedes_memory_id = NULL, source_turn_id = NULL WHERE canonical_user_id = ?;
+UPDATE memory_candidates SET published_memory_id = NULL, supersedes_memory_id = NULL, source_turn_id = NULL WHERE canonical_user_id = ?;
 `, winnerID, loserID, winnerID, loserID, winnerID, loserID, winnerID, loserID, loserID, loserID); err != nil {
 		return fmt.Errorf("snapshot merged formation relationships: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE merge_sessions SET source_memory_ids = COALESCE((SELECT json_group_array(COALESCE((SELECT winner.id `+duplicateJoin+` AND loser.id = CAST(source.value AS INTEGER)), CAST(source.value AS INTEGER))) FROM json_each(merge_sessions.source_memory_ids) source), '[]')`, winnerID, loserID); err != nil {
 		return fmt.Errorf("redirect merged profile sources: %w", err)
 	}
-	winnerForFormationAudit := `SELECT winner.id ` + duplicateJoin + ` AND loser.id = memory_events.memory_id`
 	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET lifecycle_state = 'erasing' WHERE canonical_user_id = ?`, loserID); err != nil {
 		return fmt.Errorf("fence merged account retirement: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-DROP TABLE IF EXISTS temp.merge_audit_memory_links;
-CREATE TEMP TABLE merge_audit_memory_links AS
-SELECT id AS audit_id, (`+winnerForFormationAudit+`) AS replacement_memory_id
-FROM memory_events WHERE event_kind = 'formation_audit' AND canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`);
-UPDATE memory_events SET memory_id = NULL WHERE event_kind = 'formation_audit' AND canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)
-`, winnerID, loserID, loserID, winnerID, loserID, loserID, winnerID, loserID); err != nil {
-		return fmt.Errorf("snapshot merged formation audit memory: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.merge_duplicate_memory_ids; CREATE TEMP TABLE merge_duplicate_memory_ids AS SELECT id FROM memory_entries WHERE id IN (`+duplicateIDs+`)`, winnerID, loserID); err != nil {
@@ -505,28 +488,15 @@ UPDATE memory_events SET memory_id = NULL WHERE event_kind = 'formation_audit' A
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_candidates SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memory candidates: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = (`+winnerForDuplicate+`) WHERE canonical_user_id = ? AND memory_id IN (`+duplicateIDs+`)`, winnerID, winnerID, loserID, loserID, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to redirect merged memory events: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_entries WHERE id IN (SELECT id FROM merge_duplicate_memory_ids)`); err != nil {
 		return fmt.Errorf("failed to delete duplicate memories: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 		return fmt.Errorf("failed to move merged memories: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_events AS loser SET idempotency_key = 'merge:' || ? || ':' || loser.idempotency_key || ':' || loser.id WHERE loser.canonical_user_id = ? AND loser.event_kind = 'formation_audit' AND loser.idempotency_key != '' AND EXISTS (SELECT 1 FROM memory_events winner WHERE winner.canonical_user_id = ? AND winner.idempotency_key = loser.idempotency_key)`, loserID, loserID, winnerID); err != nil {
-		return fmt.Errorf("re-key merged memory audit events: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memory_events SET canonical_user_id = ?, memory_id = COALESCE((SELECT replacement_memory_id FROM merge_audit_memory_links links WHERE links.audit_id = memory_events.id), memory_id) WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
-		return fmt.Errorf("failed to move merged memory events: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DROP TABLE merge_audit_memory_links`); err != nil {
-		return fmt.Errorf("remove merged memory formation audit snapshot: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE memory_candidates
 SET published_memory_id = (SELECT published_memory_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id),
-	publication_status = CASE WHEN (SELECT published_memory_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id) IS NOT NULL THEN 'published' ELSE publication_status END,
 	supersedes_memory_id = (SELECT supersedes_memory_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id),
 	source_turn_id = (SELECT source_turn_id FROM merge_candidate_links links WHERE links.id = memory_candidates.id)
 WHERE canonical_user_id = ? AND id IN (SELECT id FROM merge_candidate_links);
@@ -536,40 +506,39 @@ DROP TABLE merge_candidate_links;
 	}
 	mergeNow := formatTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'merge:memory:' || ? || ':' || id || ':' || updated_at, ?, 'memory', id, 'upsert', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'merge:memory:' || ? || ':' || id || ':' || updated_at, ?, 'memory', id, 'upsert', ?, ?
 FROM memory_entries WHERE canonical_user_id = ?
 ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
 	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
-	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeNow, mergeNow, mergeNow, winnerID); err != nil {
+	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at`, loserID, winnerID, mergeNow, mergeNow, winnerID); err != nil {
 		return fmt.Errorf("enqueue merged memory indexes: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'merge:memory-delete:' || ? || ':' || id, ?, 'memory', id, 'delete', ?, ?, ?
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'merge:memory-delete:' || ? || ':' || id, ?, 'memory', id, 'delete', ?, ?
 FROM merge_duplicate_memory_ids
 WHERE 1
 ON CONFLICT(job_kind, idempotency_key) DO UPDATE SET canonical_user_id = excluded.canonical_user_id,
 	entity_kind = excluded.entity_kind, entity_id = excluded.entity_id, operation = excluded.operation,
 	state = 'queued', available_at = excluded.available_at, lease_owner = '', lease_until = NULL,
 	completed_at = NULL, last_error_code = '', updated_at = excluded.updated_at;
-DROP TABLE merge_duplicate_memory_ids`, loserID, winnerID, mergeNow, mergeNow, mergeNow); err != nil {
+DROP TABLE merge_duplicate_memory_ids`, loserID, winnerID, mergeNow, mergeNow); err != nil {
 		return fmt.Errorf("enqueue duplicate merged memory index deletion: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	fact_count, profile_bytes, source_memory_ids, profile_created_at)
-SELECT ?, session_id, generation, is_active, started_at, last_seen_at, expires_at,
+	fact_count, profile_bytes, source_memory_ids)
+SELECT ?, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	fact_count, profile_bytes, source_memory_ids, profile_created_at
+	fact_count, profile_bytes, source_memory_ids
 FROM merge_sessions
 WHERE 1
 ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	generation = MAX(sessions.generation, excluded.generation),
 	is_active = CASE WHEN excluded.generation > sessions.generation THEN excluded.is_active ELSE sessions.is_active END,
-	started_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.started_at ELSE sessions.started_at END,
 	last_seen_at = MAX(sessions.last_seen_at, excluded.last_seen_at),
 	expires_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.expires_at ELSE sessions.expires_at END,
 	profile_version = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_version ELSE sessions.profile_version END,
@@ -580,13 +549,12 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	rendered_content = CASE WHEN excluded.generation > sessions.generation THEN excluded.rendered_content ELSE sessions.rendered_content END,
 	fact_count = CASE WHEN excluded.generation > sessions.generation THEN excluded.fact_count ELSE sessions.fact_count END,
 	profile_bytes = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_bytes ELSE sessions.profile_bytes END,
-	source_memory_ids = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_memory_ids ELSE sessions.source_memory_ids END,
-	profile_created_at = CASE WHEN excluded.generation > sessions.generation THEN excluded.profile_created_at ELSE sessions.profile_created_at END;
+	source_memory_ids = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_memory_ids ELSE sessions.source_memory_ids END;
 `, winnerID); err != nil {
 		return fmt.Errorf("restore merged sessions: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ?, updated_at = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), formatTime(time.Now()), winnerID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, strings.TrimSpace(intro), winnerID); err != nil {
 		return fmt.Errorf("failed to update merged speaker intro: %w", err)
 	}
 	if _, _, err := refreshProfileTx(ctx, tx, winnerID, time.Now().UTC()); err != nil {
@@ -612,14 +580,13 @@ WHERE job_kind = 'derived_index' AND canonical_user_id = ?;
 	if err := tx.QueryRowContext(ctx, `
 SELECT SUM(row_count) FROM (
 	SELECT COUNT(*) row_count FROM memory_entries WHERE canonical_user_id = ?
-	UNION ALL SELECT COUNT(*) FROM memory_events WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM sessions WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM durable_jobs WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM session_summaries WHERE canonical_user_id = ?
 )
-`, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
+`, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
 		return fmt.Errorf("verify merged tenant ownership: %w", err)
 	}
 	if remaining != 0 {
@@ -684,21 +651,20 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		return MemoryEntry{}, fmt.Errorf("resolve legacy memory identity: %w", err)
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE memory_entries SET category = ?, statement = ?, confidence = ?, importance = ?, status = 'active', status_changed_at = ?, status_reason = '', updated_at = ?, expires_at = ?, supersedes_id = ?, provenance_type = 'legacy_import', sensitivity = 'unknown', claim_slot = ?, claim_value = ? WHERE id = ? AND canonical_user_id = ?`, category, statement, confidence, importance, formatTime(now), formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), claimSlot, claimValue, id, userID)
+		_, err = tx.ExecContext(ctx, `UPDATE memory_entries SET category = ?, statement = ?, confidence = ?, importance = ?, status = 'active', updated_at = ?, expires_at = ?, supersedes_id = ?, provenance_type = 'legacy_import', sensitivity = 'unknown', claim_slot = ?, claim_value = ? WHERE id = ? AND canonical_user_id = ?`, category, statement, confidence, importance, formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), claimSlot, claimValue, id, userID)
 	} else {
-		err = tx.QueryRowContext(ctx, `INSERT INTO memory_entries (canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, expires_at, supersedes_id, provenance_type, sensitivity, status_changed_at, claim_slot, claim_value) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 'legacy_import', 'unknown', ?, ?, ?) RETURNING id`, userID, scope, category, statement, confidence, importance, formatTime(now), formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), formatTime(now), claimSlot, claimValue).Scan(&id)
+		err = tx.QueryRowContext(ctx, `INSERT INTO memory_entries (canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, expires_at, supersedes_id, provenance_type, sensitivity, claim_slot, claim_value) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, 'legacy_import', 'unknown', ?, ?) RETURNING id`, userID, scope, category, statement, confidence, importance, formatTime(now), formatTime(now), nullableTime(expiresAt), nullableID(supersedesID), claimSlot, claimValue).Scan(&id)
 	}
 	if err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to save memory for %q: %w", userID, err)
 	}
-	meta := requestctx.MetadataFromContext(ctx)
 	legacyCandidateKeyPrefix := fmt.Sprintf("legacy-save:%d:%s", id, formatTime(now))
 	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_candidates (
-		canonical_user_id, idempotency_key, state, publication_status, scope, category,
+		canonical_user_id, idempotency_key, state, scope, category,
 		statement, evidence, confidence, importance, provenance_type,
 		extractor_version, formation_mode, sensitivity, published_memory_id, created_at, updated_at,
 		decision_reason, claim_slot, claim_value
-	) VALUES (?, ? || ':' || lower(hex(randomblob(16))), 'approved', 'published', ?, ?, ?, ?, ?, ?, 'legacy_import', ?, 'legacy_direct_save', 'unknown', ?, ?, ?, 'compatibility save', ?, ?)`,
+	) VALUES (?, ? || ':' || lower(hex(randomblob(16))), 'approved', ?, ?, ?, ?, ?, ?, 'legacy_import', ?, 'legacy_direct_save', 'unknown', ?, ?, ?, 'compatibility save', ?, ?)`,
 		userID, legacyCandidateKeyPrefix, scope, category, statement, evidence, confidence, importance,
 		FormationExtractorVersion, id, formatTime(now), formatTime(now), claimSlot, claimValue); err != nil {
 		return MemoryEntry{}, fmt.Errorf("record legacy memory observation: %w", err)
@@ -710,7 +676,7 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		return MemoryEntry{}, err
 	}
 	if supersedesID > 0 {
-		result, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'superseded', status_changed_at = ?, status_reason = 'legacy_replacement', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, formatTime(now), formatTime(now), supersedesID, userID)
+		result, err := tx.ExecContext(ctx, `UPDATE memory_entries SET status = 'superseded', updated_at = ? WHERE id = ? AND canonical_user_id = ? AND status = 'active'`, formatTime(now), supersedesID, userID)
 		if err != nil {
 			return MemoryEntry{}, fmt.Errorf("supersede legacy memory: %w", err)
 		}
@@ -721,12 +687,6 @@ func (s *Store) SaveMemory(ctx context.Context, userID string, req SaveRequest) 
 		if err := enqueueDerivedChangeTx(ctx, tx, userID, "memory", supersedesID, "delete", "supersede:"+formatTime(now)); err != nil {
 			return MemoryEntry{}, err
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events(canonical_user_id, memory_id, event_type, request_id, session_id, created_at, metadata) VALUES (?, ?, 'updated', ?, ?, ?, '{"source":"legacy_api"}')`, userID, id, meta.RequestID, firstNonEmptyFormation(meta.SessionID, req.SourceSessionID), formatTime(now)); err != nil {
-		return MemoryEntry{}, fmt.Errorf("record legacy memory event: %w", err)
-	}
-	if err := insertFormationAuditTx(ctx, tx, userID, formationKey("legacy-save", id, formatTime(now)), "user_memory.legacy_saved", 0, id, 0, FormationSource{RequestID: meta.RequestID, SessionID: firstNonEmptyFormation(meta.SessionID, req.SourceSessionID)}, "legacy_api", "compatibility save"); err != nil {
-		return MemoryEntry{}, err
 	}
 	if _, _, err := refreshProfileTx(ctx, tx, userID, now); err != nil {
 		return MemoryEntry{}, fmt.Errorf("advance profile after legacy save: %w", err)
@@ -817,17 +777,6 @@ func (s *Store) listActiveMemories(userID, scope, category string, limit int) ([
 	})
 	if len(entries) > limit {
 		entries = entries[:limit]
-	}
-	ids := make([]any, 0, len(entries))
-	for _, entry := range entries {
-		ids = append(ids, entry.ID)
-		s.recordEvent(entry.UserID, entry.ID, "retrieved", "", "", "")
-	}
-	if len(ids) > 0 {
-		now := formatTime(time.Now())
-		for _, id := range ids {
-			_, _ = s.sql.Exec(`UPDATE memory_entries SET last_used_at = ? WHERE id = ?`, now, id)
-		}
 	}
 	return entries, nil
 }
@@ -923,14 +872,14 @@ func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string,
 		expires = &exp
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id, delivered_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), 2, formatTime(now), nullableTime(expires), requestID, deliveredAt}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), formatTime(now), nullableTime(expires), requestID, deliveredAt}
 	if validateGeneration {
 		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at, source_request_id, delivered_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)
@@ -987,7 +936,7 @@ func (s *Store) recentSessionTurns(ctx context.Context, userID, sessionID string
 	if count > 100 {
 		count = 100
 	}
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, importance, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
 	args := []any{userID, sessionID, formatTime(time.Now())}
 	if generation > 0 {
 		query += ` AND session_generation = ?`
@@ -1113,7 +1062,7 @@ func (s *Store) activeEntries(userID, scope, category string) ([]MemoryEntry, er
 
 const memoryEntrySelect = `SELECT memory.id, memory.canonical_user_id, memory.scope, memory.category, memory.statement,
 	COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
-	memory.confidence, memory.importance, memory.status, memory.created_at, memory.updated_at, memory.last_used_at, memory.expires_at, COALESCE(memory.supersedes_id, 0),
+	memory.confidence, memory.importance, memory.status, memory.created_at, memory.updated_at, memory.expires_at, COALESCE(memory.supersedes_id, 0),
 	memory.provenance_type, memory.sensitivity, memory.claim_slot, memory.claim_value,
 	(SELECT COUNT(*) FROM memory_candidates candidate WHERE candidate.canonical_user_id = memory.canonical_user_id AND candidate.published_memory_id = memory.id)
 FROM memory_entries memory`
@@ -1121,15 +1070,12 @@ FROM memory_entries memory`
 func scanMemoryEntry(rows interface{ Scan(...any) error }) (MemoryEntry, error) {
 	var entry MemoryEntry
 	var created, updated string
-	var lastUsed, expires sql.NullString
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount); err != nil {
+	var expires sql.NullString
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount); err != nil {
 		return MemoryEntry{}, fmt.Errorf("failed to scan memory entry: %w", err)
 	}
 	entry.CreatedAt = parseTime(created)
 	entry.UpdatedAt = parseTime(updated)
-	if lastUsed.Valid {
-		entry.LastUsedAt = parseTime(lastUsed.String)
-	}
 	if expires.Valid {
 		entry.ExpiresAt = parseTime(expires.String)
 	}
@@ -1141,7 +1087,7 @@ func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) 
 	var turn SessionTurn
 	var toolNames, created string
 	var expires sql.NullString
-	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.Generation, &turn.UserText, &turn.AssistantText, &toolNames, &turn.Importance, &created, &expires); err != nil {
+	if err := rows.Scan(&turn.ID, &turn.SessionID, &turn.UserID, &turn.Generation, &turn.UserText, &turn.AssistantText, &toolNames, &created, &expires); err != nil {
 		return SessionTurn{}, fmt.Errorf("failed to scan session turn: %w", err)
 	}
 	turn.ToolNames = splitCSV(toolNames)
@@ -1155,16 +1101,13 @@ func scanSessionTurn(rows interface{ Scan(...any) error }) (SessionTurn, error) 
 func scanMemoryEntryWithDistance(rows interface{ Scan(...any) error }) (MemoryEntry, float64, error) {
 	var entry MemoryEntry
 	var created, updated string
-	var lastUsed, expires sql.NullString
+	var expires sql.NullString
 	var distance float64
-	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &lastUsed, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount, &distance); err != nil {
+	if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Scope, &entry.Category, &entry.Statement, &entry.Evidence, &entry.Confidence, &entry.Importance, &entry.Status, &created, &updated, &expires, &entry.SupersedesID, &entry.ProvenanceType, &entry.Sensitivity, &entry.ClaimSlot, &entry.ClaimValue, &entry.EvidenceCount, &distance); err != nil {
 		return MemoryEntry{}, 0, fmt.Errorf("failed to scan memory vector result: %w", err)
 	}
 	entry.CreatedAt = parseTime(created)
 	entry.UpdatedAt = parseTime(updated)
-	if lastUsed.Valid {
-		entry.LastUsedAt = parseTime(lastUsed.String)
-	}
 	if expires.Valid {
 		entry.ExpiresAt = parseTime(expires.String)
 	}
@@ -1224,10 +1167,6 @@ func distanceToSimilarity(distance float64) float64 {
 func (s *Store) expireOldMemories() error {
 	_, err := s.CleanupExpiredSessions(context.Background(), time.Now().UTC())
 	return err
-}
-
-func (s *Store) recordEvent(userID string, memoryID int64, eventType, requestID, sessionID, metadata string) {
-	_, _ = s.sql.Exec(`INSERT INTO memory_events (canonical_user_id, memory_id, event_type, request_id, session_id, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)`, userID, nullableID(memoryID), eventType, requestID, sessionID, formatTime(time.Now()), metadata)
 }
 
 func (s *Store) ensureAccountUser(userID string) error {

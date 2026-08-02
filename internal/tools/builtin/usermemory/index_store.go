@@ -36,7 +36,7 @@ var ErrStaleDerivedIndexChangeLease = errors.New("stale derived index change lea
 // DerivedIndexRevision describes one immutable physical index generation.
 type DerivedIndexRevision struct {
 	ID, Revision                int64
-	Kind, Provider, Model       string
+	Kind, Model                 string
 	Dimension, SchemaVersion    int
 	TableName, State            string
 	ExpectedCount, IndexedCount int64
@@ -76,7 +76,7 @@ type TranscriptIndexRecord struct {
 
 // DerivedIndexHealth returns revision lifecycle status without tenant content.
 func (s *Store) DerivedIndexHealth(ctx context.Context) ([]DerivedIndexRevision, error) {
-	rows, err := s.sql.QueryContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions ORDER BY index_kind, revision`)
+	rows, err := s.sql.QueryContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions ORDER BY index_kind, revision`)
 	if err != nil {
 		return nil, err
 	}
@@ -92,62 +92,28 @@ func (s *Store) DerivedIndexHealth(ctx context.Context) ([]DerivedIndexRevision,
 	return revisions, rows.Err()
 }
 
-// BootstrapDerivedIndexes removes legacy synchronization triggers and adopts
-// exact legacy tables as revision one. Invalid tables remain inert legacy data.
+// BootstrapDerivedIndexes removes obsolete fixed indexes and synchronization
+// triggers. The lifecycle worker creates generated revisions after bootstrap.
 func (s *Store) BootstrapDerivedIndexes(ctx context.Context) error {
-	if _, err := s.sql.ExecContext(ctx, `
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // nolint:errcheck
+	if _, err := tx.ExecContext(ctx, `
 DROP TRIGGER IF EXISTS memory_entries_fts_insert;
 DROP TRIGGER IF EXISTS memory_entries_fts_delete;
 DROP TRIGGER IF EXISTS memory_entries_fts_update;
 DROP TRIGGER IF EXISTS session_turns_fts_insert;
 DROP TRIGGER IF EXISTS session_turns_fts_delete;
-DROP TRIGGER IF EXISTS session_turns_fts_update;`); err != nil {
-		return fmt.Errorf("drop legacy derived-index triggers: %w", err)
+DROP TRIGGER IF EXISTS session_turns_fts_update;
+DELETE FROM derived_index_revisions WHERE table_name IN ('memory_entries_fts', 'session_turns_fts', 'memory_entry_vectors_v2');
+DROP TABLE IF EXISTS memory_entries_fts;
+DROP TABLE IF EXISTS session_turns_fts;
+DROP TABLE IF EXISTS memory_entry_vectors_v2;`); err != nil {
+		return fmt.Errorf("clean up legacy derived indexes: %w", err)
 	}
-	for _, candidate := range []struct{ kind, table string }{
-		{IndexKindMemoryFTS, "memory_entries_fts"},
-		{IndexKindTranscriptFTS, "session_turns_fts"},
-		{IndexKindMemoryVector, memoryVectorTableV2},
-	} {
-		var revisions, tables int
-		if err := s.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM derived_index_revisions WHERE index_kind = ?`, candidate.kind).Scan(&revisions); err != nil {
-			return err
-		}
-		if revisions != 0 {
-			continue
-		}
-		if err := s.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, candidate.table).Scan(&tables); err != nil || tables == 0 {
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		dimension, model := 0, ""
-		if candidate.kind == IndexKindMemoryVector {
-			var ok bool
-			dimension, ok = s.vectorTableDimension(candidate.table)
-			if !ok {
-				continue
-			}
-			var maxModel string
-			if err := s.sql.QueryRowContext(ctx, `SELECT COALESCE(MIN(embedding_model), ''), COALESCE(MAX(embedding_model), '') FROM `+candidate.table).Scan(&model, &maxModel); err != nil {
-				continue
-			}
-			if model == "" || model != maxModel {
-				continue
-			}
-		}
-		now := formatTime(time.Now().UTC())
-		result, err := s.sql.ExecContext(ctx, `INSERT INTO derived_index_revisions(index_kind, provider, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, ?, 'building', ?, ?)`, candidate.kind, providerForKind(candidate.kind), model, dimension, candidate.table, now, now)
-		if err != nil {
-			return err
-		}
-		id, _ := result.LastInsertId()
-		if _, err := s.ValidateAndPublishIndexRevision(ctx, id); err != nil {
-			_, _ = s.sql.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'failed', last_error_code = 'legacy_validation', updated_at = ? WHERE id = ?`, now, id)
-		}
-	}
-	return nil
+	return tx.Commit()
 }
 
 func providerForKind(kind string) string {
@@ -159,7 +125,7 @@ func providerForKind(kind string) string {
 
 // LiveIndexRevision returns the active physical revision for a kind.
 func (s *Store) LiveIndexRevision(ctx context.Context, kind string) (DerivedIndexRevision, error) {
-	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE index_kind = ? AND state = 'live'`, kind))
+	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE index_kind = ? AND state = 'live'`, kind))
 }
 
 // LiveIndexDegraded reports whether the serving revision has a recorded health error.
@@ -173,13 +139,13 @@ func (s *Store) LiveIndexDegraded(ctx context.Context, kind string) (bool, error
 
 // BuildingIndexRevision returns the current shadow revision, if any.
 func (s *Store) BuildingIndexRevision(ctx context.Context, kind string) (DerivedIndexRevision, error) {
-	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE index_kind = ? AND state = 'building' ORDER BY revision DESC LIMIT 1`, kind))
+	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE index_kind = ? AND state = 'building' ORDER BY revision DESC LIMIT 1`, kind))
 }
 
 func scanIndexRevision(row interface{ Scan(...any) error }) (DerivedIndexRevision, error) {
 	var revision DerivedIndexRevision
 	var created, updated string
-	err := row.Scan(&revision.ID, &revision.Revision, &revision.Kind, &revision.Provider, &revision.Model, &revision.Dimension, &revision.SchemaVersion, &revision.TableName, &revision.State, &revision.ExpectedCount, &revision.IndexedCount, &created, &updated)
+	err := row.Scan(&revision.ID, &revision.Revision, &revision.Kind, &revision.Model, &revision.Dimension, &revision.SchemaVersion, &revision.TableName, &revision.State, &revision.ExpectedCount, &revision.IndexedCount, &created, &updated)
 	revision.CreatedAt, revision.UpdatedAt = parseTime(created), parseTime(updated)
 	return revision, err
 }
@@ -188,6 +154,9 @@ func scanIndexRevision(row interface{ Scan(...any) error }) (DerivedIndexRevisio
 func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model string, dimension int) (DerivedIndexRevision, error) {
 	if kind != IndexKindMemoryFTS && kind != IndexKindTranscriptFTS && kind != IndexKindMemoryVector && kind != IndexKindGlobalMemoryFTS && kind != IndexKindGlobalMemoryVector {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid derived index kind")
+	}
+	if provider != providerForKind(kind) {
+		return DerivedIndexRevision{}, fmt.Errorf("invalid derived index provider")
 	}
 	if (kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector) && (provider != "llm_gateway" || strings.TrimSpace(model) == "" || dimension <= 0) {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid vector revision metadata")
@@ -223,7 +192,7 @@ func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model s
 		schemaVersion = 2
 	}
 	now := formatTime(time.Now().UTC())
-	result, err := tx.ExecContext(ctx, `INSERT INTO derived_index_revisions(index_kind, provider, model, dimension, schema_version, revision, table_name, state, created_at, updated_at, build_started_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'building', ?, ?, ?)`, kind, provider, strings.TrimSpace(model), dimension, schemaVersion, revision, table, now, now, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO derived_index_revisions(index_kind, model, dimension, schema_version, revision, table_name, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'building', ?, ?)`, kind, strings.TrimSpace(model), dimension, schemaVersion, revision, table, now, now)
 	if err != nil {
 		return DerivedIndexRevision{}, err
 	}
@@ -242,31 +211,10 @@ func validateGeneratedTable(table string) error {
 }
 
 func validateRevisionTable(table string) error {
-	if table == "memory_entries_fts" || table == "session_turns_fts" || table == memoryVectorTableV2 {
-		return nil
-	}
 	return validateGeneratedTable(table)
 }
 
 func validateRevisionTableIdentity(revision DerivedIndexRevision) error {
-	if revision.TableName == "memory_entries_fts" {
-		if revision.Kind == IndexKindMemoryFTS && revision.Revision == 1 {
-			return nil
-		}
-		return fmt.Errorf("derived-index table identity mismatch")
-	}
-	if revision.TableName == "session_turns_fts" {
-		if revision.Kind == IndexKindTranscriptFTS && revision.Revision == 1 {
-			return nil
-		}
-		return fmt.Errorf("derived-index table identity mismatch")
-	}
-	if revision.TableName == memoryVectorTableV2 {
-		if revision.Kind == IndexKindMemoryVector && revision.Revision == 1 {
-			return nil
-		}
-		return fmt.Errorf("derived-index table identity mismatch")
-	}
 	want := fmt.Sprintf("derived_index_%s_r%d", revision.Kind, revision.Revision)
 	if revision.TableName != want || validateGeneratedTable(revision.TableName) != nil {
 		return fmt.Errorf("derived-index table identity mismatch")
@@ -275,7 +223,7 @@ func validateRevisionTableIdentity(revision DerivedIndexRevision) error {
 }
 
 func (s *Store) indexRevisionByID(ctx context.Context, id int64) (DerivedIndexRevision, error) {
-	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE id = ?`, id))
+	return scanIndexRevision(s.sql.QueryRowContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE id = ?`, id))
 }
 
 // ActiveMemoryIndexRecords enumerates canonical active approved unexpired rows.
@@ -555,7 +503,7 @@ func (s *Store) WritableIndexRevisions(ctx context.Context, entityKind string) (
 	} else if entityKind == "global_memory" {
 		kinds = []string{IndexKindGlobalMemoryFTS, IndexKindGlobalMemoryVector}
 	}
-	query := `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state IN ('live', 'building') AND index_kind IN (`
+	query := `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state IN ('live', 'building') AND index_kind IN (`
 	args := make([]any, 0, len(kinds))
 	for i, kind := range kinds {
 		if i > 0 {
@@ -655,15 +603,15 @@ func (s *Store) ReconcileDerivedIndexChanges(ctx context.Context) error {
 	now := formatTime(time.Now().UTC())
 	_, err := s.sql.ExecContext(ctx, `
 UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ? WHERE job_kind = 'derived_index' AND state = 'running' AND lease_until <= ?;
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'reconcile:memory:' || entity.id || ':' || entity.updated_at, entity.canonical_user_id, 'memory', entity.id, 'upsert', ?, ?, ? FROM memory_entries entity WHERE entity.status = 'active' AND (entity.expires_at IS NULL OR entity.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'memory' AND receipt.entity_id = entity.id AND receipt.canonical_user_id = entity.canonical_user_id)
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'reconcile:memory:' || entity.id || ':' || entity.updated_at, entity.canonical_user_id, 'memory', entity.id, 'upsert', ?, ? FROM memory_entries entity WHERE entity.status = 'active' AND (entity.expires_at IS NULL OR entity.expires_at > ?) AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'memory' AND receipt.entity_id = entity.id AND receipt.canonical_user_id = entity.canonical_user_id)
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ? AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'session_turn' AND receipt.entity_id = turns.id AND receipt.canonical_user_id = turns.canonical_user_id)
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND active.is_active = 1 AND active.expires_at > ? AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'session_turn' AND receipt.entity_id = turns.id AND receipt.canonical_user_id = turns.canonical_user_id)
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
-INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at)
-SELECT 'derived_index', 'reconcile:global_memory:' || entity.id || ':' || entity.created_at, NULL, 'global_memory', entity.id, 'upsert', ?, ?, ? FROM global_memories entity WHERE NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'global_memory' AND receipt.entity_id = entity.id AND receipt.canonical_user_id IS NULL)
-ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now, now, now, now)
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'reconcile:global_memory:' || entity.id || ':' || entity.created_at, NULL, 'global_memory', entity.id, 'upsert', ?, ? FROM global_memories entity WHERE NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'global_memory' AND receipt.entity_id = entity.id AND receipt.canonical_user_id IS NULL)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now)
 	return err
 }
 
@@ -675,7 +623,7 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 		return DerivedIndexRevision{}, err
 	}
 	defer tx.Rollback() // nolint:errcheck
-	revision, err := scanIndexRevision(tx.QueryRowContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE id = ? AND state = 'building'`, id))
+	revision, err := scanIndexRevision(tx.QueryRowContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE id = ? AND state = 'building'`, id))
 	if err != nil {
 		return DerivedIndexRevision{}, err
 	}
@@ -711,10 +659,10 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 		return DerivedIndexRevision{}, fmt.Errorf("derived index validation failed: expected=%d indexed=%d valid=%d", expected, indexed, valid)
 	}
 	now := formatTime(time.Now().UTC())
-	if _, err := tx.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'retired', completed_at = ?, updated_at = ? WHERE index_kind = ? AND state = 'live'`, now, now, revision.Kind); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'retired', updated_at = ? WHERE index_kind = ? AND state = 'live'`, now, revision.Kind); err != nil {
 		return DerivedIndexRevision{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'live', expected_count = ?, indexed_count = ?, published_at = ?, completed_at = ?, last_successful_rebuild_at = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND state = 'building'`, expected, indexed, now, now, now, now, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'live', expected_count = ?, indexed_count = ?, updated_at = ?, last_error_code = '' WHERE id = ? AND state = 'building'`, expected, indexed, now, id); err != nil {
 		return DerivedIndexRevision{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -765,7 +713,7 @@ func validationArgs(revision DerivedIndexRevision, now string) ([]any, []any) {
 // FailIndexRevision records a failed shadow build without touching the live revision.
 func (s *Store) FailIndexRevision(ctx context.Context, id int64, code string) error {
 	now := formatTime(time.Now().UTC())
-	_, err := s.sql.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'failed', completed_at = ?, updated_at = ?, last_error_code = ? WHERE id = ? AND state = 'building'`, now, now, safeErrorCode(code), id)
+	_, err := s.sql.ExecContext(ctx, `UPDATE derived_index_revisions SET state = 'failed', updated_at = ?, last_error_code = ? WHERE id = ? AND state = 'building'`, now, safeErrorCode(code), id)
 	return err
 }
 
@@ -870,7 +818,7 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 }
 
 func (s *Store) liveIndexRevisions(ctx context.Context) ([]DerivedIndexRevision, error) {
-	rows, err := s.sql.QueryContext(ctx, `SELECT id, revision, index_kind, provider, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state = 'live' ORDER BY index_kind, revision`)
+	rows, err := s.sql.QueryContext(ctx, `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state = 'live' ORDER BY index_kind, revision`)
 	if err != nil {
 		return nil, err
 	}
@@ -933,7 +881,7 @@ func enqueueDerivedChangeTx(ctx context.Context, tx *sql.Tx, userID, entityKind 
 	}
 	now := formatTime(time.Now().UTC())
 	key := formationKey("derived-index", entityKind, entityID, operation, token)
-	_, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, created_at, updated_at) VALUES ('derived_index', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, key, userID, entityKind, entityID, operation, now, now, now)
+	_, err := tx.ExecContext(ctx, `INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at) VALUES ('derived_index', ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job_kind, idempotency_key) DO NOTHING`, key, userID, entityKind, entityID, operation, now, now)
 	if err != nil {
 		return fmt.Errorf("enqueue derived index change: %w", err)
 	}

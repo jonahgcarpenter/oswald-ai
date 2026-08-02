@@ -88,7 +88,7 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summary.SourceTurnIDs) != 17 || summary.CoveredThroughTurnID != extractor.turns[len(extractor.turns)-1].ID || summary.ExpiresAt.IsZero() {
+	if len(summary.SourceTurnIDs) != 17 || summary.CoveredThroughTurnID != extractor.turns[len(extractor.turns)-1].ID {
 		t.Fatalf("summary=%+v", summary)
 	}
 	tail, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, summary.CoveredThroughTurnID, 100)
@@ -246,8 +246,7 @@ func newSessionRuntimeStore(t *testing.T) *usermemory.Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id, created_at, updated_at) VALUES ('user-1', ?, ?)`, now, now); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
 		t.Fatal(err)
 	}
 	db.Close() // nolint:errcheck

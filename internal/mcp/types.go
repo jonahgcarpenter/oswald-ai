@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
@@ -78,13 +77,10 @@ type ServerConfig struct {
 	Scope       string
 	OwnerUserID string
 	Name        string
-	Type        string
 	Transport   string
 	URL         string
 	Headers     map[string]string
 	Enabled     bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
 }
 
 type storedServerConfig struct {
@@ -92,14 +88,10 @@ type storedServerConfig struct {
 	Scope             string
 	OwnerUserID       string
 	Name              string
-	Type              string
 	Transport         string
 	URLCiphertext     string
-	URLHostHash       string
 	HeadersCiphertext string
 	Enabled           bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
 }
 
 type server struct {

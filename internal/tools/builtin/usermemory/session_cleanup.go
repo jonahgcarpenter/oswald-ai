@@ -60,9 +60,9 @@ func (s *Store) cleanupExpiredSessions(ctx context.Context, now time.Time, polic
 	result, err := tx.ExecContext(ctx, `
 UPDATE memory_entries
 SET status = 'expired', statement = '', claim_slot = '', claim_value = '',
-	status_changed_at = ?, status_reason = 'ttl_expired', updated_at = ?
+	updated_at = ?
 WHERE id IN (SELECT id FROM memory_entries WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at, id LIMIT ?)
-`, nowText, nowText, nowText, batch)
+`, nowText, nowText, batch)
 	if err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("expire durable memories: %w", err)
 	}
@@ -78,7 +78,7 @@ WHERE id IN (SELECT id FROM memory_entries WHERE status = 'active' AND expires_a
 			return counts, err
 		}
 	}
-	result, err = tx.ExecContext(ctx, `DELETE FROM memory_candidates WHERE id IN (SELECT id FROM memory_candidates WHERE publication_status != 'published' AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?) ORDER BY id LIMIT ?)`, nowText, formatTime(now.Add(-policy.DeadJobRetention)), batch)
+	result, err = tx.ExecContext(ctx, `DELETE FROM memory_candidates WHERE id IN (SELECT id FROM memory_candidates WHERE published_memory_id IS NULL AND ((expires_at IS NOT NULL AND expires_at <= ?) OR created_at <= ?) ORDER BY id LIMIT ?)`, nowText, formatTime(now.Add(-policy.DeadJobRetention)), batch)
 	if err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("delete expired memory candidates: %w", err)
 	}

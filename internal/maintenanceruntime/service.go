@@ -104,7 +104,6 @@ func (s *Service) sweepAt(ctx context.Context, now time.Time) {
 			config.F("rows_changed", counts.Changed()),
 			config.F("pending_delivery_failed_count", counts.PendingDeliveriesFailed),
 			config.F("candidate_deleted_count", counts.CandidatesDeleted),
-			config.F("event_deleted_count", counts.EventsDeleted),
 			config.F("terminal_job_deleted_count", counts.FormationJobsDeleted+counts.CompactionJobsDeleted),
 			config.F("derived_index_job_deleted_count", counts.DerivedIndexJobsDeleted),
 			config.F("challenge_deleted_count", counts.ChallengesDeleted),

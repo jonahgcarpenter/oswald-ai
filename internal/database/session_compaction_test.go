@@ -20,7 +20,7 @@ func TestSessionTurnsPendingDeliveryIndexIsPartial(t *testing.T) {
 
 func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 	db := openTestDB(t)
-	for _, table := range []string{"session_summaries", "durable_jobs", "session_turns_fts"} {
+	for _, table := range []string{"session_summaries", "durable_jobs"} {
 		var count int
 		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, count, err)
@@ -34,6 +34,19 @@ func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('session_turns') WHERE name = 'delivery_failed_at'`).Scan(&deliveryFailedColumn); err != nil || deliveryFailedColumn != 1 {
 		t.Fatalf("delivery_failed_at column count=%d err=%v", deliveryFailedColumn, err)
 	}
+	for table, columns := range map[string][]string{
+		"session_turns":     {"importance"},
+		"session_summaries": {"generation_model", "generator_version", "source_digest", "created_at", "expires_at"},
+		"sessions":          {"started_at", "profile_created_at"},
+		"durable_jobs":      {"generation_model", "generator_version", "started_at", "created_at"},
+	} {
+		for _, column := range columns {
+			var count int
+			if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("removed column %s.%s count=%d err=%v", table, column, count, err)
+			}
+		}
+	}
 
 	insertSessionTestUser(t, db, "user-a")
 	fromID := insertSessionTestTurn(t, db, "user-a", "session-a", 1, "first telescope note", "first answer")
@@ -45,8 +58,8 @@ func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 	if _, err := db.SQL().Exec(`
 INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	artifact_summary_id, generation_model, generator_version, available_at, created_at, updated_at
-) VALUES ('session_compaction', 'job-a', 'user-a', 'session-a', 1, ?, ?, ?, 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, fromID, throughID, summaryID); err != nil {
+	artifact_summary_id, artifact_payload, available_at, updated_at
+) VALUES ('session_compaction', 'job-a', 'user-a', 'session-a', 1, ?, ?, ?, '{"generation_model":"model","generator_version":"v1"}', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, fromID, throughID, summaryID); err != nil {
 		t.Fatalf("insert compaction job: %v", err)
 	}
 
@@ -79,15 +92,15 @@ func TestSessionCompactionConstraintsAndTenantIsolation(t *testing.T) {
 	if _, err := db.SQL().Exec(`
 	INSERT INTO session_summaries (
 		canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-		narrative, generation_model, generator_version, source_digest, created_at, source_turn_ids
-	) VALUES ('user-a', 'session', 1, ?, ?, 'duplicate', 'model', 'v1', 'digest-2', '2026-07-18T12:00:00Z', json_array(?, ?))`, a1, a2, a1, a2); err == nil {
+		narrative, source_turn_ids
+	) VALUES ('user-a', 'session', 1, ?, ?, 'duplicate', json_array(?, ?))`, a1, a2, a1, a2); err == nil {
 		t.Fatal("expected duplicate summary range to fail")
 	}
 	if _, err := db.SQL().Exec(`
 	INSERT INTO session_summaries (
 		canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-		narrative, open_tasks, generation_model, generator_version, source_digest, created_at, source_turn_ids
-	) VALUES ('user-a', 'session', 1, ?, ?, 'invalid json', 'not-json', 'model', 'v1', 'digest-3', '2026-07-18T12:00:00Z', json_array(?, ?))`, a1, a2, a1, a2); err == nil {
+		narrative, open_tasks, source_turn_ids
+	) VALUES ('user-a', 'session', 1, ?, ?, 'invalid json', 'not-json', json_array(?, ?))`, a1, a2, a1, a2); err == nil {
 		t.Fatal("expected invalid summary JSON to fail")
 	}
 	for name, sourceIDs := range map[string]string{
@@ -104,8 +117,8 @@ func TestSessionCompactionConstraintsAndTenantIsolation(t *testing.T) {
 			if _, err := db.SQL().Exec(`
 INSERT INTO session_summaries (
 	canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	narrative, generation_model, generator_version, source_digest, created_at, source_turn_ids
-) VALUES ('user-a', 'session', 1, ?, ?, ?, 'model', 'v1', ?, '2026-07-18T12:00:00Z', ?)`, a1, a2, name, "digest-"+name, sourceIDs); err == nil {
+	narrative, source_turn_ids
+) VALUES ('user-a', 'session', 1, ?, ?, ?, ?)`, a1, a2, name, sourceIDs); err == nil {
 				t.Fatalf("expected %s source turn array to fail", name)
 			}
 		})
@@ -113,36 +126,22 @@ INSERT INTO session_summaries (
 	if _, err := db.SQL().Exec(`
 INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	attempt_count, redrive_count, available_at, created_at, updated_at
-) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, 4, 0, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2); err == nil {
+	attempt_count, redrive_count, available_at, updated_at
+) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, 4, 0, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2); err == nil {
 		t.Fatal("expected excessive attempt count to fail")
 	}
 	if _, err := db.SQL().Exec(`
 INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	available_at, created_at, updated_at
-) VALUES ('session_compaction', 'cross-tenant', 'user-a', 'session', 1, ?, ?, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, b1); err == nil {
+	available_at, updated_at
+) VALUES ('session_compaction', 'cross-tenant', 'user-a', 'session', 1, ?, ?, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, b1); err == nil {
 		t.Fatal("expected cross-tenant compaction range to fail")
-	}
-}
-
-func TestSessionTurnsFTSInitializationLeavesLegacyTableUnsynchronized(t *testing.T) {
-	db := openTestDB(t)
-	insertSessionTestUser(t, db, "user-a")
-	insertSessionTestUser(t, db, "user-b")
-
-	insertSessionTestTurn(t, db, "user-a", "session-a", 1, "observed a quasar", "recorded the pulsar")
-	assertSessionFTSMatchCount(t, db, "user-a", "session-a", 1, "quasar", 0)
-	assertSessionFTSMatchCount(t, db, "user-b", "session-a", 1, "quasar", 0)
-	var triggers int
-	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'session_turns_fts_%'`).Scan(&triggers); err != nil || triggers != 0 {
-		t.Fatalf("transcript FTS trigger count=%d err=%v", triggers, err)
 	}
 }
 
 func insertSessionTestUser(t *testing.T, db *DB, userID string) {
 	t.Helper()
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id, created_at, updated_at) VALUES (?, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, userID); err != nil {
+	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, userID); err != nil {
 		t.Fatalf("insert user %s: %v", userID, err)
 	}
 }
@@ -168,8 +167,8 @@ func insertSessionTestSummary(t *testing.T, db *DB, userID, sessionID string, ge
 INSERT INTO session_summaries (
 	canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
 	narrative, open_tasks, commitments, entities, decisions, topic_tags,
-	generation_model, generator_version, source_digest, created_at, source_turn_ids
-) VALUES (?, ?, ?, ?, ?, 'A summary.', '["task"]', '["commitment"]', '["entity"]', '["decision"]', '["topic"]', 'model', 'v1', 'digest', '2026-07-18T12:00:00Z', json_array(?, ?))`, userID, sessionID, generation, fromID, throughID, fromID, throughID)
+	source_turn_ids
+) VALUES (?, ?, ?, ?, ?, 'A summary.', '["task"]', '["commitment"]', '["entity"]', '["decision"]', '["topic"]', json_array(?, ?))`, userID, sessionID, generation, fromID, throughID, fromID, throughID)
 	if err != nil {
 		t.Fatalf("insert summary: %v", err)
 	}
@@ -178,17 +177,4 @@ INSERT INTO session_summaries (
 		t.Fatalf("summary id: %v", err)
 	}
 	return id
-}
-
-func assertSessionFTSMatchCount(t *testing.T, db *DB, userID, sessionID string, generation int, query string, want int) {
-	t.Helper()
-	var got int
-	if err := db.SQL().QueryRow(`
-SELECT COUNT(*) FROM session_turns_fts
-WHERE session_turns_fts MATCH ? AND canonical_user_id = ? AND session_id = ? AND session_generation = ?`, query, userID, sessionID, generation).Scan(&got); err != nil {
-		t.Fatalf("query transcript FTS: %v", err)
-	}
-	if got != want {
-		t.Fatalf("transcript FTS count user=%s session=%s generation=%d query=%s got=%d want=%d", userID, sessionID, generation, query, got, want)
-	}
 }

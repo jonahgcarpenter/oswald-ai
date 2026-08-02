@@ -231,7 +231,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if outcome.Err != nil {
 			continue
 		}
-		if outcome.PublicationStatus == "published" {
+		if outcome.PublishedMemoryID != 0 {
 			publishedCount++
 		}
 	}
