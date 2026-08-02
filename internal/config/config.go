@@ -49,10 +49,9 @@ type RetentionPolicy struct {
 }
 
 const (
-	DefaultSoulPath              = "data/memory/soul/soul.md"
-	DefaultToolsConfigDir        = "data/tools"
-	DefaultAccountLinkPath       = "data/database/oswald.db"
-	DefaultLegacyAccountLinkPath = "data/accounts/links.json"
+	DefaultSoulPath        = "data/memory/soul/soul.md"
+	DefaultToolsConfigDir  = "data/tools"
+	DefaultAccountLinkPath = "data/database/oswald.db"
 )
 
 // Load reads configuration from environment variables, with .env file support.

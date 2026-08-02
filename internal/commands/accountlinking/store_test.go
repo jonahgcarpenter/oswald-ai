@@ -3,7 +3,6 @@ package accountlinking
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -187,10 +186,8 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(dir, "oswald.db")
 	memories := usermemory.NewStore(dbPath, log)
-	legacyPath := filepath.Join(dir, "links.json")
 
 	links := NewService(dbPath, memories, nil, log)
-	links.legacyPath = legacyPath
 	userID, err := links.EnsureAccount("discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
@@ -204,7 +201,6 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken})
 
 	reopened := NewService(dbPath, memories, nil, log)
-	reopened.legacyPath = legacyPath
 	accounts, err := reopened.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts after reopen: %v", err)
@@ -214,41 +210,18 @@ func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	}
 }
 
-func TestServiceMigratesLegacyJSON(t *testing.T) {
+func TestServiceIgnoresLegacyJSON(t *testing.T) {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
 	dbPath := filepath.Join(dir, "oswald.db")
 	memories := usermemory.NewStore(dbPath, log)
 	legacyPath := filepath.Join(dir, "links.json")
-	now := time.Now().UTC().Truncate(time.Second)
-
-	legacy := fileData{
-		Version: 1,
-		Users: map[string]UserRecord{
-			"usr_legacy": {
-				CreatedAt: now,
-				UpdatedAt: now,
-				Accounts: []LinkedAccount{{
-					Gateway:     "discord",
-					Identifier:  "123",
-					DisplayName: "Alice",
-					LinkedAt:    now,
-					Verified:    true,
-				}},
-			},
-		},
-		AccountIndex: map[string]string{"discord:123": "usr_legacy"},
-	}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("marshal legacy: %v", err)
-	}
-	if err := os.WriteFile(legacyPath, raw, 0o644); err != nil {
+	legacy := []byte(`{"version":1,"users":{"usr_legacy":{"accounts":[{"gateway":"discord","identifier":"123"}]}},"account_index":{"discord:123":"usr_legacy"}}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o644); err != nil {
 		t.Fatalf("write legacy: %v", err)
 	}
 
 	links := NewService(dbPath, memories, nil, log)
-	links.legacyPath = legacyPath
 	if err := links.Initialize(); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
@@ -257,18 +230,18 @@ func TestServiceMigratesLegacyJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure migrated account: %v", err)
 	}
-	if userID != "usr_legacy" {
-		t.Fatalf("got user %q, want legacy user", userID)
+	if userID == "usr_legacy" {
+		t.Fatalf("legacy canonical user was imported")
 	}
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts: %v", err)
 	}
-	if len(accounts) != 1 || accounts[0].DisplayName != "Alice Updated" || !accounts[0].Verified {
-		t.Fatalf("unexpected migrated account: %+v", accounts)
+	if len(accounts) != 1 || accounts[0].DisplayName != "Alice Updated" || accounts[0].Verified {
+		t.Fatalf("unexpected new account: %+v", accounts)
 	}
 	if _, err := os.Stat(legacyPath); err != nil {
-		t.Fatalf("legacy file should remain as backup: %v", err)
+		t.Fatalf("legacy file should remain untouched: %v", err)
 	}
 }
 
@@ -491,7 +464,6 @@ func newTestService(t *testing.T) *Service {
 	t.Cleanup(func() { memories.Close() })
 	links := NewService(dbPath, memories, nil, log)
 	t.Cleanup(func() { links.Close() })
-	links.legacyPath = filepath.Join(dir, "links.json")
 	return links
 }
 

@@ -62,7 +62,7 @@ Current layers:
 5. Resolve context budget from `MODEL_*` environment overrides or package defaults
 6. Create the soul store
 7. Open the user-memory SQLite handle, install retention policy, and either apply the checksum-frozen v4 baseline to a fresh database or selectively reset an exact recognized published v3.2/v3.1.2-upgraded database into that baseline
-8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex, and account-link initialization imports eligible legacy link data
+8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex
 9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
 11. Create the command service, including `/memories`, `/bootstrap`, and administrator global-memory management
@@ -891,6 +891,5 @@ Changes apply on the next request because the soul file is read fresh each time.
 Account-linking note:
 
 - `data/database/oswald.db` stores canonical users and linked external accounts
-- Existing `data/accounts/links.json` files are migrated into SQLite at startup when the database is empty
 - iMessage account records use normalized phone numbers or email addresses as the stable `identifier`
 - iMessage `display_name` prefers a BlueBubbles-provided contact display name and falls back to the identifier when none is available

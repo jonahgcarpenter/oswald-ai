@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -21,29 +20,24 @@ import (
 
 // Service manages canonical user IDs and linked gateway accounts.
 type Service struct {
-	path       string
-	legacyPath string
-	memories   *usermemory.Store
-	log        *config.Logger
-	db         *database.DB
-	mcp        MCPUserMerger
-	now        func() time.Time
-	random     io.Reader
-	mu         sync.Mutex
-	initOnce   sync.Once
-	initErr    error
+	path     string
+	memories *usermemory.Store
+	log      *config.Logger
+	db       *database.DB
+	mcp      MCPUserMerger
+	now      func() time.Time
+	random   io.Reader
+	mu       sync.Mutex
+	initOnce sync.Once
+	initErr  error
 }
 
 // NewService creates a new account-link service backed by a SQLite database on disk.
 func NewService(path string, memories *usermemory.Store, mcp MCPUserMerger, log *config.Logger) *Service {
-	legacyPath := filepath.Join(filepath.Dir(path), "links.json")
-	if path == config.DefaultAccountLinkPath {
-		legacyPath = config.DefaultLegacyAccountLinkPath
-	}
-	return &Service{path: path, legacyPath: legacyPath, memories: memories, mcp: mcp, log: log, now: time.Now, random: rand.Reader}
+	return &Service{path: path, memories: memories, mcp: mcp, log: log, now: time.Now, random: rand.Reader}
 }
 
-// Initialize prepares the account-link database and migrates the legacy JSON store when present.
+// Initialize prepares the account-link database.
 func (s *Service) Initialize() error {
 	s.initOnce.Do(func() {
 		s.initErr = s.initialize()
@@ -763,10 +757,6 @@ func (s *Service) saveLocked(data fileData) error {
 func (s *Service) initialize() error {
 	db, err := database.Open(s.path, s.log)
 	if err != nil {
-		return err
-	}
-	if err := db.MigrateLegacyAccountLinks(s.legacyPath); err != nil {
-		db.Close() // nolint:errcheck
 		return err
 	}
 	s.db = db

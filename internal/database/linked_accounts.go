@@ -208,15 +208,6 @@ func deleteStaleAccountUsers(tx *sql.Tx, userIDs []string) error {
 	return nil
 }
 
-// AccountLinksEmpty reports whether any canonical account users are stored.
-func (d *DB) AccountLinksEmpty() (bool, error) {
-	var count int
-	if err := d.db.QueryRow(`SELECT COUNT(*) FROM account_users`).Scan(&count); err != nil {
-		return false, fmt.Errorf("failed to inspect account link database: %w", err)
-	}
-	return count == 0, nil
-}
-
 func accountKey(gateway, identifier string) string {
 	return strings.ToLower(strings.TrimSpace(gateway)) + ":" + strings.TrimSpace(identifier)
 }
