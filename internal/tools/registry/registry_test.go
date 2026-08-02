@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func TestRegistryLoadsMarkdownAndExecutesHandler(t *testing.T) {
@@ -35,11 +36,13 @@ Echo a value.
 	if reg.Count() != 1 || reg.Names()[0] != "test.echo" {
 		t.Fatalf("unexpected registry names: %+v", reg.Names())
 	}
-	if err := reg.RegisterHandler("missing", func(context.Context, map[string]interface{}) (string, error) { return "", nil }); err == nil {
+	if err := reg.RegisterHandler("missing", testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{}, nil
+	}); err == nil {
 		t.Fatal("expected unknown handler registration error")
 	}
-	if err := reg.RegisterHandler("test.echo", func(_ context.Context, args map[string]interface{}) (string, error) {
-		return args["text"].(string), nil
+	if err := reg.RegisterHandler("test.echo", testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: args["text"].(string), Outcome: governance.OutcomeProductive}, nil
 	}); err != nil {
 		t.Fatalf("register handler: %v", err)
 	}
@@ -48,8 +51,8 @@ Echo a value.
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if got != "hello" {
-		t.Fatalf("got %q, want hello", got)
+	if got.Content != "hello" || got.Outcome != governance.OutcomeProductive {
+		t.Fatalf("got %+v, want productive hello result", got)
 	}
 
 	tools := reg.LLMTools()
@@ -112,11 +115,15 @@ func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 
 func registerTestTool(t *testing.T, reg *Registry, name string) {
 	t.Helper()
-	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, func(context.Context, map[string]interface{}) (string, error) {
-		return "ok", nil
+	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: "ok", Outcome: governance.OutcomeProductive}, nil
 	}); err != nil {
 		t.Fatalf("register %s: %v", name, err)
 	}
+}
+
+func testToolPolicy() governance.ToolPolicy {
+	return governance.ToolPolicy{MaxExecutions: 1, MaxFailures: 1, MaxUnproductive: 1}
 }
 
 func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {

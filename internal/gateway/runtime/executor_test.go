@@ -22,6 +22,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -568,7 +569,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	}
 	db.Close() // nolint:errcheck
 	memory := usermemory.NewStore(dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, time.Minute, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService(pingHandler{})

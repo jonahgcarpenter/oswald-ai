@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -34,11 +35,19 @@ type discoveredTool struct {
 
 // Provider exposes scoped MCP tools to the agent for a single request.
 type Provider struct {
-	manager *Manager
+	manager       *Manager
+	reservedTools map[string]bool
 }
 
-func NewProvider(manager *Manager) *Provider {
-	return &Provider{manager: manager}
+func NewProvider(manager *Manager, reservedToolNames ...string) *Provider {
+	provider := &Provider{manager: manager, reservedTools: make(map[string]bool, len(reservedToolNames))}
+	for _, name := range reservedToolNames {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			provider.reservedTools[name] = true
+		}
+	}
+	return provider
 }
 
 func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool {
@@ -72,7 +81,7 @@ func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principa
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		server, remote, ok := splitToolName(name)
-		if !ok || isReservedServerName(server) || strings.EqualFold(remote, "tools") || seenCandidates[name] {
+		if !ok || isReservedServerName(server) || strings.EqualFold(remote, "tools") || p.reservedTools[name] || seenCandidates[name] {
 			continue
 		}
 		seenCandidates[name] = true
@@ -110,7 +119,7 @@ func (p *Provider) LLMTools(ctx context.Context, principal identity.Principal, e
 	specs := p.manager.ToolSpecs(ctx, principal.CanonicalUserID)
 	tools := make([]llm.Tool, 0, len(specs))
 	for _, spec := range specs {
-		if isReservedServerName(spec.Server) || isReservedToolName(spec.Name) || !exposed[spec.Name] {
+		if isReservedServerName(spec.Server) || isReservedToolName(spec.Name) || p.reservedTools[spec.Name] || !exposed[spec.Name] {
 			continue
 		}
 		tools = append(tools, llmTool(spec))
@@ -128,9 +137,9 @@ func (p *Provider) Execute(ctx context.Context, principal identity.Principal, na
 	}
 	if remote == "tools" {
 		result, err := p.discover(ctx, principal, server, args)
-		return ExecutionResult{Content: result, ServerName: server, IsDiscovery: true}, true, err
+		return ExecutionResult{Result: result, ServerName: server, IsDiscovery: true}, true, err
 	}
-	if !exposed[name] {
+	if p.reservedTools[name] || !exposed[name] {
 		return ExecutionResult{}, false, nil
 	}
 	if _, visible := p.manager.ServerInfo(ctx, principal.CanonicalUserID, server); !visible {
@@ -153,21 +162,22 @@ func discoveryTool(server string) llm.Tool {
 	}}
 }
 
-func (p *Provider) discover(ctx context.Context, principal identity.Principal, server string, args map[string]interface{}) (string, error) {
+func (p *Provider) discover(ctx context.Context, principal identity.Principal, server string, args map[string]interface{}) (governance.Result, error) {
 	if isReservedServerName(server) {
-		return formatDiscoveryStatus(server, "", "not_found"), nil
+		return governance.Result{Content: formatDiscoveryStatus(server, "", "not_found"), Outcome: governance.OutcomeUnproductive, ReasonCode: "not_found"}, nil
 	}
 	query := strings.TrimSpace(stringArg(args, "query"))
 	entries, info, err := p.catalog(ctx, principal.CanonicalUserID, server)
 	if err != nil {
-		return formatDiscoveryStatus(server, query, "not_found"), nil
+		return governance.Result{}, fmt.Errorf("discover MCP server %q: %w", server, err)
 	}
 	if info.Status != serverStatusConnected {
-		return formatDiscoveryStatus(info.Name, query, "unavailable"), nil
+		return governance.Result{}, fmt.Errorf("MCP server %q is unavailable", info.Name)
 	}
 	tools := searchTools(entries, info.Name, query)
+	tools = filterReservedCatalog(tools, p.reservedTools)
 	if len(tools) == 0 {
-		return formatDiscoveryResult(info.Name, query, tools), nil
+		return governance.Result{Content: formatDiscoveryResult(info.Name, query, tools), Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
 	}
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
@@ -182,7 +192,34 @@ func (p *Provider) discover(ctx context.Context, principal identity.Principal, s
 		reqLog := p.manager.log.Agent("agent.tool.mcp.discovery", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.discovery", "listed MCP tools", config.F("server", info.Name), config.F("query_chars", len(query)), config.F("tool_count", len(tools)))
 	}
-	return formatDiscoveryResult(info.Name, query, tools), nil
+	return governance.Result{Content: formatDiscoveryResult(info.Name, query, tools), Outcome: governance.OutcomeProductive}, nil
+}
+
+func filterReservedCatalog(entries []registry.CatalogEntry, reserved map[string]bool) []registry.CatalogEntry {
+	if len(reserved) == 0 {
+		return entries
+	}
+	filtered := make([]registry.CatalogEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !reserved[entry.Name] {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+// ToolPolicy returns the request-governance policy for a dynamic MCP tool.
+func (p *Provider) ToolPolicy(name string) governance.ToolPolicy {
+	policy := governance.ToolPolicy{MaxExecutions: 4, MaxFailures: 2, MaxUnproductive: 1, BlockDuplicates: true}
+	if strings.HasSuffix(name, ".tools") {
+		policy.MaxExecutions = 3
+		policy.MaxUnproductive = 2
+		policy.NormalizeArgs = func(args map[string]interface{}) interface{} {
+			query, _ := args["query"].(string)
+			return map[string]interface{}{"query": strings.ToLower(strings.Join(strings.Fields(query), " "))}
+		}
+	}
+	return policy
 }
 
 func (p *Provider) catalog(ctx context.Context, userID string, server string) ([]registry.CatalogEntry, ServerInfo, error) {

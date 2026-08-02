@@ -61,6 +61,18 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	}
 }
 
+func TestProviderFiltersNamesReservedByBuiltinCatalog(t *testing.T) {
+	provider := NewProvider(nil, "web.search")
+	entries := []registry.CatalogEntry{{Name: "web.search"}, {Name: "web.lookup"}}
+	filtered := filterReservedCatalog(entries, provider.reservedTools)
+	if len(filtered) != 1 || filtered[0].Name != "web.lookup" {
+		t.Fatalf("filtered catalog = %+v", filtered)
+	}
+	if result, handled, err := provider.Execute(context.Background(), testPrincipal("user_1"), "web.search", nil, map[string]bool{"web.search": true}); err != nil || handled || result.Content != "" {
+		t.Fatalf("reserved execution result=%+v handled=%t err=%v", result, handled, err)
+	}
+}
+
 func TestProviderDoesNotAdvertisePersistedReservedSoulServer(t *testing.T) {
 	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
 	if err != nil {

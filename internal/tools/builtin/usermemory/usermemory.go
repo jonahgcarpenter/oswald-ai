@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func requestLog(log *config.Logger, ctx context.Context) *config.Logger {
@@ -26,11 +27,11 @@ func authenticatedPrincipal(ctx context.Context, toolName string) (identity.Prin
 }
 
 // NewSearchHandler returns a Handler for memory search.
-func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
-	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemorySearch)
 		if err != nil {
-			return "", err
+			return governance.Result{}, err
 		}
 		userID := principal.CanonicalUserID
 		limit := intArg(args, "limit", 8)
@@ -38,12 +39,12 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 		if strings.TrimSpace(query) == "" {
 			entries, err := store.ListMemories(userID, stringArg(args, "scope"), stringArg(args, "category"), limit)
 			if err != nil {
-				return "", err
+				return governance.Result{}, err
 			}
 			if len(entries) == 0 {
-				return "No matching memories found for this user.", nil
+				return governance.Result{Content: "No matching memories found for this user.", Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
 			}
-			return RenderMemory("", entries), nil
+			return governance.Result{Content: RenderMemory("", entries), Outcome: governance.OutcomeProductive}, nil
 		}
 		results, stats := store.Recall(ctx, userID, query, RecallRequest{
 			Scope: stringArg(args, "scope"), Category: stringArg(args, "category"), TopK: limit, MinRelevance: defaultRecallMinRelevance, ExplicitSearch: true,
@@ -56,13 +57,13 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 			searchLog.Warn("agent.tool.user_memory.search_semantic_degraded", "user memory search semantic channel degraded", config.F("tool_name", toolnames.UserMemorySearch), config.F("status", "degraded"), config.ErrorField(stats.SemanticError))
 		}
 		if !stats.LexicalAvailable && !stats.SemanticAvailable {
-			return "", fmt.Errorf("%s: retrieval indexes unavailable", toolnames.UserMemorySearch)
+			return governance.Result{}, fmt.Errorf("%s: retrieval indexes unavailable", toolnames.UserMemorySearch)
 		}
 		if len(results) == 0 {
 			if stats.LexicalError != nil || stats.SemanticError != nil {
-				return "No matching memories found in the available retrieval channel; recall is partially degraded.", nil
+				return governance.Result{Content: "No matching memories found in the available retrieval channel; recall is partially degraded.", Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results", IsDegraded: true}, nil
 			}
-			return "No matching memories found for this user.", nil
+			return governance.Result{Content: "No matching memories found for this user.", Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
 		}
 		store.RecordRecallUsage(ctx, userID, results)
 		searchLog.Debug("agent.tool.user_memory.searched", "searched user memory",
@@ -73,28 +74,28 @@ func NewSearchHandler(store *Store, log *config.Logger) func(ctx context.Context
 		if stats.LexicalError != nil || stats.SemanticError != nil {
 			output = "Recall is partially degraded; results come from the available retrieval channel.\n\n" + output
 		}
-		return output, nil
+		return governance.Result{Content: output, Outcome: governance.OutcomeProductive, IsDegraded: stats.LexicalError != nil || stats.SemanticError != nil}, nil
 	}
 }
 
 // NewListHandler returns a Handler for listing active memory.
-func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
-	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewListHandler(store *Store, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, err := authenticatedPrincipal(ctx, toolnames.UserMemoryList)
 		if err != nil {
-			return "", err
+			return governance.Result{}, err
 		}
 		userID := principal.CanonicalUserID
 		entries, err := store.ListMemories(userID, stringArg(args, "scope"), stringArg(args, "category"), intArg(args, "limit", 25))
 		if err != nil {
-			return "", err
+			return governance.Result{}, err
 		}
 		if len(entries) == 0 {
-			return "No active memories found for this user.", nil
+			return governance.Result{Content: "No active memories found for this user.", Outcome: governance.OutcomeUnproductive, ReasonCode: "empty_collection"}, nil
 		}
 		intro, _ := store.ReadIntro(userID)
 		requestLog(log, ctx).Debug("agent.tool.user_memory.listed", "listed user memory", config.F("tool_name", toolnames.UserMemoryList), config.F("returned_count", len(entries)))
-		return RenderMemory(intro, entries), nil
+		return governance.Result{Content: RenderMemory(intro, entries), Outcome: governance.OutcomeProductive}, nil
 	}
 }
 

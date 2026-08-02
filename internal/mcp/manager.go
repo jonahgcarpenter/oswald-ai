@@ -13,6 +13,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -209,8 +210,8 @@ func (m *Manager) Execute(ctx context.Context, userID string, toolName string, a
 	}
 	for _, tool := range tols {
 		if tool.RemoteName == remoteName || tool.Name == toolName {
-			content, err := tool.Handler(ctx, args)
-			return ExecutionResult{Content: content, ServerID: tool.ServerID, ServerName: tool.Server, Scope: tool.Scope, OwnerUserID: tool.OwnerUserID, ToolName: tool.Name, RemoteToolName: tool.RemoteName}, err
+			result, err := tool.Handler(ctx, args)
+			return ExecutionResult{Result: result, ServerID: tool.ServerID, ServerName: tool.Server, Scope: tool.Scope, OwnerUserID: tool.OwnerUserID, ToolName: tool.Name, RemoteToolName: tool.RemoteName}, err
 		}
 	}
 	return ExecutionResult{}, fmt.Errorf("MCP tool %q is not available", toolName)
@@ -400,18 +401,18 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 	if description == "" {
 		description = strings.TrimSpace(tool.Title)
 	}
-	return ToolSpec{Name: localName, Description: description, ServerID: cfg.ID, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+	return ToolSpec{Name: localName, Description: description, ServerID: cfg.ID, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error) {
 		meta := requestctx.MetadataFromContext(ctx)
 		principal, _ := requestctx.PrincipalFromContext(ctx)
 		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
 		if err != nil {
-			return "", safeMCPRequestError(err)
+			return governance.Result{}, safeMCPRequestError(err)
 		}
 		flattened, err := flattenToolResult(result)
 		if err != nil {
-			return "", err
+			return governance.Result{}, err
 		}
 		return flattened, nil
 	}}, nil

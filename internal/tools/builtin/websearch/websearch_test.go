@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 type fakeSearcher struct {
@@ -65,8 +66,17 @@ func TestNewHandlerValidatesAndPropagatesSearch(t *testing.T) {
 	if searcher.query != "golang" {
 		t.Fatalf("search query = %q, want golang", searcher.query)
 	}
-	if !strings.Contains(result, "Title") || !strings.Contains(result, "https://example.com") {
-		t.Fatalf("handler result missing formatted search data: %q", result)
+	if result.Outcome != governance.OutcomeProductive {
+		t.Fatalf("handler outcome = %q, want %q", result.Outcome, governance.OutcomeProductive)
+	}
+	if !strings.Contains(result.Content, "Title") || !strings.Contains(result.Content, "https://example.com") {
+		t.Fatalf("handler result missing formatted search data: %q", result.Content)
+	}
+
+	searcher.results = nil
+	result, err = handler(context.Background(), map[string]interface{}{"query": "missing"})
+	if err != nil || result.Outcome != governance.OutcomeUnproductive || result.ReasonCode != "no_results" {
+		t.Fatalf("empty search result = %+v err=%v", result, err)
 	}
 
 	searcher.err = errors.New("boom")

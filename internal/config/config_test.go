@@ -54,6 +54,41 @@ func TestEnvHelpersParseConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestLoadToolGovernanceLimits(t *testing.T) {
+	t.Setenv("MAX_TOOL_CALLS_PER_REQUEST", "15")
+	t.Setenv("MAX_TOOL_ITERATIONS_PER_REQUEST", "9")
+	t.Setenv("MAX_TOOL_FAILURE_RETRIES", "4")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxToolCallsPerRequest != 15 || cfg.MaxToolIterations != 9 || cfg.MaxToolFailureRetries != 4 {
+		t.Fatalf("unexpected tool limits: calls=%d iterations=%d failures=%d", cfg.MaxToolCallsPerRequest, cfg.MaxToolIterations, cfg.MaxToolFailureRetries)
+	}
+}
+
+func TestLoadRejectsInvalidToolGovernanceLimits(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "calls", key: "MAX_TOOL_CALLS_PER_REQUEST", value: "0"},
+		{name: "iterations", key: "MAX_TOOL_ITERATIONS_PER_REQUEST", value: "-1"},
+		{name: "failures", key: "MAX_TOOL_FAILURE_RETRIES", value: "-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAX_TOOL_CALLS_PER_REQUEST", "12")
+			t.Setenv("MAX_TOOL_ITERATIONS_PER_REQUEST", "8")
+			t.Setenv("MAX_TOOL_FAILURE_RETRIES", "3")
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), test.key) {
+				t.Fatalf("Load error = %v, want %s validation", err, test.key)
+			}
+		})
+	}
+}
+
 func TestParseLevelAndRequestID(t *testing.T) {
 	if got := ParseLevel(" warning "); got != LevelWarn {
 		t.Fatalf("ParseLevel warning = %s, want warn", got)

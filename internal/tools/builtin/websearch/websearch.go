@@ -8,6 +8,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 // SearchResult holds a single result returned by a web search.
@@ -79,15 +80,16 @@ func ParseFormattedResults(raw string) []SearchResult {
 }
 
 // NewHandler returns a handler that executes web searches via the provided searcher.
-func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (string, error) {
-	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		query := ""
 		if q, ok := args["query"]; ok {
 			query, _ = q.(string)
 		}
+		query = strings.TrimSpace(query)
 
 		if query == "" {
-			return "", fmt.Errorf("query parameter was empty")
+			return governance.Result{}, fmt.Errorf("query parameter was empty")
 		}
 
 		meta := requestctx.MetadataFromContext(ctx)
@@ -101,9 +103,14 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 
 		results, err := searcher.Search(ctx, query)
 		if err != nil {
-			return "", fmt.Errorf("search failed: %w", err)
+			return governance.Result{}, fmt.Errorf("search failed: %w", err)
 		}
-
-		return FormatResults(results), nil
+		outcome := governance.OutcomeProductive
+		reason := ""
+		if len(results) == 0 {
+			outcome = governance.OutcomeUnproductive
+			reason = "no_results"
+		}
+		return governance.Result{Content: FormatResults(results), Outcome: outcome, ReasonCode: reason}, nil
 	}
 }

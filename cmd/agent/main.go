@@ -30,6 +30,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func main() {
@@ -105,7 +106,6 @@ func main() {
 	}
 	defer mcpStore.Close() // nolint:errcheck
 	mcpManager := mcp.NewManagerFromStore(mcpStore, rootLog)
-	mcpProvider := mcp.NewProvider(mcpManager)
 	accountLinkService := accountlinking.NewService(config.DefaultAccountLinkPath, userMemStore, mcpManager, rootLog.Server("account_link"))
 	if err := accountLinkService.Initialize(); err != nil {
 		log.Fatal("app.account_link.init_failed", "failed to initialize account link store", config.ErrorField(err))
@@ -134,6 +134,7 @@ func main() {
 	if err != nil {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
+	mcpProvider := mcp.NewProvider(mcpManager, toolRegistry.Names()...)
 	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel)
 	if err != nil {
 		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
@@ -169,7 +170,11 @@ func main() {
 		soulStore,
 		userMemStore,
 		budget,
-		cfg.MaxToolFailureRetries,
+		governance.GlobalPolicy{
+			MaxExecutions:          cfg.MaxToolCallsPerRequest,
+			MaxToolIterations:      cfg.MaxToolIterations,
+			MaxConsecutiveFailures: cfg.MaxToolFailureRetries,
+		},
 		agentRequestTimeout,
 		rootLog,
 		mcpProvider,

@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 const (
@@ -23,11 +25,11 @@ const (
 )
 
 // Handler executes an MCP-backed tool call.
-type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
+type Handler func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error)
 
 // ExecutionResult preserves provenance for the exact MCP handler that ran.
 type ExecutionResult struct {
-	Content        string
+	governance.Result
 	ServerID       string
 	ServerName     string
 	Scope          string

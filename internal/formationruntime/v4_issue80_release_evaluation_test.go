@@ -315,8 +315,8 @@ func evaluateIssue80GlobalMemory(t *testing.T) {
 	ctx := requestctx.WithPrincipal(context.Background(), nonAdmin)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "global-search", SessionID: "session", Model: "model"})
 	output, err := search(ctx, map[string]interface{}{"query": "What does Oswald use?", "limit": 5, "memory": "MCP attempted mutation"})
-	if err != nil || !strings.Contains(output, "Go with SQLite") {
-		t.Fatalf("global search output=%q err=%v", output, err)
+	if err != nil || !strings.Contains(output.Content, "Go with SQLite") {
+		t.Fatalf("global search output=%q err=%v", output.Content, err)
 	}
 	page, _ = global.List(context.Background(), 1)
 	if len(page.Memories) != 1 {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -178,5 +179,20 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		if !got[name] || !reg.HasHandler(name) {
 			t.Fatalf("final builtin tool is unavailable: %s", name)
 		}
+	}
+}
+
+func TestMemoryArgumentNormalizationPreservesInvalidLimitCorrection(t *testing.T) {
+	normalize := normalizeMemorySearchArgs(8)
+	invalid, err := governance.Fingerprint(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "test", "limit": "8"}, normalize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := governance.Fingerprint(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "test", "limit": float64(8)}, normalize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalid == valid {
+		t.Fatal("invalid limit and corrected valid limit produced the same fingerprint")
 	}
 }

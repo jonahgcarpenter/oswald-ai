@@ -11,12 +11,13 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 // Handler is the execution function for a single tool.
-// It receives the model's tool call arguments and returns the text content to
-// inject as a tool response message. ctx is propagated for timeout cancellation.
-type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
+// It receives the model's tool call arguments and returns typed productivity
+// plus the content injected as a tool response. ctx propagates cancellation.
+type Handler func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error)
 
 // ParamSpec describes one parameter row parsed from the markdown table.
 type ParamSpec struct {
@@ -66,6 +67,7 @@ type ToolVisibility struct {
 type Registry struct {
 	specs    map[string]Spec
 	handlers map[string]Handler
+	policies map[string]governance.ToolPolicy
 	log      *config.Logger
 }
 
@@ -75,6 +77,7 @@ func New(log *config.Logger) *Registry {
 	return &Registry{
 		specs:    make(map[string]Spec),
 		handlers: make(map[string]Handler),
+		policies: make(map[string]governance.ToolPolicy),
 		log:      log,
 	}
 }
@@ -133,11 +136,15 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 // RegisterHandler associates a Handler with a tool name.
 // Returns an error if the name does not match any loaded tool spec, to catch
 // typos and orphaned handlers early at startup.
-func (r *Registry) RegisterHandler(name string, handler Handler) error {
+func (r *Registry) RegisterHandler(name string, policy governance.ToolPolicy, handler Handler) error {
 	if _, ok := r.specs[name]; !ok {
 		return fmt.Errorf("cannot register handler for %q: no tool spec loaded with that name", name)
 	}
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("invalid policy for tool %q: %w", name, err)
+	}
 	r.handlers[name] = handler
+	r.policies[name] = policy
 	r.log.Debug("tool.registry.handler_registered", "registered tool handler", config.F("tool_name", name))
 	return nil
 }
@@ -161,11 +168,11 @@ func (r *Registry) RegisterSpec(spec Spec) error {
 
 // RegisterTool registers a programmatically discovered tool and its handler in a
 // single step.
-func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
+func (r *Registry) RegisterTool(spec Spec, policy governance.ToolPolicy, handler Handler) error {
 	if err := r.RegisterSpec(spec); err != nil {
 		return err
 	}
-	return r.RegisterHandler(spec.Name, handler)
+	return r.RegisterHandler(spec.Name, policy, handler)
 }
 
 // LLMTools converts builtin Specs into the []llm.Tool slice passed to
@@ -249,12 +256,18 @@ func (r *Registry) CatalogBySource(source string) []CatalogEntry {
 
 // Execute calls the registered handler for the named tool with the given arguments.
 // Returns an error if no handler is registered for the tool name.
-func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (governance.Result, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
-		return "", r.unknownToolError(name)
+		return governance.Result{}, r.unknownToolError(name)
 	}
 	return handler(ctx, args)
+}
+
+// Policy returns the validated runtime governance policy for a builtin tool.
+func (r *Registry) Policy(name string) (governance.ToolPolicy, bool) {
+	policy, ok := r.policies[name]
+	return policy, ok
 }
 
 func (r *Registry) unknownToolError(name string) error {

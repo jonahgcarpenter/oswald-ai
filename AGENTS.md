@@ -42,7 +42,7 @@ Current layers:
 14. `internal/agent/` — iterative tool-calling agent loop
 15. `internal/soul/` — read-only operator-managed system-prompt loader
 16. `internal/promptbudget/` — model context budget and prompt token estimates
-17. `internal/tools/` — tool registry, builtin handlers, and schema loading
+17. `internal/tools/` — tool registry, request governance, builtin handlers, and schema loading
 18. `internal/mcp/` — MCP client sessions and discovered tools
 19. `internal/media/` — image validation, normalization, and unsupported-file prompt notes
 20. `internal/llm/` — OpenAI-compatible LLM gateway client and provider-neutral request/response schema
@@ -138,10 +138,13 @@ Per request it does the following:
 11. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, optional generated summary as lower-authority untrusted historical reference data, recent `user`/`assistant` pairs in chronological order, and the current request plus explicitly untrusted recall as the final `user` message with any current-turn images
 12. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
 13. If the model emits tool calls:
-   - execute each tool handler
-   - append tool results as `tool` messages
-   - repeat until no tool calls remain or the consecutive tool-failure limit is hit
-14. If tool failures exhaust the retry budget, make one final model call with tools disabled
+   - authorize every call against the exact catalog advertised for that model iteration
+   - block exact request-local duplicates using a hash of the tool name and normalized canonical arguments
+   - execute allowed handlers and classify successful results as productive or unproductive
+   - append exactly one correlated `tool` result for every declared call, including blocked calls in multi-call batches
+   - retire only a tool that exhausts its configured execution, failure, or unproductive-result allowance
+   - repeat until no tool calls remain or a global tool-governance limit is hit
+14. If the global execution, tool-iteration, or consecutive-failure budget is exhausted, make one final model call with all tools disabled
 15. Persist only the cleaned final user message, final assistant reply, and compact tool-name annotations to the active session generation
 16. Return the final `AgentResponse`
 
@@ -499,8 +502,11 @@ The registry:
 - loads markdown specs from disk
 - converts them into LLM tool schemas
 - maps tool names to handlers
+- associates every handler with a validated runtime governance policy
 - executes handlers when the model issues tool calls
 - keeps builtin tools and MCP-discovered tools in the same runtime catalog
+
+Runtime governance lives in `internal/tools/governance/`. Builtin policies are declared during registration; MCP discovery and remote tools use shared MCP-class policies. A request-local governor tracks attempts, actual executions, productive and unproductive results, failures, duplicates, and blocked calls. Exact duplicate fingerprints are hashed and never logged or persisted. Tools that exhaust a per-tool allowance are hidden for the remainder of the request while unrelated tools remain available.
 
 ### MCP Integration
 
@@ -510,11 +516,18 @@ The registry:
 - Every valid remotely listed tool except the reserved remote name `tools` may be exposed and executed; there is no read-only mutation filter, so configured servers and their catalogs must be trusted
 - MCP tools use namespaced names like `<server>.<tool>` and are surfaced through request-local discovery or eligible recent-tool pre-exposure; the `soul` server namespace is reserved and never model-visible
 
-### Tool Failure Handling
+### Tool Governance
 
 - Tool execution errors are converted into tool-response messages so the model can recover
-- Consecutive failures are tracked per request
-- Once `MAX_TOOL_FAILURE_RETRIES` is reached, the agent stops offering tools for that request and asks the model to finish without them
+- Successful handlers return a typed productive or unproductive outcome; empty web, memory, transcript, global-memory, MCP-discovery, and MCP protocol results therefore cannot reset failure progress or loop indefinitely
+- Exact duplicate calls are blocked before handler execution, but the tool remains available for meaningfully different arguments
+- Per-tool execution, failure, and unproductive limits are code-owned policy; exhaustion removes only that exact tool
+- `MAX_TOOL_CALLS_PER_REQUEST` defaults to `12` actual handler executions across the request
+- `MAX_TOOL_ITERATIONS_PER_REQUEST` defaults to `8` model responses containing tool calls
+- `MAX_TOOL_FAILURE_RETRIES` defaults to `3` consecutive execution failures; productive execution resets this global streak, while unproductive or blocked calls do not
+- Global limit exhaustion completes every declared call in the active batch with a correlated result, then asks the model to finish in one final call with all tools disabled
+- Calls not advertised in the active model request are blocked. MCP discovery therefore exposes matching remote tools only for a subsequent model iteration, not later in the same emitted batch
+- The request timeout remains the final wall-clock safeguard
 
 ## Model Gateway Integration
 
@@ -800,6 +813,7 @@ Current startup requirements:
 | `internal/modelinfo/`                          | Model metadata discovery                     |
 | `internal/database/`                           | SQLite schema and database helpers           |
 | `internal/tools/registry/`                     | Tool schema loading and execution            |
+| `internal/tools/governance/`                   | Request-local tool policy and limits         |
 | `internal/tools/runtime/`                      | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
 | `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |

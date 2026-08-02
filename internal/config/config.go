@@ -28,6 +28,8 @@ type Config struct {
 	DiscordToken             string          // Optional Discord bot token
 	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8888")
 	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
+	MaxToolCallsPerRequest   int             // Maximum tool handler executions in one primary-agent request (default: 12)
+	MaxToolIterations        int             // Maximum model responses containing tool calls in one request (default: 8)
 	WorkerPoolSize           int             // Number of concurrent broker workers (default: 1)
 	LogLevel                 Level           // Logging verbosity (default: LevelInfo)
 	RetentionPolicy          RetentionPolicy // Memory retention and maintenance policy
@@ -62,7 +64,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Config{
+	cfg := &Config{
 		HomeAssistantListenPort:  getEnv("HOME_ASSISTANT_LISTEN_PORT", ""),
 		HomeAssistantAuthToken:   getEnv("HOME_ASSISTANT_AUTH_TOKEN", ""),
 		BlueBubblesListenPort:    getEnv("BLUEBUBBLES_LISTEN_PORT", ""),
@@ -80,10 +82,22 @@ func Load() (*Config, error) {
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8080"),
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
+		MaxToolCallsPerRequest:   getEnvInt("MAX_TOOL_CALLS_PER_REQUEST", 12),
+		MaxToolIterations:        getEnvInt("MAX_TOOL_ITERATIONS_PER_REQUEST", 8),
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
 		RetentionPolicy:          retentionPolicy,
-	}, nil
+	}
+	if cfg.MaxToolCallsPerRequest <= 0 {
+		return nil, fmt.Errorf("MAX_TOOL_CALLS_PER_REQUEST must be positive")
+	}
+	if cfg.MaxToolIterations <= 0 {
+		return nil, fmt.Errorf("MAX_TOOL_ITERATIONS_PER_REQUEST must be positive")
+	}
+	if cfg.MaxToolFailureRetries < 0 {
+		return nil, fmt.Errorf("MAX_TOOL_FAILURE_RETRIES must not be negative")
+	}
+	return cfg, nil
 }
 
 func loadRetentionPolicy() (RetentionPolicy, error) {

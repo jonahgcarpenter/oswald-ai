@@ -30,6 +30,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -106,11 +107,11 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "tool-backed answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup", Parameters: []registry.ParamSpec{{Name: "q", Type: "string", Required: true}}}, func(_ context.Context, args map[string]interface{}) (string, error) {
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup", Parameters: []registry.ParamSpec{{Name: "q", Type: "string", Required: true}}}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		if args["q"] != "oswald" {
 			t.Fatalf("unexpected tool args: %+v", args)
 		}
-		return "lookup result", nil
+		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
 	}
@@ -186,13 +187,13 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished without tools"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.fail", Description: "Fail"}, func(context.Context, map[string]interface{}) (string, error) {
-		return "", errors.New("boom")
+	if err := reg.RegisterTool(registry.Spec{Name: "test.fail", Description: "Fail"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{}, errors.New("boom")
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
-	agent.maxToolFailureRetries = 1
+	agent.toolPolicy.MaxConsecutiveFailures = 1
 
 	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
@@ -210,14 +211,167 @@ func TestProcessDisablesToolsAfterFailureBudget(t *testing.T) {
 	}
 }
 
+func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("first", "test.lookup", map[string]interface{}{"q": "same"}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: "duplicate", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "same"}}},
+			{ID: "distinct", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "different"}}},
+		}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	var invocations []string
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+		invocations = append(invocations, args["q"].(string))
+		return productiveResult("result " + args["q"].(string)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	if _, err := processAgent(agent, "duplicate", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(invocations, ","); got != "same,different" {
+		t.Fatalf("handler invocations = %q, want same,different", got)
+	}
+	requests := primaryRequests(chat.requests)
+	duplicateResult := toolResultByID(requests[2].Messages, "duplicate")
+	if duplicateResult == nil || !strings.Contains(duplicateResult.Content, "same tool and arguments") {
+		t.Fatalf("duplicate call was not blocked with a matching result: %+v", requests[2].Messages)
+	}
+	if distinctResult := toolResultByID(requests[2].Messages, "distinct"); distinctResult == nil || distinctResult.Content != "result different" {
+		t.Fatalf("distinct call did not execute: %+v", requests[2].Messages)
+	}
+}
+
+func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("stale", "test.stale", nil),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	policy := testToolPolicy()
+	policy.MaxUnproductive = 1
+	if err := reg.RegisterTool(registry.Spec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: "nothing useful", Outcome: governance.OutcomeUnproductive}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterTool(registry.Spec{Name: "test.useful", Description: "Useful"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("useful"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	if _, err := processAgent(agent, "retire", "homeassistant", "session", "user-1", "User", "search", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	requests := primaryRequests(chat.requests)
+	if requestHasTool(requests[1], "test.stale") || !requestHasTool(requests[1], "test.useful") {
+		t.Fatalf("per-tool retirement changed the wrong catalog: %+v", toolNames(requests[1]))
+	}
+}
+
+func TestProcessGlobalCapMidBatchEmitsResultForEveryCall(t *testing.T) {
+	declared := []llm.ToolCall{
+		{ID: "one", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "one"}}},
+		{ID: "two", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "two"}}},
+		{ID: "three", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "three"}}},
+	}
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: declared}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	invocations := 0
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		invocations++
+		return productiveResult("first result"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	agent.toolPolicy.MaxExecutions = 1
+
+	if _, err := processAgent(agent, "cap", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	requests := primaryRequests(chat.requests)
+	if invocations != 1 {
+		t.Fatalf("handler invocation count = %d, want 1", invocations)
+	}
+	if len(requests) != 2 || len(requests[1].Tools) != 0 {
+		t.Fatalf("final request did not disable tools: %+v", requests)
+	}
+	for _, call := range declared {
+		if result := toolResultByID(requests[1].Messages, call.ID); result == nil {
+			t.Fatalf("missing tool result for declared call %q: %+v", call.ID, requests[1].Messages)
+		}
+	}
+}
+
+func TestProcessNormalizesMissingToolCallIDsConsistently(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "one"}}},
+			{Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "two"}}},
+		}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+		return productiveResult(args["q"].(string)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	if _, err := processAgent(agent, "ids", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	messages := primaryRequests(chat.requests)[1].Messages
+	assistant := messages[len(messages)-3]
+	wants := []string{"call_1_1", "call_1_2"}
+	for i, want := range wants {
+		if assistant.ToolCalls[i].ID != want {
+			t.Fatalf("assistant call %d ID = %q, want %q", i, assistant.ToolCalls[i].ID, want)
+		}
+		if result := toolResultByID(messages, want); result == nil {
+			t.Fatalf("missing tool result with normalized ID %q: %+v", want, messages)
+		}
+	}
+}
+
+func TestNormalizeToolCallIDsAvoidsProvidedAndDuplicateCollisions(t *testing.T) {
+	message := llm.ChatMessage{ToolCalls: []llm.ToolCall{
+		{ID: "call_1_2"},
+		{},
+		{ID: "call_1_2"},
+	}}
+	normalizeToolCallIDs(&message, 1)
+	seen := map[string]bool{}
+	for _, call := range message.ToolCalls {
+		if call.ID == "" || seen[call.ID] {
+			t.Fatalf("tool call IDs are not unique: %+v", message.ToolCalls)
+		}
+		seen[call.ID] = true
+	}
+	if message.ToolCalls[0].ID != "call_1_2" {
+		t.Fatalf("first provider ID was not preserved: %+v", message.ToolCalls)
+	}
+}
+
 func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, func(context.Context, map[string]interface{}) (string, error) {
-		return "lookup result", nil
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
 	}
@@ -294,8 +448,8 @@ func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, func(context.Context, map[string]interface{}) (string, error) {
-		return "lookup result", nil
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
 	}
@@ -918,7 +1072,9 @@ func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testi
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := reg.RegisterSpec(registry.Spec{Name: toolnames.GlobalMemorySearch, Source: registry.ToolSourceBuiltin}); err != nil {
+	if err := reg.RegisterTool(registry.Spec{Name: toolnames.GlobalMemorySearch, Source: registry.ToolSourceBuiltin}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("global memory"), nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	agent, store := newTestAgent(t, chat, nil, reg)
@@ -940,6 +1096,27 @@ func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testi
 
 func toolCallResponse(id, name string, args map[string]interface{}) *llm.ChatResponse {
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: id, Function: llm.ToolFunction{Name: name, Arguments: args}}}}}
+}
+
+func testToolPolicy() governance.ToolPolicy {
+	return governance.ToolPolicy{MaxExecutions: 4, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true}
+}
+
+func testGlobalPolicy() governance.GlobalPolicy {
+	return governance.GlobalPolicy{MaxExecutions: 10, MaxToolIterations: 10, MaxConsecutiveFailures: 3}
+}
+
+func productiveResult(content string) governance.Result {
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}
+}
+
+func toolResultByID(messages []llm.ChatMessage, id string) *llm.ChatMessage {
+	for i := range messages {
+		if messages[i].Role == "tool" && messages[i].ToolCallID == id {
+			return &messages[i]
+		}
+	}
+	return nil
 }
 
 type fakeChatter struct {
@@ -1017,19 +1194,23 @@ func (p *fakeMCPProvider) LLMTools(_ context.Context, _ identity.Principal, expo
 	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.turn_on", Description: "Turn on a light", Parameters: llm.ToolParameters{Type: "object"}}}}
 }
 
+func (p *fakeMCPProvider) ToolPolicy(string) governance.ToolPolicy {
+	return testToolPolicy()
+}
+
 func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, name string, _ map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error) {
 	if name == "home.tools" {
 		if exposer := requestctx.ToolExposerFromContext(ctx); exposer != nil {
 			exposer.ExposeTools([]string{"home.turn_on"})
 		}
-		return mcp.ExecutionResult{Content: "Available MCP tools from home:\n1. home.turn_on", IsDiscovery: true}, true, nil
+		return mcp.ExecutionResult{Result: productiveResult("Available MCP tools from home:\n1. home.turn_on"), IsDiscovery: true}, true, nil
 	}
 	if name == "home.turn_on" && exposed[name] {
 		scope := p.scope
 		if scope == "" {
 			scope = mcp.ScopeUser
 		}
-		return mcp.ExecutionResult{Content: "light turned on", Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: name, RemoteToolName: "turn_on"}, true, nil
+		return mcp.ExecutionResult{Result: productiveResult("light turned on"), Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: name, RemoteToolName: "turn_on"}, true, nil
 	}
 	return mcp.ExecutionResult{}, false, nil
 }
@@ -1110,7 +1291,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), time.Minute, log)
 	return agent, userStore, soulPath
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -20,9 +21,9 @@ type untrustedEnvelope struct {
 	Truncated bool        `json:"truncated,omitempty"`
 }
 
-func flattenToolResult(result *gomcp.CallToolResult) (string, error) {
+func flattenToolResult(result *gomcp.CallToolResult) (governance.Result, error) {
 	if result == nil {
-		return "", fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
+		return governance.Result{}, fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
 	}
 
 	parts := make([]string, 0, len(result.Content)+1)
@@ -45,7 +46,7 @@ func flattenToolResult(result *gomcp.CallToolResult) (string, error) {
 		default:
 			data, err := json.Marshal(c)
 			if err != nil {
-				return "", fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
+				return governance.Result{}, fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
 			}
 			parts = append(parts, string(data))
 		}
@@ -54,20 +55,24 @@ func flattenToolResult(result *gomcp.CallToolResult) (string, error) {
 	if len(parts) == 0 && result.StructuredContent != nil {
 		data, err := json.Marshal(result.StructuredContent)
 		if err != nil {
-			return "", fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
+			return governance.Result{}, fmt.Errorf("MCP response was invalid (category: result_format). Do not retry unchanged")
 		}
 		parts = append(parts, string(data))
 	}
 
 	text := strings.TrimSpace(strings.Join(parts, "\n\n"))
 	if result.IsError {
-		return "", fmt.Errorf("MCP tool reported failure (category: remote_tool). Review the arguments before retrying")
+		return governance.Result{}, fmt.Errorf("MCP tool reported failure (category: remote_tool). Review the arguments before retrying")
 	}
+	outcome := governance.OutcomeProductive
+	reason := ""
 	if text == "" {
 		text = "MCP tool returned no content."
+		outcome = governance.OutcomeUnproductive
+		reason = "no_content"
 	}
 
-	return encodeUntrustedEnvelope("mcp_tool_result", text, maxToolResultChars), nil
+	return governance.Result{Content: encodeUntrustedEnvelope("mcp_tool_result", text, maxToolResultChars), Outcome: outcome, ReasonCode: reason}, nil
 }
 
 func encodeUntrustedEnvelope(kind string, data interface{}, maxRunes int) string {

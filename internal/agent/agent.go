@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	toolruntime "github.com/jonahgcarpenter/oswald-ai/internal/tools/runtime"
 )
@@ -214,16 +215,16 @@ type Request struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient            llm.Chatter
-	registry              *registry.Registry
-	mcpProvider           MCPProvider
-	budget                promptbudget.ContextBudget
-	model                 string
-	soul                  *soul.Store
-	userMemory            *usermemory.Store
-	maxToolFailureRetries int
-	requestTimeout        time.Duration
-	log                   *config.Logger
+	chatClient     llm.Chatter
+	registry       *registry.Registry
+	mcpProvider    MCPProvider
+	budget         promptbudget.ContextBudget
+	model          string
+	soul           *soul.Store
+	userMemory     *usermemory.Store
+	toolPolicy     governance.GlobalPolicy
+	requestTimeout time.Duration
+	log            *config.Logger
 }
 
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
@@ -232,11 +233,12 @@ type MCPProvider interface {
 	ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string
 	LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool
 	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
+	ToolPolicy(name string) governance.ToolPolicy
 }
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, prompt
-// budget, tool failure retry budget, and logger.
+// soul store, SQLite user memory store, prompt budget, tool-governance policy,
+// request timeout, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
@@ -244,7 +246,7 @@ func NewAgent(
 	soul *soul.Store,
 	userMemory *usermemory.Store,
 	budget promptbudget.ContextBudget,
-	maxToolFailureRetries int,
+	toolPolicy governance.GlobalPolicy,
 	requestTimeout time.Duration,
 	log *config.Logger,
 	mcpProviders ...MCPProvider,
@@ -254,16 +256,16 @@ func NewAgent(
 		mcpProvider = mcpProviders[0]
 	}
 	return &Agent{
-		chatClient:            chatClient,
-		registry:              registry,
-		mcpProvider:           mcpProvider,
-		budget:                budget,
-		model:                 model,
-		soul:                  soul,
-		userMemory:            userMemory,
-		maxToolFailureRetries: maxToolFailureRetries,
-		requestTimeout:        requestTimeout,
-		log:                   log,
+		chatClient:     chatClient,
+		registry:       registry,
+		mcpProvider:    mcpProvider,
+		budget:         budget,
+		model:          model,
+		soul:           soul,
+		userMemory:     userMemory,
+		toolPolicy:     toolPolicy,
+		requestTimeout: requestTimeout,
+		log:            log,
 	}
 }
 
@@ -343,24 +345,98 @@ func mapMetrics(resp *llm.ChatResponse) *ModelMetrics {
 	}
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *toolruntime.Exposure) []llm.Tool {
-	tools := a.registry.LLMToolsForVisibility(exposure.Visibility())
-	if a.mcpProvider == nil {
-		return tools
-	}
-	tools = append(tools, a.mcpProvider.DiscoveryTools(ctx, principal)...)
-	tools = append(tools, a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools())...)
-	return tools
+type offeredToolCatalog struct {
+	Tools    []llm.Tool
+	Policies map[string]governance.ToolPolicy
 }
 
-func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (mcp.ExecutionResult, error) {
-	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
-			return result, err
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *toolruntime.Exposure, governor *governance.Governor) offeredToolCatalog {
+	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
+	add := func(tool llm.Tool, policy governance.ToolPolicy) {
+		name := tool.Function.Name
+		if name == "" || catalog.Policies[name].MaxExecutions > 0 {
+			return
+		}
+		if governor != nil && governor.IsToolRetired(name, policy) {
+			return
+		}
+		catalog.Tools = append(catalog.Tools, tool)
+		catalog.Policies[name] = policy
+	}
+	for _, tool := range a.registry.LLMToolsForVisibility(exposure.Visibility()) {
+		if policy, ok := a.registry.Policy(tool.Function.Name); ok {
+			add(tool, policy)
 		}
 	}
-	content, err := a.registry.Execute(ctx, name, args)
-	return mcp.ExecutionResult{Content: content}, err
+	if a.mcpProvider == nil {
+		return catalog
+	}
+	for _, tool := range a.mcpProvider.DiscoveryTools(ctx, principal) {
+		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
+	}
+	for _, tool := range a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools()) {
+		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
+	}
+	return catalog
+}
+
+func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *toolruntime.Exposure) (governance.Result, error) {
+	if a.registry.HasHandler(name) {
+		return a.registry.Execute(ctx, name, args)
+	}
+	if a.mcpProvider != nil {
+		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
+			return result.Result, err
+		}
+	}
+	return a.registry.Execute(ctx, name, args)
+}
+
+func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {
+	if message == nil {
+		return
+	}
+	reserved := make(map[string]bool, len(message.ToolCalls))
+	for _, call := range message.ToolCalls {
+		if id := strings.TrimSpace(call.ID); id != "" {
+			reserved[id] = true
+		}
+	}
+	used := make(map[string]bool, len(message.ToolCalls))
+	for i := range message.ToolCalls {
+		id := strings.TrimSpace(message.ToolCalls[i].ID)
+		if id != "" && !used[id] {
+			message.ToolCalls[i].ID = id
+			used[id] = true
+			continue
+		}
+		base := fmt.Sprintf("call_%d_%d", iteration, i+1)
+		id = base
+		for suffix := 2; reserved[id] || used[id]; suffix++ {
+			id = fmt.Sprintf("%s_%d", base, suffix)
+		}
+		message.ToolCalls[i].ID = id
+		used[id] = true
+	}
+}
+
+func governanceResultText(reason string) string {
+	switch reason {
+	case governance.ReasonDuplicate:
+		return "Tool call blocked: the same tool and arguments were already executed in this request. Use the existing result or try meaningfully different arguments."
+	case governance.ReasonToolLimit:
+		return "Tool call blocked: this tool reached its execution limit for the request. Continue with the available results."
+	case governance.ReasonToolFailures:
+		return "Tool call blocked: the tool failure limit was reached. Continue without retrying this tool."
+	case governance.ReasonToolUnproductive:
+		return "Tool call blocked: this tool returned too many unproductive results. Continue with the available information."
+	case governance.ReasonGlobalLimit, governance.ReasonIterationLimit:
+		return "Tool call blocked: the request tool budget was exhausted. Finish the answer using the available results."
+	case governance.ReasonUnadvertised:
+		return "Tool call blocked: this tool was not available for this model step. Use only currently available tools."
+	default:
+		return "Tool call blocked by request policy. Continue with the available information."
+	}
 }
 
 func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, callback func(llm.ChatMessage), log *config.Logger) (*llm.ChatResponse, error, bool) {
@@ -457,6 +533,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	})
 	toolExposure := toolruntime.NewExposure()
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
+	toolGovernor := governance.New(a.toolPolicy)
 
 	// Read the operator-managed soul file fresh on every request.
 	soulContent, soulErr := a.soul.Read()
@@ -577,8 +654,8 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 
-	initialTools := a.toolsForRequest(ctx, request.Principal, toolExposure)
-	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, sessionSummaryMinimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialTools, a.budget.UsableInputLimit())
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, sessionSummaryMinimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, a.budget.UsableInputLimit())
 	if a.userMemory != nil {
 		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
 	}
@@ -615,10 +692,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	var accumulatedContent strings.Builder
 	toolExecutionCount := 0
 
-	// consecutiveToolFailures tracks back-to-back tool execution failures for
-	// this request. A successful tool call resets the counter.
-	consecutiveToolFailures := 0
-
 	// toolAnnotations collects brief notes about tools used this request.
 	// These are appended to the stored assistant message so future turns
 	// show what tools were called without ballooning history size.
@@ -643,19 +716,21 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 
 	var lastResp *llm.ChatResponse
 	toolFailureBudgetExhausted := false
+	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
 
 	// Agentic loop: the model runs, may call tools, receives results, then runs again.
 	// The loop exits when the model stops issuing tool calls, the request context
-	// expires, or consecutive tool execution failures exhaust the retry budget.
+	// expires, or request-local tool governance exhausts a safety budget.
 	for iteration := 1; ; iteration++ {
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
 
 		req.Messages = messages
-		req.Tools = a.toolsForRequest(ctx, request.Principal, toolExposure)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+		req.Tools = catalog.Tools
 		req.ToolChoice = nil
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
@@ -713,6 +788,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			}
 		}
 
+		normalizeToolCallIDs(&resp.Message, iteration)
 		lastResp = resp
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
@@ -726,7 +802,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			config.F("tool_call_count", len(resp.Message.ToolCalls)),
 			config.F("thinking_chars", len(resp.Message.Thinking)),
 			config.F("content_chars", len(resp.Message.Content)),
-			config.F("failure_streak", consecutiveToolFailures),
+			config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
 		)
 
 		// No tool calls — the model is done. Exit the loop.
@@ -734,6 +810,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration), config.F("status", "ok"))
 			break
 		}
+		iterationDecision := toolGovernor.BeginToolIteration()
 
 		// Append the assistant turn (including its tool calls) to the conversation.
 		messages = append(messages, resp.Message)
@@ -744,9 +821,6 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
-			if toolCallID == "" {
-				toolCallID = fmt.Sprintf("call_%d_%d", iteration, toolExecutionCount+1)
-			}
 			toolStartedAt := time.Now()
 
 			// Emit a structured tool-call chunk so UIs can render the invocation.
@@ -759,34 +833,50 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			)
 
 			var toolContent string
-
-			result, execErr := a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
-			if execErr != nil {
+			var execErr error
+			result := governance.Result{}
+			policy, advertised := catalog.Policies[toolName]
+			decision := governance.Decision{ReasonCode: iterationDecision.ReasonCode}
+			if iterationDecision.Allowed {
+				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
+			}
+			if decision.Allowed {
+				result, execErr = a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
+				toolGovernor.RecordResult(toolName, result, execErr)
+			} else {
+				toolContent = governanceResultText(decision.ReasonCode)
+				reqLog.Warn("agent.tool.blocked", "blocked tool execution",
+					config.F("iteration", iteration), config.F("tool_name", toolName),
+					config.F("reason_code", decision.ReasonCode), config.F("status", "rejected"))
+			}
+			if decision.Allowed && execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
-				consecutiveToolFailures++
 				reqLog.Warn("agent.tool.failure", "tool execution failed",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),
-					config.F("failure_streak", consecutiveToolFailures),
-					config.F("max_failures", a.maxToolFailureRetries),
+					config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
+					config.F("max_failures", a.toolPolicy.MaxConsecutiveFailures),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
 					config.F("status", "error"),
 					config.ErrorField(execErr),
 				)
 				toolContent = fmt.Sprintf("Error: %v", execErr)
-			} else {
-				consecutiveToolFailures = 0
+			} else if decision.Allowed {
 				toolContent = result.Content
 				reqLog.Debug("agent.tool.success", "tool execution succeeded",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),
+					config.F("tool_outcome", result.Outcome),
+					config.F("reason_code", result.ReasonCode),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
 					config.F("status", "ok"),
 				)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
-			toolExecutionCount++
+			if decision.Allowed {
+				toolExecutionCount++
+			}
 			if streamCallback != nil {
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
@@ -800,19 +890,32 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 				ToolCallID: toolCallID,
 				Content:    toolContent,
 			})
-
-			if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
-				reqLog.Warn("agent.tool_budget.exhausted", "tool failure budget exhausted", config.F("failure_streak", consecutiveToolFailures), config.F("max_failures", a.maxToolFailureRetries), config.F("status", "degraded"))
-				toolFailureBudgetExhausted = true
-				break
-			}
+			stats := toolGovernor.Stats(toolName)
+			reqLog.Debug("agent.tool.governance", "updated request-local tool governance",
+				config.F("tool_name", toolName),
+				config.F("tool_attempt_count", stats.Attempts),
+				config.F("tool_execution_count", stats.Executions),
+				config.F("tool_productive_count", stats.Productive),
+				config.F("tool_unproductive_count", stats.Unproductive),
+				config.F("tool_failure_count", stats.Failures),
+				config.F("tool_duplicate_count", stats.Duplicates),
+				config.F("tool_blocked_count", stats.Blocked),
+				config.F("is_tool_retired", advertised && toolGovernor.IsToolRetired(toolName, policy)))
 		}
-		if a.maxToolFailureRetries > 0 && consecutiveToolFailures >= a.maxToolFailureRetries {
+		if reason := toolGovernor.GlobalStopReason(); reason != "" {
+			toolGovernanceStopReason = reason
+			toolFailureBudgetExhausted = reason == governance.ReasonToolFailures
+			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
+				config.F("reason_code", reason),
+				config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
+				config.F("tool_execution_count", toolGovernor.TotalExecutions()),
+				config.F("tool_iteration_count", toolGovernor.ToolIterations()),
+				config.F("status", "degraded"))
 			break
 		}
 	}
 
-	if toolFailureBudgetExhausted {
+	if toolGovernanceStopReason != "" {
 		accumulatedContent.Reset()
 		finalReq := req
 		finalReq.Messages = messages
@@ -836,7 +939,8 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		lastResp = resp
 		reqLog.Debug("agent.loop.complete", "completed agent loop after disabling tools",
 			config.F("iteration_count", toolExecutionCount+1),
-			config.F("failure_streak", consecutiveToolFailures),
+			config.F("failure_streak", toolGovernor.ConsecutiveFailures()),
+			config.F("reason_code", toolGovernanceStopReason),
 			config.F("status", "degraded"),
 		)
 	}
@@ -914,7 +1018,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" {
 		responseStatus = "degraded"
 	}
 	reqLog.Info("agent.response.complete", "completed agent response",

@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func TestMemoryHandlersRequireAuthenticatedPrincipal(t *testing.T) {
@@ -19,7 +20,7 @@ func TestMemoryHandlersRequireAuthenticatedPrincipal(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+	handlers := map[string]func(context.Context, map[string]interface{}) (governance.Result, error){
 		"search": NewSearchHandler(store, log),
 		"list":   NewListHandler(store, log),
 	}
@@ -73,7 +74,7 @@ func TestMemoryHandlersAllowAuthenticatedGatewaysInGroups(t *testing.T) {
 		{CanonicalUserID: "usr_1", Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook},
 		{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "signed-user", Assurance: identity.AssuranceHomeAssistantToken},
 	}
-	handlers := map[string]func(context.Context, map[string]interface{}) (string, error){
+	handlers := map[string]func(context.Context, map[string]interface{}) (governance.Result, error){
 		"search": NewSearchHandler(store, log),
 		"list":   NewListHandler(store, log),
 	}
@@ -110,8 +111,11 @@ func TestMemorySearchReportsTotalAndPartialDegradation(t *testing.T) {
 	}
 	search := NewSearchHandler(store, log)
 	result, err := search(principalContext("usr_1", "alice"), map[string]interface{}{"query": "Where is home?"})
-	if err != nil || !strings.Contains(result, "partially degraded") || !strings.Contains(result, "Porto") {
-		t.Fatalf("partial search result=%q err=%v", result, err)
+	if err != nil || !strings.Contains(result.Content, "partially degraded") || !strings.Contains(result.Content, "Porto") {
+		t.Fatalf("partial search result=%q err=%v", result.Content, err)
+	}
+	if result.Outcome != governance.OutcomeProductive || !result.IsDegraded {
+		t.Fatalf("partial search outcome=%q degraded=%t, want productive degraded result", result.Outcome, result.IsDegraded)
 	}
 
 	store.embedder = nil

@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func TestStoreAddRejectsNormalizedDuplicatesAndAcceptsDifferentFacts(t *testing.T) {
@@ -292,12 +293,15 @@ func TestSearchHandlerRendersLowerAuthorityJSONSharedAcrossTenants(t *testing.T)
 		t.Fatal(err)
 	}
 	if first != second {
-		t.Fatalf("tenant results differ:\nA: %s\nB: %s", first, second)
+		t.Fatalf("tenant results differ:\nA: %s\nB: %s", first.Content, second.Content)
 	}
-	if !strings.Contains(first, "UNTRUSTED LOWER-AUTHORITY REFERENCE") {
-		t.Fatalf("missing lower-authority label: %q", first)
+	if first.Outcome != governance.OutcomeProductive {
+		t.Fatalf("search outcome = %q, want %q", first.Outcome, governance.OutcomeProductive)
 	}
-	lines := strings.Split(first, "\n")
+	if !strings.Contains(first.Content, "UNTRUSTED LOWER-AUTHORITY REFERENCE") {
+		t.Fatalf("missing lower-authority label: %q", first.Content)
+	}
+	lines := strings.Split(first.Content, "\n")
 	if len(lines) != 3 {
 		t.Fatalf("unexpected rendering lines: %q", lines)
 	}
@@ -313,7 +317,7 @@ func TestSearchHandlerRendersLowerAuthorityJSONSharedAcrossTenants(t *testing.T)
 	if record.ID != added.Memory.ID || record.Memory != added.Memory.Text || record.Score != 1 || strings.Join(record.Sources, ",") != "lexical" {
 		t.Fatalf("unexpected rendered record: %+v", record)
 	}
-	if utf8.RuneCountInString(first) > searchOutputLimit {
+	if utf8.RuneCountInString(first.Content) > searchOutputLimit {
 		t.Fatalf("render exceeds %d runes", searchOutputLimit)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 const (
@@ -447,18 +448,18 @@ func (s *Store) liveRevision(ctx context.Context, kind string) (liveIndexRevisio
 }
 
 // NewSearchHandler creates the sole model-visible global-memory tool.
-func NewSearchHandler(store *Store, log *config.Logger) func(context.Context, map[string]interface{}) (string, error) {
-	return func(ctx context.Context, args map[string]interface{}) (string, error) {
+func NewSearchHandler(store *Store, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if _, err := authenticatedPrincipal(ctx); err != nil {
-			return "", err
+			return governance.Result{}, err
 		}
 		query := NormalizeMemory(stringArg(args, "query"))
 		if query == "" || utf8.RuneCountInString(query) > 500 {
-			return "", fmt.Errorf("%s: query must contain 1..500 characters", toolnames.GlobalMemorySearch)
+			return governance.Result{}, fmt.Errorf("%s: query must contain 1..500 characters", toolnames.GlobalMemorySearch)
 		}
 		limit, validLimit := intArg(args, "limit", DefaultSearchLimit)
 		if !validLimit || limit < 1 || limit > MaxSearchLimit {
-			return "", fmt.Errorf("%s: limit must be between 1 and %d", toolnames.GlobalMemorySearch, MaxSearchLimit)
+			return governance.Result{}, fmt.Errorf("%s: limit must be between 1 and %d", toolnames.GlobalMemorySearch, MaxSearchLimit)
 		}
 		started := time.Now()
 		results, stats := store.Search(ctx, query, limit)
@@ -473,7 +474,16 @@ func NewSearchHandler(store *Store, log *config.Logger) func(context.Context, ma
 			config.F("lexical_candidate_count", stats.LexicalCount), config.F("semantic_candidate_count", stats.SemanticCount),
 			config.F("selected_memory_count", stats.SelectedCount), config.F("is_lexical_available", stats.LexicalAvailable),
 			config.F("is_vector_available", stats.SemanticAvailable), config.F("duration_ms", time.Since(started).Milliseconds()))
-		return renderSearch(results, searchOutputLimit), nil
+		if !stats.LexicalAvailable && !stats.SemanticAvailable {
+			return governance.Result{}, fmt.Errorf("%s: retrieval channels unavailable", toolnames.GlobalMemorySearch)
+		}
+		outcome := governance.OutcomeProductive
+		reason := ""
+		if len(results) == 0 {
+			outcome = governance.OutcomeUnproductive
+			reason = "no_results"
+		}
+		return governance.Result{Content: renderSearch(results, searchOutputLimit), Outcome: outcome, ReasonCode: reason, IsDegraded: stats.LexicalError != nil || stats.SemanticError != nil}, nil
 	}
 }
 
