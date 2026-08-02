@@ -204,10 +204,11 @@ Oswald keeps four distinct memory layers.
 - Global memory is factual lower-authority reference data, separate from soul policy and personality
 - Canonical rows live in the administrator-curated `global_memories` table; global memory is never learned automatically from MCP results, user prompts, or model tool calls
 - Administrators manage the store with `/global-memory add <memory text>`, `/global-memory list [page]`, and `/global-memory forget <id>`
-- Add stores the normalized memory text and rejects an exact normalized duplicate. Forget hard-deletes the canonical row and enqueues deletion from derived indexes; there is no staged, evidence-evolving, supersession, or post-delivery publication lifecycle
+- Add trusts the administrator-provided content, normalizes it, enforces the 1,000-rune storage bound, and rejects an exact normalized duplicate. It does not filter credentials or instruction-like text. Forget hard-deletes the canonical row and enqueues deletion from derived indexes; there is no staged, evidence-evolving, supersession, or post-delivery publication lifecycle
 - `global_memory_search` is the sole model-visible global-memory tool and requires a valid authenticated tenant principal. There are no model-visible global-memory add, save, list, or forget tools
 - Global memory is not injected into prompts automatically. The model calls `global_memory_search` when a request concerns Oswald's implementation, hardware, deployment, version, architecture, configuration, capabilities, or similar deployment facts
 - Search hybrid-ranks lexical FTS5 and semantic sqlite-vec results. Either channel may degrade independently; if neither derived channel is available, a bounded scan of canonical `global_memories` provides fallback results
+- Search returns matching records directly as newline-delimited JSON containing ID, memory text, score, and retrieval sources, without an additional heading or authority-warning wrapper
 - Semantic retrieval is enabled only when `LLM_GATEWAY_EMBEDDING_MODEL` is configured. Without it, lexical retrieval and bounded canonical fallback remain available
 
 ### Persistent User Memory
