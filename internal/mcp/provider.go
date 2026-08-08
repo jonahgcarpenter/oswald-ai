@@ -60,10 +60,10 @@ func (p *Provider) DiscoveryTools(ctx context.Context, principal identity.Princi
 	}
 	tools := make([]llm.Tool, 0, len(configs))
 	for _, cfg := range configs {
-		if !cfg.Enabled || isReservedServerName(cfg.Name) {
+		if !cfg.Enabled || strings.TrimSpace(cfg.Description) == "" || isReservedServerName(cfg.Name) {
 			continue
 		}
-		tools = append(tools, discoveryTool(cfg.Name))
+		tools = append(tools, discoveryTool(cfg.Name, cfg.Description))
 	}
 	return tools
 }
@@ -95,7 +95,7 @@ func (p *Provider) ResolveTools(ctx context.Context, principal identity.Principa
 	available := map[string]bool{}
 	for _, server := range servers {
 		specs, info, err := p.manager.ServerToolSpecs(ctx, principal.CanonicalUserID, server)
-		if err != nil || info.Status != serverStatusConnected {
+		if err != nil || strings.TrimSpace(info.Description) == "" || info.Status != serverStatusConnected {
 			continue
 		}
 		for _, spec := range specs {
@@ -149,10 +149,10 @@ func (p *Provider) Execute(ctx context.Context, principal identity.Principal, na
 	return result, true, err
 }
 
-func discoveryTool(server string) llm.Tool {
+func discoveryTool(server, description string) llm.Tool {
 	return llm.Tool{Type: "function", Function: llm.ToolDefinition{
 		Name:        server + ".tools",
-		Description: "Search and expose MCP tools from the configured " + server + " server for this request. Call this before using any " + server + ".* MCP tool.",
+		Description: description,
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{

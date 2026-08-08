@@ -13,7 +13,8 @@ import (
 )
 
 func TestPermanentV400SQLIsExecutedDirectly(t *testing.T) {
-	migration := orderedMigrations()[0]
+	migrations := orderedMigrations()
+	migration := migrations[0]
 	for _, forbidden := range []string{"ALTER TABLE", "DROP TABLE", "DROP TRIGGER", "data-transform:", "legacy-ledger:"} {
 		if strings.Contains(migration.sql, forbidden) {
 			t.Fatalf("direct baseline contains forbidden historical operation %q", forbidden)
@@ -25,7 +26,15 @@ func TestPermanentV400SQLIsExecutedDirectly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer direct.Close()
-	if _, err := direct.Exec(migration.sql + `
+	if _, err := direct.Exec(migration.sql); err != nil {
+		t.Fatalf("execute baseline definition: %v", err)
+	}
+	for _, migration := range migrations[1:] {
+		if _, err := direct.Exec(migration.sql); err != nil {
+			t.Fatalf("execute migration %s: %v", migration.name, err)
+		}
+	}
+	if _, err := direct.Exec(`
 CREATE TABLE schema_migration_versions (
 	version INTEGER PRIMARY KEY CHECK (version > 0),
 	name TEXT NOT NULL UNIQUE,
@@ -45,7 +54,7 @@ CREATE TABLE schema_migration_versions (
 	directSchema := schemaSnapshot(t, direct)
 	appliedSchema := schemaSnapshot(t, appliedStore.SQL())
 	if directSchema != appliedSchema {
-		t.Fatal("fresh schema differs from directly executed v4.0.0 SQL")
+		t.Fatal("fresh schema differs from directly executed permanent migration SQL")
 	}
 }
 
@@ -98,7 +107,7 @@ INSERT INTO memory_candidates(
 	}
 	defer reopened.Close()
 	var count int
-	if err := reopened.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != 1 {
+	if err := reopened.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != len(orderedMigrations()) {
 		t.Fatalf("baseline reapplied: count=%d err=%v", count, err)
 	}
 	var persistedAnnotations string
@@ -107,6 +116,48 @@ INSERT INTO memory_candidates(
 	}
 	if persistedAnnotations != toolAnnotations {
 		t.Fatalf("persisted tool names changed across restart: annotations=%q", persistedAnnotations)
+	}
+}
+
+func TestPermanentV401AddsEmptyMCPDescriptionForBackfill(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := orderedMigrations()[0]
+	if _, err := raw.Exec(migration.sql + `
+CREATE TABLE schema_migration_versions (
+	version INTEGER PRIMARY KEY CHECK (version > 0),
+	name TEXT NOT NULL UNIQUE,
+	checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+	applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (1, 'v4.0.0', '` + migrationChecksum(migration) + `', datetime('now'));
+INSERT INTO mcp_servers(id, scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled)
+VALUES ('mcp-1', 'global', NULL, 'github', 'streamable_http', 'ciphertext', '', 1);`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("apply v4.0.1: %v", err)
+	}
+	defer db.Close()
+	var description string
+	if err := db.SQL().QueryRow(`SELECT description FROM mcp_servers WHERE id = 'mcp-1'`).Scan(&description); err != nil {
+		t.Fatal(err)
+	}
+	if description != "" {
+		t.Fatalf("migrated description = %q, want empty backfill marker", description)
+	}
+	var count int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != len(orderedMigrations()) {
+		t.Fatalf("migration ledger count=%d err=%v", count, err)
 	}
 }
 
@@ -303,8 +354,9 @@ func TestPermanentMigrationRunnerAppliesMissingRegisteredFiles(t *testing.T) {
 	}
 	defer raw.Close()
 	db := &DB{path: path, db: raw}
-	registry := append(orderedMigrations(), schemaMigration{
-		version: 2,
+	base := orderedMigrations()
+	registry := append(base, schemaMigration{
+		version: len(base) + 1,
 		name:    "v4.1.0",
 		sql:     "CREATE TABLE migration_two_probe (id INTEGER PRIMARY KEY);",
 		major:   4,
@@ -320,7 +372,7 @@ func TestPermanentMigrationRunnerAppliesMissingRegisteredFiles(t *testing.T) {
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'migration_two_probe'`).Scan(&probe); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 2 || probe != 1 {
+	if rows != len(registry) || probe != 1 {
 		t.Fatalf("missing migration not applied: ledger=%d probe=%d", rows, probe)
 	}
 }
@@ -362,8 +414,8 @@ func TestPermanentMigrationRejectsMalformedLedgerPrefixes(t *testing.T) {
 		name   string
 		mutate string
 	}{
-		{name: "gap", mutate: `UPDATE schema_migration_versions SET version = 2 WHERE version = 1`},
-		{name: "unknown trailing version", mutate: `INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (2, 'v9.0.0', '` + strings.Repeat("f", 64) + `', datetime('now'))`},
+		{name: "gap", mutate: `UPDATE schema_migration_versions SET version = 3 WHERE version = 1`},
+		{name: "unknown trailing version", mutate: `INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (3, 'v9.0.0', '` + strings.Repeat("f", 64) + `', datetime('now'))`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "malformed.db")
@@ -410,8 +462,9 @@ func TestPermanentMigrationFailureRollsBackMissingPrefixOnly(t *testing.T) {
 	}
 	defer raw.Close()
 	db := &DB{path: path, db: raw}
-	registry := append(orderedMigrations(), schemaMigration{
-		version: 2,
+	base := orderedMigrations()
+	registry := append(base, schemaMigration{
+		version: len(base) + 1,
 		name:    "v4.1.0",
 		sql:     "CREATE TABLE migration_two_probe (id INTEGER PRIMARY KEY); invalid statement;",
 		major:   4,
@@ -427,7 +480,7 @@ func TestPermanentMigrationFailureRollsBackMissingPrefixOnly(t *testing.T) {
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'migration_two_probe'`).Scan(&probe); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 1 || probe != 0 {
+	if ledgerRows != len(base) || probe != 0 {
 		t.Fatalf("failed prefix migration changed database: ledger=%d probe=%d", ledgerRows, probe)
 	}
 }
@@ -456,8 +509,8 @@ func TestPermanentV400ConcurrentOpens(t *testing.T) {
 	if err := dbs[0].SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("migration ledger row count=%d, want 1", count)
+	if count != len(orderedMigrations()) {
+		t.Fatalf("migration ledger row count=%d, want %d", count, len(orderedMigrations()))
 	}
 }
 

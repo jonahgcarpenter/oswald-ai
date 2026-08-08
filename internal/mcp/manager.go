@@ -112,7 +112,7 @@ func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
 	}
 	infos := make([]ServerInfo, 0, len(configs))
 	for _, cfg := range configs {
-		info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+		info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 		if !cfg.Enabled {
 			info.Status = serverStatusDisabled
 			infos = append(infos, info)
@@ -157,7 +157,7 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 	}
 	var specs []ToolSpec
 	for _, cfg := range configs {
-		if !cfg.Enabled || isReservedServerName(cfg.Name) {
+		if !cfg.Enabled || strings.TrimSpace(cfg.Description) == "" || isReservedServerName(cfg.Name) {
 			continue
 		}
 		srv, err := m.ensureConnected(ctx, cfg)
@@ -182,7 +182,7 @@ func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]T
 	if !ok {
 		return nil, ServerInfo{}, fmt.Errorf("no configured MCP server named %q", name)
 	}
-	info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+	info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 	if !cfg.Enabled {
 		info.Status = serverStatusDisabled
 		return nil, info, nil

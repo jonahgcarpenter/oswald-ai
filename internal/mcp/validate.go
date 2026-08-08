@@ -8,9 +8,14 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
-const maxProviderIdentifierBytes = 64
+const (
+	maxProviderIdentifierBytes    = 64
+	maxServerDescriptionRuneCount = 500
+)
 
 func validateProviderIdentifier(name string) error {
 	if len(name) == 0 || len(name) > maxProviderIdentifierBytes {
@@ -54,6 +59,22 @@ func validateServerName(name string) error {
 		return fmt.Errorf("server name %q is reserved", name)
 	}
 	return nil
+}
+
+func normalizeServerDescription(description string) (string, error) {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return "", fmt.Errorf("MCP server description cannot be empty")
+	}
+	if utf8.RuneCountInString(description) > maxServerDescriptionRuneCount {
+		return "", fmt.Errorf("MCP server description must be at most %d characters", maxServerDescriptionRuneCount)
+	}
+	for _, r := range description {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("MCP server description cannot contain control characters")
+		}
+	}
+	return description, nil
 }
 
 func isReservedServerName(name string) bool {

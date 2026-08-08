@@ -23,10 +23,10 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	addTestUsers(t, store, "user_1", "user_2")
 	ctx := context.Background()
 	for _, cfg := range []ServerConfig{
-		{Scope: ScopeGlobal, Name: "github", Transport: TransportStreamableHTTP, URL: "https://example.com/github", Enabled: true},
-		{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true},
-		{Scope: ScopeUser, OwnerUserID: "user_2", Name: "other", Transport: TransportStreamableHTTP, URL: "https://example.com/other", Enabled: true},
-		{Scope: ScopeUser, OwnerUserID: "user_1", Name: "disabled", Transport: TransportStreamableHTTP, URL: "https://example.com/disabled", Enabled: false},
+		{Scope: ScopeGlobal, Name: "github", Description: "Manage GitHub repositories and issues.", Transport: TransportStreamableHTTP, URL: "https://example.com/github", Enabled: true},
+		{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Description: "Control Home Assistant devices and automations.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true},
+		{Scope: ScopeUser, OwnerUserID: "user_2", Name: "other", Description: "Use another user's tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/other", Enabled: true},
+		{Scope: ScopeUser, OwnerUserID: "user_1", Name: "disabled", Description: "Use disabled tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/disabled", Enabled: false},
 	} {
 		if _, err := store.Save(ctx, cfg); err != nil {
 			t.Fatalf("save %s: %v", cfg.Name, err)
@@ -48,6 +48,9 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 		if tool.Function.Name != "home.tools" {
 			continue
 		}
+		if tool.Function.Description != "Control Home Assistant devices and automations." {
+			t.Fatalf("home.tools description = %q", tool.Function.Description)
+		}
 		if _, ok := tool.Function.Parameters.Properties["query"]; !ok {
 			t.Fatal("home.tools schema missing query parameter")
 		}
@@ -58,6 +61,26 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "homeassistant", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
 	if tools := provider.DiscoveryTools(ctx, invalid); len(tools) != 0 {
 		t.Fatalf("invalid principal received discovery tools: %+v", tools)
+	}
+}
+
+func TestProviderHidesMigratedServerWithoutDescription(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Temporary description.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	if err != nil {
+		t.Fatalf("save legacy server: %v", err)
+	}
+	if _, err := store.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET description = '' WHERE id = ?`, cfg.ID); err != nil {
+		t.Fatalf("clear migrated description: %v", err)
+	}
+	manager := NewManagerFromStore(store, config.NewLogger(config.LevelError))
+	infos := manager.ServerInfos(ctx, "user_1")
+	if len(infos) != 1 || infos[0].Description != "" {
+		t.Fatalf("migrated server info = %+v", infos)
+	}
+	if tools := NewProvider(manager).DiscoveryTools(ctx, testPrincipal("user_1")); len(tools) != 0 {
+		t.Fatalf("undescribed server was advertised: %+v", tools)
 	}
 }
 
@@ -82,7 +105,7 @@ func TestProviderDoesNotAdvertisePersistedReservedSoulServer(t *testing.T) {
 	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Legacy tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
 	if err != nil {
 		t.Fatalf("save legacy server: %v", err)
 	}
@@ -108,7 +131,7 @@ func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
 	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
 		t.Fatalf("save home: %v", err)
 	}
@@ -137,7 +160,7 @@ func TestProviderEntryPointsRejectUnauthenticatedPrincipal(t *testing.T) {
 	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
 		t.Fatalf("save home: %v", err)
 	}

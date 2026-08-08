@@ -57,12 +57,12 @@ VALUES ('mcp-1', 'user', 'user-1', 'server', 'discard-type', 'streamable_http', 
 		t.Fatalf("unexpected migrated linked account: %s", got)
 	}
 	var gotURL, gotHeaders []byte
-	var scope, mcpOwner, name, transport string
+	var scope, mcpOwner, name, description, transport string
 	var enabled int
-	if err := db.SQL().QueryRow(`SELECT scope, owner_user_id, name, transport, url_ciphertext, headers_ciphertext, enabled FROM mcp_servers`).Scan(&scope, &mcpOwner, &name, &transport, &gotURL, &gotHeaders, &enabled); err != nil {
+	if err := db.SQL().QueryRow(`SELECT scope, owner_user_id, name, description, transport, url_ciphertext, headers_ciphertext, enabled FROM mcp_servers`).Scan(&scope, &mcpOwner, &name, &description, &transport, &gotURL, &gotHeaders, &enabled); err != nil {
 		t.Fatal(err)
 	}
-	if scope != "user" || mcpOwner != "user-1" || name != "server" || transport != "streamable_http" || enabled != 0 || !bytes.Equal(gotURL, ciphertext) || !bytes.Equal(gotHeaders, ciphertext) {
+	if scope != "user" || mcpOwner != "user-1" || name != "server" || description != "" || transport != "streamable_http" || enabled != 0 || !bytes.Equal(gotURL, ciphertext) || !bytes.Equal(gotHeaders, ciphertext) {
 		t.Fatalf("unexpected migrated MCP server: %q %q %q %q %d %v %v", scope, mcpOwner, name, transport, enabled, gotURL, gotHeaders)
 	}
 	var websocketLinks, websocketOnlyUsers int
@@ -267,15 +267,21 @@ func createLegacyV320Database(t *testing.T, path string) *sql.DB {
 
 func assertPermanentV4Ledger(t *testing.T, db *sql.DB) {
 	t.Helper()
-	var version, count int
-	var name, checksum string
-	if err := db.QueryRow(`SELECT version, name, checksum FROM schema_migration_versions`).Scan(&version, &name, &checksum); err != nil {
-		t.Fatal(err)
-	}
+	migrations := orderedMigrations()
+	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || count != 1 || name != "v4.0.0" || checksum != migrationChecksum(orderedMigrations()[0]) {
+	if count != len(migrations) {
+		t.Fatalf("unexpected permanent ledger count: got %d want %d", count, len(migrations))
+	}
+	var version int
+	var name, checksum string
+	if err := db.QueryRow(`SELECT version, name, checksum FROM schema_migration_versions ORDER BY version DESC LIMIT 1`).Scan(&version, &name, &checksum); err != nil {
+		t.Fatal(err)
+	}
+	latest := migrations[len(migrations)-1]
+	if version != latest.version || name != latest.name || checksum != migrationChecksum(latest) {
 		t.Fatalf("unexpected permanent ledger: version=%d count=%d name=%q checksum=%q", version, count, name, checksum)
 	}
 }

@@ -77,6 +77,7 @@ type ServerConfig struct {
 	Scope       string
 	OwnerUserID string
 	Name        string
+	Description string
 	Transport   string
 	URL         string
 	Headers     map[string]string
@@ -88,6 +89,7 @@ type storedServerConfig struct {
 	Scope             string
 	OwnerUserID       string
 	Name              string
+	Description       string
 	Transport         string
 	URLCiphertext     string
 	HeadersCiphertext string

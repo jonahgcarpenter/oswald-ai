@@ -23,7 +23,7 @@ type handler struct {
 }
 
 func (h handler) Definition() commands.Definition {
-	return commands.Definition{Name: "mcp", Summary: "Manage your MCP server connections.", Usage: "/mcp servers|add|remove|enable|disable|test ..."}
+	return commands.Definition{Name: "mcp", Summary: "Manage your MCP server connections.", Usage: "/mcp servers|add|remove|enable|disable|test ... (add requires a description)"}
 }
 
 func (h handler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
@@ -94,6 +94,11 @@ func (h handler) list(ctx context.Context, userID, scope string) (commands.Resul
 		if info.Reason != "" {
 			line += ", reason: " + info.Reason
 		}
+		if info.Description == "" {
+			line += ", description: required"
+		} else {
+			line += ", description: " + info.Description
+		}
 		lines = append(lines, line)
 	}
 	if len(lines) == 1 {
@@ -103,21 +108,48 @@ func (h handler) list(ctx context.Context, userID, scope string) (commands.Resul
 }
 
 func (h handler) add(ctx context.Context, scope, owner string, args []string) (commands.Result, error) {
-	if len(args) < 2 {
-		return commands.Result{Text: "Use: /mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>]"}, nil
+	if len(args) < 3 {
+		return commands.Result{Text: addUsage(scope)}, nil
 	}
 	name := args[0]
 	url := args[1]
-	headers, err := parseHeaders(args[2:])
+	headers, description, err := parseAddOptions(args[2:])
 	if err != nil {
 		return commands.Result{Text: err.Error()}, nil
 	}
-	_, err = h.store.Save(ctx, mcpmanager.ServerConfig{Scope: scope, OwnerUserID: owner, Name: name, Transport: mcpmanager.TransportStreamableHTTP, URL: url, Headers: headers, Enabled: true})
+	_, err = h.store.Save(ctx, mcpmanager.ServerConfig{Scope: scope, OwnerUserID: owner, Name: name, Description: description, Transport: mcpmanager.TransportStreamableHTTP, URL: url, Headers: headers, Enabled: true})
 	if err != nil {
 		return commands.Result{}, err
 	}
 	h.manager.Invalidate(scope, owner, strings.ToLower(name))
 	return commands.Result{Text: fmt.Sprintf("MCP server %q saved. URL and headers are encrypted at rest.", strings.ToLower(name))}, nil
+}
+
+func addUsage(scope string) string {
+	prefix := "/mcp add"
+	if scope == mcpmanager.ScopeGlobal {
+		prefix = "/mcp global add"
+	}
+	return "Use: " + prefix + " <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>] <description>"
+}
+
+func parseAddOptions(args []string) (map[string]string, string, error) {
+	var optionArgs, descriptionParts []string
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "auth-bearer=") || strings.HasPrefix(arg, "header:") {
+			optionArgs = append(optionArgs, arg)
+			continue
+		}
+		descriptionParts = append(descriptionParts, arg)
+	}
+	if len(descriptionParts) == 0 {
+		return nil, "", fmt.Errorf("MCP server description cannot be empty")
+	}
+	headers, err := parseHeaders(optionArgs)
+	if err != nil {
+		return nil, "", err
+	}
+	return headers, strings.Join(descriptionParts, " "), nil
 }
 
 func (h handler) remove(ctx context.Context, scope, owner string, args []string) (commands.Result, error) {

@@ -240,7 +240,7 @@ func TestChallengeMergeTransfersMemoryAndEncryptedMCP(t *testing.T) {
 	if err := memories.AppendSessionTurnForGeneration(ctx, "linked-session", loserID, loserProfile.Generation, "before link", "still here", nil, time.Hour); err != nil {
 		t.Fatalf("append loser session: %v", err)
 	}
-	if _, err := mcpStore.Save(ctx, mcp.ServerConfig{Scope: mcp.ScopeUser, OwnerUserID: loserID, Name: "home", Transport: mcp.TransportStreamableHTTP, URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true}); err != nil {
+	if _, err := mcpStore.Save(ctx, mcp.ServerConfig{Scope: mcp.ScopeUser, OwnerUserID: loserID, Name: "home", Description: "Control Home Assistant.", Transport: mcp.TransportStreamableHTTP, URL: "https://example.com/mcp", Headers: map[string]string{"Authorization": "Bearer secret"}, Enabled: true}); err != nil {
 		t.Fatalf("save loser MCP: %v", err)
 	}
 	winner := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "401", Assurance: identity.AssuranceDiscordGateway}

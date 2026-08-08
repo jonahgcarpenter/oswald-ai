@@ -67,7 +67,7 @@ func TestManagerRejectsConfigLoadedBeforeUserMerge(t *testing.T) {
 	store := testStore(t)
 	addTestUsers(t, store, "winner", "loser")
 	ctx := context.Background()
-	stale, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "loser", Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp"})
+	stale, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "loser", Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp"})
 	if err != nil {
 		t.Fatalf("save stale config: %v", err)
 	}
