@@ -962,6 +962,9 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	if !requestHasTool(requests[1], "home.turn_on") {
 		t.Fatalf("second request did not expose actual MCP tool: %+v", toolNames(requests[1]))
 	}
+	if description := requestToolDescription(requests[1], "home.turn_on"); description != "Turn on a light" {
+		t.Fatalf("discovered tool description = %q", description)
+	}
 }
 
 func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
@@ -982,6 +985,9 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	request := primaryRequests(chat.requests)[0]
 	if !requestHasTool(request, "home.turn_on") {
 		t.Fatalf("first request did not pre-expose recent MCP tool: %+v", toolNames(request))
+	}
+	if description := requestToolDescription(request, "home.turn_on"); description != "Turn on a light" {
+		t.Fatalf("pre-exposed tool description = %q", description)
 	}
 	foundAnnotation := false
 	for _, message := range request.Messages {
@@ -1368,6 +1374,15 @@ func requestHasTool(req llm.ChatRequest, name string) bool {
 		}
 	}
 	return false
+}
+
+func requestToolDescription(req llm.ChatRequest, name string) string {
+	for _, tool := range req.Tools {
+		if tool.Function.Name == name {
+			return tool.Function.Description
+		}
+	}
+	return ""
 }
 
 func toolNames(req llm.ChatRequest) []string {

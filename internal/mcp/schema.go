@@ -53,8 +53,8 @@ func schemaToParams(inputSchema any) ([]ParamSpec, error) {
 			Name:        name,
 			Type:        propType,
 			Required:    required[name],
-			Description: strings.TrimSpace(property.Description),
-			Enum:        property.Enum,
+			Description: normalizeCatalogDescription(property.Description, maxParamDescriptionRuneCount),
+			Enum:        safeCatalogEnum(property.Enum),
 		})
 	}
 

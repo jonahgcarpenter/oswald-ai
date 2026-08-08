@@ -397,9 +397,9 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 	if err != nil {
 		return ToolSpec{}, fmt.Errorf("normalize input schema: %w", err)
 	}
-	description := strings.TrimSpace(tool.Description)
+	description := normalizeCatalogDescription(tool.Description, maxToolDescriptionRuneCount)
 	if description == "" {
-		description = strings.TrimSpace(tool.Title)
+		description = normalizeCatalogDescription(tool.Title, maxToolDescriptionRuneCount)
 	}
 	return ToolSpec{Name: localName, Description: description, ServerID: cfg.ID, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error) {
 		meta := requestctx.MetadataFromContext(ctx)

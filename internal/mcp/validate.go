@@ -15,6 +15,11 @@ import (
 const (
 	maxProviderIdentifierBytes    = 64
 	maxServerDescriptionRuneCount = 500
+	maxToolDescriptionRuneCount   = 1000
+	maxParamDescriptionRuneCount  = 500
+	maxEnumValueCount             = 100
+	maxEnumValueRuneCount         = 200
+	maxEnumTotalRuneCount         = 4000
 )
 
 func validateProviderIdentifier(name string) error {
@@ -75,6 +80,44 @@ func normalizeServerDescription(description string) (string, error) {
 		}
 	}
 	return description, nil
+}
+
+func normalizeCatalogDescription(description string, maxRunes int) string {
+	description = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return ' '
+		}
+		return r
+	}, description)
+	description = strings.Join(strings.Fields(description), " ")
+	runes := []rune(description)
+	if len(runes) > maxRunes {
+		description = strings.TrimSpace(string(runes[:maxRunes]))
+	}
+	return description
+}
+
+func safeCatalogEnum(values []string) []string {
+	if len(values) == 0 || len(values) > maxEnumValueCount {
+		return nil
+	}
+	totalRunes := 0
+	for _, value := range values {
+		runeCount := utf8.RuneCountInString(value)
+		if runeCount > maxEnumValueRuneCount {
+			return nil
+		}
+		totalRunes += runeCount
+		if totalRunes > maxEnumTotalRuneCount {
+			return nil
+		}
+		for _, r := range value {
+			if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+				return nil
+			}
+		}
+	}
+	return append([]string(nil), values...)
 }
 
 func isReservedServerName(name string) bool {

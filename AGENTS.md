@@ -493,7 +493,7 @@ Optional external tools:
 
 - MCP server configurations are stored in SQLite with plaintext model-visible descriptions and encrypted URLs and headers
 - MCP server configuration is optional, but the subsystem is initialized unconditionally and `MCP_CONFIG_ENCRYPTION_KEY` is required at startup
-- MCP-discovered tools are not included in the default LLM tool list; each described server exposes `<server>.tools` using exactly its configured description, that tool exposes returned matches for the current request, and eligible successful recent tools may be pre-exposed for continuity
+- MCP-discovered tools are not included in the default LLM tool list; each described server exposes `<server>.tools` using exactly its configured description, that tool exposes returned matches for the current request, and eligible successful recent tools may be pre-exposed for continuity with their current live catalog descriptions
 - `/mcp add <name> <https-url> [auth/header options] <description>` and its global form require a 1-500 character description; descriptions reject control characters and can contain unquoted spaces. The store permits empty descriptions only as the `v4.0.1` migration default for existing rows, and those rows expose neither discovery nor historically pre-exposed MCP tools until updated by rerunning the complete add command
 - Global MCP servers are visible to all users; user MCP servers are visible only to their owning canonical user
 
@@ -515,7 +515,7 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 - MCP client startup lives in `internal/mcp/`; remote connections are opened lazily by discovery, testing, historical pre-exposure, or execution
 - Server URLs must use HTTPS and pass public-address validation. Although `sse` exists as a stored transport value, only `streamable_http` is implemented; SSE-only configurations fail when connection is attempted
 - Authentication is supplied through encrypted configured headers, including optional bearer headers
-- Every valid remotely listed tool except the reserved remote name `tools` may be exposed and executed; there is no read-only mutation filter, so configured servers and their catalogs must be trusted
+- Every valid remotely listed tool except the reserved remote name `tools` may be exposed and executed; there is no read-only mutation filter, so configured servers and their catalogs must be trusted. Remote tool and parameter descriptions are normalized, bounded, and included as model-visible schema metadata; safe bounded string enums are included without altering their exact values. Tool results remain explicitly untrusted
 - MCP tools use namespaced names like `<server>.<tool>` and are surfaced through request-local discovery or eligible recent-tool pre-exposure; the `soul` server namespace is reserved and never model-visible
 
 ### Tool Governance

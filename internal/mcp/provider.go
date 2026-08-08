@@ -240,12 +240,20 @@ func llmTool(spec ToolSpec) llm.Tool {
 	props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
 	required := []string{}
 	for _, p := range spec.Parameters {
-		props[p.Name] = llm.ToolParameterProperty{Type: p.Type, Description: "Input value for this MCP tool."}
+		description := p.Description
+		if description == "" {
+			description = "Input value for this MCP tool."
+		}
+		props[p.Name] = llm.ToolParameterProperty{Type: p.Type, Description: description, Enum: append([]string(nil), p.Enum...)}
 		if p.Required {
 			required = append(required, p.Name)
 		}
 	}
-	return llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: spec.Name, Description: "Execute this configured MCP tool.", Parameters: llm.ToolParameters{Type: "object", Properties: props, Required: required}}}
+	description := spec.Description
+	if description == "" {
+		description = "Execute this configured MCP tool."
+	}
+	return llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: spec.Name, Description: description, Parameters: llm.ToolParameters{Type: "object", Properties: props, Required: required}}}
 }
 
 func mapParams(params []ParamSpec) []registry.ParamSpec {
