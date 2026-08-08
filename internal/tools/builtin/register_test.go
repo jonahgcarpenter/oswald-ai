@@ -182,6 +182,34 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
+func TestRegisterLimitsOnlyUnproductiveWebSearches(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range reg.Names() {
+		policy, ok := reg.Policy(name)
+		if !ok {
+			t.Fatalf("missing policy for %s", name)
+		}
+		if policy.MaxExecutions != 0 || policy.MaxFailures != 0 {
+			t.Fatalf("%s has a per-tool execution/failure limit: %+v", name, policy)
+		}
+		wantUnproductive := 0
+		if name == "web.search" {
+			wantUnproductive = 2
+		}
+		if policy.MaxUnproductive != wantUnproductive {
+			t.Fatalf("%s max unproductive = %d, want %d", name, policy.MaxUnproductive, wantUnproductive)
+		}
+	}
+}
+
 func TestMemoryArgumentNormalizationPreservesInvalidLimitCorrection(t *testing.T) {
 	normalize := normalizeMemorySearchArgs(8)
 	invalid, err := governance.Fingerprint(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "test", "limit": "8"}, normalize)

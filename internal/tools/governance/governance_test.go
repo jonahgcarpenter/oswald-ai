@@ -32,9 +32,13 @@ func TestPoliciesValidateSafetyLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	invalidTool := testPolicy()
-	invalidTool.MaxUnproductive = 0
+	invalidTool.MaxUnproductive = -1
 	if err := invalidTool.Validate(); err == nil {
-		t.Fatal("zero unproductive limit was accepted")
+		t.Fatal("negative unproductive limit was accepted")
+	}
+	unlimited := ToolPolicy{}
+	if err := unlimited.Validate(); err != nil {
+		t.Fatalf("zero-value unlimited policy was rejected: %v", err)
 	}
 	invalidGlobal := testGlobal()
 	invalidGlobal.MaxExecutions = 0
@@ -46,11 +50,12 @@ func TestPoliciesValidateSafetyLimits(t *testing.T) {
 func TestGovernorBlocksDuplicatesWithoutConsumingExecution(t *testing.T) {
 	g := New(testGlobal())
 	policy := testPolicy()
-	if decision := g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true); !decision.Allowed {
+	decision := g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
+	if !decision.Allowed {
 		t.Fatalf("first decision = %+v", decision)
 	}
-	g.RecordResult("test.tool", Result{Outcome: OutcomeProductive}, nil)
-	decision := g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
+	g.RecordResult("test.tool", decision, Result{Outcome: OutcomeProductive}, nil)
+	decision = g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
 	if decision.Allowed || decision.ReasonCode != ReasonDuplicate {
 		t.Fatalf("duplicate decision = %+v", decision)
 	}
@@ -60,14 +65,53 @@ func TestGovernorBlocksDuplicatesWithoutConsumingExecution(t *testing.T) {
 	}
 }
 
+func TestGovernorAllowsExactRetryAfterExecutionFailure(t *testing.T) {
+	g := New(testGlobal())
+	policy := testPolicy()
+	args := map[string]interface{}{"q": "same"}
+
+	first := g.BeforeExecution("test.tool", args, policy, true)
+	if !first.Allowed {
+		t.Fatalf("first decision = %+v", first)
+	}
+	g.RecordResult("test.tool", first, Result{}, assertError{})
+
+	retry := g.BeforeExecution("test.tool", args, policy, true)
+	if !retry.Allowed {
+		t.Fatalf("retry decision = %+v", retry)
+	}
+	g.RecordResult("test.tool", retry, Result{Outcome: OutcomeProductive}, nil)
+
+	duplicate := g.BeforeExecution("test.tool", args, policy, true)
+	if duplicate.Allowed || duplicate.ReasonCode != ReasonDuplicate {
+		t.Fatalf("post-success duplicate decision = %+v", duplicate)
+	}
+}
+
+func TestGovernorZeroLimitsDoNotRetireTool(t *testing.T) {
+	g := New(GlobalPolicy{MaxExecutions: 20, MaxToolIterations: 20})
+	policy := ToolPolicy{BlockDuplicates: true}
+	for i := 0; i < 10; i++ {
+		decision := g.BeforeExecution("unlimited.tool", map[string]interface{}{"n": i}, policy, true)
+		if !decision.Allowed {
+			t.Fatalf("call %d blocked: %+v", i, decision)
+		}
+		g.RecordResult("unlimited.tool", decision, Result{Outcome: OutcomeUnproductive}, assertError{})
+	}
+	if g.IsToolRetired("unlimited.tool", policy) {
+		t.Fatal("zero-limit tool was retired")
+	}
+}
+
 func TestGovernorRetiresOnlyExhaustedTool(t *testing.T) {
 	g := New(testGlobal())
 	policy := testPolicy()
 	for i := 0; i < policy.MaxUnproductive; i++ {
-		if decision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": i}, policy, true); !decision.Allowed {
+		decision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": i}, policy, true)
+		if !decision.Allowed {
 			t.Fatalf("call %d blocked: %+v", i, decision)
 		}
-		g.RecordResult("empty.tool", Result{Outcome: OutcomeUnproductive}, nil)
+		g.RecordResult("empty.tool", decision, Result{Outcome: OutcomeUnproductive}, nil)
 	}
 	if !g.IsToolRetired("empty.tool", policy) {
 		t.Fatal("empty tool was not retired")
@@ -80,21 +124,24 @@ func TestGovernorRetiresOnlyExhaustedTool(t *testing.T) {
 func TestGovernorProductiveResultResetsOnlyGlobalFailureStreak(t *testing.T) {
 	g := New(testGlobal())
 	policy := testPolicy()
-	if decision := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true); !decision.Allowed {
-		t.Fatal(decision)
+	badDecision := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true)
+	if !badDecision.Allowed {
+		t.Fatal(badDecision)
 	}
-	g.RecordResult("bad.tool", Result{}, assertError{})
-	if decision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": 1}, policy, true); !decision.Allowed {
-		t.Fatal(decision)
+	g.RecordResult("bad.tool", badDecision, Result{}, assertError{})
+	emptyDecision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": 1}, policy, true)
+	if !emptyDecision.Allowed {
+		t.Fatal(emptyDecision)
 	}
-	g.RecordResult("empty.tool", Result{Outcome: OutcomeUnproductive}, nil)
+	g.RecordResult("empty.tool", emptyDecision, Result{Outcome: OutcomeUnproductive}, nil)
 	if g.ConsecutiveFailures() != 1 {
 		t.Fatalf("unproductive result reset failure streak: %d", g.ConsecutiveFailures())
 	}
-	if decision := g.BeforeExecution("good.tool", map[string]interface{}{"n": 1}, policy, true); !decision.Allowed {
-		t.Fatal(decision)
+	goodDecision := g.BeforeExecution("good.tool", map[string]interface{}{"n": 1}, policy, true)
+	if !goodDecision.Allowed {
+		t.Fatal(goodDecision)
 	}
-	g.RecordResult("good.tool", Result{Outcome: OutcomeProductive}, nil)
+	g.RecordResult("good.tool", goodDecision, Result{Outcome: OutcomeProductive}, nil)
 	if g.ConsecutiveFailures() != 0 {
 		t.Fatalf("productive result did not reset failure streak: %d", g.ConsecutiveFailures())
 	}

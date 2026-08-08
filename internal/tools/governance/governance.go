@@ -39,17 +39,16 @@ type ToolPolicy struct {
 	NormalizeArgs   ArgumentNormalizer
 }
 
-// Validate rejects policies that would silently disable a tool or its safety
-// limits. Every registered primary-agent tool receives a complete policy.
+// Validate rejects negative limits. A zero limit disables that guard.
 func (p ToolPolicy) Validate() error {
-	if p.MaxExecutions <= 0 {
-		return fmt.Errorf("max executions must be positive")
+	if p.MaxExecutions < 0 {
+		return fmt.Errorf("max executions must not be negative")
 	}
-	if p.MaxFailures <= 0 {
-		return fmt.Errorf("max failures must be positive")
+	if p.MaxFailures < 0 {
+		return fmt.Errorf("max failures must not be negative")
 	}
-	if p.MaxUnproductive <= 0 {
-		return fmt.Errorf("max unproductive results must be positive")
+	if p.MaxUnproductive < 0 {
+		return fmt.Errorf("max unproductive results must not be negative")
 	}
 	return nil
 }
@@ -89,8 +88,9 @@ type ToolStats struct {
 
 // Decision is the governor's pre-execution decision for one model-emitted call.
 type Decision struct {
-	Allowed    bool
-	ReasonCode string
+	Allowed     bool
+	ReasonCode  string
+	fingerprint string
 }
 
 const (
@@ -156,6 +156,7 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 		stats.Blocked++
 		return Decision{ReasonCode: ReasonGlobalLimit}
 	}
+	decision := Decision{Allowed: true}
 	if policy.BlockDuplicates {
 		fingerprint, err := Fingerprint(name, args, policy.NormalizeArgs)
 		if err != nil {
@@ -168,16 +169,20 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 			return Decision{ReasonCode: ReasonDuplicate}
 		}
 		g.seen[fingerprint] = struct{}{}
+		decision.fingerprint = fingerprint
 	}
 	stats.Executions++
 	g.totalExecutions++
-	return Decision{Allowed: true}
+	return decision
 }
 
 // RecordResult accounts for a completed permitted execution.
-func (g *Governor) RecordResult(name string, result Result, execErr error) {
+func (g *Governor) RecordResult(name string, decision Decision, result Result, execErr error) {
 	stats := g.toolStats(name)
 	if execErr != nil {
+		if decision.fingerprint != "" {
+			delete(g.seen, decision.fingerprint)
+		}
 		stats.Failures++
 		g.consecutiveFailures++
 		if g.global.MaxConsecutiveFailures > 0 && g.consecutiveFailures >= g.global.MaxConsecutiveFailures {
@@ -239,13 +244,13 @@ func (g *Governor) setGlobalReason(reason string) {
 }
 
 func retiredReason(stats ToolStats, policy ToolPolicy) string {
-	if stats.Executions >= policy.MaxExecutions {
+	if policy.MaxExecutions > 0 && stats.Executions >= policy.MaxExecutions {
 		return ReasonToolLimit
 	}
-	if stats.Failures >= policy.MaxFailures {
+	if policy.MaxFailures > 0 && stats.Failures >= policy.MaxFailures {
 		return ReasonToolFailures
 	}
-	if stats.Unproductive >= policy.MaxUnproductive {
+	if policy.MaxUnproductive > 0 && stats.Unproductive >= policy.MaxUnproductive {
 		return ReasonToolUnproductive
 	}
 	return ""

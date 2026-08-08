@@ -27,9 +27,9 @@ type Config struct {
 	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string          // Optional Discord bot token
 	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8888")
-	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools (default: 3)
-	MaxToolCallsPerRequest   int             // Maximum tool handler executions in one primary-agent request (default: 12)
-	MaxToolIterations        int             // Maximum model responses containing tool calls in one request (default: 8)
+	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools; zero disables the guard
+	MaxToolCallsPerRequest   int             // Emergency maximum tool handler executions in one primary-agent request (default: 50)
+	MaxToolIterations        int             // Emergency maximum model responses containing tool calls in one request (default: 30)
 	WorkerPoolSize           int             // Number of concurrent broker workers (default: 1)
 	LogLevel                 Level           // Logging verbosity (default: LevelInfo)
 	RetentionPolicy          RetentionPolicy // Memory retention and maintenance policy
@@ -80,9 +80,9 @@ func Load() (*Config, error) {
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
 		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8080"),
-		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 3),
-		MaxToolCallsPerRequest:   getEnvInt("MAX_TOOL_CALLS_PER_REQUEST", 12),
-		MaxToolIterations:        getEnvInt("MAX_TOOL_ITERATIONS_PER_REQUEST", 8),
+		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 0),
+		MaxToolCallsPerRequest:   getEnvInt("MAX_TOOL_CALLS_PER_REQUEST", 50),
+		MaxToolIterations:        getEnvInt("MAX_TOOL_ITERATIONS_PER_REQUEST", 30),
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
 		RetentionPolicy:          retentionPolicy,

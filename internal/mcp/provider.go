@@ -210,10 +210,8 @@ func filterReservedCatalog(entries []registry.CatalogEntry, reserved map[string]
 
 // ToolPolicy returns the request-governance policy for a dynamic MCP tool.
 func (p *Provider) ToolPolicy(name string) governance.ToolPolicy {
-	policy := governance.ToolPolicy{MaxExecutions: 4, MaxFailures: 2, MaxUnproductive: 1, BlockDuplicates: true}
+	policy := governance.ToolPolicy{BlockDuplicates: true}
 	if strings.HasSuffix(name, ".tools") {
-		policy.MaxExecutions = 3
-		policy.MaxUnproductive = 2
 		policy.NormalizeArgs = func(args map[string]interface{}) interface{} {
 			query, _ := args["query"].(string)
 			return map[string]interface{}{"query": strings.ToLower(strings.Join(strings.Fields(query), " "))}

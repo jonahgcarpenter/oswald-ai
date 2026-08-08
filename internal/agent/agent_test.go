@@ -246,6 +246,38 @@ func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
 	}
 }
 
+func TestProcessAllowsExactRetryAfterToolFailure(t *testing.T) {
+	args := map[string]interface{}{"q": "same"}
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("first", "test.lookup", args),
+		toolCallResponse("retry", "test.lookup", args),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	invocations := 0
+	if err := reg.RegisterTool(registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		invocations++
+		if invocations == 1 {
+			return governance.Result{}, errors.New("temporary failure")
+		}
+		return productiveResult("recovered"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	if _, err := processAgent(agent, "retry", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if invocations != 2 {
+		t.Fatalf("handler invocation count = %d, want 2", invocations)
+	}
+	requests := primaryRequests(chat.requests)
+	if result := toolResultByID(requests[2].Messages, "retry"); result == nil || result.Content != "recovered" {
+		t.Fatalf("retry result missing: %+v", requests[2].Messages)
+	}
+}
+
 func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("stale", "test.stale", nil),

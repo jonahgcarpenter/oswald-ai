@@ -297,6 +297,19 @@ func TestDiscoveryTruncatesAtCompleteCatalogEntries(t *testing.T) {
 	}
 }
 
+func TestMCPToolPoliciesHaveNoPerToolLimits(t *testing.T) {
+	provider := &Provider{}
+	for _, name := range []string{"home.tools", "home.turn_on"} {
+		policy := provider.ToolPolicy(name)
+		if policy.MaxExecutions != 0 || policy.MaxFailures != 0 || policy.MaxUnproductive != 0 {
+			t.Fatalf("%s policy has per-tool limits: %+v", name, policy)
+		}
+		if !policy.BlockDuplicates {
+			t.Fatalf("%s does not block completed duplicates", name)
+		}
+	}
+}
+
 type registryEntry struct {
 	name        string
 	description string

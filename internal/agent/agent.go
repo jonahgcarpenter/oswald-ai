@@ -354,7 +354,7 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
 	add := func(tool llm.Tool, policy governance.ToolPolicy) {
 		name := tool.Function.Name
-		if name == "" || catalog.Policies[name].MaxExecutions > 0 {
+		if _, exists := catalog.Policies[name]; name == "" || exists {
 			return
 		}
 		if governor != nil && governor.IsToolRetired(name, policy) {
@@ -842,7 +842,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			}
 			if decision.Allowed {
 				result, execErr = a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
-				toolGovernor.RecordResult(toolName, result, execErr)
+				toolGovernor.RecordResult(toolName, decision, result, execErr)
 			} else {
 				toolContent = governanceResultText(decision.ReasonCode)
 				reqLog.Warn("agent.tool.blocked", "blocked tool execution",

@@ -508,7 +508,7 @@ The registry:
 - executes handlers when the model issues tool calls
 - keeps builtin tools and MCP-discovered tools in the same runtime catalog
 
-Runtime governance lives in `internal/tools/governance/`. Builtin policies are declared during registration; MCP discovery and remote tools use shared MCP-class policies. A request-local governor tracks attempts, actual executions, productive and unproductive results, failures, duplicates, and blocked calls. Exact duplicate fingerprints are hashed and never logged or persisted. Tools that exhaust a per-tool allowance are hidden for the remainder of the request while unrelated tools remain available.
+Runtime governance lives in `internal/tools/governance/`. Builtin policies are declared during registration; MCP discovery and remote tools use shared MCP-class policies. A request-local governor tracks attempts, actual executions, productive and unproductive results, failures, duplicates, and blocked calls. Exact duplicate fingerprints are hashed and never logged or persisted. Successful and unproductive executions retain their fingerprint, while execution failures release it so the model can retry the exact call. A zero per-tool limit disables that guard. Tools that exhaust an enabled per-tool allowance are hidden for the remainder of the request while unrelated tools remain available.
 
 ### MCP Integration
 
@@ -521,12 +521,12 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 ### Tool Governance
 
 - Tool execution errors are converted into tool-response messages so the model can recover
-- Successful handlers return a typed productive or unproductive outcome; empty web, memory, transcript, global-memory, MCP-discovery, and MCP protocol results therefore cannot reset failure progress or loop indefinitely
-- Exact duplicate calls are blocked before handler execution, but the tool remains available for meaningfully different arguments
-- Per-tool execution, failure, and unproductive limits are code-owned policy; exhaustion removes only that exact tool
-- `MAX_TOOL_CALLS_PER_REQUEST` defaults to `12` actual handler executions across the request
-- `MAX_TOOL_ITERATIONS_PER_REQUEST` defaults to `8` model responses containing tool calls
-- `MAX_TOOL_FAILURE_RETRIES` defaults to `3` consecutive execution failures; productive execution resets this global streak, while unproductive or blocked calls do not
+- Successful handlers return a typed productive or unproductive outcome. `web.search` retires after two unproductive results in one request; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
+- Exact duplicate successful or unproductive calls are blocked before handler execution, but failed executions release their fingerprint so the exact call can be retried
+- Per-tool execution, failure, and unproductive limits are code-owned policy; zero disables a guard, and exhaustion of an enabled guard removes only that exact tool
+- `MAX_TOOL_CALLS_PER_REQUEST` defaults to `50` actual handler executions as an emergency request-wide ceiling
+- `MAX_TOOL_ITERATIONS_PER_REQUEST` defaults to `30` model responses containing tool calls as an emergency request-wide ceiling
+- `MAX_TOOL_FAILURE_RETRIES` defaults to `0`, disabling the request-wide consecutive-failure guard; positive values re-enable it, and productive execution resets the streak
 - Global limit exhaustion completes every declared call in the active batch with a correlated result, then asks the model to finish in one final call with all tools disabled
 - Calls not advertised in the active model request are blocked. MCP discovery therefore exposes matching remote tools only for a subsequent model iteration, not later in the same emitted batch
 - The request timeout remains the final wall-clock safeguard
