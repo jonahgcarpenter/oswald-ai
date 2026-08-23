@@ -44,7 +44,15 @@ type MemorySaveItem struct {
 
 // MemorySaveBatch is the input contract for background memory formation.
 type MemorySaveBatch struct {
-	Memories []MemorySaveItem `json:"memories"`
+	Memories       []MemorySaveItem `json:"memories"`
+	SubmittedCount int              `json:"-"`
+	MalformedCount int              `json:"-"`
+}
+
+type memorySaveBatchArtifact struct {
+	Memories       []MemorySaveItem `json:"memories"`
+	SubmittedCount int              `json:"submitted_count"`
+	MalformedCount int              `json:"malformed_count"`
 }
 
 // MemorySaveOutcome reports one independently evaluated batch item.
@@ -86,7 +94,7 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 	if len(rawItems) > maxExtractedMemoryBatch {
 		return MemorySaveBatch{}, nil, fmt.Errorf("memories contains %d items; maximum is %d", len(rawItems), maxExtractedMemoryBatch)
 	}
-	batch := MemorySaveBatch{Memories: make([]MemorySaveItem, 0, len(rawItems))}
+	batch := MemorySaveBatch{Memories: make([]MemorySaveItem, 0, len(rawItems)), SubmittedCount: len(rawItems)}
 	itemErrors := make([]MemorySaveItemError, 0)
 	for index, raw := range rawItems {
 		encoded, err := json.Marshal(raw)
@@ -130,13 +138,58 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("confidence, importance, or ttl_days is outside the schema range")})
 			continue
 		}
+		if !validMemorySaveEnums(item) {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("scope, category, context, provenance, or sensitivity is outside the schema enum")})
+			continue
+		}
 		item.InputIndex = index
 		batch.Memories = append(batch.Memories, item)
 	}
+	batch.MalformedCount = len(itemErrors)
 	return batch, itemErrors, nil
 }
 
-// DecodeMemorySaveBatchJSON strictly decodes a persisted extraction artifact.
+func validMemorySaveEnums(item MemorySaveItem) bool {
+	validScope := item.Scope == string(memoryformation.ScopeShortTerm) || item.Scope == string(memoryformation.ScopeLongTerm)
+	validCategory := item.Category == string(memoryformation.CategoryIdentity) ||
+		item.Category == string(memoryformation.CategoryCommunicationPreferences) ||
+		item.Category == string(memoryformation.CategoryDurablePreferences) ||
+		item.Category == string(memoryformation.CategoryProjects) ||
+		item.Category == string(memoryformation.CategoryRelationships) ||
+		item.Category == string(memoryformation.CategoryEnvironment) ||
+		item.Category == string(memoryformation.CategoryNotes)
+	validContext := item.Context == string(memoryformation.ContextDirectAssertion) ||
+		item.Context == string(memoryformation.ContextTemporaryState) ||
+		item.Context == string(memoryformation.ContextHypothetical) ||
+		item.Context == string(memoryformation.ContextQuotation)
+	validProvenance := item.Provenance == string(memoryformation.ProvenanceUserStatement) ||
+		item.Provenance == string(memoryformation.ProvenanceModelInference) ||
+		item.Provenance == string(memoryformation.ProvenanceThirdParty) ||
+		item.Provenance == string(memoryformation.ProvenancePublicSource) ||
+		item.Provenance == string(memoryformation.ProvenanceToolOutput)
+	validSensitivity := item.Sensitivity == string(memoryformation.SensitivityLow) ||
+		item.Sensitivity == string(memoryformation.SensitivityIdentityOrContact) ||
+		item.Sensitivity == string(memoryformation.SensitivityHighImpactInteraction)
+	return validScope && validCategory && validContext && validProvenance && validSensitivity
+}
+
+// MarshalMemorySaveBatchArtifact encodes one validated batch for durable replay.
+func MarshalMemorySaveBatchArtifact(batch MemorySaveBatch) ([]byte, error) {
+	if batch.SubmittedCount < 0 || batch.SubmittedCount > maxExtractedMemoryBatch || batch.MalformedCount < 0 || batch.MalformedCount > batch.SubmittedCount || len(batch.Memories)+batch.MalformedCount != batch.SubmittedCount {
+		return nil, fmt.Errorf("memory save artifact counts are inconsistent")
+	}
+	memories := batch.Memories
+	if memories == nil {
+		memories = []MemorySaveItem{}
+	}
+	return json.Marshal(memorySaveBatchArtifact{
+		Memories:       memories,
+		SubmittedCount: batch.SubmittedCount,
+		MalformedCount: batch.MalformedCount,
+	})
+}
+
+// DecodeMemorySaveBatchJSON strictly decodes a legacy or current persisted extraction artifact.
 func DecodeMemorySaveBatchJSON(data []byte) (MemorySaveBatch, []MemorySaveItemError, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -147,7 +200,58 @@ func DecodeMemorySaveBatchJSON(data []byte) (MemorySaveBatch, []MemorySaveItemEr
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return MemorySaveBatch{}, nil, fmt.Errorf("trailing JSON")
 	}
-	return DecodeMemorySaveBatch(arguments)
+	if memories, exists := arguments["memories"]; exists && memories == nil {
+		arguments["memories"] = []interface{}{}
+	}
+	_, hasSubmittedCount := arguments["submitted_count"]
+	_, hasMalformedCount := arguments["malformed_count"]
+	if hasSubmittedCount != hasMalformedCount {
+		return MemorySaveBatch{}, nil, fmt.Errorf("persisted artifact counts must be provided together")
+	}
+	if !hasSubmittedCount {
+		return DecodeMemorySaveBatch(arguments)
+	}
+	for key := range arguments {
+		if key != "memories" && key != "submitted_count" && key != "malformed_count" {
+			return MemorySaveBatch{}, nil, fmt.Errorf("unknown persisted artifact field %q", key)
+		}
+	}
+	submittedCount, err := artifactInteger(arguments["submitted_count"])
+	if err != nil {
+		return MemorySaveBatch{}, nil, fmt.Errorf("submitted_count: %w", err)
+	}
+	malformedCount, err := artifactInteger(arguments["malformed_count"])
+	if err != nil {
+		return MemorySaveBatch{}, nil, fmt.Errorf("malformed_count: %w", err)
+	}
+	rawItems, ok := arguments["memories"].([]interface{})
+	if !ok {
+		return MemorySaveBatch{}, nil, fmt.Errorf("memories must be an array")
+	}
+	if submittedCount < 0 || submittedCount > maxExtractedMemoryBatch || malformedCount < 0 || malformedCount > submittedCount || len(rawItems)+malformedCount != submittedCount {
+		return MemorySaveBatch{}, nil, fmt.Errorf("persisted artifact counts are inconsistent")
+	}
+	delete(arguments, "submitted_count")
+	delete(arguments, "malformed_count")
+	batch, itemErrors, err := DecodeMemorySaveBatch(arguments)
+	if err != nil {
+		return MemorySaveBatch{}, nil, err
+	}
+	batch.SubmittedCount = submittedCount
+	batch.MalformedCount = malformedCount + len(itemErrors)
+	return batch, itemErrors, nil
+}
+
+func artifactInteger(value interface{}) (int, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	integer, err := number.Int64()
+	if err != nil || int64(int(integer)) != integer {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	return int(integer), nil
 }
 
 // SubmitMemorySaveBatch evaluates and atomically applies each item independently.

@@ -21,6 +21,7 @@ func TestNormalizedUserMemorySchema(t *testing.T) {
 	for _, column := range []string{"evidence", "source_turn_id", "published_memory_id", "updated_at"} {
 		assertTableColumn(t, db, "memory_candidates", column)
 	}
+	assertTableColumn(t, db, "durable_jobs", "invalid_output_retry_count")
 	for _, removed := range []struct{ table, column string }{
 		{"memory_candidates", "evidence_summary"}, {"memory_candidates", "policy_decision"},
 		{"memory_candidates", "lifecycle_state"}, {"memory_candidates", "lifecycle_reason"},

@@ -3,7 +3,6 @@ package formationruntime
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -17,9 +16,10 @@ import (
 )
 
 const (
-	formationPollInterval = time.Second
-	formationJobLease     = 5 * time.Minute
-	formationMaxAttempts  = 5
+	formationPollInterval   = time.Second
+	formationJobLease       = 5 * time.Minute
+	formationMaxAttempts    = 5
+	invalidOutputMaxRetries = 1
 )
 
 var errBackgroundPreempted = errors.New("background model work preempted by foreground traffic")
@@ -95,7 +95,11 @@ func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(formationPollInterval)
 	defer ticker.Stop()
-	_, _ = s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion)
+	if count, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
+		s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
+	} else if count > 0 && s.log != nil {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
+	}
 	ticks := 0
 	for {
 		s.drain(ctx)
@@ -105,9 +109,15 @@ func (s *Service) run(ctx context.Context) {
 		case <-ticker.C:
 			ticks++
 			if ticks%60 == 0 {
-				_, _ = s.store.RedriveDeadFormationJobs(ctx, 5*time.Minute)
-				if _, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
+				if count, err := s.store.RedriveDeadFormationJobs(ctx, 5*time.Minute); err != nil {
+					s.warn("user_memory.formation.job.redrive_failed", "failed to redrive user-memory formation jobs", err)
+				} else if count > 0 && s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.job.redriven", "redrove user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
+				}
+				if count, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
 					s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
+				} else if count > 0 && s.log != nil {
+					s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
 				}
 			}
 		case <-s.notify:
@@ -131,6 +141,24 @@ func (s *Service) drain(ctx context.Context) {
 					s.warn("user_memory.formation.job.defer_failed", "failed to defer preempted user-memory formation job", deferErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
 				}
 				return
+			}
+			if errors.Is(err, errInvalidOutput) {
+				code := errorCode(err)
+				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("error_code", code)}
+				if job.InvalidOutputRetryCount < invalidOutputMaxRetries {
+					if retryErr := s.store.RetryInvalidFormationJob(context.Background(), job, code); retryErr != nil {
+						s.warn("user_memory.formation.job.retry_failed", "failed to retry invalid user-memory formation output", retryErr, fields...)
+					} else {
+						s.warn("user_memory.formation.job.invalid_output_retry", "user-memory formation invalid output will retry once", err, append(fields, config.F("status", "retry"))...)
+					}
+					continue
+				}
+				if skipErr := s.store.SkipFormationJob(context.Background(), job, code); skipErr != nil {
+					s.warn("user_memory.formation.job.complete_failed", "failed to terminally skip invalid user-memory formation output", skipErr, fields...)
+				} else {
+					s.warn("user_memory.formation.job.skipped", "user-memory formation invalid output exhausted its retry", err, fields...)
+				}
+				continue
 			}
 			if errors.Is(err, errPermanentExtraction) {
 				if skipErr := s.store.SkipFormationJob(context.Background(), job, errorCode(err)); skipErr != nil {
@@ -175,6 +203,10 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		return err
 	}
 	publishedCount := 0
+	proposedCount := 0
+	approvedCount := 0
+	rejectedCount := 0
+	validationFailedCount := 0
 	extracted := usermemory.MemorySaveBatch{}
 	artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
 	if artifactErr != nil {
@@ -212,7 +244,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if err != nil {
 			return err
 		}
-		payload, err := json.Marshal(extracted)
+		payload, err := usermemory.MarshalMemorySaveBatchArtifact(extracted)
 		if err != nil {
 			return err
 		}
@@ -229,7 +261,16 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 			return outcome.Err
 		}
 		if outcome.Err != nil {
+			validationFailedCount++
 			continue
+		}
+		switch outcome.State {
+		case "proposed":
+			proposedCount++
+		case "approved":
+			approvedCount++
+		case "rejected":
+			rejectedCount++
 		}
 		if outcome.PublishedMemoryID != 0 {
 			publishedCount++
@@ -237,8 +278,11 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	}
 	if s.log != nil {
 		s.log.Server("user_memory.formation").Info("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
-			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("candidate_count", len(extracted.Memories)),
-			config.F("approved_count", publishedCount),
+			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount),
+			config.F("submitted_count", extracted.SubmittedCount), config.F("candidate_count", len(extracted.Memories)), config.F("malformed_count", extracted.MalformedCount),
+			config.F("validation_failed_count", validationFailedCount), config.F("proposed_count", proposedCount), config.F("approved_count", approvedCount),
+			config.F("rejected_count", rejectedCount), config.F("published_count", publishedCount),
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
 	}
 	return nil
@@ -265,6 +309,9 @@ func (s *Service) warn(event, message string, err error, fields ...config.Field)
 func errorCode(err error) string {
 	if err == nil {
 		return "unknown"
+	}
+	if code, ok := invalidOutputCode(err); ok {
+		return code
 	}
 	if errors.Is(err, errPermanentExtraction) {
 		var httpErr *llm.ChatHTTPError

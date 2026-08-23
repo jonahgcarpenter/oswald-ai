@@ -9,6 +9,8 @@ import (
 )
 
 var errPermanentExtraction = memoryextractor.ErrPermanentExtraction
+var errInvalidOutput = memoryextractor.ErrInvalidOutput
+var invalidOutputCode = memoryextractor.InvalidOutputCode
 
 // Extractor proposes a shared memory-save batch from one completed turn.
 type Extractor interface {

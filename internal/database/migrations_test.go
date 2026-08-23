@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -158,6 +159,75 @@ VALUES ('mcp-1', 'global', NULL, 'github', 'streamable_http', 'ciphertext', '', 
 	var count int
 	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != len(orderedMigrations()) {
 		t.Fatalf("migration ledger count=%d err=%v", count, err)
+	}
+}
+
+func TestPermanentV402AddsDedicatedFormationInvalidOutputRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := orderedMigrations()
+	if len(migrations) < 3 {
+		t.Fatalf("permanent migration count=%d, want at least 3", len(migrations))
+	}
+	if _, err := raw.Exec(migrations[0].sql + migrations[1].sql + `
+CREATE TABLE schema_migration_versions (
+	version INTEGER PRIMARY KEY CHECK (version > 0),
+	name TEXT NOT NULL UNIQUE,
+	checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+	applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (1, 'v4.0.0', '` + migrationChecksum(migrations[0]) + `', datetime('now'));
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (2, 'v4.0.1', '` + migrationChecksum(migrations[1]) + `', datetime('now'));
+INSERT INTO account_users(canonical_user_id) VALUES ('user');
+INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, session_generation, delivered_at, source_request_id)
+VALUES ('session', 'user', 'remember this', 'noted', '2026-07-21T00:00:00Z', 1, '2026-07-21T00:00:01Z', 'request');
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, source_request_id, source_session_id, source_session_generation, source_turn_id, extractor_version, available_at, updated_at)
+VALUES ('memory_formation', 'formation', 'user', 'request', 'session', 1, last_insert_rowid(), 'v1', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z');
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+VALUES ('derived_index', 'index', 'user', 'memory', 1, 'upsert', '2026-07-21T00:00:00Z', '2026-07-21T00:00:00Z');`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("apply v4.0.2: %v", err)
+	}
+	defer db.Close()
+	var version, formationCount, indexCount int
+	var name string
+	if err := db.SQL().QueryRow(`SELECT version, name FROM schema_migration_versions ORDER BY version DESC LIMIT 1`).Scan(&version, &name); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 || name != "v4.0.2" {
+		t.Fatalf("latest migration=%d/%q", version, name)
+	}
+	if err := db.SQL().QueryRow(`SELECT invalid_output_retry_count FROM durable_jobs WHERE idempotency_key = 'formation'`).Scan(&formationCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL().QueryRow(`SELECT invalid_output_retry_count FROM durable_jobs WHERE idempotency_key = 'index'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if formationCount != 0 || indexCount != 0 {
+		t.Fatalf("migration defaults formation=%d index=%d", formationCount, indexCount)
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET invalid_output_retry_count = 1 WHERE idempotency_key = 'formation'`); err != nil {
+		t.Fatalf("formation retry count 1 rejected: %v", err)
+	}
+	for name, statement := range map[string]string{
+		"formation above one": `UPDATE durable_jobs SET invalid_output_retry_count = 2 WHERE idempotency_key = 'formation'`,
+		"negative formation":  `UPDATE durable_jobs SET invalid_output_retry_count = -1 WHERE idempotency_key = 'formation'`,
+		"non-formation retry": `UPDATE durable_jobs SET invalid_output_retry_count = 1 WHERE idempotency_key = 'index'`,
+	} {
+		if _, err := db.SQL().Exec(statement); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
 	}
 }
 
@@ -410,12 +480,13 @@ func TestPermanentMigrationRejectsChecksumDriftWithoutChange(t *testing.T) {
 }
 
 func TestPermanentMigrationRejectsMalformedLedgerPrefixes(t *testing.T) {
+	unknownVersion := len(orderedMigrations()) + 1
 	for _, test := range []struct {
 		name   string
 		mutate string
 	}{
-		{name: "gap", mutate: `UPDATE schema_migration_versions SET version = 3 WHERE version = 1`},
-		{name: "unknown trailing version", mutate: `INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (3, 'v9.0.0', '` + strings.Repeat("f", 64) + `', datetime('now'))`},
+		{name: "gap", mutate: `UPDATE schema_migration_versions SET version = ` + fmt.Sprint(unknownVersion) + ` WHERE version = 1`},
+		{name: "unknown trailing version", mutate: `INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (` + fmt.Sprint(unknownVersion) + `, 'v9.0.0', '` + strings.Repeat("f", 64) + `', datetime('now'))`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "malformed.db")

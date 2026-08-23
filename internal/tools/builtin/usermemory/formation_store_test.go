@@ -327,8 +327,130 @@ func TestFormationLeaseMutationsFailAfterSourceBecomesUnsuccessful(t *testing.T)
 	assertStale("propose", err)
 	assertStale("complete", store.CompleteFormationJob(context.Background(), job, false))
 	assertStale("retry", store.RetryFormationJob(context.Background(), job, "transient", 5))
+	assertStale("invalid retry", store.RetryInvalidFormationJob(context.Background(), job, "invalid_batch_shape"))
 	assertStale("defer", store.DeferFormationJob(context.Background(), job, time.Second))
 	assertStale("skip", store.SkipFormationJob(context.Background(), job, "invalid"))
+}
+
+func TestRetryInvalidFormationJobUsesDedicatedBudget(t *testing.T) {
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.AttemptCount != 1 || job.InvalidOutputRetryCount != 0 {
+		t.Fatalf("initial job=%+v", job)
+	}
+	if err := store.RetryInvalidFormationJob(context.Background(), job, "invalid_batch_shape"); err != nil {
+		t.Fatal(err)
+	}
+	var state, leaseOwner, code string
+	var attemptCount, invalidRetryCount int
+	var leaseUntil sql.NullString
+	if err := store.sql.QueryRow(`SELECT state, attempt_count, invalid_output_retry_count, lease_owner, lease_until, last_error_code FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attemptCount, &invalidRetryCount, &leaseOwner, &leaseUntil, &code); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retry" || attemptCount != 0 || invalidRetryCount != 1 || leaseOwner != "" || leaseUntil.Valid || code != "invalid_batch_shape" {
+		t.Fatalf("retried state=%q attempts=%d invalid_retries=%d lease_owner=%q lease_until=%v code=%q", state, attemptCount, invalidRetryCount, leaseOwner, leaseUntil, code)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed.AttemptCount != 1 || reclaimed.InvalidOutputRetryCount != 1 {
+		t.Fatalf("reclaimed job=%+v", reclaimed)
+	}
+	if err := store.RetryInvalidFormationJob(context.Background(), reclaimed, "all_items_malformed"); !errors.Is(err, ErrStaleFormationJobLease) {
+		t.Fatalf("second invalid retry error=%v", err)
+	}
+	if err := store.DeferFormationJob(context.Background(), reclaimed, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.sql.QueryRow(`SELECT attempt_count, invalid_output_retry_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&attemptCount, &invalidRetryCount); err != nil {
+		t.Fatal(err)
+	}
+	if attemptCount != 0 || invalidRetryCount != 1 {
+		t.Fatalf("preempted attempts=%d invalid_retries=%d", attemptCount, invalidRetryCount)
+	}
+}
+
+func TestOperationalRedrivePreservesInvalidOutputBudget(t *testing.T) {
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetryInvalidFormationJob(context.Background(), job, "missing_tool_call"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	job, err = store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetryFormationJob(context.Background(), job, "transient_provider", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET updated_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	redriven, err := store.RedriveDeadFormationJobs(context.Background(), time.Second)
+	if err != nil || redriven != 1 {
+		t.Fatalf("redriven=%d err=%v", redriven, err)
+	}
+	var state string
+	var attemptCount, invalidRetryCount, redriveCount int
+	if err := store.sql.QueryRow(`SELECT state, attempt_count, invalid_output_retry_count, redrive_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attemptCount, &invalidRetryCount, &redriveCount); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retry" || attemptCount != 0 || invalidRetryCount != 1 || redriveCount != 1 {
+		t.Fatalf("state=%q attempts=%d invalid_retries=%d redrives=%d", state, attemptCount, invalidRetryCount, redriveCount)
+	}
+}
+
+func TestInvalidOutputRetrySurvivesStoreReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	store := NewStore(path, config.NewLogger(config.LevelError))
+	seedAccountUsers(t, store, "user")
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetryInvalidFormationJob(context.Background(), job, "missing_tool_call"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewStore(path, config.NewLogger(config.LevelError))
+	t.Cleanup(func() { reopened.Close() })
+	if _, err := reopened.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := reopened.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed.InvalidOutputRetryCount != 1 || reclaimed.AttemptCount != 1 {
+		t.Fatalf("reopened job=%+v", reclaimed)
+	}
 }
 
 func TestReclaimedFormationLeaseRejectsStaleOwnerAtExactLeaseUntil(t *testing.T) {

@@ -1,6 +1,7 @@
 package usermemory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,6 +55,19 @@ func TestDecodeMemorySaveBatchRejectsSchemaRangeViolations(t *testing.T) {
 	}
 }
 
+func TestDecodeMemorySaveBatchRejectsSchemaEnumViolations(t *testing.T) {
+	for _, field := range []string{"scope", "category", "context", "provenance", "sensitivity"} {
+		t.Run(field, func(t *testing.T) {
+			item := validMemorySaveMap()
+			item[field] = "not_in_schema"
+			batch, itemErrors, err := DecodeMemorySaveBatch(map[string]interface{}{"memories": []interface{}{item}})
+			if err != nil || len(batch.Memories) != 0 || batch.SubmittedCount != 1 || batch.MalformedCount != 1 || len(itemErrors) != 1 {
+				t.Fatalf("batch=%+v item_errors=%+v err=%v", batch, itemErrors, err)
+			}
+		})
+	}
+}
+
 func TestDecodeMemorySaveBatchJSONUsesSameContract(t *testing.T) {
 	data := []byte(fmt.Sprintf(`{"memories":[%s]}`, mustMemorySaveJSON(t, validMemorySaveMap())))
 	batch, itemErrors, err := DecodeMemorySaveBatchJSON(data)
@@ -62,6 +76,91 @@ func TestDecodeMemorySaveBatchJSONUsesSameContract(t *testing.T) {
 	}
 	if _, _, err := DecodeMemorySaveBatchJSON([]byte(`{"memories":[],"extra":true}`)); err == nil {
 		t.Fatal("unknown outer field was accepted")
+	}
+}
+
+func TestMemorySaveBatchArtifactPreservesMixedBatchCounts(t *testing.T) {
+	malformed := validMemorySaveMap()
+	delete(malformed, "category")
+	batch, itemErrors, err := DecodeMemorySaveBatch(map[string]interface{}{"memories": []interface{}{malformed, validMemorySaveMap()}})
+	if err != nil || len(itemErrors) != 1 || batch.SubmittedCount != 2 || batch.MalformedCount != 1 || len(batch.Memories) != 1 {
+		t.Fatalf("batch=%+v item_errors=%+v err=%v", batch, itemErrors, err)
+	}
+	artifact, err := MarshalMemorySaveBatchArtifact(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(artifact, []byte(`"submitted_count":2`)) || !bytes.Contains(artifact, []byte(`"malformed_count":1`)) {
+		t.Fatalf("artifact omitted counts: %s", artifact)
+	}
+	replayed, replayErrors, err := DecodeMemorySaveBatchJSON(artifact)
+	if err != nil || len(replayErrors) != 0 || replayed.SubmittedCount != 2 || replayed.MalformedCount != 1 || len(replayed.Memories) != 1 {
+		t.Fatalf("replayed=%+v item_errors=%+v err=%v", replayed, replayErrors, err)
+	}
+}
+
+func TestMemorySaveBatchArtifactAcceptsLegacyShape(t *testing.T) {
+	malformed := validMemorySaveMap()
+	delete(malformed, "category")
+	artifact := []byte(fmt.Sprintf(`{"memories":[%s,%s]}`, mustMemorySaveJSON(t, malformed), mustMemorySaveJSON(t, validMemorySaveMap())))
+	batch, itemErrors, err := DecodeMemorySaveBatchJSON(artifact)
+	if err != nil || len(itemErrors) != 1 || batch.SubmittedCount != 2 || batch.MalformedCount != 1 || len(batch.Memories) != 1 {
+		t.Fatalf("batch=%+v item_errors=%+v err=%v", batch, itemErrors, err)
+	}
+}
+
+func TestMemorySaveBatchArtifactRoundTripsEmptyAndLegacyNull(t *testing.T) {
+	artifact, err := MarshalMemorySaveBatchArtifact(MemorySaveBatch{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(artifact, []byte(`"memories":[]`)) {
+		t.Fatalf("empty artifact did not normalize memories: %s", artifact)
+	}
+	for name, data := range map[string][]byte{"current": artifact, "legacy null": []byte(`{"memories":null}`)} {
+		t.Run(name, func(t *testing.T) {
+			batch, itemErrors, err := DecodeMemorySaveBatchJSON(data)
+			if err != nil || len(itemErrors) != 0 || batch.SubmittedCount != 0 || batch.MalformedCount != 0 || len(batch.Memories) != 0 {
+				t.Fatalf("batch=%+v item_errors=%+v err=%v", batch, itemErrors, err)
+			}
+		})
+	}
+	if _, _, err := DecodeMemorySaveBatch(map[string]interface{}{"memories": nil}); err == nil {
+		t.Fatal("model-facing null memories was accepted")
+	}
+}
+
+func TestMemorySaveBatchArtifactRejectsInvalidMetadata(t *testing.T) {
+	valid := mustMemorySaveJSON(t, validMemorySaveMap())
+	for name, artifact := range map[string]string{
+		"missing malformed":   `{"memories":[],"submitted_count":0}`,
+		"missing submitted":   `{"memories":[],"malformed_count":0}`,
+		"unknown field":       `{"memories":[],"submitted_count":0,"malformed_count":0,"extra":true}`,
+		"string count":        `{"memories":[],"submitted_count":"0","malformed_count":0}`,
+		"fractional count":    `{"memories":[],"submitted_count":0.5,"malformed_count":0}`,
+		"negative count":      `{"memories":[],"submitted_count":-1,"malformed_count":0}`,
+		"above maximum":       `{"memories":[],"submitted_count":6,"malformed_count":6}`,
+		"malformed above all": `{"memories":[],"submitted_count":0,"malformed_count":1}`,
+		"count mismatch":      `{"memories":[` + valid + `],"submitted_count":2,"malformed_count":0}`,
+		"trailing JSON":       `{"memories":[],"submitted_count":0,"malformed_count":0}{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := DecodeMemorySaveBatchJSON([]byte(artifact)); err == nil {
+				t.Fatal("invalid artifact was accepted")
+			}
+		})
+	}
+	for name, batch := range map[string]MemorySaveBatch{
+		"missing submitted":  {Memories: []MemorySaveItem{{}}},
+		"negative malformed": {SubmittedCount: 0, MalformedCount: -1},
+		"above maximum":      {SubmittedCount: 6, MalformedCount: 6},
+		"count mismatch":     {Memories: []MemorySaveItem{{}}, SubmittedCount: 2},
+	} {
+		t.Run("marshal "+name, func(t *testing.T) {
+			if _, err := MarshalMemorySaveBatchArtifact(batch); err == nil {
+				t.Fatal("invalid in-memory batch was accepted")
+			}
+		})
 	}
 }
 
