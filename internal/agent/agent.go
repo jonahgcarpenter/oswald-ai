@@ -25,8 +25,7 @@ import (
 )
 
 const (
-	sessionHistoryCandidateLimit = 100
-	sessionSummaryMinimumTail    = 8
+	sessionHistoryCandidateLimit = 1000
 	recentToolExposureTurns      = 4
 	automaticRecallTopK          = 4
 	automaticRecallCharLimit     = 2000
@@ -37,6 +36,7 @@ const (
 	maxImageModelAttempts        = 5
 	imageRetryScale              = 0.75
 	imageInitialScaleMaxEdge     = 1920
+	sessionPromptPressurePrefix  = "session-prompt-pressure-v1"
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -626,19 +626,20 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
 			sessionSummary = usermemory.SessionSummary{}
 		}
+		recentTools, toolErr := a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, 0, recentToolExposureTurns)
+		if toolErr != nil {
+			reqLog.Warn("agent.session_memory.tools.failed", "failed to load recent tool continuity", config.F("status", "degraded"), config.ErrorField(toolErr))
+		} else {
+			for _, turn := range recentTools {
+				recentToolNames = append(recentToolNames, turn.ToolNames...)
+			}
+			recentToolNames = uniqueToolNames(recentToolNames)
+		}
 		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
 			reqLog.Warn("agent.session_memory.context.failed", "failed to build session-memory context", config.F("status", "degraded"), config.ErrorField(err))
 			recentTurns = nil
 		} else {
-			toolTurnCount := len(recentTurns)
-			if toolTurnCount > recentToolExposureTurns {
-				toolTurnCount = recentToolExposureTurns
-			}
-			for _, turn := range recentTurns[:toolTurnCount] {
-				recentToolNames = append(recentToolNames, turn.ToolNames...)
-			}
-			recentToolNames = uniqueToolNames(recentToolNames)
 			reqLog.Debug("agent.session_memory.context.loaded", "loaded session-memory context",
 				config.F("candidate_turn_count", len(recentTurns)),
 			)
@@ -655,7 +656,9 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	}
 
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
-	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, sessionSummaryMinimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, a.budget.UsableInputLimit())
+	inputLimit := a.budget.UsableInputLimit()
+	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
+	promptContext := AssemblePromptContextWithSummary(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, minimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, inputLimit)
 	if a.userMemory != nil {
 		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
 	}
@@ -1010,8 +1013,10 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
 	var storedTurn usermemory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+		storedReplay := usermemory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations)}
+		completedPressure := completedPromptPressure(promptContext, storedReplay)
 		var err error
-		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResult(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL)
+		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressure(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
@@ -1039,4 +1044,8 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
 	}, nil
+}
+
+func promptPressureVersion(model string, inputLimit int) string {
+	return fmt.Sprintf("%s:%s:%d", sessionPromptPressurePrefix, strings.TrimSpace(model), inputLimit)
 }

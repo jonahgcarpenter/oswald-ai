@@ -404,11 +404,11 @@ func evaluateIssue80SessionContinuity(t *testing.T) {
 		}
 		turnIDs = append(turnIDs, turn.ID)
 	}
-	jobID, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turnIDs[0], turnIDs[1])
+	jobID, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turnIDs[0], turnIDs[1], "issue80-model", "issue80-v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(ctx, "issue80-worker", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(ctx, "issue80-worker", time.Minute, "issue80-model", "issue80-v1")
 	if err != nil || job.ID != jobID {
 		t.Fatalf("compaction job=%+v err=%v", job, err)
 	}

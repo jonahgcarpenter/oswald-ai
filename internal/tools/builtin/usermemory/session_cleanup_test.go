@@ -176,14 +176,14 @@ func TestCleanupRetainsTranscriptAndSummaryForActiveSessionLifetime(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(ctx, "user", "session", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(ctx, "test", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(ctx, "test", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSessionCompactionArtifact(ctx, job, SummaryArtifact{Narrative: "summary", GenerationModel: "model", GeneratorVersion: "v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(ctx, job, SummaryArtifact{Narrative: "summary", GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.PublishSessionSummary(ctx, job); err != nil {

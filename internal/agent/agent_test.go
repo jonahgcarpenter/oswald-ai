@@ -700,10 +700,10 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -997,6 +997,57 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	}
 	if !foundAnnotation {
 		t.Fatalf("assistant history missing compact tool annotation: %+v", request.Messages)
+	}
+}
+
+func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.mcpProvider = &fakeMCPProvider{}
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-mcp", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 4; i++ {
+		var tools []string
+		if i == 1 {
+			tools = []string{"home.turn_on"}
+		}
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-mcp", "user-1", profile.Generation, fmt.Sprintf("prior %d", i), "answer", tools, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns, err := store.DeliveredSessionTurnsAfter(context.Background(), "user-1", "session-mcp", profile.Generation, 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, usermemory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteSessionCompactionJob(context.Background(), job, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	request := primaryRequests(chat.requests)[0]
+	if !requestHasTool(request, "home.turn_on") {
+		t.Fatalf("summarized fourth-newest MCP tool was not pre-exposed: %+v", toolNames(request))
+	}
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, "Tools used: home.turn_on") {
+			t.Fatalf("summarized turn was unexpectedly replayed verbatim: %+v", request.Messages)
+		}
 	}
 }
 

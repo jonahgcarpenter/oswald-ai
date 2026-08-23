@@ -34,6 +34,12 @@ func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('session_turns') WHERE name = 'delivery_failed_at'`).Scan(&deliveryFailedColumn); err != nil || deliveryFailedColumn != 1 {
 		t.Fatalf("delivery_failed_at column count=%d err=%v", deliveryFailedColumn, err)
 	}
+	for _, column := range []string{"compaction_pressure_tokens", "compaction_pressure_limit", "compaction_pressure_version"} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('session_turns') WHERE name = ?`, column).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("session pressure column %s count=%d err=%v", column, count, err)
+		}
+	}
 	for table, columns := range map[string][]string{
 		"session_turns":     {"importance"},
 		"session_summaries": {"generation_model", "generator_version", "source_digest", "created_at", "expires_at"},
@@ -47,6 +53,12 @@ func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 			}
 		}
 	}
+	for _, column := range []string{"compaction_model", "compaction_generator_version", "compaction_invalid_output_retry_count", "compaction_target_turn_id"} {
+		var count int
+		if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM pragma_table_info('durable_jobs') WHERE name = ?`, column).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("compaction column %s count=%d err=%v", column, count, err)
+		}
+	}
 
 	insertSessionTestUser(t, db, "user-a")
 	fromID := insertSessionTestTurn(t, db, "user-a", "session-a", 1, "first telescope note", "first answer")
@@ -56,10 +68,10 @@ func TestSessionCompactionFreshSchemaAndIdempotency(t *testing.T) {
 		t.Fatal("expected immutable summary source update to fail")
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO durable_jobs (
+	INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	artifact_summary_id, artifact_payload, available_at, updated_at
-) VALUES ('session_compaction', 'job-a', 'user-a', 'session-a', 1, ?, ?, ?, '{"generation_model":"model","generator_version":"v1"}', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, fromID, throughID, summaryID); err != nil {
+	compaction_target_turn_id, artifact_summary_id, artifact_payload, compaction_model, compaction_generator_version, available_at, updated_at
+	) VALUES ('session_compaction', 'job-a', 'user-a', 'session-a', 1, ?, ?, ?, ?, '{"generation_model":"model","generator_version":"v1"}', 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, fromID, throughID, throughID, summaryID); err != nil {
 		t.Fatalf("insert compaction job: %v", err)
 	}
 
@@ -124,17 +136,17 @@ INSERT INTO session_summaries (
 		})
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO durable_jobs (
+	INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	attempt_count, redrive_count, available_at, updated_at
-) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, 4, 0, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2); err == nil {
+	compaction_target_turn_id, attempt_count, redrive_count, compaction_model, compaction_generator_version, available_at, updated_at
+	) VALUES ('session_compaction', 'too-many-attempts', 'user-a', 'session', 1, ?, ?, ?, 4, 0, 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, a2, a2); err == nil {
 		t.Fatal("expected excessive attempt count to fail")
 	}
 	if _, err := db.SQL().Exec(`
-INSERT INTO durable_jobs (
+	INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id,
-	available_at, updated_at
-) VALUES ('session_compaction', 'cross-tenant', 'user-a', 'session', 1, ?, ?, '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, b1); err == nil {
+	compaction_target_turn_id, compaction_model, compaction_generator_version, available_at, updated_at
+	) VALUES ('session_compaction', 'cross-tenant', 'user-a', 'session', 1, ?, ?, ?, 'model', 'v1', '2026-07-18T12:00:00Z', '2026-07-18T12:00:00Z')`, a1, b1, b1); err == nil {
 		t.Fatal("expected cross-tenant compaction range to fail")
 	}
 }

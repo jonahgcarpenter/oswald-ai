@@ -29,3 +29,35 @@ func TestMaintenanceDirectlyDeletesStaleCandidateRows(t *testing.T) {
 	}
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE id = ?`, 0, candidateID)
 }
+
+func TestMaintenanceRetainsFailedCompactionContractForActiveSession(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	t.Cleanup(func() { _ = store.Close() })
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
+	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SkipSessionCompactionJob(context.Background(), job, "missing_tool_call"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET completed_at = ?, updated_at = ? WHERE id = ?`, formatTime(now.Add(-48*time.Hour)), formatTime(now.Add(-48*time.Hour)), jobID); err != nil {
+		t.Fatal(err)
+	}
+	policy := config.RetentionPolicy{RetiredIndexRetention: time.Hour, SessionInactivity: 24 * time.Hour, PendingDeliveryTimeout: time.Minute, SuccessfulJobRetention: time.Hour, DeadJobRetention: 24 * time.Hour, AccountChallengeGrace: time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: time.Hour, BatchSize: 100}
+	if _, err := store.MaintenanceSweep(context.Background(), now, policy); err != nil {
+		t.Fatal(err)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE id = ?`, 1, jobID)
+	if _, err := store.ResetSession(context.Background(), "user", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM durable_jobs WHERE id = ?`, 0, jobID)
+}

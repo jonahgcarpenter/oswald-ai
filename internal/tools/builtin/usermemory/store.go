@@ -70,6 +70,23 @@ type SessionTurn struct {
 	Score         float64
 }
 
+// SessionTurnAssistantContent renders the exact assistant replay stored in a
+// foreground prompt, including compact tool continuity annotations.
+func SessionTurnAssistantContent(turn SessionTurn) string {
+	if len(turn.ToolNames) == 0 {
+		return turn.AssistantText
+	}
+	return turn.AssistantText + "\n\nTools used: " + strings.Join(turn.ToolNames, ", ")
+}
+
+// SessionTurnMessages renders one complete role-correct exchange.
+func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{Role: "user", Content: turn.UserText},
+		{Role: "assistant", Content: SessionTurnAssistantContent(turn)},
+	}
+}
+
 // ContextOptions controls request-time memory retrieval.
 type ContextOptions struct {
 	RecentTurns int
@@ -833,23 +850,33 @@ func (s *Store) lockUsers(userIDs ...string) func() {
 // AppendSessionTurn stores a completed session exchange without requiring an
 // active generation row. It remains useful to tests that exercise raw history.
 func (s *Store) AppendSessionTurn(ctx context.Context, sessionID, userID, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false, true)
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, 1, userText, assistantText, toolNames, ttl, false, true, nil)
 	return err
 }
 
 // AppendSessionTurnForGeneration stores a completed exchange in one frozen session generation.
 func (s *Store) AppendSessionTurnForGeneration(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) error {
-	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, true)
+	_, err := s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, true, nil)
 	return err
 }
 
 // AppendSessionTurnForGenerationResult stores a completed exchange and returns
 // the authoritative inserted turn for post-response formation work.
 func (s *Store) AppendSessionTurnForGenerationResult(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration) (StoredSessionTurn, error) {
-	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, false)
+	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, false, nil)
 }
 
-func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration, markDelivered bool) (StoredSessionTurn, error) {
+// AppendSessionTurnForGenerationResultWithPressure stores a pending completed
+// exchange together with the deterministic pressure of the completed request.
+func (s *Store) AppendSessionTurnForGenerationResultWithPressure(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
+	if pressure.Tokens < 0 || pressure.Limit <= 0 || strings.TrimSpace(pressure.Version) == "" {
+		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid compaction pressure")
+	}
+	pressure.Version = strings.TrimSpace(pressure.Version)
+	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, ttl, true, false, &pressure)
+}
+
+func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, ttl time.Duration, validateGeneration, markDelivered bool, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return StoredSessionTurn{}, nil
 	}
@@ -871,15 +898,19 @@ func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string,
 		exp := now.Add(ttl).UTC()
 		expires = &exp
 	}
+	var pressureTokens, pressureLimit, pressureVersion any
+	if pressure != nil {
+		pressureTokens, pressureLimit, pressureVersion = pressure.Tokens, pressure.Limit, pressure.Version
+	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), formatTime(now), nullableTime(expires), requestID, deliveredAt}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), formatTime(now), nullableTime(expires), requestID, deliveredAt, pressureTokens, pressureLimit, pressureVersion}
 	if validateGeneration {
 		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)

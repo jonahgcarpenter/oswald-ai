@@ -14,6 +14,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
+const (
+	compactionTestModel            = "model"
+	compactionTestGeneratorVersion = "session-summary-v1"
+)
+
 func TestSessionCompactionRangeAndEnqueueIdempotency(t *testing.T) {
 	store := newSessionCompactionTestStore(t)
 	seedAccountUsers(t, store, "user-a", "user-b")
@@ -34,16 +39,128 @@ func TestSessionCompactionRangeAndEnqueueIdempotency(t *testing.T) {
 	if err != nil || len(ranged) != 2 || ranged[0].ID != first || ranged[1].ID != second {
 		t.Fatalf("range = %+v, err = %v", ranged, err)
 	}
-	firstJob, err := store.EnqueueSessionCompactionJob(context.Background(), "user-a", "shared", generation, first, second)
+	firstJob, err := store.EnqueueSessionCompactionJob(context.Background(), "user-a", "shared", generation, first, second, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondJob, err := store.EnqueueSessionCompactionJob(context.Background(), "user-a", "shared", generation, first, second)
+	secondJob, err := store.EnqueueSessionCompactionJob(context.Background(), "user-a", "shared", generation, first, second, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || secondJob != firstJob {
 		t.Fatalf("idempotent job = %d, want %d, err = %v", secondJob, firstJob, err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-b", "shared", generation, first, second); err == nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-b", "shared", generation, first, second, compactionTestModel, compactionTestGeneratorVersion); err == nil {
 		t.Fatal("expected cross-tenant range rejection")
+	}
+}
+
+func TestSessionCompactionSuppressesOverlappingContractJobs(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	first := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
+	second := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "two")
+	third := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "three")
+	firstJob, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, second, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlap, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, third, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil || overlap != firstJob {
+		t.Fatalf("overlap job=%d want=%d err=%v", overlap, firstJob, err)
+	}
+	assertCompactionCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'session_compaction'`, 1)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SkipSessionCompactionJob(context.Background(), job, "invalid_output"); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, third, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil || blocked != firstJob {
+		t.Fatalf("terminal contract blocker=%d want=%d err=%v", blocked, firstJob, err)
+	}
+	replacement, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, third, compactionTestModel, "session-summary-v2")
+	if err != nil || replacement == 0 || replacement == firstJob {
+		t.Fatalf("replacement=%d first=%d err=%v", replacement, firstJob, err)
+	}
+}
+
+func TestSessionCompactionInvalidOutputRetryIsDedicatedAndDurable(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetryInvalidSessionCompactionJob(context.Background(), job, "missing_tool_call"); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	var attempts, invalidRetries int
+	if err := store.sql.QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attempts, &invalidRetries); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retry" || attempts != 0 || invalidRetries != 1 {
+		t.Fatalf("state=%q attempts=%d invalid_retries=%d", state, attempts, invalidRetries)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := store.ClaimSessionCompactionJob(context.Background(), "worker-2", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil || reclaimed.InvalidOutputRetryCount != 1 || reclaimed.AttemptCount != 1 {
+		t.Fatalf("reclaimed=%+v err=%v", reclaimed, err)
+	}
+	if err := store.RetryInvalidSessionCompactionJob(context.Background(), reclaimed, "missing_tool_call"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second invalid retry error=%v", err)
+	}
+}
+
+func TestSessionCompactionRedrivesOnlyTransientFailures(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
+	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'dead', completed_at = ?, updated_at = ?, last_error_code = 'missing_tool_call' WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Hour)), formatTime(time.Now().UTC().Add(-time.Hour)), jobID); err != nil {
+		t.Fatal(err)
+	}
+	redriven, err := store.RedriveDeadSessionCompactionJobs(context.Background(), time.Second)
+	if err != nil || redriven != 0 {
+		t.Fatalf("redriven=%d err=%v", redriven, err)
+	}
+}
+
+func TestSessionCompactionReconcileSupersedesActiveOldContract(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
+	oldID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, "old-model", "old-version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := store.ReconcileSessionCompactionJobs(context.Background(), compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil || changed != 1 {
+		t.Fatalf("changed=%d err=%v", changed, err)
+	}
+	var state, code string
+	if err := store.sql.QueryRow(`SELECT state, last_error_code FROM durable_jobs WHERE id = ?`, oldID).Scan(&state, &code); err != nil {
+		t.Fatal(err)
+	}
+	if state != "skipped" || code != "superseded_compaction_contract" {
+		t.Fatalf("state=%q code=%q", state, code)
+	}
+	currentID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil || currentID == oldID {
+		t.Fatalf("current=%d old=%d err=%v", currentID, oldID, err)
 	}
 }
 
@@ -61,7 +178,7 @@ func TestSessionCompactionDoesNotCrossUndeliveredTurn(t *testing.T) {
 	if err != nil || planned.TotalCount != 1 || len(planned.Turns) != 1 || planned.Turns[0].ID != first {
 		t.Fatalf("planned across delivery gap: %+v err=%v", planned, err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last); err == nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last, compactionTestModel, compactionTestGeneratorVersion); err == nil {
 		t.Fatal("enqueued range across undelivered turn")
 	}
 	if err := store.MarkSessionTurnDeliveryFailed(context.Background(), "user", middle); err != nil {
@@ -71,7 +188,7 @@ func TestSessionCompactionDoesNotCrossUndeliveredTurn(t *testing.T) {
 	if err != nil || planned.TotalCount != 2 || len(planned.Turns) != 2 || planned.Turns[1].ID != last {
 		t.Fatalf("terminal failed delivery still blocked later turns: %+v err=%v", planned, err)
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatalf("enqueue across terminal failed delivery: %v", err)
 	}
 }
@@ -124,14 +241,14 @@ func TestLateDeliveryInvalidatesCrossingCheckpointAndCanReplan(t *testing.T) {
 				t.Fatal(err)
 			}
 			last := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "three")
-			if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last); err != nil {
+			if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 				t.Fatal(err)
 			}
-			job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+			job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "Skipped late turn", GenerationModel: "model", GeneratorVersion: "v1"}); err != nil {
+			if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "Skipped late turn", GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
@@ -150,7 +267,7 @@ func TestLateDeliveryInvalidatesCrossingCheckpointAndCanReplan(t *testing.T) {
 			if err != nil || available.TotalCount != 3 || len(available.Turns) != 3 || available.Turns[1].ID != middle.ID {
 				t.Fatalf("restored compaction range=%+v err=%v", available, err)
 			}
-			if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last); err != nil {
+			if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, last, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 				t.Fatalf("replan restored range: %v", err)
 			}
 		})
@@ -164,23 +281,23 @@ func TestSessionCompactionArtifactPublicationAndIncrementalSources(t *testing.T)
 	first := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
 	second := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "two")
 
-	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, second)
+	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, second, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || job.ID != jobID {
 		t.Fatalf("claim = %+v, err = %v", job, err)
 	}
-	artifact := SummaryArtifact{Narrative: "First checkpoint", OpenTasks: []string{"ship it"}, Commitments: []string{"follow up"}, Entities: []string{"Atlas"}, Decisions: []string{"use Go"}, TopicTags: []string{"project"}, GenerationModel: "model", GeneratorVersion: "summary-v1"}
+	artifact := SummaryArtifact{Narrative: "First checkpoint", OpenTasks: []string{"ship it"}, Commitments: []string{"follow up"}, Entities: []string{"Atlas"}, Decisions: []string{"use Go"}, TopicTags: []string{"project"}, GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}
 	if err := store.SaveSessionCompactionArtifact(context.Background(), job, artifact); err != nil {
 		t.Fatal(err)
 	}
 	storedArtifact, err := store.SessionCompactionArtifact(context.Background(), job)
-	if err != nil || storedArtifact.GenerationModel != "model" || storedArtifact.GeneratorVersion != "summary-v1" {
+	if err != nil || storedArtifact.GenerationModel != compactionTestModel || storedArtifact.GeneratorVersion != compactionTestGeneratorVersion {
 		t.Fatalf("stored artifact = %+v, err = %v", storedArtifact, err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "changed", GenerationModel: "model", GeneratorVersion: "summary-v1"}); err == nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "changed", GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err == nil {
 		t.Fatal("expected immutable artifact mismatch")
 	}
 	summary, err := store.PublishSessionSummary(context.Background(), job)
@@ -205,14 +322,14 @@ func TestSessionCompactionArtifactPublicationAndIncrementalSources(t *testing.T)
 	}
 
 	third := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "three")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, third); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, third, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	incrementalJob, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	incrementalJob, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), incrementalJob, SummaryArtifact{Narrative: "Incremental checkpoint", GenerationModel: "model", GeneratorVersion: "summary-v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), incrementalJob, SummaryArtifact{Narrative: "Incremental checkpoint", GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err != nil {
 		t.Fatal(err)
 	}
 	incremental, err := store.PublishSessionSummary(context.Background(), incrementalJob)
@@ -244,7 +361,7 @@ func TestExpiredSessionGenerationCannotCompact(t *testing.T) {
 	if err := store.MarkSessionTurnDelivered(context.Background(), "user", turn); err == nil {
 		t.Fatal("expired generation accepted delivery mark")
 	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turn, turn); err == nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turn, turn, compactionTestModel, compactionTestGeneratorVersion); err == nil {
 		t.Fatal("expired generation accepted compaction job")
 	}
 }
@@ -254,10 +371,10 @@ func TestPreCompactionCandidateRequiresLiveJobLease(t *testing.T) {
 	seedAccountUsers(t, store, "user")
 	generation := activateCompactionSession(t, store, "user", "session")
 	turn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I work on Atlas.")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turn, turn); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turn, turn, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,10 +405,10 @@ func TestPreCompactionCandidateLifecyclePublicationAndStaleLeaseFence(t *testing
 	belowTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I work on Atlas.")
 	approvedTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I prefer tea.")
 	rejectedTurn := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "My coworker prefers coffee.")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, belowTurn, rejectedTurn); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, belowTurn, rejectedTurn, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,10 +465,10 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 	seedAccountUsers(t, store, "user")
 	generation := activateCompactionSession(t, store, "user", "session")
 	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I prefer tea.")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	staleJob, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	staleJob, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +500,7 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 	if _, err := store.sql.Exec(`UPDATE durable_jobs SET lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Minute)), staleJob.ID); err != nil {
 		t.Fatal(err)
 	}
-	currentJob, err := store.ClaimSessionCompactionJob(context.Background(), staleJob.LeaseOwner, 2*time.Minute)
+	currentJob, err := store.ClaimSessionCompactionJob(context.Background(), staleJob.LeaseOwner, 2*time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || currentJob.LeaseUntil.Equal(staleJob.LeaseUntil) {
 		t.Fatalf("reclaimed job=%+v err=%v", currentJob, err)
 	}
@@ -406,14 +523,14 @@ func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testi
 	generation := activateCompactionSession(t, store, "user", "session")
 	first := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
 	second := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "two")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, second); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, first, second, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "checkpoint", GenerationModel: "model", GeneratorVersion: "v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: "checkpoint", GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = NULL WHERE id = ?`, second); err != nil {
@@ -435,7 +552,7 @@ func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testi
 		t.Fatal("expected stale generation rejection")
 	}
 	assertCompactionCount(t, store, `SELECT COUNT(*) FROM session_summaries`, 0)
-	changed, err := store.ReconcileSessionCompactionJobs(context.Background())
+	changed, err := store.ReconcileSessionCompactionJobs(context.Background(), compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || changed != 0 {
 		t.Fatalf("reconciled = %d, err = %v", changed, err)
 	}
@@ -447,15 +564,15 @@ func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
 	seedAccountUsers(t, store, "user")
 	generation := activateCompactionSession(t, store, "user", "session")
 	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "one")
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID); err != nil {
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= maxSessionCompactionAttempts; attempt++ {
-		job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute)
+		job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 		if err != nil || job.AttemptCount != attempt {
 			t.Fatalf("attempt %d job = %+v, err = %v", attempt, job, err)
 		}
-		if err := store.RetrySessionCompactionJob(context.Background(), job, "model failed", "temporary failure"); err != nil {
+		if err := store.RetrySessionCompactionJob(context.Background(), job, "transient_provider"); err != nil {
 			t.Fatal(err)
 		}
 		if attempt < maxSessionCompactionAttempts {
@@ -464,7 +581,7 @@ func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
 			}
 		}
 	}
-	if _, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("claim dead job error = %v", err)
 	}
 	if _, err := store.sql.Exec(`UPDATE durable_jobs SET updated_at = ? WHERE job_kind = 'session_compaction'`, formatTime(time.Now().Add(-time.Hour))); err != nil {
@@ -474,9 +591,32 @@ func TestSessionCompactionLeaseRetryDeadAndRedrive(t *testing.T) {
 	if err != nil || redriven != 1 {
 		t.Fatalf("redriven = %d, err = %v", redriven, err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker-2", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker-2", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || job.AttemptCount != 1 || job.RedriveCount != 1 {
 		t.Fatalf("redriven job = %+v, err = %v", job, err)
+	}
+}
+
+func TestSessionPromptPressureBecomesVisibleOnlyAfterDelivery(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turn, err := store.AppendSessionTurnForGenerationResultWithPressure(context.Background(), "session", "user", generation, "hello", "answer", []string{"web.search"}, time.Hour, SessionPromptPressure{Tokens: 7000, Limit: 7000, Version: "pressure-v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LatestDeliveredSessionPromptPressure(context.Background(), "user", "session", generation, "pressure-v1"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("pending pressure error=%v", err)
+	}
+	if err := store.MarkSessionTurnDelivered(context.Background(), "user", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	pressure, err := store.LatestDeliveredSessionPromptPressure(context.Background(), "user", "session", generation, "pressure-v1")
+	if err != nil || pressure.TurnID != turn.ID || pressure.Tokens != 7000 || pressure.Limit != 7000 {
+		t.Fatalf("pressure=%+v err=%v", pressure, err)
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET compaction_pressure_tokens = 7001 WHERE id = ?`, turn.ID); err == nil {
+		t.Fatal("immutable pressure update succeeded")
 	}
 }
 

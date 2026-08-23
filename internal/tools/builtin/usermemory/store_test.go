@@ -625,7 +625,7 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	loserLast := appendDeliveredCompactionTurn(t, store, "loser", "shared", loserProfile.Generation, "loser two")
 	winnerSummary, winnerJob := publishMergeTestSummary(t, store, "winner", "shared", winnerProfile.Generation, winnerFirst, winnerLast, "winner checkpoint")
 	loserSummary, loserJob := publishMergeTestSummary(t, store, "loser", "shared", loserProfile.Generation, loserFirst, loserLast, "loser checkpoint")
-	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ? WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(time.Minute)), loserJob); err != nil {
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ?, compaction_invalid_output_retry_count = 1 WHERE id = ? AND job_kind = 'session_compaction'`, formatTime(time.Now().Add(time.Minute)), loserJob); err != nil {
 		t.Fatal(err)
 	}
 
@@ -662,17 +662,18 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	if turnCount != 4 || summaryCount != 2 || jobCount != 2 || sessionCount != 1 {
 		t.Fatalf("turns=%d summaries=%d jobs=%d sessions=%d", turnCount, summaryCount, jobCount, sessionCount)
 	}
-	var jobState, leaseOwner, artifactPayload string
+	var jobState, leaseOwner, artifactPayload, model, generatorVersion string
 	var leaseUntil sql.NullString
 	var artifactSummaryID int64
-	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction'`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID, &artifactPayload); err != nil {
+	var invalidOutputRetryCount int
+	if err := store.sql.QueryRow(`SELECT state, lease_owner, lease_until, artifact_summary_id, artifact_payload, compaction_model, compaction_generator_version, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction'`, loserJob).Scan(&jobState, &leaseOwner, &leaseUntil, &artifactSummaryID, &artifactPayload, &model, &generatorVersion, &invalidOutputRetryCount); err != nil {
 		t.Fatal(err)
 	}
-	if jobState != "retry" || leaseOwner != "" || leaseUntil.Valid || artifactSummaryID != loserSummary.ID {
-		t.Fatalf("loser job state=%q owner=%q lease=%v artifact=%d", jobState, leaseOwner, leaseUntil, artifactSummaryID)
+	if jobState != "retry" || leaseOwner != "" || leaseUntil.Valid || artifactSummaryID != loserSummary.ID || model != compactionTestModel || generatorVersion != compactionTestGeneratorVersion || invalidOutputRetryCount != 1 {
+		t.Fatalf("loser job state=%q owner=%q lease=%v artifact=%d model=%q generator=%q invalid_retries=%d", jobState, leaseOwner, leaseUntil, artifactSummaryID, model, generatorVersion, invalidOutputRetryCount)
 	}
 	artifact, err := decodeSummaryArtifact(artifactPayload)
-	if err != nil || artifact.GenerationModel != "test-model" || artifact.GeneratorVersion != "test-v1" {
+	if err != nil || artifact.GenerationModel != compactionTestModel || artifact.GeneratorVersion != compactionTestGeneratorVersion {
 		t.Fatalf("merged summary artifact=%+v err=%v", artifact, err)
 	}
 	latest, err := store.LatestSessionSummary(ctx, "winner", "shared", activeGeneration)
@@ -704,15 +705,15 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 
 func publishMergeTestSummary(t *testing.T, store *Store, userID, sessionID string, generation int, fromID, throughID int64, narrative string) (SessionSummary, int64) {
 	t.Helper()
-	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), userID, sessionID, generation, fromID, throughID)
+	jobID, err := store.EnqueueSessionCompactionJob(context.Background(), userID, sessionID, generation, fromID, throughID, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "merge-test", time.Minute)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "merge-test", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
 	if err != nil || job.ID != jobID {
 		t.Fatalf("claim merge job=%+v want=%d err=%v", job, jobID, err)
 	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: narrative, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, SummaryArtifact{Narrative: narrative, GenerationModel: compactionTestModel, GeneratorVersion: compactionTestGeneratorVersion}); err != nil {
 		t.Fatal(err)
 	}
 	summary, err := store.PublishSessionSummary(context.Background(), job)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -143,7 +142,7 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 		MaxTokens:         extractionMaxTokens,
 	}, nil)
 	if err != nil {
-		if isPermanentProviderError(err) {
+		if llm.IsPermanentChatProviderError(err) {
 			return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory formation extraction: %w", err))
 		}
 		return usermemory.MemorySaveBatch{}, fmt.Errorf("memory formation extraction: %w", err)
@@ -199,11 +198,6 @@ func validateTool(tool llm.Tool) error {
 		}
 	}
 	return nil
-}
-
-func isPermanentProviderError(err error) bool {
-	var httpErr *llm.ChatHTTPError
-	return errors.As(err, &httpErr) && httpErr.StatusCode >= http.StatusBadRequest && httpErr.StatusCode < http.StatusInternalServerError && httpErr.StatusCode != http.StatusRequestTimeout && httpErr.StatusCode != http.StatusTooEarly && httpErr.StatusCode != http.StatusTooManyRequests
 }
 
 const extractionPolicyPrompt = `Extract retained user-memory candidates from ONLY the current user text, then call user_memory_save exactly once.
