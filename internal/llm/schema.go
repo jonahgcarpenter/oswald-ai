@@ -70,26 +70,27 @@ type Tool struct {
 	Function ToolDefinition `json:"function"`
 }
 
-// ToolChoice forces the provider to call one named function tool.
-type ToolChoice struct {
-	Type     string             `json:"type"`
-	Function ToolChoiceFunction `json:"function"`
-}
+// ToolChoice controls whether the provider may choose or must call a tool.
+type ToolChoice string
 
-// ToolChoiceFunction identifies the forced function tool.
-type ToolChoiceFunction struct {
-	Name string `json:"name"`
-}
+const (
+	// ToolChoiceRequired requires a tool call. Callers that need one specific
+	// tool must advertise only that tool and disable parallel tool calls.
+	ToolChoiceRequired ToolChoice = "required"
+)
 
 // ChatRequest is the provider-neutral payload for a chat-style LLM request.
 type ChatRequest struct {
-	Model      string        `json:"model"`
-	User       string        `json:"user,omitempty"`
-	Messages   []ChatMessage `json:"messages"`
-	Tools      []Tool        `json:"tools,omitempty"`
-	ToolChoice *ToolChoice   `json:"tool_choice,omitempty"`
-	Format     string        `json:"format,omitempty"`
-	Stream     bool          `json:"stream"`
+	Model             string        `json:"model"`
+	User              string        `json:"user,omitempty"`
+	Messages          []ChatMessage `json:"messages"`
+	Tools             []Tool        `json:"tools,omitempty"`
+	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64      `json:"temperature,omitempty"`
+	MaxTokens         int           `json:"max_tokens,omitempty"`
+	Format            string        `json:"format,omitempty"`
+	Stream            bool          `json:"stream"`
 }
 
 // ChatResponse is the standardized reply from a chat LLM call.

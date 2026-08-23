@@ -44,7 +44,9 @@ type MemorySaveItem struct {
 
 // MemorySaveBatch is the input contract for background memory formation.
 type MemorySaveBatch struct {
-	Memories []MemorySaveItem `json:"memories"`
+	Memories       []MemorySaveItem `json:"memories"`
+	SubmittedCount int              `json:"-"`
+	MalformedCount int              `json:"-"`
 }
 
 // MemorySaveOutcome reports one independently evaluated batch item.
@@ -86,7 +88,7 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 	if len(rawItems) > maxExtractedMemoryBatch {
 		return MemorySaveBatch{}, nil, fmt.Errorf("memories contains %d items; maximum is %d", len(rawItems), maxExtractedMemoryBatch)
 	}
-	batch := MemorySaveBatch{Memories: make([]MemorySaveItem, 0, len(rawItems))}
+	batch := MemorySaveBatch{Memories: make([]MemorySaveItem, 0, len(rawItems)), SubmittedCount: len(rawItems)}
 	itemErrors := make([]MemorySaveItemError, 0)
 	for index, raw := range rawItems {
 		encoded, err := json.Marshal(raw)
@@ -130,10 +132,39 @@ func DecodeMemorySaveBatch(arguments map[string]interface{}) (MemorySaveBatch, [
 			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("confidence, importance, or ttl_days is outside the schema range")})
 			continue
 		}
+		if !validMemorySaveEnums(item) {
+			itemErrors = append(itemErrors, MemorySaveItemError{InputIndex: index, Err: fmt.Errorf("scope, category, context, provenance, or sensitivity is outside the schema enum")})
+			continue
+		}
 		item.InputIndex = index
 		batch.Memories = append(batch.Memories, item)
 	}
+	batch.MalformedCount = len(itemErrors)
 	return batch, itemErrors, nil
+}
+
+func validMemorySaveEnums(item MemorySaveItem) bool {
+	validScope := item.Scope == string(memoryformation.ScopeShortTerm) || item.Scope == string(memoryformation.ScopeLongTerm)
+	validCategory := item.Category == string(memoryformation.CategoryIdentity) ||
+		item.Category == string(memoryformation.CategoryCommunicationPreferences) ||
+		item.Category == string(memoryformation.CategoryDurablePreferences) ||
+		item.Category == string(memoryformation.CategoryProjects) ||
+		item.Category == string(memoryformation.CategoryRelationships) ||
+		item.Category == string(memoryformation.CategoryEnvironment) ||
+		item.Category == string(memoryformation.CategoryNotes)
+	validContext := item.Context == string(memoryformation.ContextDirectAssertion) ||
+		item.Context == string(memoryformation.ContextTemporaryState) ||
+		item.Context == string(memoryformation.ContextHypothetical) ||
+		item.Context == string(memoryformation.ContextQuotation)
+	validProvenance := item.Provenance == string(memoryformation.ProvenanceUserStatement) ||
+		item.Provenance == string(memoryformation.ProvenanceModelInference) ||
+		item.Provenance == string(memoryformation.ProvenanceThirdParty) ||
+		item.Provenance == string(memoryformation.ProvenancePublicSource) ||
+		item.Provenance == string(memoryformation.ProvenanceToolOutput)
+	validSensitivity := item.Sensitivity == string(memoryformation.SensitivityLow) ||
+		item.Sensitivity == string(memoryformation.SensitivityIdentityOrContact) ||
+		item.Sensitivity == string(memoryformation.SensitivityHighImpactInteraction)
+	return validScope && validCategory && validContext && validProvenance && validSensitivity
 }
 
 // DecodeMemorySaveBatchJSON strictly decodes a persisted extraction artifact.

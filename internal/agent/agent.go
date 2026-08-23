@@ -731,7 +731,7 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		req.Messages = messages
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		req.Tools = catalog.Tools
-		req.ToolChoice = nil
+		req.ToolChoice = ""
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
 			config.F("is_streaming", req.Stream),

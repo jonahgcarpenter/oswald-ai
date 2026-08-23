@@ -52,8 +52,11 @@ func TestLLMExtractorParsesStrictJSON(t *testing.T) {
 	if err != nil || len(got.Memories) != 1 || got.Memories[0].Evidence != "I use Go" || got.Memories[0].ClaimSlot != "project.language" {
 		t.Fatalf("extracted=%+v err=%v", got, err)
 	}
-	if len(client.request.Tools) != 1 || client.request.ToolChoice == nil || client.request.ToolChoice.Function.Name != userMemorySaveToolName {
+	if len(client.request.Tools) != 1 || client.request.Tools[0].Function.Name != userMemorySaveToolName || client.request.ToolChoice != llm.ToolChoiceRequired || client.request.ParallelToolCalls == nil || *client.request.ParallelToolCalls {
 		t.Fatalf("request did not force the private memory save tool: %+v", client.request)
+	}
+	if client.request.Temperature == nil || *client.request.Temperature != 0 || client.request.MaxTokens != extractionMaxTokens {
+		t.Fatalf("request did not apply deterministic extraction controls: %+v", client.request)
 	}
 	for _, required := range []string{"all 13 fields", "Evidence must be the complete user turn", "identity -> identity.*", "identity.name, never identity_name", "topic mention does not establish", "importance must be an integer from 1 to 5", `"category":"communication_preferences"`, `"claim_slot":"communication.reply_style"`, `{"memories":[]}`} {
 		if !strings.Contains(client.request.Messages[0].Content, required) {
@@ -67,7 +70,8 @@ func TestLLMExtractorRejectsAllMalformedCandidates(t *testing.T) {
 	delete(malformed, "claim_slot")
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed}}}
 	got, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if !errors.Is(err, ErrPermanentExtraction) || len(got.Memories) != 0 || client.calls != 1 || !strings.Contains(err.Error(), "all 1 submitted candidates were malformed") {
+	code, ok := InvalidOutputCode(err)
+	if !errors.Is(err, ErrInvalidOutput) || errors.Is(err, ErrPermanentExtraction) || !ok || code != invalidOutputAllItemsMalformed || len(got.Memories) != 0 || client.calls != 1 {
 		t.Fatalf("extracted=%+v calls=%d err=%v", got, client.calls, err)
 	}
 }
@@ -77,7 +81,7 @@ func TestLLMExtractorRejectsCandidateMissingCategory(t *testing.T) {
 	delete(malformed, "category")
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed}}}
 	_, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "My name is Jonah"})
-	if !errors.Is(err, ErrPermanentExtraction) || !strings.Contains(err.Error(), "malformed") {
+	if code, ok := InvalidOutputCode(err); !errors.Is(err, ErrInvalidOutput) || !ok || code != invalidOutputAllItemsMalformed {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -87,7 +91,7 @@ func TestLLMExtractorPreservesValidCandidatesBesideMalformedCandidates(t *testin
 	delete(malformed, "category")
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": []interface{}{malformed, validCandidate()}}}
 	got, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
-	if err != nil || len(got.Memories) != 1 || got.Memories[0].Statement != "The user uses Go." {
+	if err != nil || len(got.Memories) != 1 || got.Memories[0].Statement != "The user uses Go." || got.SubmittedCount != 2 || got.MalformedCount != 1 {
 		t.Fatalf("extracted=%+v err=%v", got, err)
 	}
 }
@@ -99,8 +103,29 @@ func TestLLMExtractorRejectsMoreThanFiveCandidates(t *testing.T) {
 	}
 	client := &fakeChatter{arguments: map[string]interface{}{"memories": items}}
 	_, err := newTestExtractor(t, client).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use several tools"})
-	if !errors.Is(err, ErrPermanentExtraction) || !strings.Contains(err.Error(), "maximum is 5") {
+	if code, ok := InvalidOutputCode(err); !errors.Is(err, ErrInvalidOutput) || !ok || code != invalidOutputBatchShape {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLLMExtractorReturnsStableStructuralFailureCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *llm.ChatResponse
+		wantCode string
+	}{
+		{name: "missing tool call", response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant"}}, wantCode: invalidOutputMissingToolCall},
+		{name: "multiple tool calls", response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemorySaveToolName}}, {Function: llm.ToolFunction{Name: userMemorySaveToolName}}}}}, wantCode: invalidOutputMultipleToolCalls},
+		{name: "unexpected tool", response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: "other_tool"}}}}}, wantCode: invalidOutputUnexpectedToolCall},
+		{name: "malformed arguments", response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemorySaveToolName, Arguments: map[string]interface{}{"_raw": "not json"}}}}}}, wantCode: invalidOutputMalformedArguments},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newTestExtractor(t, &fakeChatter{response: test.response}).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
+			if code, ok := InvalidOutputCode(err); !errors.Is(err, ErrInvalidOutput) || !ok || code != test.wantCode {
+				t.Fatalf("code=%q error=%v", code, err)
+			}
+		})
 	}
 }
 
@@ -120,6 +145,7 @@ func TestLLMExtractorClassifiesProviderErrors(t *testing.T) {
 
 type fakeChatter struct {
 	arguments map[string]interface{}
+	response  *llm.ChatResponse
 	err       error
 	request   llm.ChatRequest
 	calls     int
@@ -130,6 +156,9 @@ func (f *fakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ func(ll
 	f.request = request
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.response != nil {
+		return f.response, nil
 	}
 	return &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemorySaveToolName, Arguments: f.arguments}}}}}, nil
 }

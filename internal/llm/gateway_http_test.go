@@ -36,6 +36,18 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 		if body["model"] != "test-model" || body["stream"] != false {
 			t.Fatalf("unexpected request body: %+v", body)
 		}
+		if _, ok := body["tool_choice"]; ok {
+			t.Fatalf("ordinary request included tool_choice: %+v", body)
+		}
+		if _, ok := body["parallel_tool_calls"]; ok {
+			t.Fatalf("ordinary request included parallel_tool_calls: %+v", body)
+		}
+		if _, ok := body["temperature"]; ok {
+			t.Fatalf("ordinary request included temperature: %+v", body)
+		}
+		if _, ok := body["max_tokens"]; ok {
+			t.Fatalf("ordinary request included max_tokens: %+v", body)
+		}
 		_, _ = w.Write([]byte(`{
 			"model":"served-model",
 			"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}],
@@ -57,14 +69,20 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Tools      []Tool      `json:"tools"`
-			ToolChoice *ToolChoice `json:"tool_choice"`
+			Tools             []Tool     `json:"tools"`
+			ToolChoice        ToolChoice `json:"tool_choice"`
+			ParallelToolCalls *bool      `json:"parallel_tool_calls"`
+			Temperature       *float64   `json:"temperature"`
+			MaxTokens         int        `json:"max_tokens"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if len(body.Tools) != 1 || body.ToolChoice == nil || body.ToolChoice.Function.Name != "user_memory_save" {
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "user_memory_save" || body.ToolChoice != ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
 			t.Fatalf("unexpected forced tool request: %+v", body)
+		}
+		if body.Temperature == nil || *body.Temperature != 0 || body.MaxTokens != 2048 {
+			t.Fatalf("unexpected deterministic controls: %+v", body)
 		}
 		memories := body.Tools[0].Function.Parameters.Properties["memories"]
 		if memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.AdditionalProperties != nil {
@@ -92,7 +110,9 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 		}},
 	}}}
 	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: &ToolChoice{Type: "function", Function: ToolChoiceFunction{Name: "user_memory_save"}}}, nil)
+	parallelToolCalls := false
+	temperature := 0.0
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: 2048}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

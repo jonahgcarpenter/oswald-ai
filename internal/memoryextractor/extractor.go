@@ -15,10 +15,47 @@ import (
 const (
 	userMemorySaveToolName  = "user_memory_save"
 	maxExtractedMemoryBatch = 5
+	extractionMaxTokens     = 2048
+
+	invalidOutputMissingToolCall    = "missing_tool_call"
+	invalidOutputMultipleToolCalls  = "multiple_tool_calls"
+	invalidOutputUnexpectedToolCall = "unexpected_tool_call"
+	invalidOutputMalformedArguments = "malformed_tool_arguments"
+	invalidOutputBatchShape         = "invalid_batch_shape"
+	invalidOutputAllItemsMalformed  = "all_items_malformed"
 )
 
 // ErrPermanentExtraction marks malformed output and non-retryable provider requests.
 var ErrPermanentExtraction = errors.New("permanent memory formation extraction failure")
+
+// ErrInvalidOutput marks model output that may succeed on one bounded retry.
+var ErrInvalidOutput = errors.New("invalid memory formation model output")
+
+// InvalidOutputError identifies one stable model-output failure category.
+type InvalidOutputError struct {
+	Code string
+}
+
+func (e *InvalidOutputError) Error() string {
+	return "invalid memory formation model output: " + e.Code
+}
+
+func (e *InvalidOutputError) Unwrap() error {
+	return ErrInvalidOutput
+}
+
+// InvalidOutputCode returns the stable reason carried by an invalid-output error.
+func InvalidOutputCode(err error) (string, bool) {
+	var outputErr *InvalidOutputError
+	if !errors.As(err, &outputErr) {
+		return "", false
+	}
+	return outputErr.Code, true
+}
+
+func invalidOutput(code string) error {
+	return &InvalidOutputError{Code: code}
+}
 
 // LLMExtractor uses the configured gateway model with only a private user_memory_save schema exposed.
 type LLMExtractor struct {
@@ -91,14 +128,19 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 	if strings.TrimSpace(turn.UserText) == "" {
 		return usermemory.MemorySaveBatch{}, nil
 	}
+	parallelToolCalls := false
+	temperature := 0.0
 	resp, err := e.client.Chat(ctx, llm.ChatRequest{
 		Model: e.model,
 		Messages: []llm.ChatMessage{
 			{Role: "system", Content: extractionPolicyPrompt},
 			{Role: "user", Content: turn.UserText},
 		},
-		Tools:      []llm.Tool{e.tool},
-		ToolChoice: &llm.ToolChoice{Type: "function", Function: llm.ToolChoiceFunction{Name: userMemorySaveToolName}},
+		Tools:             []llm.Tool{e.tool},
+		ToolChoice:        llm.ToolChoiceRequired,
+		ParallelToolCalls: &parallelToolCalls,
+		Temperature:       &temperature,
+		MaxTokens:         extractionMaxTokens,
 	}, nil)
 	if err != nil {
 		if isPermanentProviderError(err) {
@@ -106,19 +148,25 @@ func (e *LLMExtractor) Extract(ctx context.Context, turn usermemory.StoredSessio
 		}
 		return usermemory.MemorySaveBatch{}, fmt.Errorf("memory formation extraction: %w", err)
 	}
-	if resp == nil || len(resp.Message.ToolCalls) != 1 {
-		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory formation extraction must return exactly one tool call"))
+	if resp == nil || len(resp.Message.ToolCalls) == 0 {
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputMissingToolCall)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputMultipleToolCalls)
 	}
 	call := resp.Message.ToolCalls[0]
 	if call.Function.Name != userMemorySaveToolName {
-		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("memory formation extraction called unexpected tool %q", call.Function.Name))
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputUnexpectedToolCall)
+	}
+	if _, malformed := call.Function.Arguments["_raw"]; malformed {
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputMalformedArguments)
 	}
 	batch, itemErrors, err := usermemory.DecodeMemorySaveBatch(call.Function.Arguments)
 	if err != nil {
-		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("decode memory formation tool arguments: %w", err))
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputBatchShape)
 	}
 	if len(itemErrors) > 0 && len(batch.Memories) == 0 {
-		return usermemory.MemorySaveBatch{}, errors.Join(ErrPermanentExtraction, fmt.Errorf("decode memory formation tool arguments: all %d submitted candidates were malformed", len(itemErrors)))
+		return usermemory.MemorySaveBatch{}, invalidOutput(invalidOutputAllItemsMalformed)
 	}
 	return batch, nil
 }

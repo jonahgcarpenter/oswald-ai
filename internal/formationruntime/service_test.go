@@ -332,7 +332,7 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 	}
 }
 
-func TestServiceSkipsAllMalformedCandidatesWithoutRetry(t *testing.T) {
+func TestServiceRetriesAllMalformedCandidatesOnceThenSkips(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "You actually are on v3.2.0 not 1.0", "req")
 	client := &fakeExtractionChatter{content: `{"candidates":[{"statement":"The AI is running version 3.2.0.","evidence":"You actually are on v3.2.0 not 1.0","scope":"short_term","category":"software_version","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":0.4,"ttl_days":7,"supersedes_statement":null}]}`}
@@ -343,8 +343,14 @@ func TestServiceSkipsAllMalformedCandidatesWithoutRetry(t *testing.T) {
 	}
 	service.drain(context.Background())
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
-	if err != nil || state != "skipped" || client.calls != 1 {
+	if err != nil || state != "retry" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
+	}
+	time.Sleep(2100 * time.Millisecond)
+	service.drain(context.Background())
+	state, err = store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "skipped" || client.calls != 2 {
+		t.Fatalf("terminal state=%q calls=%d err=%v", state, client.calls, err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
 	if err != nil || len(memories) != 0 {
@@ -352,7 +358,48 @@ func TestServiceSkipsAllMalformedCandidatesWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestServiceSkipsCandidateMissingCategoryWithoutRetry(t *testing.T) {
+func TestServicePublishesWhenInvalidOutputRetryRecovers(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "I use Go", "retry-recovers")
+	extractor := &fakeExtractor{err: &memoryextractor.InvalidOutputError{Code: "missing_tool_call"}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "retry-recovers", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "retry" || extractor.calls != 1 {
+		t.Fatalf("state=%q calls=%d err=%v", state, extractor.calls, err)
+	}
+	extractor.err = nil
+	extractor.candidates = []usermemory.MemorySaveItem{{Statement: "The user uses Go.", Evidence: "I use Go", Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4, ClaimSlot: "project.language", ClaimValue: "go"}}
+	time.Sleep(2100 * time.Millisecond)
+	service.drain(context.Background())
+	state, err = store.FormationJobState(context.Background(), "user-1", jobID)
+	memories, listErr := store.ListMemories("user-1", "", "", 10)
+	if err != nil || listErr != nil || state != "succeeded" || extractor.calls != 2 || len(memories) != 1 {
+		t.Fatalf("state=%q calls=%d memories=%+v state_err=%v list_err=%v", state, extractor.calls, memories, err, listErr)
+	}
+}
+
+func TestServiceDoesNotRetryValidEmptyBatch(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "Nothing durable here", "empty")
+	extractor := &fakeExtractor{}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	jobID, err := store.EnqueueFormationJob(context.Background(), usermemory.FormationSource{RequestID: "empty", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
+	if err != nil || state != "succeeded" || extractor.calls != 1 {
+		t.Fatalf("state=%q calls=%d err=%v", state, extractor.calls, err)
+	}
+}
+
+func TestServiceRetriesCandidateMissingCategory(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "My name is Jonah", "missing-category")
 	client := &fakeExtractionChatter{content: `{"memories":[{"statement":"The user's name is Jonah.","evidence":"My name is Jonah","scope":"long_term","context":"direct_assertion","provenance":"user_statement","sensitivity":"identity_or_contact","confidence":1,"importance":5,"ttl_days":0,"supersedes":"","claim_slot":"identity.name","claim_value":"Jonah"}]}`}
@@ -363,7 +410,7 @@ func TestServiceSkipsCandidateMissingCategoryWithoutRetry(t *testing.T) {
 	}
 	service.drain(context.Background())
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
-	if err != nil || state != "skipped" || client.calls != 1 {
+	if err != nil || state != "retry" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -416,7 +463,7 @@ func TestServiceDropsMalformedPersistedArtifactBesideValidCandidate(t *testing.T
 	}
 }
 
-func TestServiceSkipsMalformedOuterArgumentsWithoutRetry(t *testing.T) {
+func TestServiceRetriesMalformedOuterArguments(t *testing.T) {
 	store := formationTestStore(t)
 	turnID := formationTestTurn(t, store, "Nothing to retain", "req")
 	client := &fakeExtractionChatter{content: `[{"statement":"wrong top-level shape"}]`}
@@ -427,7 +474,7 @@ func TestServiceSkipsMalformedOuterArgumentsWithoutRetry(t *testing.T) {
 	}
 	service.drain(context.Background())
 	state, err := store.FormationJobState(context.Background(), "user-1", jobID)
-	if err != nil || state != "skipped" || client.calls != 1 {
+	if err != nil || state != "retry" || client.calls != 1 {
 		t.Fatalf("state=%q calls=%d err=%v", state, client.calls, err)
 	}
 }

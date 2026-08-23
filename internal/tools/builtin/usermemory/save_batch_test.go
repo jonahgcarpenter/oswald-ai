@@ -54,6 +54,19 @@ func TestDecodeMemorySaveBatchRejectsSchemaRangeViolations(t *testing.T) {
 	}
 }
 
+func TestDecodeMemorySaveBatchRejectsSchemaEnumViolations(t *testing.T) {
+	for _, field := range []string{"scope", "category", "context", "provenance", "sensitivity"} {
+		t.Run(field, func(t *testing.T) {
+			item := validMemorySaveMap()
+			item[field] = "not_in_schema"
+			batch, itemErrors, err := DecodeMemorySaveBatch(map[string]interface{}{"memories": []interface{}{item}})
+			if err != nil || len(batch.Memories) != 0 || batch.SubmittedCount != 1 || batch.MalformedCount != 1 || len(itemErrors) != 1 {
+				t.Fatalf("batch=%+v item_errors=%+v err=%v", batch, itemErrors, err)
+			}
+		})
+	}
+}
+
 func TestDecodeMemorySaveBatchJSONUsesSameContract(t *testing.T) {
 	data := []byte(fmt.Sprintf(`{"memories":[%s]}`, mustMemorySaveJSON(t, validMemorySaveMap())))
 	batch, itemErrors, err := DecodeMemorySaveBatchJSON(data)
