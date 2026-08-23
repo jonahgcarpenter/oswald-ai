@@ -3,7 +3,6 @@ package formationruntime
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -17,10 +16,10 @@ import (
 )
 
 const (
-	formationPollInterval = time.Second
-	formationJobLease     = 5 * time.Minute
-	formationMaxAttempts  = 5
-	invalidOutputAttempts = 2
+	formationPollInterval   = time.Second
+	formationJobLease       = 5 * time.Minute
+	formationMaxAttempts    = 5
+	invalidOutputMaxRetries = 1
 )
 
 var errBackgroundPreempted = errors.New("background model work preempted by foreground traffic")
@@ -145,9 +144,9 @@ func (s *Service) drain(ctx context.Context) {
 			}
 			if errors.Is(err, errInvalidOutput) {
 				code := errorCode(err)
-				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("error_code", code)}
-				if job.AttemptCount < invalidOutputAttempts {
-					if retryErr := s.store.RetryFormationJob(context.Background(), job, code, 0); retryErr != nil {
+				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("error_code", code)}
+				if job.InvalidOutputRetryCount < invalidOutputMaxRetries {
+					if retryErr := s.store.RetryInvalidFormationJob(context.Background(), job, code); retryErr != nil {
 						s.warn("user_memory.formation.job.retry_failed", "failed to retry invalid user-memory formation output", retryErr, fields...)
 					} else {
 						s.warn("user_memory.formation.job.invalid_output_retry", "user-memory formation invalid output will retry once", err, append(fields, config.F("status", "retry"))...)
@@ -245,7 +244,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if err != nil {
 			return err
 		}
-		payload, err := json.Marshal(extracted)
+		payload, err := usermemory.MarshalMemorySaveBatchArtifact(extracted)
 		if err != nil {
 			return err
 		}
@@ -280,7 +279,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	if s.log != nil {
 		s.log.Server("user_memory.formation").Info("user_memory.formation.extraction.complete", "completed user-memory formation extraction",
 			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
-			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount),
+			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount),
 			config.F("submitted_count", extracted.SubmittedCount), config.F("candidate_count", len(extracted.Memories)), config.F("malformed_count", extracted.MalformedCount),
 			config.F("validation_failed_count", validationFailedCount), config.F("proposed_count", proposedCount), config.F("approved_count", approvedCount),
 			config.F("rejected_count", rejectedCount), config.F("published_count", publishedCount),

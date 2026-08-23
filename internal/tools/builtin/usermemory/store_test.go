@@ -535,7 +535,8 @@ func TestMergeUsersTxMovesRunningFormationJobAfterSourceTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ? WHERE id = ?`, formatTime(time.Now().Add(time.Minute)), jobID); err != nil {
+	artifact := `{"memories":[],"submitted_count":1,"malformed_count":1}`
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET state = 'running', lease_owner = 'old-worker', lease_until = ?, invalid_output_retry_count = 1, extraction_payload = ? WHERE id = ?`, formatTime(time.Now().Add(time.Minute)), artifact, jobID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -550,17 +551,17 @@ func TestMergeUsersTxMovesRunningFormationJobAfterSourceTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var owner, state, leaseOwner string
-	var sourceGeneration, turnGeneration int
+	var owner, state, leaseOwner, mergedArtifact string
+	var sourceGeneration, turnGeneration, invalidRetryCount int
 	var leaseUntil sql.NullString
-	if err := store.sql.QueryRow(`SELECT canonical_user_id, source_session_generation, state, lease_owner, lease_until FROM durable_jobs WHERE id = ?`, jobID).Scan(&owner, &sourceGeneration, &state, &leaseOwner, &leaseUntil); err != nil {
+	if err := store.sql.QueryRow(`SELECT canonical_user_id, source_session_generation, state, lease_owner, lease_until, invalid_output_retry_count, extraction_payload FROM durable_jobs WHERE id = ?`, jobID).Scan(&owner, &sourceGeneration, &state, &leaseOwner, &leaseUntil, &invalidRetryCount, &mergedArtifact); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.sql.QueryRow(`SELECT session_generation FROM session_turns WHERE id = ? AND canonical_user_id = 'winner'`, turn.ID).Scan(&turnGeneration); err != nil {
 		t.Fatal(err)
 	}
-	if owner != "winner" || sourceGeneration != turnGeneration || sourceGeneration == loserProfile.Generation || state != "retry" || leaseOwner != "" || leaseUntil.Valid {
-		t.Fatalf("merged formation owner=%q source_generation=%d turn_generation=%d state=%q lease_owner=%q lease_until=%v", owner, sourceGeneration, turnGeneration, state, leaseOwner, leaseUntil)
+	if owner != "winner" || sourceGeneration != turnGeneration || sourceGeneration == loserProfile.Generation || state != "retry" || leaseOwner != "" || leaseUntil.Valid || invalidRetryCount != 1 || mergedArtifact != artifact {
+		t.Fatalf("merged formation owner=%q source_generation=%d turn_generation=%d state=%q lease_owner=%q lease_until=%v invalid_retries=%d artifact=%q", owner, sourceGeneration, turnGeneration, state, leaseOwner, leaseUntil, invalidRetryCount, mergedArtifact)
 	}
 }
 

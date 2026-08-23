@@ -49,6 +49,12 @@ type MemorySaveBatch struct {
 	MalformedCount int              `json:"-"`
 }
 
+type memorySaveBatchArtifact struct {
+	Memories       []MemorySaveItem `json:"memories"`
+	SubmittedCount int              `json:"submitted_count"`
+	MalformedCount int              `json:"malformed_count"`
+}
+
 // MemorySaveOutcome reports one independently evaluated batch item.
 type MemorySaveOutcome struct {
 	InputIndex        int
@@ -167,7 +173,23 @@ func validMemorySaveEnums(item MemorySaveItem) bool {
 	return validScope && validCategory && validContext && validProvenance && validSensitivity
 }
 
-// DecodeMemorySaveBatchJSON strictly decodes a persisted extraction artifact.
+// MarshalMemorySaveBatchArtifact encodes one validated batch for durable replay.
+func MarshalMemorySaveBatchArtifact(batch MemorySaveBatch) ([]byte, error) {
+	if batch.SubmittedCount < 0 || batch.SubmittedCount > maxExtractedMemoryBatch || batch.MalformedCount < 0 || batch.MalformedCount > batch.SubmittedCount || len(batch.Memories)+batch.MalformedCount != batch.SubmittedCount {
+		return nil, fmt.Errorf("memory save artifact counts are inconsistent")
+	}
+	memories := batch.Memories
+	if memories == nil {
+		memories = []MemorySaveItem{}
+	}
+	return json.Marshal(memorySaveBatchArtifact{
+		Memories:       memories,
+		SubmittedCount: batch.SubmittedCount,
+		MalformedCount: batch.MalformedCount,
+	})
+}
+
+// DecodeMemorySaveBatchJSON strictly decodes a legacy or current persisted extraction artifact.
 func DecodeMemorySaveBatchJSON(data []byte) (MemorySaveBatch, []MemorySaveItemError, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -178,7 +200,58 @@ func DecodeMemorySaveBatchJSON(data []byte) (MemorySaveBatch, []MemorySaveItemEr
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return MemorySaveBatch{}, nil, fmt.Errorf("trailing JSON")
 	}
-	return DecodeMemorySaveBatch(arguments)
+	if memories, exists := arguments["memories"]; exists && memories == nil {
+		arguments["memories"] = []interface{}{}
+	}
+	_, hasSubmittedCount := arguments["submitted_count"]
+	_, hasMalformedCount := arguments["malformed_count"]
+	if hasSubmittedCount != hasMalformedCount {
+		return MemorySaveBatch{}, nil, fmt.Errorf("persisted artifact counts must be provided together")
+	}
+	if !hasSubmittedCount {
+		return DecodeMemorySaveBatch(arguments)
+	}
+	for key := range arguments {
+		if key != "memories" && key != "submitted_count" && key != "malformed_count" {
+			return MemorySaveBatch{}, nil, fmt.Errorf("unknown persisted artifact field %q", key)
+		}
+	}
+	submittedCount, err := artifactInteger(arguments["submitted_count"])
+	if err != nil {
+		return MemorySaveBatch{}, nil, fmt.Errorf("submitted_count: %w", err)
+	}
+	malformedCount, err := artifactInteger(arguments["malformed_count"])
+	if err != nil {
+		return MemorySaveBatch{}, nil, fmt.Errorf("malformed_count: %w", err)
+	}
+	rawItems, ok := arguments["memories"].([]interface{})
+	if !ok {
+		return MemorySaveBatch{}, nil, fmt.Errorf("memories must be an array")
+	}
+	if submittedCount < 0 || submittedCount > maxExtractedMemoryBatch || malformedCount < 0 || malformedCount > submittedCount || len(rawItems)+malformedCount != submittedCount {
+		return MemorySaveBatch{}, nil, fmt.Errorf("persisted artifact counts are inconsistent")
+	}
+	delete(arguments, "submitted_count")
+	delete(arguments, "malformed_count")
+	batch, itemErrors, err := DecodeMemorySaveBatch(arguments)
+	if err != nil {
+		return MemorySaveBatch{}, nil, err
+	}
+	batch.SubmittedCount = submittedCount
+	batch.MalformedCount = malformedCount + len(itemErrors)
+	return batch, itemErrors, nil
+}
+
+func artifactInteger(value interface{}) (int, error) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	integer, err := number.Int64()
+	if err != nil || int64(int(integer)) != integer {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	return int(integer), nil
 }
 
 // SubmitMemorySaveBatch evaluates and atomically applies each item independently.

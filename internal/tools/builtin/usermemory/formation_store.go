@@ -74,17 +74,18 @@ type FormationCandidate struct {
 
 // FormationJob is one leased post-turn extraction operation.
 type FormationJob struct {
-	ID                int64
-	UserID            string
-	RequestID         string
-	SessionID         string
-	SessionGeneration int
-	TurnID            int64
-	Model             string
-	ExtractorVersion  string
-	AttemptCount      int
-	LeaseOwner        string
-	LeaseUntil        time.Time
+	ID                      int64
+	UserID                  string
+	RequestID               string
+	SessionID               string
+	SessionGeneration       int
+	TurnID                  int64
+	Model                   string
+	ExtractorVersion        string
+	AttemptCount            int
+	InvalidOutputRetryCount int
+	LeaseOwner              string
+	LeaseUntil              time.Time
 }
 
 const formationSourceFenceSQL = `
@@ -743,14 +744,14 @@ func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (For
 	err = tx.QueryRowContext(ctx, `
 SELECT id, canonical_user_id, source_request_id, source_session_id,
 	source_session_generation, COALESCE(source_turn_id, 0), extraction_model,
-	extractor_version, attempt_count
+	extractor_version, attempt_count, invalid_output_retry_count
 FROM durable_jobs
 WHERE job_kind = 'memory_formation' AND ((state IN ('queued', 'retry') AND available_at <= ?)
 	OR (state = 'running' AND lease_until <= ?))
 	`+formationSourceFenceSQL+`
 ORDER BY available_at, id LIMIT 1
-`, formatTime(now), formatTime(now)).Scan(&job.ID, &job.UserID, &job.RequestID, &job.SessionID,
-		&job.SessionGeneration, &job.TurnID, &job.Model, &job.ExtractorVersion, &job.AttemptCount)
+	`, formatTime(now), formatTime(now)).Scan(&job.ID, &job.UserID, &job.RequestID, &job.SessionID,
+		&job.SessionGeneration, &job.TurnID, &job.Model, &job.ExtractorVersion, &job.AttemptCount, &job.InvalidOutputRetryCount)
 	if err != nil {
 		return FormationJob{}, err
 	}
@@ -830,6 +831,15 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
 	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = CASE WHEN ? = 'dead' THEN ? ELSE NULL END, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? `+formationSourceFenceSQL, state, formatTime(now.Add(delay)), state, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
+	return requireFormationLeaseMutation(result, err)
+}
+
+// RetryInvalidFormationJob consumes the one dedicated structured-output retry
+// without charging the operational provider retry budget.
+func (s *Store) RetryInvalidFormationJob(ctx context.Context, job FormationJob, code string) error {
+	now := time.Now().UTC()
+	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), invalid_output_retry_count = invalid_output_retry_count + 1, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND invalid_output_retry_count = 0 AND extraction_payload = '' `+formationSourceFenceSQL, formatTime(now.Add(delay)), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
 	return requireFormationLeaseMutation(result, err)
 }
 

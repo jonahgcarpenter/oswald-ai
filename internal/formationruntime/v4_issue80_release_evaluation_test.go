@@ -60,7 +60,7 @@ type issue80Extractor struct {
 
 func (f *issue80Extractor) Extract(context.Context, usermemory.StoredSessionTurn) (usermemory.MemorySaveBatch, error) {
 	f.calls++
-	return usermemory.MemorySaveBatch{Memories: append([]usermemory.MemorySaveItem(nil), f.memories...)}, nil
+	return usermemory.MemorySaveBatch{Memories: append([]usermemory.MemorySaveItem(nil), f.memories...), SubmittedCount: len(f.memories)}, nil
 }
 
 type issue80Embedder struct {
