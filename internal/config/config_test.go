@@ -22,7 +22,6 @@ var retentionEnvKeys = []string{
 func TestEnvHelpersUseFallbacksForMissingEmptyAndInvalidValues(t *testing.T) {
 	t.Setenv("OSWALD_TEST_STRING", "")
 	t.Setenv("OSWALD_TEST_INT", "not-an-int")
-	t.Setenv("OSWALD_TEST_DURATION", "not-a-duration")
 
 	if got := getEnv("OSWALD_TEST_MISSING", "fallback"); got != "fallback" {
 		t.Fatalf("getEnv missing = %q, want fallback", got)
@@ -33,24 +32,17 @@ func TestEnvHelpersUseFallbacksForMissingEmptyAndInvalidValues(t *testing.T) {
 	if got := getEnvInt("OSWALD_TEST_INT", 12); got != 12 {
 		t.Fatalf("getEnvInt invalid = %d, want 12", got)
 	}
-	if got := getEnvDuration("OSWALD_TEST_DURATION", 3*time.Second); got != 3*time.Second {
-		t.Fatalf("getEnvDuration invalid = %s, want 3s", got)
-	}
 }
 
 func TestEnvHelpersParseConfiguredValues(t *testing.T) {
 	t.Setenv("OSWALD_TEST_STRING", "value")
 	t.Setenv("OSWALD_TEST_INT", "42")
-	t.Setenv("OSWALD_TEST_DURATION", "1500ms")
 
 	if got := getEnv("OSWALD_TEST_STRING", "fallback"); got != "value" {
 		t.Fatalf("getEnv set = %q, want value", got)
 	}
 	if got := getEnvInt("OSWALD_TEST_INT", 0); got != 42 {
 		t.Fatalf("getEnvInt set = %d, want 42", got)
-	}
-	if got := getEnvDuration("OSWALD_TEST_DURATION", 0); got != 1500*time.Millisecond {
-		t.Fatalf("getEnvDuration set = %s, want 1500ms", got)
 	}
 }
 

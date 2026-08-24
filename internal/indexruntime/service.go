@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/leaseruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -309,7 +310,13 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("index.outbox.claim_failed", "outbox", err)
 			return
 		}
-		if err := s.applyChange(ctx, change); err != nil {
+		err = leaseruntime.Run(ctx, leaseTime,
+			func(renewCtx context.Context) error {
+				return s.store.RenewDerivedIndexChangeLease(renewCtx, change, leaseTime)
+			},
+			func(workCtx context.Context) error { return s.applyChange(workCtx, change) },
+		)
+		if err != nil {
 			if retryErr := s.store.RetryDerivedIndexChange(ctx, change, err.Error()); retryErr != nil {
 				s.warn("index.outbox.retry_failed", change.EntityKind, retryErr)
 				return

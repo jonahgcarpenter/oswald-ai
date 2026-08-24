@@ -227,6 +227,30 @@ func TestFormationLeaseFenceRollsBackCandidateAndCanonicalWrites(t *testing.T) {
 	}
 }
 
+func TestFormationLeaseRenewalAdvancesExactFence(t *testing.T) {
+	store := newFormationTestStore(t)
+	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
+	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := job
+	leaseUntil, err := store.RenewFormationJobLease(context.Background(), job, 2*time.Minute)
+	if err != nil || !leaseUntil.After(job.LeaseUntil) {
+		t.Fatalf("renewed until=%s err=%v", leaseUntil, err)
+	}
+	if err := store.ValidateFormationJobLease(context.Background(), old); !errors.Is(err, ErrStaleFormationJobLease) {
+		t.Fatalf("old lease validation=%v", err)
+	}
+	job.LeaseUntil = leaseUntil
+	if err := store.ValidateFormationJobLease(context.Background(), job); err != nil {
+		t.Fatalf("renewed lease validation=%v", err)
+	}
+}
+
 func TestFormationJobsRequireExactSuccessfullyDeliveredSource(t *testing.T) {
 	for _, test := range []struct {
 		name   string

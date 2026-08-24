@@ -677,6 +677,23 @@ WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?`, owner, 
 	return job, nil
 }
 
+// RenewSessionCompactionJobLease extends an exactly owned, still-live compaction lease.
+func (s *Store) RenewSessionCompactionJobLease(ctx context.Context, job SessionCompactionJob, lease time.Duration) (time.Time, error) {
+	if lease <= 0 {
+		return time.Time{}, fmt.Errorf("renew session compaction lease: duration must be positive")
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)`, formatTime(leaseUntil), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("renew session compaction lease: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return time.Time{}, sql.ErrNoRows
+	}
+	return leaseUntil, nil
+}
+
 // SaveSessionCompactionArtifact persists canonical JSON for the first result only.
 func (s *Store) SaveSessionCompactionArtifact(ctx context.Context, job SessionCompactionJob, artifact SummaryArtifact) error {
 	if artifact.GenerationModel != job.Model || artifact.GeneratorVersion != job.GeneratorVersion {

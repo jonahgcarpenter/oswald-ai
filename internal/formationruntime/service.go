@@ -10,6 +10,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/leaseruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -43,12 +44,8 @@ type Service struct {
 }
 
 // NewService creates a serialized formation worker.
-func NewService(store *usermemory.Store, extractor Extractor, model string, log *config.Logger, providerTimeout ...time.Duration) *Service {
-	jobLease := formationJobLease
-	if len(providerTimeout) > 0 && providerTimeout[0] > 0 && providerTimeout[0]+30*time.Second > jobLease {
-		jobLease = providerTimeout[0] + 30*time.Second
-	}
-	return &Service{store: store, extractor: extractor, model: model, jobLease: jobLease, log: log, notify: make(chan struct{}, 1)}
+func NewService(store *usermemory.Store, extractor Extractor, model string, log *config.Logger) *Service {
+	return &Service{store: store, extractor: extractor, model: model, jobLease: formationJobLease, log: log, notify: make(chan struct{}, 1)}
 }
 
 // SetLowPriorityGate makes extraction yield to foreground model work.
@@ -135,7 +132,8 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("user_memory.formation.job.claim_failed", "failed to claim user-memory formation job", err)
 			return
 		}
-		if err := s.process(ctx, job); err != nil {
+		err = s.process(ctx, &job)
+		if err != nil {
 			if errors.Is(err, errBackgroundPreempted) {
 				if deferErr := s.store.DeferFormationJob(context.Background(), job, time.Second); deferErr != nil {
 					s.warn("user_memory.formation.job.defer_failed", "failed to defer preempted user-memory formation job", deferErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
@@ -187,9 +185,9 @@ func (s *Service) drain(ctx context.Context) {
 	}
 }
 
-func (s *Service) process(ctx context.Context, job usermemory.FormationJob) error {
+func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) error {
 	started := time.Now()
-	if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
+	if err := s.store.ValidateFormationJobLease(ctx, *job); err != nil {
 		return err
 	}
 	turn, err := s.store.SessionTurnByID(ctx, job.UserID, job.TurnID)
@@ -199,7 +197,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		}
 		return err
 	}
-	if err := s.store.ValidateFormationJobLease(ctx, job); err != nil {
+	if err := s.store.ValidateFormationJobLease(ctx, *job); err != nil {
 		return err
 	}
 	publishedCount := 0
@@ -208,7 +206,7 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 	rejectedCount := 0
 	validationFailedCount := 0
 	extracted := usermemory.MemorySaveBatch{}
-	artifact, artifactErr := s.store.FormationJobArtifact(ctx, job)
+	artifact, artifactErr := s.store.FormationJobArtifact(ctx, *job)
 	if artifactErr != nil {
 		return artifactErr
 	}
@@ -232,13 +230,31 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 			}
 		}
 		defer release()
-		extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
-		extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
-		extracted, err = s.extractor.Extract(extractCtx, turn)
+		renewedJob := *job
+		err = leaseruntime.Run(extractParent, s.jobLease,
+			func(renewCtx context.Context) error {
+				leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
+				if renewErr == nil {
+					renewedJob.LeaseUntil = leaseUntil
+				}
+				return renewErr
+			},
+			func(workCtx context.Context) error {
+				extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
+				extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+				var extractErr error
+				extracted, extractErr = s.extractor.Extract(extractCtx, turn)
+				return extractErr
+			},
+		)
+		*job = renewedJob
 		wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
 		release()
 		release = func() {}
 		if wasPreempted {
+			if llm.WasAsyncJobSubmitted(err) {
+				return err
+			}
 			return errBackgroundPreempted
 		}
 		if err != nil {
@@ -248,14 +264,14 @@ func (s *Service) process(ctx context.Context, job usermemory.FormationJob) erro
 		if err != nil {
 			return err
 		}
-		if err := s.store.SaveFormationJobArtifact(ctx, job, string(payload)); err != nil {
+		if err := s.store.SaveFormationJobArtifact(ctx, *job, string(payload)); err != nil {
 			return err
 		}
 	}
 	outcomes := s.store.SubmitMemorySaveBatch(ctx, job.UserID, turn.UserText, usermemory.FormationSource{
 		RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation,
 		TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.ExtractorVersion,
-	}, extracted, &job)
+	}, extracted, job)
 	for _, outcome := range outcomes {
 		if outcome.Operational {
 			return outcome.Err

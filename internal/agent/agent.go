@@ -215,16 +215,15 @@ type Request struct {
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
 type Agent struct {
-	chatClient     llm.Chatter
-	registry       *registry.Registry
-	mcpProvider    MCPProvider
-	budget         promptbudget.ContextBudget
-	model          string
-	soul           *soul.Store
-	userMemory     *usermemory.Store
-	toolPolicy     governance.GlobalPolicy
-	requestTimeout time.Duration
-	log            *config.Logger
+	chatClient  llm.Chatter
+	registry    *registry.Registry
+	mcpProvider MCPProvider
+	budget      promptbudget.ContextBudget
+	model       string
+	soul        *soul.Store
+	userMemory  *usermemory.Store
+	toolPolicy  governance.GlobalPolicy
+	log         *config.Logger
 }
 
 // MCPProvider resolves request-scoped MCP tools for the active canonical user.
@@ -238,7 +237,7 @@ type MCPProvider interface {
 
 // NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
 // soul store, SQLite user memory store, prompt budget, tool-governance policy,
-// request timeout, and logger.
+// and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
@@ -247,7 +246,6 @@ func NewAgent(
 	userMemory *usermemory.Store,
 	budget promptbudget.ContextBudget,
 	toolPolicy governance.GlobalPolicy,
-	requestTimeout time.Duration,
 	log *config.Logger,
 	mcpProviders ...MCPProvider,
 ) *Agent {
@@ -256,16 +254,15 @@ func NewAgent(
 		mcpProvider = mcpProviders[0]
 	}
 	return &Agent{
-		chatClient:     chatClient,
-		registry:       registry,
-		mcpProvider:    mcpProvider,
-		budget:         budget,
-		model:          model,
-		soul:           soul,
-		userMemory:     userMemory,
-		toolPolicy:     toolPolicy,
-		requestTimeout: requestTimeout,
-		log:            log,
+		chatClient:  chatClient,
+		registry:    registry,
+		mcpProvider: mcpProvider,
+		budget:      budget,
+		model:       model,
+		soul:        soul,
+		userMemory:  userMemory,
+		toolPolicy:  toolPolicy,
+		log:         log,
 	}
 }
 
@@ -499,7 +496,7 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 // Tool execution errors are handled gracefully — failures inject an error tool
 // response so the model can decide how to proceed. Provider errors are captured
 // into AgentResponse.Error rather than returned as Go errors.
-func (a *Agent) Process(request Request) (*AgentResponse, error) {
+func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
 	}
@@ -518,8 +515,9 @@ func (a *Agent) Process(request Request) (*AgentResponse, error) {
 		config.F("image_count", len(userImages)),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), a.requestTimeout)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.

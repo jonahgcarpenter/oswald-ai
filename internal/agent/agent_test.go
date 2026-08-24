@@ -41,7 +41,7 @@ func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
 		ExternalID:      "user-1",
 		Assurance:       identity.AssuranceSelfAsserted,
 	}
-	response, err := (&Agent{}).Process(Request{Principal: principal})
+	response, err := (&Agent{}).Process(context.Background(), Request{Principal: principal})
 	if err == nil || response != nil || !strings.Contains(err.Error(), "authenticated principal") {
 		t.Fatalf("response=%+v err=%v", response, err)
 	}
@@ -786,7 +786,7 @@ func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}
-	response, err := agent.Process(Request{RequestID: "req-1", Principal: principal, DisplayName: "Display", SessionKey: "session-1", IsDirect: true, Prompt: "yes remember it"})
+	response, err := agent.Process(context.Background(), Request{RequestID: "req-1", Principal: principal, DisplayName: "Display", SessionKey: "session-1", IsDirect: true, Prompt: "yes remember it"})
 	if err != nil || response.Response != "model response" {
 		t.Fatalf("response=%+v err=%v", response, err)
 	}
@@ -1312,7 +1312,7 @@ func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayN
 	case "imessage":
 		assurance = identity.AssuranceBlueBubblesWebhook
 	}
-	response, err := agent.Process(Request{
+	response, err := agent.Process(context.Background(), Request{
 		RequestID: requestID,
 		Principal: identity.Principal{
 			CanonicalUserID: userID,
@@ -1379,7 +1379,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err != nil {
 		t.Fatalf("user store: %v", err)
 	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), time.Minute, log)
+	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, promptbudget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
 	return agent, userStore, soulPath
 }
 

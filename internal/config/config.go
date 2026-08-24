@@ -22,7 +22,6 @@ type Config struct {
 	LLMGatewayEmbeddingModel string          // Optional LLM gateway embedding model used for semantic durable-memory retrieval
 	LLMGatewayAPIKey         string          // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey     string          // Optional gateway routing key for LLM gateway requests
-	LLMGatewayTimeout        time.Duration   // Expected upstream LLM gateway timeout; local guard timeouts are derived from it
 	ModelContextWindow       int             // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string          // Optional Discord bot token
@@ -75,7 +74,6 @@ func Load() (*Config, error) {
 		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
 		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
-		LLMGatewayTimeout:        getEnvDuration("LLM_GATEWAY_TIMEOUT", 180*time.Second),
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
@@ -161,20 +159,6 @@ func getEnvInt(key string, defaultValue int) int {
 		return defaultValue
 	}
 	return n
-}
-
-// getEnvDuration retrieves an environment variable as a Go duration string with a fallback default.
-// Returns the default if the variable is missing or cannot be parsed as a duration.
-func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
-	value, exists := os.LookupEnv(key)
-	if !exists || value == "" {
-		return defaultValue
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil {
-		return defaultValue
-	}
-	return d
 }
 
 func getEnvPositiveDuration(key string, defaultValue time.Duration) (time.Duration, error) {

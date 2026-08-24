@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -54,15 +53,7 @@ func main() {
 		log.Fatal("app.config.invalid", "missing required LLM_GATEWAY_URL configuration")
 	}
 
-	llmHTTPTimeout := cfg.LLMGatewayTimeout + 10*time.Second
-	agentRequestTimeout := cfg.LLMGatewayTimeout + 30*time.Second
-	log.Info("app.timeout.configured", "configured request timeouts",
-		config.F("llm_gateway_timeout", cfg.LLMGatewayTimeout.String()),
-		config.F("llm_http_timeout", llmHTTPTimeout.String()),
-		config.F("agent_request_timeout", agentRequestTimeout.String()),
-	)
-
-	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, llmHTTPTimeout, rootLog)
+	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog)
 
 	details, budgetErr := modelinfo.Resolve(context.Background(), cfg, rootLog)
 	budget := promptbudget.FromModelDetails(details)
@@ -139,8 +130,8 @@ func main() {
 	if err != nil {
 		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
 	}
-	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog, cfg.LLMGatewayTimeout)
-	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve), cfg.LLMGatewayModel, budget, cfg.LLMGatewayTimeout, rootLog)
+	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
+	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve), cfg.LLMGatewayModel, budget, rootLog)
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
@@ -175,7 +166,6 @@ func main() {
 			MaxToolIterations:      cfg.MaxToolIterations,
 			MaxConsecutiveFailures: cfg.MaxToolFailureRetries,
 		},
-		agentRequestTimeout,
 		rootLog,
 		mcpProvider,
 	)

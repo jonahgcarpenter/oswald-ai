@@ -20,8 +20,8 @@ const reflectedSoulCanary = "SOUL_CANARY_DO_NOT_LOG_OR_RETURN"
 
 func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
-			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		if r.URL.Path != "/v1/async/chat/completions" && r.URL.Path != "/v1/async/chat/completions/job-1" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer api-key" {
 			t.Fatalf("Authorization = %q", got)
@@ -29,34 +29,32 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 		if got := r.Header.Get("x-bf-vk"); got != "virtual-key" {
 			t.Fatalf("x-bf-vk = %q", got)
 		}
-		var body map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
+		if r.Method == http.MethodPost {
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if body["model"] != "test-model" || body["stream"] != false {
+				t.Fatalf("unexpected request body: %+v", body)
+			}
+			for _, field := range []string{"tool_choice", "parallel_tool_calls", "temperature", "max_tokens"} {
+				if _, ok := body[field]; ok {
+					t.Fatalf("ordinary request included %s: %+v", field, body)
+				}
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"job-1","status":"pending","created_at":"2026-01-01T00:00:00Z"}`))
+			return
 		}
-		if body["model"] != "test-model" || body["stream"] != false {
-			t.Fatalf("unexpected request body: %+v", body)
-		}
-		if _, ok := body["tool_choice"]; ok {
-			t.Fatalf("ordinary request included tool_choice: %+v", body)
-		}
-		if _, ok := body["parallel_tool_calls"]; ok {
-			t.Fatalf("ordinary request included parallel_tool_calls: %+v", body)
-		}
-		if _, ok := body["temperature"]; ok {
-			t.Fatalf("ordinary request included temperature: %+v", body)
-		}
-		if _, ok := body["max_tokens"]; ok {
-			t.Fatalf("ordinary request included max_tokens: %+v", body)
-		}
-		_, _ = w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{"id":"job-1","status":"completed","status_code":200,"result":{
 			"model":"served-model",
 			"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}],
 			"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
-		}`))
+		}}`))
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL+"/", "api-key", "virtual-key", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL+"/", "api-key", "virtual-key", config.NewLogger(config.LevelError))
 	resp, err := client.Chat(context.Background(), ChatRequest{Model: "test-model", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}, nil)
 	if err != nil {
 		t.Fatalf("Chat returned error: %v", err)
@@ -68,6 +66,10 @@ func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 
 func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"id":"job-1","status":"completed","status_code":200,"result":{"choices":[{"message":{"role":"assistant","content":"ok"}}]}}`))
+			return
+		}
 		var body struct {
 			Tools             []Tool     `json:"tools"`
 			ToolChoice        ToolChoice `json:"tool_choice"`
@@ -95,7 +97,8 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 		if importance.Minimum == nil || importance.Maximum == nil || *importance.Minimum != 1 || *importance.Maximum != 5 {
 			t.Fatalf("importance range was not serialized: %+v", importance)
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"job-1","status":"pending"}`))
 	}))
 	defer server.Close()
 
@@ -109,7 +112,7 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 			}},
 		}},
 	}}}
-	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	parallelToolCalls := false
 	temperature := 0.0
 	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: 2048}, nil)
@@ -124,6 +127,7 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 		}
 		switch r.Header.Get("x-test-case") {
 		case "bad-json":
+			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`not-json`))
 		default:
 			http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -131,7 +135,7 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "HTTP 502") {
 		t.Fatalf("Chat HTTP error = %v, want HTTP 502", err)
 	}
@@ -140,8 +144,73 @@ func TestGatewayClientChatHTTPAndDecodeErrors(t *testing.T) {
 		req.Header.Set("x-test-case", "bad-json")
 		return http.DefaultTransport.RoundTrip(req)
 	})
-	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "decode chat response") {
-		t.Fatalf("Chat decode error = %v, want decode error", err)
+	if _, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil || !strings.Contains(err.Error(), "decode LLM gateway async response") {
+		t.Fatalf("Chat decode error = %v, want async decode error", err)
+	}
+}
+
+func TestGatewayClientAsyncChatPollsUntilCompleted(t *testing.T) {
+	polls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"job","status":"pending"}`))
+			return
+		}
+		polls++
+		if polls == 1 {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"job","status":"processing"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"job","status":"completed","status_code":200,"result":{"choices":[{"message":{"role":"assistant","content":"complete"}}]}}`))
+	}))
+	defer server.Close()
+
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	resp, err := client.Chat(context.Background(), ChatRequest{Model: "model"}, nil)
+	if err != nil || resp.Message.Content != "complete" || polls != 2 {
+		t.Fatalf("response=%+v polls=%d err=%v", resp, polls, err)
+	}
+}
+
+func TestGatewayClientAsyncChatMapsTerminalFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"job","status":"pending"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"job","status":"failed","status_code":429,"error":{"error":{"message":"busy"}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "model"}, nil)
+	var httpErr *ChatHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("error=%T %v, want typed 429", err, err)
+	}
+}
+
+func TestGatewayClientAsyncChatHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			cancel()
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"job","status":"pending"}`))
+	}))
+	defer server.Close()
+
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
+	_, err := client.Chat(ctx, ChatRequest{Model: "model"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v, want context cancellation", err)
+	}
+	if !WasAsyncJobSubmitted(err) {
+		t.Fatalf("error=%v, want accepted async job marker", err)
 	}
 }
 
@@ -152,7 +221,7 @@ func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	_, err := client.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
 	var httpErr *ChatHTTPError
 	if !errors.As(err, &httpErr) {
@@ -243,7 +312,7 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 			defer server.Close()
 			var err error
 			logs := captureLogs(t, func(log *config.Logger) {
-				client := NewGatewayClient(server.URL, "", "", time.Second, log)
+				client := newTestGatewayClient(server.URL, "", "", log)
 				err = tt.call(client)
 			})
 			if err == nil {
@@ -327,14 +396,22 @@ func TestOllamaModelRunnerStoppedErrorClassification(t *testing.T) {
 
 func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/embeddings" {
-			t.Fatalf("path = %q, want /v1/embeddings", r.URL.Path)
+		if r.Method == http.MethodPost {
+			if r.URL.Path != "/v1/async/embeddings" {
+				t.Fatalf("path = %q, want /v1/async/embeddings", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"embed-job","status":"pending"}`))
+			return
 		}
-		_, _ = w.Write([]byte(`{"model":"embed-model","data":[{"embedding":[1.5,2.5]}]}`))
+		if r.URL.Path != "/v1/async/embeddings/embed-job" {
+			t.Fatalf("unexpected poll path %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":"embed-job","status":"completed","status_code":200,"result":{"model":"embed-model","data":[{"embedding":[1.5,2.5]}]}}`))
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	resp, err := client.Embed(context.Background(), EmbedRequest{Model: "embed-model", Input: "text"})
 	if err != nil {
 		t.Fatalf("Embed returned error: %v", err)
@@ -346,6 +423,9 @@ func TestGatewayClientEmbedParsesResponse(t *testing.T) {
 
 func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("stream path = %q", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"model\":\"stream-model\",\"choices\":[{\"delta\":{\"reasoning\":\"think\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
@@ -356,7 +436,7 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 	}))
 	defer server.Close()
 
-	client := NewGatewayClient(server.URL, "", "", time.Second, config.NewLogger(config.LevelError))
+	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	var chunks []ChatMessage
 	resp, err := client.Chat(context.Background(), ChatRequest{Model: "fallback-model", Stream: true}, func(chunk ChatMessage) {
 		chunks = append(chunks, chunk)
@@ -379,6 +459,12 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func newTestGatewayClient(baseURL, apiKey, virtualKey string, log *config.Logger) *GatewayClient {
+	client := NewGatewayClient(baseURL, apiKey, virtualKey, log)
+	client.pollInterval = time.Millisecond
+	return client
+}
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)

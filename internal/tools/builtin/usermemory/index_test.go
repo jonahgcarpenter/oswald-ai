@@ -64,6 +64,31 @@ func TestDerivedIndexOutboxIdempotencyRetryAndRestart(t *testing.T) {
 	}
 }
 
+func TestDerivedIndexLeaseRenewalKeepsOwnershipLive(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	seedAccountUsers(t, store, "user")
+	tx, err := store.sql.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueDerivedChangeTx(context.Background(), tx, "user", "memory", 42, "upsert", "renew"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	change, err := store.ClaimDerivedIndexChange(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RenewDerivedIndexChangeLease(context.Background(), change, 2*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteDerivedIndexChange(context.Background(), change); err != nil {
+		t.Fatalf("complete renewed lease: %v", err)
+	}
+}
+
 func TestClaimGlobalDerivedIndexChangeAllowsNullCanonicalUser(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
