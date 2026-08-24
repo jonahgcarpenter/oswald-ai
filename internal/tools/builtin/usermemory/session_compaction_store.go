@@ -59,21 +59,40 @@ func RenderSessionSummary(summary SessionSummary) string {
 		string(payload) + "\n</session_history_summary>"
 }
 
-// SessionCompactionJob is one fixed-range, leased summary checkpoint operation.
+// SessionCompactionJob is one fixed-range, leased chunk of a stable campaign.
 type SessionCompactionJob struct {
-	ID                   int64
-	UserID               string
-	SessionID            string
-	SessionGeneration    int
-	CoveredFromTurnID    int64
-	CoveredThroughTurnID int64
-	State                string
-	ArtifactSummaryID    int64
-	AttemptCount         int
-	RedriveCount         int
-	LeaseOwner           string
-	LeaseUntil           time.Time
-	AvailableAt          time.Time
+	ID                      int64
+	UserID                  string
+	SessionID               string
+	SessionGeneration       int
+	CoveredFromTurnID       int64
+	CoveredThroughTurnID    int64
+	TargetTurnID            int64
+	State                   string
+	ArtifactSummaryID       int64
+	Model                   string
+	GeneratorVersion        string
+	AttemptCount            int
+	RedriveCount            int
+	InvalidOutputRetryCount int
+	LeaseOwner              string
+	LeaseUntil              time.Time
+	AvailableAt             time.Time
+}
+
+// DeliveredSessionPromptPressure is the newest delivered completed-request
+// pressure snapshot for one active session generation.
+type DeliveredSessionPromptPressure struct {
+	TurnID int64
+	SessionPromptPressure
+}
+
+// SessionPromptPressure is the immutable completed-request pressure snapshot
+// that becomes planner-visible only after its source turn is delivered.
+type SessionPromptPressure struct {
+	Tokens  int
+	Limit   int
+	Version string
 }
 
 // SummaryArtifact is the first model-produced structured result saved for a job.
@@ -332,6 +351,35 @@ WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	return result, err
 }
 
+// LatestDeliveredSessionPromptPressure returns the newest delivered pressure
+// snapshot written by the requested policy version.
+func (s *Store) LatestDeliveredSessionPromptPressure(ctx context.Context, userID, sessionID string, generation int, version string) (DeliveredSessionPromptPressure, error) {
+	if err := validateSessionScope(userID, sessionID, generation); err != nil {
+		return DeliveredSessionPromptPressure{}, err
+	}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return DeliveredSessionPromptPressure{}, fmt.Errorf("session prompt pressure version is required")
+	}
+	if err := s.requireActiveSessionGeneration(ctx, userID, sessionID, generation); err != nil {
+		return DeliveredSessionPromptPressure{}, err
+	}
+	var pressure DeliveredSessionPromptPressure
+	err := s.sql.QueryRowContext(ctx, `SELECT id, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version FROM session_turns WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL AND compaction_pressure_version = ? ORDER BY id DESC LIMIT 1`, userID, sessionID, generation, version).Scan(&pressure.TurnID, &pressure.Tokens, &pressure.Limit, &pressure.Version)
+	return pressure, err
+}
+
+// SessionCompactionCampaignTarget returns an unfinished target pinned by the
+// current model and generator contract.
+func (s *Store) SessionCompactionCampaignTarget(ctx context.Context, userID, sessionID string, generation int, boundary int64, model, generatorVersion string) (int64, error) {
+	if err := validateSessionScope(userID, sessionID, generation); err != nil {
+		return 0, err
+	}
+	var target int64
+	err := s.sql.QueryRowContext(ctx, `SELECT compaction_target_turn_id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND compaction_model = ? AND compaction_generator_version = ? AND compaction_target_turn_id > ? ORDER BY id DESC LIMIT 1`, userID, sessionID, generation, strings.TrimSpace(model), strings.TrimSpace(generatorVersion), boundary).Scan(&target)
+	return target, err
+}
+
 // DeliveredSessionTurnsRange returns an inclusive fixed range in chronological order.
 func (s *Store) DeliveredSessionTurnsRange(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID int64) ([]SessionTurn, error) {
 	if err := validateSessionScope(userID, sessionID, generation); err != nil {
@@ -384,16 +432,35 @@ WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND de
 }
 
 // EnqueueSessionCompactionJob creates one idempotent job for an immutable range.
-func (s *Store) EnqueueSessionCompactionJob(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID int64) (int64, error) {
+func (s *Store) EnqueueSessionCompactionJob(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID int64, model, generatorVersion string) (int64, error) {
+	return s.EnqueueSessionCompactionCampaignJob(ctx, userID, sessionID, generation, fromTurnID, throughTurnID, throughTurnID, model, generatorVersion)
+}
+
+// EnqueueSessionCompactionCampaignJob creates one idempotent chunk belonging
+// to a stable campaign target.
+func (s *Store) EnqueueSessionCompactionCampaignJob(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID, targetTurnID int64, model, generatorVersion string) (int64, error) {
 	if err := validateSessionScope(userID, sessionID, generation); err != nil {
 		return 0, err
 	}
-	if fromTurnID <= 0 || throughTurnID < fromTurnID {
+	if fromTurnID <= 0 || throughTurnID < fromTurnID || targetTurnID < throughTurnID {
 		return 0, fmt.Errorf("enqueue session compaction: invalid range")
+	}
+	model = strings.TrimSpace(model)
+	generatorVersion = strings.TrimSpace(generatorVersion)
+	if model == "" || generatorVersion == "" {
+		return 0, fmt.Errorf("enqueue session compaction: model and generator version are required")
+	}
+	var blockedID int64
+	err := s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND compaction_model = ? AND compaction_generator_version = ? AND artifact_summary_id IS NULL AND state IN ('queued','running','retry','skipped','dead') ORDER BY id LIMIT 1`, userID, sessionID, generation, model, generatorVersion).Scan(&blockedID)
+	if err == nil {
+		return blockedID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
 	}
 	now := time.Now().UTC()
 	var priorFrom, priorThrough int64
-	err := s.sql.QueryRowContext(ctx, `SELECT covered_from_turn_id, covered_through_turn_id FROM session_summaries WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? ORDER BY covered_through_turn_id DESC LIMIT 1`, userID, sessionID, generation).Scan(&priorFrom, &priorThrough)
+	err = s.sql.QueryRowContext(ctx, `SELECT covered_from_turn_id, covered_through_turn_id FROM session_summaries WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? ORDER BY covered_through_turn_id DESC LIMIT 1`, userID, sessionID, generation).Scan(&priorFrom, &priorThrough)
 	if err == nil && (fromTurnID != priorFrom || throughTurnID <= priorThrough) {
 		return 0, fmt.Errorf("enqueue session compaction: range does not extend latest checkpoint")
 	}
@@ -403,9 +470,9 @@ func (s *Store) EnqueueSessionCompactionJob(ctx context.Context, userID, session
 	result, err := s.sql.ExecContext(ctx, `
 INSERT INTO durable_jobs (
 	job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id,
-	covered_through_turn_id, available_at, updated_at
+	covered_through_turn_id, compaction_target_turn_id, compaction_model, compaction_generator_version, available_at, updated_at
 )
-SELECT 'session_compaction', ? || ':' || ? || ':' || ? || ':' || ? || ':' || ?, ?, ?, ?, ?, ?, ?, ?
+SELECT 'session_compaction', ? || ':' || ? || ':' || ? || ':' || ? || ':' || ? || ':' || ? || ':' || ? || ':' || ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 		SELECT 1 FROM sessions
 		WHERE canonical_user_id = ? AND session_id = ? AND generation = ?
@@ -424,12 +491,19 @@ WHERE EXISTS (
 		SELECT 1 FROM session_turns WHERE id = ? AND canonical_user_id = ?
 			AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL
 	)
+	AND NOT EXISTS (
+		SELECT 1 FROM durable_jobs active_job WHERE active_job.job_kind = 'session_compaction'
+			AND active_job.canonical_user_id = ? AND active_job.session_id = ?
+			AND active_job.session_generation = ? AND active_job.state IN ('queued','running','retry')
+	)
 ON CONFLICT DO NOTHING`,
-		userID, sessionID, generation, fromTurnID, throughTurnID, userID, sessionID, generation, fromTurnID, throughTurnID, formatTime(now), formatTime(now),
+		userID, sessionID, generation, fromTurnID, throughTurnID, targetTurnID, model, generatorVersion,
+		userID, sessionID, generation, fromTurnID, throughTurnID, targetTurnID, model, generatorVersion, formatTime(now), formatTime(now),
 		userID, sessionID, generation, formatTime(now),
 		fromTurnID, userID, sessionID, generation,
 		userID, sessionID, generation, fromTurnID, throughTurnID,
-		throughTurnID, userID, sessionID, generation)
+		throughTurnID, userID, sessionID, generation,
+		userID, sessionID, generation)
 	if err != nil {
 		return 0, fmt.Errorf("enqueue session compaction: %w", err)
 	}
@@ -437,7 +511,11 @@ ON CONFLICT DO NOTHING`,
 		return 0, countErr
 	} else if count == 0 {
 		var id int64
-		err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ?`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
+		err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND state IN ('queued','running','retry') ORDER BY id LIMIT 1`, userID, sessionID, generation).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ? AND compaction_model = ? AND compaction_generator_version = ?`, userID, sessionID, generation, fromTurnID, throughTurnID, model, generatorVersion).Scan(&id)
 		if err == nil {
 			return id, nil
 		}
@@ -447,8 +525,29 @@ ON CONFLICT DO NOTHING`,
 		return 0, err
 	}
 	var id int64
-	err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ?`, userID, sessionID, generation, fromTurnID, throughTurnID).Scan(&id)
+	err = s.sql.QueryRowContext(ctx, `SELECT id FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ? AND session_generation = ? AND covered_from_turn_id = ? AND covered_through_turn_id = ? AND compaction_model = ? AND compaction_generator_version = ?`, userID, sessionID, generation, fromTurnID, throughTurnID, model, generatorVersion).Scan(&id)
 	return id, err
+}
+
+// RecordUncompactableSessionCompactionCampaign persists one terminal receipt
+// without submitting a model request that cannot fit its complete oldest turn.
+func (s *Store) RecordUncompactableSessionCompactionCampaign(ctx context.Context, userID, sessionID string, generation int, fromTurnID, throughTurnID, targetTurnID int64, model, generatorVersion string) (int64, error) {
+	id, err := s.EnqueueSessionCompactionCampaignJob(ctx, userID, sessionID, generation, fromTurnID, throughTurnID, targetTurnID, model, generatorVersion)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, last_error_code = 'uncompactable_complete_exchange', updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'queued' AND artifact_payload = ''`, formatTime(now), formatTime(now), id, userID)
+	if err != nil {
+		return 0, fmt.Errorf("record uncompactable session compaction campaign: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		var state string
+		if err := s.sql.QueryRowContext(ctx, `SELECT state FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, id, userID).Scan(&state); err != nil {
+			return 0, err
+		}
+	}
+	return id, nil
 }
 
 // ListSessionCompactionJobsForStartup lists nonterminal jobs for reconciliation.
@@ -473,13 +572,22 @@ func (s *Store) ListSessionCompactionJobsForStartup(ctx context.Context, limit i
 }
 
 // ReconcileSessionCompactionJobs skips stale generations and releases expired leases.
-func (s *Store) ReconcileSessionCompactionJobs(ctx context.Context) (int64, error) {
+func (s *Store) ReconcileSessionCompactionJobs(ctx context.Context, model, generatorVersion string) (int64, error) {
 	now := time.Now().UTC()
 	tx, err := s.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback() // nolint:errcheck
+	contract, err := tx.ExecContext(ctx, `
+UPDATE durable_jobs
+SET state = 'skipped', completed_at = COALESCE(completed_at, ?), lease_owner = '', lease_until = NULL,
+	last_error_code = 'superseded_compaction_contract', updated_at = ?
+WHERE job_kind = 'session_compaction' AND state IN ('queued','running','retry','dead')
+	AND (compaction_model != ? OR compaction_generator_version != ?)`, formatTime(now), formatTime(now), strings.TrimSpace(model), strings.TrimSpace(generatorVersion))
+	if err != nil {
+		return 0, fmt.Errorf("skip superseded session compaction jobs: %w", err)
+	}
 	stale, err := tx.ExecContext(ctx, `
 UPDATE durable_jobs
 SET state = 'skipped', completed_at = ?, lease_owner = '', lease_until = NULL,
@@ -500,7 +608,7 @@ UPDATE durable_jobs
 SET state = CASE WHEN attempt_count >= ? THEN 'dead' ELSE 'retry' END,
 	available_at = ?, lease_owner = '', lease_until = NULL,
 	completed_at = CASE WHEN attempt_count >= ? THEN ? ELSE NULL END,
-	last_error_code = 'lease_expired', updated_at = ?
+	last_error_code = 'transient_lease_expired', updated_at = ?
 WHERE job_kind = 'session_compaction' AND state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?`,
 		maxSessionCompactionAttempts, formatTime(now), maxSessionCompactionAttempts, formatTime(now), formatTime(now), formatTime(now))
 	if err != nil {
@@ -508,14 +616,15 @@ WHERE job_kind = 'session_compaction' AND state = 'running' AND lease_until IS N
 	}
 	staleCount, _ := stale.RowsAffected()
 	expiredCount, _ := expired.RowsAffected()
+	contractCount, _ := contract.RowsAffected()
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	return staleCount + expiredCount, nil
+	return staleCount + expiredCount + contractCount, nil
 }
 
 // ClaimSessionCompactionJob leases the oldest ready job to one worker.
-func (s *Store) ClaimSessionCompactionJob(ctx context.Context, owner string, lease time.Duration) (SessionCompactionJob, error) {
+func (s *Store) ClaimSessionCompactionJob(ctx context.Context, owner string, lease time.Duration, model, generatorVersion string) (SessionCompactionJob, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
 		return SessionCompactionJob{}, fmt.Errorf("claim session compaction job: lease owner is required")
@@ -534,6 +643,7 @@ func (s *Store) ClaimSessionCompactionJob(ctx context.Context, owner string, lea
 SELECT id FROM durable_jobs jobs
 WHERE job_kind = 'session_compaction' AND ((state IN ('queued', 'retry') AND available_at <= ?)
 	OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?))
+	AND compaction_model = ? AND compaction_generator_version = ?
 	AND EXISTS (
 		SELECT 1 FROM sessions active
 		WHERE active.canonical_user_id = jobs.canonical_user_id
@@ -542,7 +652,7 @@ WHERE job_kind = 'session_compaction' AND ((state IN ('queued', 'retry') AND ava
 			AND active.is_active = 1
 			AND julianday(active.expires_at) > julianday(?)
 	)
-ORDER BY available_at, id LIMIT 1`, formatTime(now), formatTime(now), formatTime(now)).Scan(&id)
+ORDER BY available_at, id LIMIT 1`, formatTime(now), formatTime(now), strings.TrimSpace(model), strings.TrimSpace(generatorVersion), formatTime(now)).Scan(&id)
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -569,6 +679,9 @@ WHERE id = ? AND job_kind = 'session_compaction' AND attempt_count < ?`, owner, 
 
 // SaveSessionCompactionArtifact persists canonical JSON for the first result only.
 func (s *Store) SaveSessionCompactionArtifact(ctx context.Context, job SessionCompactionJob, artifact SummaryArtifact) error {
+	if artifact.GenerationModel != job.Model || artifact.GeneratorVersion != job.GeneratorVersion {
+		return fmt.Errorf("save session compaction artifact: contract mismatch")
+	}
 	payload, artifact, err := encodeSummaryArtifact(artifact)
 	if err != nil {
 		return err
@@ -715,7 +828,7 @@ func (s *Store) CompleteSessionCompactionJob(ctx context.Context, job SessionCom
 }
 
 // RetrySessionCompactionJob releases a failed lease with bounded backoff.
-func (s *Store) RetrySessionCompactionJob(ctx context.Context, job SessionCompactionJob, code, message string) error {
+func (s *Store) RetrySessionCompactionJob(ctx context.Context, job SessionCompactionJob, code string) error {
 	now := time.Now().UTC()
 	state := "retry"
 	if job.AttemptCount >= maxSessionCompactionAttempts {
@@ -732,6 +845,34 @@ WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND s
 		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(now))
 	if err != nil {
 		return fmt.Errorf("retry session compaction job: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// RetryInvalidSessionCompactionJob consumes the one structured-output retry
+// without charging the operational provider retry budget.
+func (s *Store) RetryInvalidSessionCompactionJob(ctx context.Context, job SessionCompactionJob, code string) error {
+	now := time.Now().UTC()
+	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), compaction_invalid_output_retry_count = compaction_invalid_output_retry_count + 1, available_at = ?, completed_at = NULL, lease_owner = '', lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) AND compaction_invalid_output_retry_count = 0 AND artifact_payload = ''`, formatTime(now.Add(delay)), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
+	if err != nil {
+		return fmt.Errorf("retry invalid session compaction job: %w", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// SkipSessionCompactionJob terminally skips a job that cannot succeed unchanged.
+func (s *Store) SkipSessionCompactionJob(ctx context.Context, job SessionCompactionJob, code string) error {
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'skipped', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)`, formatTime(now), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
+	if err != nil {
+		return fmt.Errorf("skip session compaction job: %w", err)
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return sql.ErrNoRows
@@ -773,6 +914,7 @@ UPDATE durable_jobs
 SET state = 'retry', attempt_count = 0, redrive_count = redrive_count + 1,
 	available_at = ?, completed_at = NULL, last_error_code = '', updated_at = ?
 WHERE job_kind = 'session_compaction' AND state = 'dead' AND redrive_count < 3
+	AND last_error_code LIKE 'transient_%'
 	AND ((redrive_count = 0 AND updated_at <= ?)
 		OR (redrive_count = 1 AND updated_at <= ?)
 		OR (redrive_count = 2 AND updated_at <= ?))
@@ -792,7 +934,7 @@ WHERE job_kind = 'session_compaction' AND state = 'dead' AND redrive_count < 3
 
 const sessionSummarySelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, narrative, open_tasks, commitments, entities, decisions, topic_tags, source_turn_ids FROM session_summaries `
 
-const sessionCompactionJobSelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), attempt_count, redrive_count, available_at, lease_owner, lease_until FROM durable_jobs `
+const sessionCompactionJobSelect = `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, compaction_target_turn_id, state, COALESCE(artifact_summary_id, 0), compaction_model, compaction_generator_version, attempt_count, redrive_count, compaction_invalid_output_retry_count, available_at, lease_owner, lease_until FROM durable_jobs `
 
 func validateSessionScope(userID, sessionID string, generation int) error {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" || generation <= 0 {
@@ -877,6 +1019,12 @@ func encodeSummaryArtifact(artifact SummaryArtifact) (string, SummaryArtifact, e
 		return "", SummaryArtifact{}, fmt.Errorf("session compaction artifact exceeds %d bytes", maxSummaryArtifactBytes)
 	}
 	return string(payload), artifact, nil
+}
+
+// ValidateSummaryArtifact validates and normalizes an artifact before persistence.
+func ValidateSummaryArtifact(artifact SummaryArtifact) (SummaryArtifact, error) {
+	_, normalized, err := encodeSummaryArtifact(artifact)
+	return normalized, err
 }
 
 func decodeSummaryArtifact(payload string) (SummaryArtifact, error) {
@@ -964,8 +1112,8 @@ func scanSessionCompactionJob(row interface{ Scan(...any) error }) (SessionCompa
 	var availableAt string
 	var leaseUntil sql.NullString
 	err := row.Scan(&job.ID, &job.UserID, &job.SessionID, &job.SessionGeneration,
-		&job.CoveredFromTurnID, &job.CoveredThroughTurnID, &job.State,
-		&job.ArtifactSummaryID, &job.AttemptCount, &job.RedriveCount, &availableAt, &job.LeaseOwner, &leaseUntil)
+		&job.CoveredFromTurnID, &job.CoveredThroughTurnID, &job.TargetTurnID, &job.State,
+		&job.ArtifactSummaryID, &job.Model, &job.GeneratorVersion, &job.AttemptCount, &job.RedriveCount, &job.InvalidOutputRetryCount, &availableAt, &job.LeaseOwner, &leaseUntil)
 	if err != nil {
 		return SessionCompactionJob{}, err
 	}
@@ -984,15 +1132,15 @@ func loadSessionCompactionJobWithArtifactTx(ctx context.Context, tx *sql.Tx, exp
 	var job SessionCompactionJob
 	var payload, availableAt string
 	var leaseUntil sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, state, COALESCE(artifact_summary_id, 0), attempt_count, redrive_count, available_at, lease_owner, lease_until, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, expected.ID, expected.UserID).Scan(
+	err := tx.QueryRowContext(ctx, `SELECT id, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, compaction_target_turn_id, state, COALESCE(artifact_summary_id, 0), compaction_model, compaction_generator_version, attempt_count, redrive_count, compaction_invalid_output_retry_count, available_at, lease_owner, lease_until, artifact_payload FROM durable_jobs WHERE id = ? AND job_kind = 'session_compaction' AND canonical_user_id = ?`, expected.ID, expected.UserID).Scan(
 		&job.ID, &job.UserID, &job.SessionID, &job.SessionGeneration, &job.CoveredFromTurnID,
-		&job.CoveredThroughTurnID, &job.State, &job.ArtifactSummaryID,
-		&job.AttemptCount, &job.RedriveCount, &availableAt,
+		&job.CoveredThroughTurnID, &job.TargetTurnID, &job.State, &job.ArtifactSummaryID,
+		&job.Model, &job.GeneratorVersion, &job.AttemptCount, &job.RedriveCount, &job.InvalidOutputRetryCount, &availableAt,
 		&job.LeaseOwner, &leaseUntil, &payload)
 	if err != nil {
 		return SessionCompactionJob{}, "", err
 	}
-	if job.SessionID != expected.SessionID || job.SessionGeneration != expected.SessionGeneration || job.CoveredFromTurnID != expected.CoveredFromTurnID || job.CoveredThroughTurnID != expected.CoveredThroughTurnID {
+	if job.SessionID != expected.SessionID || job.SessionGeneration != expected.SessionGeneration || job.CoveredFromTurnID != expected.CoveredFromTurnID || job.CoveredThroughTurnID != expected.CoveredThroughTurnID || job.TargetTurnID != expected.TargetTurnID || job.Model != expected.Model || job.GeneratorVersion != expected.GeneratorVersion {
 		return SessionCompactionJob{}, "", fmt.Errorf("session compaction job scope mismatch")
 	}
 	job.AvailableAt = parseTime(availableAt)

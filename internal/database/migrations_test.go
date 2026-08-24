@@ -205,7 +205,7 @@ VALUES ('derived_index', 'index', 'user', 'memory', 1, 'upsert', '2026-07-21T00:
 	if err := db.SQL().QueryRow(`SELECT version, name FROM schema_migration_versions ORDER BY version DESC LIMIT 1`).Scan(&version, &name); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 || name != "v4.0.2" {
+	if version != len(orderedMigrations()) || name != orderedMigrations()[len(orderedMigrations())-1].name {
 		t.Fatalf("latest migration=%d/%q", version, name)
 	}
 	if err := db.SQL().QueryRow(`SELECT invalid_output_retry_count FROM durable_jobs WHERE idempotency_key = 'formation'`).Scan(&formationCount); err != nil {
@@ -228,6 +228,84 @@ VALUES ('derived_index', 'index', 'user', 'memory', 1, 'upsert', '2026-07-21T00:
 		if _, err := db.SQL().Exec(statement); err == nil {
 			t.Fatalf("%s was accepted", name)
 		}
+	}
+}
+
+func TestPermanentV403AndV404HardenSessionCompactionContracts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := orderedMigrations()
+	if len(migrations) < 4 {
+		t.Fatalf("permanent migration count=%d, want at least 4", len(migrations))
+	}
+	if _, err := raw.Exec(migrations[0].sql + migrations[1].sql + migrations[2].sql + `
+CREATE TABLE schema_migration_versions (
+	version INTEGER PRIMARY KEY CHECK (version > 0),
+	name TEXT NOT NULL UNIQUE,
+	checksum TEXT NOT NULL CHECK (length(checksum) = 64),
+	applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (1, 'v4.0.0', '` + migrationChecksum(migrations[0]) + `', datetime('now'));
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (2, 'v4.0.1', '` + migrationChecksum(migrations[1]) + `', datetime('now'));
+INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (3, 'v4.0.2', '` + migrationChecksum(migrations[2]) + `', datetime('now'));
+INSERT INTO account_users(canonical_user_id) VALUES ('user');
+INSERT INTO sessions(canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at, profile_version, profile_version_high_water, renderer_version, source_digest, rendered_content, fact_count, profile_bytes)
+VALUES ('user', 'session', 1, 1, '2026-08-23T00:00:00Z', '2027-08-23T00:00:00Z', 1, 1, 'v1', 'digest', 'profile', 0, 7);
+INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, session_generation, delivered_at)
+VALUES ('session', 'user', 'one', 'answer', '2026-08-23T00:00:00Z', 1, '2026-08-23T00:00:01Z');
+INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, session_generation, delivered_at)
+VALUES ('session', 'user', 'two', 'answer', '2026-08-23T00:00:02Z', 1, '2026-08-23T00:00:03Z');
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, available_at, updated_at)
+VALUES ('session_compaction', 'legacy', 'user', 'session', 1, 1, 2, '2026-08-23T00:00:00Z', '2026-08-23T00:00:00Z');`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("apply v4.0.3 and v4.0.4: %v", err)
+	}
+	defer db.Close()
+	var state, model, generator, code string
+	if err := db.SQL().QueryRow(`SELECT state, compaction_model, compaction_generator_version, last_error_code FROM durable_jobs WHERE idempotency_key = 'legacy'`).Scan(&state, &model, &generator, &code); err != nil {
+		t.Fatal(err)
+	}
+	if state != "skipped" || model != "legacy-unknown" || generator != "legacy-unknown" || code != "legacy_compaction_contract" {
+		t.Fatalf("legacy state=%q model=%q generator=%q code=%q", state, model, generator, code)
+	}
+	var target int64
+	if err := db.SQL().QueryRow(`SELECT compaction_target_turn_id FROM durable_jobs WHERE idempotency_key = 'legacy'`).Scan(&target); err != nil || target != 2 {
+		t.Fatalf("legacy campaign target=%d err=%v", target, err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, available_at, updated_at) VALUES ('session_compaction', 'missing-contract', 'user', 'session', 1, 1, 2, '2026-08-23T00:00:00Z', '2026-08-23T00:00:00Z')`); err == nil {
+		t.Fatal("compaction job without contract was accepted")
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, compaction_target_turn_id, compaction_model, compaction_generator_version, available_at, updated_at) VALUES ('session_compaction', 'current', 'user', 'session', 1, 1, 2, 2, 'model', 'session-summary-v1', '2026-08-23T00:00:00Z', '2026-08-23T00:00:00Z')`); err != nil {
+		t.Fatalf("current compaction contract rejected: %v", err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, session_id, session_generation, covered_from_turn_id, covered_through_turn_id, compaction_target_turn_id, compaction_model, compaction_generator_version, available_at, updated_at) VALUES ('session_compaction', 'overlap', 'user', 'session', 1, 1, 2, 2, 'other-model', 'session-summary-v1', '2026-08-23T00:00:00Z', '2026-08-23T00:00:00Z')`); err == nil {
+		t.Fatal("second active compaction contract was accepted")
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 1 WHERE idempotency_key = 'current'`); err != nil {
+		t.Fatalf("dedicated compaction retry rejected: %v", err)
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_invalid_output_retry_count = 2 WHERE idempotency_key = 'current'`); err == nil {
+		t.Fatal("second dedicated compaction retry was accepted")
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_model = 'changed' WHERE idempotency_key = 'current'`); err == nil {
+		t.Fatal("compaction contract mutation was accepted")
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET compaction_target_turn_id = 3 WHERE idempotency_key = 'current'`); err == nil {
+		t.Fatal("compaction campaign target mutation was accepted")
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET job_kind = 'memory_formation' WHERE idempotency_key = 'current'`); err == nil {
+		t.Fatal("compaction job kind transition was accepted")
 	}
 }
 
@@ -268,7 +346,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 12, "index": 24, "trigger": 15, "view": 0} {
+	for objectType, want := range map[string]int{"table": 12, "index": 26, "trigger": 21, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

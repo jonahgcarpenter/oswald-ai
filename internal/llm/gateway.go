@@ -29,6 +29,12 @@ func (e *ChatHTTPError) Error() string {
 	return fmt.Sprintf("LLM gateway chat returned HTTP %d", e.StatusCode)
 }
 
+// IsPermanentChatProviderError reports request failures that should not be retried unchanged.
+func IsPermanentChatProviderError(err error) bool {
+	var httpErr *ChatHTTPError
+	return errors.As(err, &httpErr) && httpErr.StatusCode >= http.StatusBadRequest && httpErr.StatusCode < http.StatusInternalServerError && httpErr.StatusCode != http.StatusRequestTimeout && httpErr.StatusCode != http.StatusTooEarly && httpErr.StatusCode != http.StatusTooManyRequests
+}
+
 // IsTemporaryOllamaToolParserError identifies a narrow upstream Ollama/Qwen
 // tool-parser failure. Remove this workaround when the provider no longer
 // turns malformed generated tool markup into HTTP 500 responses.
@@ -188,8 +194,9 @@ func mapFromGatewayMessage(m gatewayMessage) ChatMessage {
 			msg.ToolCalls[i] = ToolCall{
 				ID: tc.ID,
 				Function: ToolFunction{
-					Name:      tc.Function.Name,
-					Arguments: decodeToolArguments(tc.Function.Arguments),
+					Name:         tc.Function.Name,
+					Arguments:    decodeToolArguments(tc.Function.Arguments),
+					RawArguments: tc.Function.Arguments,
 				},
 			}
 		}
@@ -462,7 +469,7 @@ func (c *GatewayClient) readChatStream(ctx context.Context, resp *http.Response,
 			if part == nil || part.Name == "" {
 				continue
 			}
-			final.Message.ToolCalls = append(final.Message.ToolCalls, ToolCall{ID: firstNonEmpty(part.ID, fmt.Sprintf("call_stream_%d", i+1)), Function: ToolFunction{Name: part.Name, Arguments: decodeToolArguments(part.Arguments)}})
+			final.Message.ToolCalls = append(final.Message.ToolCalls, ToolCall{ID: firstNonEmpty(part.ID, fmt.Sprintf("call_stream_%d", i+1)), Function: ToolFunction{Name: part.Name, Arguments: decodeToolArguments(part.Arguments), RawArguments: part.Arguments}})
 		}
 	}
 	final.DurationMS = time.Since(startedAt).Milliseconds()

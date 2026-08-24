@@ -4,8 +4,9 @@ import "context"
 
 // ToolFunction holds the name and arguments of a single tool invocation.
 type ToolFunction struct {
-	Name      string                 `json:"name"`
-	Arguments map[string]interface{} `json:"arguments"`
+	Name         string                 `json:"name"`
+	Arguments    map[string]interface{} `json:"arguments"`
+	RawArguments string                 `json:"-"`
 }
 
 // ToolCall represents a single tool call emitted by the model.

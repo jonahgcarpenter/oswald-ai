@@ -175,6 +175,18 @@ func TestGatewayClientChatReturnsTypedHTTPError(t *testing.T) {
 	}
 }
 
+func TestPermanentChatProviderErrorClassification(t *testing.T) {
+	for _, test := range []struct {
+		status int
+		want   bool
+	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusNotFound, true}, {http.StatusRequestTimeout, false}, {http.StatusTooEarly, false}, {http.StatusTooManyRequests, false}, {http.StatusInternalServerError, false}} {
+		err := &ChatHTTPError{StatusCode: test.status, Body: "provider content"}
+		if got := IsPermanentChatProviderError(err); got != test.want {
+			t.Fatalf("status=%d permanent=%v want=%v", test.status, got, test.want)
+		}
+	}
+}
+
 func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -358,7 +370,7 @@ func TestGatewayClientChatStreamAccumulatesContentThinkingAndTools(t *testing.T)
 	if resp.PromptTokens != 7 || resp.CompletionTokens != 8 || resp.TotalTokens != 15 {
 		t.Fatalf("unexpected stream usage: %+v", resp)
 	}
-	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "call_1" || resp.Message.ToolCalls[0].Function.Arguments["x"] != float64(1) {
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "call_1" || resp.Message.ToolCalls[0].Function.Arguments["x"] != float64(1) || resp.Message.ToolCalls[0].Function.RawArguments != `{"x":1}` {
 		t.Fatalf("unexpected stream tool call: %+v", resp.Message.ToolCalls)
 	}
 	if len(chunks) != 2 || chunks[0].Thinking != "think" || chunks[1].Content != "hello" {

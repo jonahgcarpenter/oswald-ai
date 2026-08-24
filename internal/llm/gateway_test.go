@@ -71,7 +71,7 @@ func TestMapFromGatewayMessageDecodesToolArgumentsAndThinking(t *testing.T) {
 	if msg.Content != "hello" || msg.Thinking != "reasoning" {
 		t.Fatalf("unexpected message content/thinking: %+v", msg)
 	}
-	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "test.tool" || msg.ToolCalls[0].Function.Arguments["value"].(float64) != 42 {
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "test.tool" || msg.ToolCalls[0].Function.Arguments["value"].(float64) != 42 || msg.ToolCalls[0].Function.RawArguments != `{"value":42}` {
 		t.Fatalf("unexpected tool calls: %+v", msg.ToolCalls)
 	}
 }

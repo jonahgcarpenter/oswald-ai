@@ -62,7 +62,7 @@ func AssemblePromptContextWithRecall(
 }
 
 // AssemblePromptContextWithSummary reserves a bounded historical summary and a
-// minimum newest verbatim tail before recall and additional history.
+// caller-selected newest verbatim tail before recall and additional history.
 func AssemblePromptContextWithSummary(
 	deploymentPolicy string,
 	tenantProfile string,
@@ -165,6 +165,42 @@ func AssemblePromptContextWithSummary(
 	return result
 }
 
+func preservedRecentTailCount(recentTurns []usermemory.SessionTurn, inputLimit int) int {
+	budget := inputLimit / 4
+	if budget < 2000 {
+		budget = 2000
+	}
+	if budget > 8000 {
+		budget = 8000
+	}
+	if budget > inputLimit {
+		budget = inputLimit
+	}
+	total := 0
+	count := 0
+	for _, turn := range recentTurns {
+		if count == 2 {
+			break
+		}
+		size := promptbudget.EstimateRequest(usermemory.SessionTurnMessages(turn), nil)
+		if total+size > budget {
+			break
+		}
+		total += size
+		count++
+	}
+	return count
+}
+
+func completedPromptPressure(prompt PromptContext, storedTurn usermemory.SessionTurn) int {
+	userOnly := promptbudget.EstimateRequest([]llm.ChatMessage{{Role: "user", Content: storedTurn.UserText}}, nil)
+	pressure := prompt.EstimatedBefore + promptbudget.EstimateRequest(usermemory.SessionTurnMessages(storedTurn), nil) - userOnly
+	if pressure < 0 {
+		return 0
+	}
+	return pressure
+}
+
 func messagesWithSummaryAndTurns(required []llm.ChatMessage, summary string, newestFirst []usermemory.SessionTurn) []llm.ChatMessage {
 	return messagesWithSummaryAndChronologicalTurns(required, summary, reverseTurns(newestFirst))
 }
@@ -177,10 +213,7 @@ func messagesWithSummaryAndChronologicalTurns(required []llm.ChatMessage, summar
 		messages = append(messages, llm.ChatMessage{Role: "user", Content: summary})
 	}
 	for _, turn := range chronological {
-		messages = append(messages,
-			llm.ChatMessage{Role: "user", Content: turn.UserText},
-			llm.ChatMessage{Role: "assistant", Content: assistantTurnContent(turn)},
-		)
+		messages = append(messages, usermemory.SessionTurnMessages(turn)...)
 	}
 	messages = append(messages, required[last])
 	return messages
@@ -205,20 +238,10 @@ func messagesWithChronologicalTurns(required []llm.ChatMessage, chronological []
 	last := len(required) - 1
 	messages = append(messages, required[:last]...)
 	for _, turn := range chronological {
-		messages = append(messages,
-			llm.ChatMessage{Role: "user", Content: turn.UserText},
-			llm.ChatMessage{Role: "assistant", Content: assistantTurnContent(turn)},
-		)
+		messages = append(messages, usermemory.SessionTurnMessages(turn)...)
 	}
 	messages = append(messages, required[last])
 	return messages
-}
-
-func assistantTurnContent(turn usermemory.SessionTurn) string {
-	if len(turn.ToolNames) == 0 {
-		return turn.AssistantText
-	}
-	return turn.AssistantText + "\n\nTools used: " + strings.Join(turn.ToolNames, ", ")
 }
 
 func reverseTurns(turns []usermemory.SessionTurn) []usermemory.SessionTurn {

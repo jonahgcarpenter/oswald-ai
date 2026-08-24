@@ -45,6 +45,17 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	}
 }
 
+func TestCompletedPromptPressureIncludesStoredAssistantReplay(t *testing.T) {
+	prompt := PromptContext{EstimatedBefore: 1000}
+	turn := usermemory.SessionTurn{UserText: "current user", AssistantText: strings.Repeat("answer ", 40), ToolNames: []string{"web.search"}}
+	got := completedPromptPressure(prompt, turn)
+	userOnly := promptbudget.EstimateRequest([]llm.ChatMessage{{Role: "user", Content: turn.UserText}}, nil)
+	want := prompt.EstimatedBefore + promptbudget.EstimateRequest(usermemory.SessionTurnMessages(turn), nil) - userOnly
+	if got != want || got <= prompt.EstimatedBefore {
+		t.Fatalf("completed pressure=%d want=%d before=%d", got, want, prompt.EstimatedBefore)
+	}
+}
+
 func TestAssemblePromptContextExactFitAndOneTokenOver(t *testing.T) {
 	turn := usermemory.SessionTurn{UserText: "historical question", AssistantText: "historical answer"}
 	all := AssemblePromptContext("policy", "", "now", nil, []usermemory.SessionTurn{turn}, nil, 100000)
