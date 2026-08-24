@@ -517,6 +517,31 @@ func TestStaleCompactionProposalCannotReconcilePublishedCandidateAfterSameOwnerR
 	}
 }
 
+func TestSessionCompactionLeaseRenewalAdvancesExactFence(t *testing.T) {
+	store := newSessionCompactionTestStore(t)
+	seedAccountUsers(t, store, "user")
+	generation := activateCompactionSession(t, store, "user", "session")
+	turnID := appendDeliveredCompactionTurn(t, store, "user", "session", generation, "I prefer tea.")
+	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user", "session", generation, turnID, turnID, compactionTestModel, compactionTestGeneratorVersion); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimSessionCompactionJob(context.Background(), "worker", time.Minute, compactionTestModel, compactionTestGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil, err := store.RenewSessionCompactionJobLease(context.Background(), job, 2*time.Minute)
+	if err != nil || !leaseUntil.After(job.LeaseUntil) {
+		t.Fatalf("renewed until=%s err=%v", leaseUntil, err)
+	}
+	if _, err := store.RenewSessionCompactionJobLease(context.Background(), job, 2*time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale lease renewed: %v", err)
+	}
+	job.LeaseUntil = leaseUntil
+	if _, err := store.RenewSessionCompactionJobLease(context.Background(), job, 2*time.Minute); err != nil {
+		t.Fatalf("renew current lease: %v", err)
+	}
+}
+
 func TestSessionCompactionPublicationRollsBackAndRejectsStaleGeneration(t *testing.T) {
 	store := newSessionCompactionTestStore(t)
 	seedAccountUsers(t, store, "user")

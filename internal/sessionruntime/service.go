@@ -14,6 +14,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/leaseruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
@@ -54,12 +55,8 @@ func (s *Service) SetLowPriorityGate(gate LowPriorityGate) {
 }
 
 // NewService constructs the post-delivery compaction service.
-func NewService(store *usermemory.Store, extractor Extractor, model string, budget promptbudget.ContextBudget, requestTimeout time.Duration, log *config.Logger) *Service {
-	lease := requestTimeout + 30*time.Second
-	if lease < 2*time.Minute {
-		lease = 2 * time.Minute
-	}
-	return &Service{store: store, extractor: extractor, model: model, budget: budget, log: log, owner: fmt.Sprintf("session-compactor-%d", time.Now().UnixNano()), lease: lease, planRequests: make(chan usermemory.ActiveSessionScope, 128)}
+func NewService(store *usermemory.Store, extractor Extractor, model string, budget promptbudget.ContextBudget, log *config.Logger) *Service {
+	return &Service{store: store, extractor: extractor, model: model, budget: budget, log: log, owner: fmt.Sprintf("session-compactor-%d", time.Now().UnixNano()), lease: 2 * time.Minute, planRequests: make(chan usermemory.ActiveSessionScope, 128)}
 }
 
 // Start reconciles durable state and starts one serialized worker.
@@ -264,7 +261,8 @@ func promptPressureVersion(model string, inputLimit int) string {
 
 func (s *Service) drain(ctx context.Context) {
 	for ctx.Err() == nil {
-		job, err := s.store.ClaimSessionCompactionJob(ctx, s.owner, s.lease, s.model, SummaryGeneratorVersion)
+		claimOwner := fmt.Sprintf("%s-%d", s.owner, time.Now().UnixNano())
+		job, err := s.store.ClaimSessionCompactionJob(ctx, claimOwner, s.lease, s.model, SummaryGeneratorVersion)
 		if errors.Is(err, sql.ErrNoRows) {
 			return
 		}
@@ -272,7 +270,8 @@ func (s *Service) drain(ctx context.Context) {
 			s.warn("session.compaction.job.claim_failed", "failed to claim session compaction job", err)
 			return
 		}
-		if err := s.process(ctx, job); err != nil {
+		err = s.process(ctx, &job)
+		if err != nil {
 			if errors.Is(err, errLowPriorityUnavailable) {
 				if deferErr := s.store.DeferSessionCompactionJob(context.Background(), job, time.Second); deferErr != nil {
 					s.warn("session.compaction.job.defer_failed", "failed to defer preempted session compaction job", deferErr, config.F("job_id", job.ID))
@@ -320,30 +319,30 @@ func (s *Service) drain(ctx context.Context) {
 	}
 }
 
-func (s *Service) process(ctx context.Context, job usermemory.SessionCompactionJob) error {
-	artifact, err := s.store.SessionCompactionArtifact(ctx, job)
+func (s *Service) process(ctx context.Context, job *usermemory.SessionCompactionJob) error {
+	artifact, err := s.store.SessionCompactionArtifact(ctx, *job)
 	if errors.Is(err, sql.ErrNoRows) {
 		artifact, err = s.generateArtifact(ctx, job)
 		if err != nil {
 			return err
 		}
-		if err := s.validateCandidates(ctx, job, artifact); err != nil {
+		if err := s.validateCandidates(ctx, *job, artifact); err != nil {
 			return err
 		}
-		if err := s.store.SaveSessionCompactionArtifact(ctx, job, artifact); err != nil {
+		if err := s.store.SaveSessionCompactionArtifact(ctx, *job, artifact); err != nil {
 			return err
 		}
 	} else if err != nil {
 		return terminalCompaction("persisted_artifact_invalid")
 	}
-	if err := s.stageCandidates(ctx, job, artifact); err != nil {
+	if err := s.stageCandidates(ctx, *job, artifact); err != nil {
 		return err
 	}
-	summary, err := s.store.PublishSessionSummary(ctx, job)
+	summary, err := s.store.PublishSessionSummary(ctx, *job)
 	if err != nil {
 		return err
 	}
-	if err := s.store.CompleteSessionCompactionJob(ctx, job, false); err != nil {
+	if err := s.store.CompleteSessionCompactionJob(ctx, *job, false); err != nil {
 		return err
 	}
 	if s.log != nil {
@@ -352,8 +351,8 @@ func (s *Service) process(ctx context.Context, job usermemory.SessionCompactionJ
 	return nil
 }
 
-func (s *Service) generateArtifact(ctx context.Context, job usermemory.SessionCompactionJob) (usermemory.SummaryArtifact, error) {
-	previous, turns, err := s.newTurnsForJob(ctx, job)
+func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionCompactionJob) (usermemory.SummaryArtifact, error) {
+	previous, turns, err := s.newTurnsForJob(ctx, *job)
 	if err != nil {
 		return usermemory.SummaryArtifact{}, err
 	}
@@ -370,9 +369,25 @@ func (s *Service) generateArtifact(ctx context.Context, job usermemory.SessionCo
 	if extractParent.Err() != nil {
 		return usermemory.SummaryArtifact{}, errLowPriorityUnavailable
 	}
-	extractCtx := requestctx.WithMetadata(extractParent, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: job.Model})
-	extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "session_compaction", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
-	artifact, err := s.extractor.Compact(extractCtx, previous, turns)
+	var artifact usermemory.SummaryArtifact
+	renewedJob := *job
+	err = leaseruntime.Run(extractParent, s.lease,
+		func(renewCtx context.Context) error {
+			leaseUntil, renewErr := s.store.RenewSessionCompactionJobLease(renewCtx, renewedJob, s.lease)
+			if renewErr == nil {
+				renewedJob.LeaseUntil = leaseUntil
+			}
+			return renewErr
+		},
+		func(workCtx context.Context) error {
+			extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: job.Model})
+			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "session_compaction", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+			var compactErr error
+			artifact, compactErr = s.extractor.Compact(extractCtx, previous, turns)
+			return compactErr
+		},
+	)
+	*job = renewedJob
 	wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
 	release()
 	release = func() {}

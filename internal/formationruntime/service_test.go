@@ -47,9 +47,9 @@ func TestFormationJobLeaseCoversProviderTimeout(t *testing.T) {
 	}
 }
 
-func TestFormationJobLeaseExtendsLongProviderTimeout(t *testing.T) {
-	service := NewService(nil, nil, "model", config.NewLogger(config.LevelError), 12*time.Minute)
-	if service.jobLease != 12*time.Minute+30*time.Second {
+func TestFormationJobLeaseUsesRenewableDefault(t *testing.T) {
+	service := NewService(nil, nil, "model", config.NewLogger(config.LevelError))
+	if service.jobLease != formationJobLease {
 		t.Fatalf("job lease=%s", service.jobLease)
 	}
 }
@@ -115,7 +115,7 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 	if err != nil || job.ID != jobID {
 		t.Fatalf("claim=%+v err=%v", job, err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CompleteFormationJob(context.Background(), job, false); err != nil {
@@ -126,7 +126,7 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 		t.Fatalf("memories=%+v err=%v", memories, err)
 	}
 
-	if err := service.process(context.Background(), job); err == nil {
+	if err := service.process(context.Background(), &job); err == nil {
 		t.Fatal("completed formation lease replay succeeded")
 	}
 	memories, err = store.ListMemories("user-1", "", "", 10)
@@ -156,7 +156,7 @@ func TestServicePublishesPartialDirectNameIntoNewSessionProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	memories, err := store.ListMemories("user-1", "", "identity", 10)
@@ -186,7 +186,7 @@ func TestServicePublishesIndependentFactsFromLongTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -214,7 +214,7 @@ func TestServicePublishesPacmanInferenceAsUncertainMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -284,7 +284,7 @@ func TestServiceLeavesFailedJobRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err == nil {
+	if err := service.process(context.Background(), &job); err == nil {
 		t.Fatal("expected extraction failure")
 	}
 	if err := store.RetryFormationJob(context.Background(), job, "extractor", formationMaxAttempts); err != nil {
@@ -329,7 +329,7 @@ func TestServiceDiscardsSuccessfulExtractionAfterForegroundPreemption(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); !errors.Is(err, errBackgroundPreempted) {
+	if err := service.process(context.Background(), &job); !errors.Is(err, errBackgroundPreempted) {
 		t.Fatalf("process error=%v", err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -504,7 +504,7 @@ func TestServiceDropsMalformedPersistedArtifactBesideValidCandidate(t *testing.T
 	if err := store.SaveFormationJobArtifact(context.Background(), job, artifact); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewService(store, nil, "model", config.NewLogger(config.LevelError)).process(context.Background(), job); err != nil {
+	if err := NewService(store, nil, "model", config.NewLogger(config.LevelError)).process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	memories, err := store.ListMemories("user-1", "", "", 10)
@@ -525,7 +525,7 @@ func TestServicePersistsAndReplaysExtractionCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := store.FormationJobArtifact(context.Background(), job)
@@ -536,7 +536,7 @@ func TestServicePersistsAndReplaysExtractionCounts(t *testing.T) {
 	if err != nil || len(itemErrors) != 0 || batch.SubmittedCount != 2 || batch.MalformedCount != 1 || len(batch.Memories) != 1 {
 		t.Fatalf("artifact=%s batch=%+v item_errors=%+v err=%v", artifact, batch, itemErrors, err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	if extractor.calls != 1 {

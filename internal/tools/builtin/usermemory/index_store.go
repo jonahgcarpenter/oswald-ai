@@ -568,10 +568,20 @@ func (s *Store) ClaimDerivedIndexChange(ctx context.Context, lease time.Duration
 	return change, nil
 }
 
+// RenewDerivedIndexChangeLease extends an exactly owned, still-live outbox lease.
+func (s *Store) RenewDerivedIndexChangeLease(ctx context.Context, change DerivedIndexChange, lease time.Duration) error {
+	if lease <= 0 {
+		return fmt.Errorf("renew derived index lease: duration must be positive")
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'derived_index' AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`, formatTime(now.Add(lease)), formatTime(now), change.Sequence, change.LeaseOwner, formatTime(now))
+	return requireDerivedIndexLeaseMutation(result, err)
+}
+
 // CompleteDerivedIndexChange acknowledges a leased change.
 func (s *Store) CompleteDerivedIndexChange(ctx context.Context, change DerivedIndexChange) error {
 	now := formatTime(time.Now().UTC())
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'succeeded', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'derived_index' AND state = 'running' AND lease_owner = ?`, now, now, change.Sequence, change.LeaseOwner)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'succeeded', completed_at = ?, lease_owner = '', lease_until = NULL, last_error_code = '', updated_at = ? WHERE id = ? AND job_kind = 'derived_index' AND state = 'running' AND lease_owner = ? AND julianday(lease_until) > julianday(?)`, now, now, change.Sequence, change.LeaseOwner, now)
 	return requireDerivedIndexLeaseMutation(result, err)
 }
 

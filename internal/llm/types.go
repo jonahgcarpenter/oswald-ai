@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 type gatewayToolFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
@@ -95,4 +97,12 @@ type gatewayEmbeddingResponse struct {
 
 type gatewayEmbeddingDatum struct {
 	Embedding []float64 `json:"embedding"`
+}
+
+type gatewayAsyncJob struct {
+	ID         string          `json:"id"`
+	Status     string          `json:"status"`
+	StatusCode int             `json:"status_code,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      json.RawMessage `json:"error,omitempty"`
 }

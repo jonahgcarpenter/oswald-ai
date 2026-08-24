@@ -519,7 +519,7 @@ func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source
 
 type responseRuntimeProcessor struct{ response *agent.AgentResponse }
 
-func (p responseRuntimeProcessor) Process(agent.Request) (*agent.AgentResponse, error) {
+func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.AgentResponse, error) {
 	return p.response, nil
 }
 
@@ -543,7 +543,7 @@ type blockingRuntimeProcessor struct {
 	release chan struct{}
 }
 
-func (p *blockingRuntimeProcessor) Process(agent.Request) (*agent.AgentResponse, error) {
+func (p *blockingRuntimeProcessor) Process(context.Context, agent.Request) (*agent.AgentResponse, error) {
 	close(p.started)
 	<-p.release
 	return &agent.AgentResponse{Response: "agent response"}, nil
@@ -568,7 +568,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	}
 	db.Close() // nolint:errcheck
 	memory := usermemory.NewStore(dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, time.Minute, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService(pingHandler{})

@@ -84,7 +84,7 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 		}
 	}
 	extractor := &fakeSummaryExtractor{}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil || jobID == 0 {
 		t.Fatalf("plan job=%d err=%v", jobID, err)
@@ -96,7 +96,7 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	if job.Model != "model" || job.GeneratorVersion != SummaryGeneratorVersion {
 		t.Fatalf("job model=%q generator version=%q", job.Model, job.GeneratorVersion)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	if extractor.calls != 1 || extractor.previous != nil || len(extractor.turns) != 23 {
@@ -127,7 +127,7 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	if extractor.calls != 2 || extractor.previous == nil || len(extractor.previous.Commitments) != 1 || extractor.previous.Commitments[0] != "Report progress" {
@@ -192,7 +192,7 @@ func TestServiceCompactionYieldsWhenForegroundWorkIsBusy(t *testing.T) {
 		}
 	}
 	extractor := &fakeSummaryExtractor{}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(unavailableLowPriorityGate{})
 	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestServiceCompactionYieldsWhenForegroundWorkIsBusy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); !errors.Is(err, errLowPriorityUnavailable) || extractor.calls != 0 {
+	if err := service.process(context.Background(), &job); !errors.Is(err, errLowPriorityUnavailable) || extractor.calls != 0 {
 		t.Fatalf("process error=%v extractor calls=%d", err, extractor.calls)
 	}
 	if err := store.DeferSessionCompactionJob(context.Background(), job, time.Second); err != nil {
@@ -222,7 +222,7 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	}
 	gate := &canceledLowPriorityGate{}
 	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.process(context.Background(), job); !errors.Is(err, errProviderPreempted) {
+	if err := service.process(context.Background(), &job); !errors.Is(err, errProviderPreempted) {
 		t.Fatalf("process error=%v", err)
 	}
 	if _, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation); err == nil {
@@ -246,7 +246,7 @@ func TestServiceBoundsInvalidCompactionOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	extractor := &fakeSummaryExtractor{err: invalidCompactionOutput("missing_tool_call")}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestServiceSkipsPermanentCompactionProviderFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	extractor := &fakeSummaryExtractor{err: &permanentProviderError{statusCode: 400}}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
 		t.Fatal(err)
@@ -300,7 +300,7 @@ func TestServiceChargesProviderStartedPreemption(t *testing.T) {
 	}
 	gate := &canceledLowPriorityGate{}
 	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
@@ -324,7 +324,7 @@ func TestServiceCompactionProviderCallsHaveAbsoluteBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	extractor := &fakeSummaryExtractor{results: []error{invalidCompactionOutput("missing_tool_call")}, err: errors.New("provider unavailable")}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil {
 		t.Fatal(err)
@@ -370,7 +370,7 @@ func TestValidateCompactionCandidatesKeepsStoreFailuresTransient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestServicePlannerWaitsBelowThreshold(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil || jobID != 0 {
 		t.Fatalf("unexpected plan job=%d err=%v", jobID, err)
@@ -415,7 +415,7 @@ func TestServicePlannerTriggersAtPressureBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil || jobID == 0 {
 		t.Fatalf("boundary plan job=%d err=%v", jobID, err)
@@ -446,7 +446,7 @@ func TestServiceCampaignContinuesAfterFirstChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestServiceCampaignContinuesAfterFirstChunk(t *testing.T) {
 	if job.CoveredThroughTurnID >= job.TargetTurnID {
 		t.Fatalf("first chunk unexpectedly covered campaign: %+v", job)
 	}
-	if err := service.process(context.Background(), job); err != nil {
+	if err := service.process(context.Background(), &job); err != nil {
 		t.Fatal(err)
 	}
 	nextID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
@@ -485,7 +485,7 @@ func TestServiceRecordsUncompactableCompleteExchangeWithoutProviderCall(t *testi
 		}
 	}
 	extractor := &fakeSummaryExtractor{}
-	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100}, time.Minute, config.NewLogger(config.LevelError))
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100}, config.NewLogger(config.LevelError))
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
 	if err != nil || jobID == 0 {
 		t.Fatalf("receipt job=%d err=%v", jobID, err)

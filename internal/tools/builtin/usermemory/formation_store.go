@@ -772,6 +772,20 @@ ORDER BY available_at, id LIMIT 1
 	return job, nil
 }
 
+// RenewFormationJobLease extends an exactly owned, still-live formation lease.
+func (s *Store) RenewFormationJobLease(ctx context.Context, job FormationJob, lease time.Duration) (time.Time, error) {
+	if lease <= 0 {
+		return time.Time{}, fmt.Errorf("renew memory formation lease: duration must be positive")
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease)
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET lease_until = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, formatTime(leaseUntil), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
+	if err := requireFormationLeaseMutation(result, err); err != nil {
+		return time.Time{}, err
+	}
+	return leaseUntil, nil
+}
+
 // FormationJobArtifact returns the first persisted extractor result for replay.
 func (s *Store) FormationJobArtifact(ctx context.Context, job FormationJob) (string, error) {
 	var payload string

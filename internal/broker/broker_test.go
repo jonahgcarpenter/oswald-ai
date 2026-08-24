@@ -729,11 +729,44 @@ func TestBrokerRejectsAfterShutdown(t *testing.T) {
 	}
 }
 
+func TestBrokerShutdownCancelsActiveAgentRequest(t *testing.T) {
+	processor := &cancelProcessor{started: make(chan struct{})}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	req := &Request{RequestID: "active", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	<-processor.started
+	done := make(chan struct{})
+	go func() { b.Shutdown(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel active agent request")
+	}
+	result := <-req.ResponseChan
+	if !errors.Is(result.Err, context.Canceled) {
+		t.Fatalf("result error=%v, want context cancellation", result.Err)
+	}
+}
+
 type captureProcessor struct {
 	requests chan agent.Request
 }
 
-func (p *captureProcessor) Process(req agent.Request) (*agent.AgentResponse, error) {
+type cancelProcessor struct {
+	started chan struct{}
+}
+
+func (p *cancelProcessor) Process(ctx context.Context, _ agent.Request) (*agent.AgentResponse, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *captureProcessor) Process(_ context.Context, req agent.Request) (*agent.AgentResponse, error) {
 	p.requests <- req
 	return &agent.AgentResponse{Response: "ok"}, nil
 }

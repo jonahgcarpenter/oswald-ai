@@ -133,13 +133,15 @@ type Broker struct {
 	ready       chan *work
 	log         *config.Logger
 
-	mu          sync.Mutex
-	lanes       map[LaneKey][]*work
-	userFences  map[string]*userFence
-	outstanding int
-	accepting   bool
-	started     bool
-	background  *backgroundPermit
+	mu              sync.Mutex
+	lanes           map[LaneKey][]*work
+	userFences      map[string]*userFence
+	outstanding     int
+	accepting       bool
+	started         bool
+	background      *backgroundPermit
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
 
 	workWG    sync.WaitGroup
 	workerWG  sync.WaitGroup
@@ -153,7 +155,7 @@ type backgroundPermit struct {
 
 // Processor handles one typed agent request.
 type Processor interface {
-	Process(agent.Request) (*agent.AgentResponse, error)
+	Process(context.Context, agent.Request) (*agent.AgentResponse, error)
 }
 
 // NewBroker creates a lane-aware broker. Call Start before production use.
@@ -165,14 +167,17 @@ func NewBroker(aiAgent Processor, workerCount int, log *config.Logger) *Broker {
 	if capacity < requestQueueSize {
 		capacity = requestQueueSize
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Broker{
-		agent:       aiAgent,
-		workerCount: workerCount,
-		ready:       make(chan *work, capacity),
-		log:         log,
-		lanes:       make(map[LaneKey][]*work),
-		userFences:  make(map[string]*userFence),
-		accepting:   true,
+		agent:           aiAgent,
+		workerCount:     workerCount,
+		ready:           make(chan *work, capacity),
+		log:             log,
+		lanes:           make(map[LaneKey][]*work),
+		userFences:      make(map[string]*userFence),
+		accepting:       true,
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 }
 
@@ -231,7 +236,7 @@ func (b *Broker) Submit(req *Request) error {
 				return nil
 			}
 		}
-		resp, err := b.agent.Process(agent.Request{
+		resp, err := b.agent.Process(b.lifecycleCtx, agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect,
@@ -375,11 +380,12 @@ func (b *Broker) TryAcquireLowPriority(parent context.Context) (context.Context,
 	return ctx, release, true
 }
 
-// Shutdown rejects new work, drains every accepted lane, and stops workers.
+// Shutdown rejects new work, cancels active agent requests, drains accepted lanes, and stops workers.
 func (b *Broker) Shutdown() {
 	b.shutdown.Do(func() {
 		b.mu.Lock()
 		b.accepting = false
+		b.lifecycleCancel()
 		if b.background != nil {
 			b.background.cancel()
 		}

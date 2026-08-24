@@ -1,6 +1,7 @@
 package homeassistant
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +26,7 @@ type fakeProcessor struct {
 	requests chan agent.Request
 }
 
-func (p *fakeProcessor) Process(request agent.Request) (*agent.AgentResponse, error) {
+func (p *fakeProcessor) Process(_ context.Context, request agent.Request) (*agent.AgentResponse, error) {
 	p.requests <- request
 	if request.StreamFunc != nil {
 		request.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "Hello "})

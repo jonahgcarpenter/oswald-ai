@@ -710,7 +710,7 @@ type issue80Processor struct {
 	generation int
 }
 
-func (p *issue80Processor) Process(req agent.Request) (*agent.AgentResponse, error) {
+func (p *issue80Processor) Process(_ context.Context, req agent.Request) (*agent.AgentResponse, error) {
 	profile, err := p.store.ResolveSessionProfile(context.Background(), req.Principal.CanonicalUserID, req.SessionKey, time.Hour)
 	if err != nil {
 		return nil, err
