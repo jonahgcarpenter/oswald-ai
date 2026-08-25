@@ -13,7 +13,6 @@ import (
 
 const (
 	discordStreamEditInterval  = 800 * time.Millisecond
-	discordStreamBufferRunes   = 24
 	discordStreamCursor        = " ▉"
 	discordToolStatusLineLimit = 12
 )
@@ -30,11 +29,6 @@ type discordToolStatus struct {
 	done       bool
 	failed     bool
 	durationMS int64
-}
-
-type discordStaleMessage struct {
-	id   string
-	text string
 }
 
 type discordResponseStream struct {
@@ -57,7 +51,7 @@ func (s *discordResponseStream) start() {
 }
 
 func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
-	if chunk.Type == agent.ChunkThinking || chunk.Type == agent.ChunkStatus {
+	if chunk.Type == agent.ChunkStatus {
 		return
 	}
 	s.start()
@@ -99,41 +93,45 @@ func (s *discordResponseStream) run() {
 				return
 			}
 		case <-ticker.C:
-			state.flushPreview(false)
+			state.flushAnswer()
 		}
 	}
 }
 
 type discordStreamState struct {
-	stream             *discordResponseStream
-	active             strings.Builder
-	activeMessageID    string
-	lastPreview        string
-	toolMessageID      string
-	tools              []discordToolStatus
-	staleMessages      []discordStaleMessage
-	replyUsed          bool
-	replyMessageID     string
-	previewDisabled    bool
-	toolStatusDisabled bool
+	stream          *discordResponseStream
+	active          strings.Builder
+	messageID       string
+	lastDisplay     string
+	tools           []discordToolStatus
+	replyUsed       bool
+	replyMessageID  string
+	answerStarted   bool
+	previewDisabled bool
 }
 
 func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 	switch chunk.Type {
+	case agent.ChunkThinking:
+		if !s.answerStarted {
+			s.showStatus()
+		}
 	case agent.ChunkContent:
 		if chunk.Text == "" {
 			return
 		}
 		s.active.WriteString(chunk.Text)
-		if s.activeMessageID == "" && utf8.RuneCountInString(s.active.String()) >= discordStreamBufferRunes {
-			s.flushPreview(false)
+		if !s.answerStarted {
+			s.answerStarted = true
+			s.show(strings.TrimSpace(discordStreamCursor))
 		}
 	case agent.ChunkToolCall:
-		s.finishActiveSegment()
+		s.active.Reset()
+		s.answerStarted = false
 		if chunk.Tool != nil && chunk.Tool.Name != "" {
 			s.tools = append(s.tools, discordToolStatus{name: chunk.Tool.Name})
-			s.flushToolStatus()
 		}
+		s.showStatus()
 	case agent.ChunkToolResult:
 		if chunk.Tool == nil || chunk.Tool.Name == "" {
 			return
@@ -146,110 +144,18 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 				break
 			}
 		}
-		s.flushToolStatus()
+		s.showStatus()
 	}
 }
 
-func (s *discordStreamState) finishActiveSegment() {
-	if s.active.Len() == 0 {
+func (s *discordStreamState) showStatus() {
+	if s.answerStarted {
 		return
 	}
-	text := s.active.String()
-	if !s.previewDisabled {
-		if err := s.deliverSegment(text); err != nil {
-			s.stream.responder.gateway.log().Debug("gateway.stream.segment_finalize_failed", "discord streamed segment finalization degraded", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
-		}
-	} else if s.activeMessageID != "" {
-		if err := s.delete(s.activeMessageID, true); err != nil {
-			s.staleMessages = append(s.staleMessages, discordStaleMessage{id: s.activeMessageID, text: text})
-		}
-	}
-	s.active.Reset()
-	s.activeMessageID = ""
-	s.lastPreview = ""
-	s.previewDisabled = false
-}
-
-func (s *discordStreamState) deliverSegment(text string) error {
-	chunks := splitMessage(text, 2000)
-	if len(chunks) == 0 {
-		return nil
-	}
-	start := 0
-	if s.activeMessageID != "" {
-		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.activeMessageID, chunks[0]); err != nil {
-			if deleteErr := s.delete(s.activeMessageID, true); deleteErr != nil {
-				s.staleMessages = append(s.staleMessages, discordStaleMessage{id: s.activeMessageID, text: text})
-			}
-			return err
-		}
-		s.remember(s.activeMessageID, chunks[0])
-		start = 1
-	}
-	for _, chunk := range chunks[start:] {
-		messageID, err := s.send(chunk)
-		if err != nil {
-			return err
-		}
-		s.remember(messageID, chunk)
-	}
-	return nil
-}
-
-func (s *discordStreamState) flushPreview(finalize bool) {
-	if s.previewDisabled || s.active.Len() == 0 {
-		return
-	}
-	if s.activeMessageID == "" && s.hasStaleReply() {
-		return
-	}
-	text := s.active.String()
-	display := text
-	if !finalize {
-		display = discordPreviewText(text)
-	}
-	if display == s.lastPreview {
-		return
-	}
-
-	var err error
-	if s.activeMessageID == "" {
-		s.activeMessageID, err = s.send(display)
-	} else {
-		err = s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.activeMessageID, display)
-	}
-	if err != nil {
-		s.previewDisabled = true
-		s.stream.responder.gateway.log().Debug("gateway.stream.preview_failed", "discord progressive preview degraded", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
-		return
-	}
-	s.lastPreview = display
-	s.stream.responder.stopTypingIndicator()
-}
-
-func discordPreviewText(text string) string {
-	limit := 2000 - utf8.RuneCountInString(discordStreamCursor) - utf8.RuneCountInString("\n```")
-	chunks := splitMessage(text, limit)
-	if len(chunks) == 0 {
-		return ""
-	}
-	preview := chunks[0]
-	if strings.Count(preview, "```")%2 != 0 {
-		preview += "\n```"
-	}
-	return preview + discordStreamCursor
-}
-
-func (s *discordStreamState) flushToolStatus() {
-	if s.toolStatusDisabled || len(s.tools) == 0 {
-		return
-	}
+	lines := []string{"Thinking..."}
 	start := 0
 	if len(s.tools) > discordToolStatusLineLimit {
 		start = len(s.tools) - discordToolStatusLineLimit
-	}
-	lines := make([]string, 0, len(s.tools)-start+1)
-	if start > 0 {
 		lines = append(lines, fmt.Sprintf("%d earlier tool calls completed.", start))
 	}
 	for _, tool := range s.tools[start:] {
@@ -263,24 +169,46 @@ func (s *discordStreamState) flushToolStatus() {
 			lines = append(lines, fmt.Sprintf("Completed `%s` (%d ms).", name, tool.durationMS))
 		}
 	}
-	content := strings.Join(lines, "\n")
-	var err error
-	if s.toolMessageID == "" {
-		s.toolMessageID, err = s.send(content)
-	} else {
-		err = s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.toolMessageID, content)
-	}
-	if err != nil {
-		s.toolStatusDisabled = true
-		if s.toolMessageID != "" {
-			if s.delete(s.toolMessageID, true) == nil {
-				s.toolMessageID = ""
-			}
-		}
-		s.stream.responder.gateway.log().Debug("gateway.stream.tool_status_failed", "discord tool status delivery degraded", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
+	s.show(strings.Join(lines, "\n"))
+}
+
+func (s *discordStreamState) flushAnswer() {
+	if !s.answerStarted || s.active.Len() == 0 {
 		return
 	}
+	s.show(discordPreviewText(s.active.String()))
+}
+
+func (s *discordStreamState) show(content string) {
+	if s.previewDisabled || content == "" || content == s.lastDisplay {
+		return
+	}
+	var err error
+	if s.messageID == "" {
+		s.messageID, err = s.send(content)
+	} else {
+		err = s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.messageID, content)
+	}
+	if err != nil {
+		s.previewDisabled = true
+		s.stream.responder.gateway.log().Debug("gateway.stream.preview_failed", "discord lifecycle preview degraded", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
+		return
+	}
+	s.lastDisplay = content
 	s.stream.responder.stopTypingIndicator()
+}
+
+func discordPreviewText(text string) string {
+	limit := 2000 - utf8.RuneCountInString(discordStreamCursor) - utf8.RuneCountInString("\n```")
+	chunks := splitMessage(text, limit)
+	if len(chunks) == 0 {
+		return strings.TrimSpace(discordStreamCursor)
+	}
+	preview := chunks[0]
+	if strings.Count(preview, "```")%2 != 0 {
+		preview += "\n```"
+	}
+	return preview + discordStreamCursor
 }
 
 func (s *discordStreamState) finish(response *agent.AgentResponse) error {
@@ -289,35 +217,22 @@ func (s *discordStreamState) finish(response *agent.AgentResponse) error {
 	log := s.stream.responder.gateway.log()
 	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", response.Model))
 
-	for _, stale := range s.staleMessages {
-		if stale.id == s.replyMessageID {
-			if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, stale.id, stale.text); err == nil {
-				s.remember(stale.id, stale.text)
-			} else {
-				s.replyUsed = false
-				s.replyMessageID = ""
-			}
-			continue
-		}
-		_ = s.delete(stale.id, false)
-	}
-	if s.toolStatusDisabled && s.toolMessageID != "" {
-		s.toolStatusDisabled = false
-		s.flushToolStatus()
-	}
-
 	sentCount := 0
-	if len(chunks) > 0 && s.activeMessageID != "" {
-		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.activeMessageID, chunks[0]); err == nil {
-			s.remember(s.activeMessageID, chunks[0])
+	var lifecycleErr error
+	if len(chunks) > 0 && s.messageID != "" {
+		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.messageID, chunks[0]); err == nil {
+			s.remember(s.messageID, chunks[0])
 			sentCount++
 			chunks = chunks[1:]
 		} else {
-			if deleteErr := s.delete(s.activeMessageID, true); deleteErr != nil && s.activeMessageID == s.replyMessageID {
-				s.replyUsed = false
-				s.replyMessageID = ""
+			if deleteErr := s.delete(s.messageID, true); deleteErr != nil {
+				lifecycleErr = fmt.Errorf("finalize discord lifecycle message: edit failed: %v; delete failed: %w", err, deleteErr)
+				if s.messageID == s.replyMessageID {
+					s.replyUsed = false
+					s.replyMessageID = ""
+				}
 			}
-			log.Debug("gateway.stream.final_edit_failed", "discord final preview edit failed; sending authoritative response separately", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
+			log.Debug("gateway.stream.final_edit_failed", "discord final lifecycle edit failed; sending authoritative response separately", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}
 
@@ -331,19 +246,29 @@ func (s *discordStreamState) finish(response *agent.AgentResponse) error {
 		sentCount++
 	}
 	log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
-	return nil
+	return lifecycleErr
 }
 
 func (s *discordStreamState) fail(text string) error {
-	s.finishActiveSegment()
-	for _, stale := range s.staleMessages {
-		_ = s.delete(stale.id, false)
+	var lifecycleErr error
+	if s.messageID != "" {
+		if err := s.stream.responder.gateway.editMessage(s.stream.responder.channelID, s.messageID, text); err == nil {
+			s.remember(s.messageID, text)
+			return nil
+		} else if deleteErr := s.delete(s.messageID, true); deleteErr != nil {
+			lifecycleErr = fmt.Errorf("replace discord lifecycle message with error: edit failed: %v; delete failed: %w", err, deleteErr)
+			if s.messageID == s.replyMessageID {
+				s.replyUsed = false
+				s.replyMessageID = ""
+			}
+		}
 	}
 	messageID, err := s.send(text)
-	if err == nil {
-		s.remember(messageID, text)
+	if err != nil {
+		return err
 	}
-	return err
+	s.remember(messageID, text)
+	return lifecycleErr
 }
 
 func (s *discordStreamState) send(content string) (string, error) {
@@ -368,15 +293,6 @@ func (s *discordStreamState) delete(messageID string, releaseReply bool) error {
 		s.replyMessageID = ""
 	}
 	return err
-}
-
-func (s *discordStreamState) hasStaleReply() bool {
-	for _, stale := range s.staleMessages {
-		if stale.id == s.replyMessageID {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *discordStreamState) remember(messageID, text string) {

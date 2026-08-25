@@ -36,19 +36,27 @@ func (r *runtimeResponder) StartProcessing() (func(), error) {
 	r.stopTyping = stopTyping
 	r.typingMu.Unlock()
 	go func() {
-		_ = r.gateway.sendTyping(r.channelID)
 		ticker := time.NewTicker(9 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				_ = r.gateway.sendTyping(r.channelID)
+				r.typingMu.Lock()
+				select {
+				case <-stopTyping:
+					r.typingMu.Unlock()
+					return
+				default:
+					_ = r.gateway.sendTyping(r.channelID)
+					r.typingMu.Unlock()
+				}
 			case <-stopTyping:
 				return
 			}
 		}
 	}()
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
 	return r.stopTypingIndicator, nil
 }
 
