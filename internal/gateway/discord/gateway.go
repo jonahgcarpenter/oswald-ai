@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	gorilla "github.com/gorilla/websocket"
 
@@ -381,15 +382,19 @@ func splitMessage(text string, limit int) []string {
 	runes := []rune(text)
 
 	for len(runes) > 0 {
-		if len(runes) <= limit {
+		prefixLen := discordPrefixRuneCount(runes, limit)
+		if prefixLen == len(runes) {
 			chunks = append(chunks, string(runes))
 			break
 		}
+		if prefixLen == 0 {
+			prefixLen = 1
+		}
 
-		chunkRunes := runes[:limit]
+		chunkRunes := runes[:prefixLen]
 		splitIdx := -1
 
-		for i := len(chunkRunes) - 1; i >= 0; i-- {
+		for i := len(chunkRunes) - 1; i > 0; i-- {
 			if chunkRunes[i] == '\n' {
 				splitIdx = i
 				break
@@ -406,7 +411,7 @@ func splitMessage(text string, limit int) []string {
 		}
 
 		if splitIdx == -1 {
-			for i := len(chunkRunes) - 1; i >= 0; i-- {
+			for i := len(chunkRunes) - 1; i > 0; i-- {
 				if chunkRunes[i] == ' ' {
 					splitIdx = i
 					break
@@ -415,7 +420,7 @@ func splitMessage(text string, limit int) []string {
 		}
 
 		if splitIdx == -1 {
-			splitIdx = limit
+			splitIdx = prefixLen
 		}
 
 		chunks = append(chunks, strings.TrimSpace(string(runes[:splitIdx])))
@@ -424,6 +429,25 @@ func splitMessage(text string, limit int) []string {
 	}
 
 	return chunks
+}
+
+func discordContentLength(value string) int {
+	return len(utf16.Encode([]rune(value)))
+}
+
+func discordPrefixRuneCount(runes []rune, limit int) int {
+	units := 0
+	for i, r := range runes {
+		width := 1
+		if r > 0xffff {
+			width = 2
+		}
+		if units+width > limit {
+			return i
+		}
+		units += width
+	}
+	return len(runes)
 }
 
 // resolveMentions replaces every <@ID> and <@!ID> token in text with @username.

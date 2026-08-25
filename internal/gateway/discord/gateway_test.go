@@ -53,7 +53,7 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	if last.Content != "hello discord" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
-	if rest.lastMessageContent() != "Thinking..." || len(rest.editedMessages()) != 1 || rest.editedMessages()[0]["content"] != "discord response" {
+	if rest.lastMessageContent() != "discord response" || len(rest.editedMessages()) != 0 {
 		t.Fatalf("unexpected lifecycle delivery: sent=%+v edited=%+v", rest.sentMessages(), rest.editedMessages())
 	}
 	if _, ok := dg.lookupReply("sent-1"); !ok {
@@ -82,10 +82,10 @@ func TestDiscordHandleDirectMessageStreamsAndFinalizesReply(t *testing.T) {
 	}
 	sent := rest.sentMessages()
 	edited := rest.editedMessages()
-	if len(sent) != 1 || sent[0]["content"] != "Thinking..." {
+	if len(sent) != 1 || sent[0]["content"] != strings.TrimSpace(discordStreamCursor) {
 		t.Fatalf("unexpected progressive sends: %+v", sent)
 	}
-	if len(edited) != 2 || edited[0]["content"] != strings.TrimSpace(discordStreamCursor) || edited[1]["content"] != responseText {
+	if len(edited) != 1 || edited[0]["content"] != responseText {
 		t.Fatalf("unexpected final edits: %+v", edited)
 	}
 	ctx, ok := dg.lookupReply("sent-1")
@@ -101,9 +101,9 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "private reasoning"})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "I will look that up before answering."})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search", Arguments: map[string]interface{}{"query": "secret query"}}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search", Arguments: map[string]interface{}{"query": "secret query", "authorization": "Bearer private-token"}}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", ResultText: "private result", DurationMS: 420}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "post tool reasoning"})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final streamed response is now arriving."})
 	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final answer."}); err != nil {
 		t.Fatal(err)
@@ -111,13 +111,13 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 
 	sent := rest.sentMessages()
 	edited := rest.editedMessages()
-	if len(sent) != 1 || sent[0]["content"] != "Thinking..." {
+	if len(sent) != 1 || sent[0]["content"] != "-# private reasoning"+discordStreamCursor {
 		t.Fatalf("expected one lifecycle message, got %+v", sent)
 	}
 	if len(edited) != 5 ||
-		edited[0]["content"] != strings.TrimSpace(discordStreamCursor) ||
-		edited[1]["content"] != "Thinking...\nRunning `web.search`..." ||
-		edited[2]["content"] != "Thinking...\nCompleted `web.search` (420 ms)." ||
+		edited[0]["content"] != "-# private reasoning\n\nSearching the web for \"secret query\"..." ||
+		edited[1]["content"] != "Searched the web for \"secret query\"." ||
+		edited[2]["content"] != "-# post tool reasoning"+discordStreamCursor ||
 		edited[3]["content"] != strings.TrimSpace(discordStreamCursor) ||
 		edited[4]["content"] != "The final answer." {
 		t.Fatalf("unexpected stream edits: %+v", edited)
@@ -126,8 +126,8 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 		Sent   []map[string]interface{}
 		Edited []map[string]interface{}
 	}{sent, edited})
-	if strings.Contains(string(serialized), "private reasoning") || strings.Contains(string(serialized), "secret query") || strings.Contains(string(serialized), "private result") {
-		t.Fatalf("private stream data leaked to Discord: %s", serialized)
+	if !strings.Contains(string(serialized), "private reasoning") || !strings.Contains(string(serialized), "secret query") || strings.Contains(string(serialized), "private result") || strings.Contains(string(serialized), "private-token") {
+		t.Fatalf("unexpected lifecycle data exposure: %s", serialized)
 	}
 }
 
@@ -234,7 +234,7 @@ func TestDiscordStreamReportsStaleLifecycleCleanupFailure(t *testing.T) {
 	defer server.Close()
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
-	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "temporary thinking"})
 
 	err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The authoritative final answer."})
 	if err == nil || postCount != 2 {
@@ -258,7 +258,7 @@ func TestDiscordStreamReportsStaleLifecycleErrorCleanupFailure(t *testing.T) {
 	defer server.Close()
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
-	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "temporary thinking"})
 
 	err := r.SendAgentError("Safe error response.")
 	if err == nil || postCount != 2 {
@@ -273,11 +273,11 @@ func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	r.stream.editInterval = 5 * time.Millisecond
 
-	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Preliminary content"})
-	time.Sleep(20 * time.Millisecond)
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "First thinking paragraph."})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 25}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "Second thinking paragraph."})
+	time.Sleep(20 * time.Millisecond)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Authoritative content"})
 	time.Sleep(20 * time.Millisecond)
 	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "Authoritative content complete."}); err != nil {
@@ -287,23 +287,24 @@ func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
 	if len(rest.sentMessages()) != 1 {
 		t.Fatalf("expected one lifecycle message, got %+v", rest.sentMessages())
 	}
+	if rest.sentMessages()[0]["content"] != "-# First thinking paragraph."+discordStreamCursor {
+		t.Fatalf("unexpected first thinking state: %+v", rest.sentMessages())
+	}
 	edited := rest.editedMessages()
-	for _, expected := range []string{
-		"Preliminary content" + discordStreamCursor,
-		"Thinking...\nRunning `web.search`...",
-		"Thinking...\nCompleted `web.search` (25 ms).",
+	expectedEdits := []string{
+		"-# First thinking paragraph.\n\nSearching the web for \"the requested information\"...",
+		"Searched the web for \"the requested information\".",
+		"-# Second thinking paragraph." + discordStreamCursor,
+		strings.TrimSpace(discordStreamCursor),
 		"Authoritative content" + discordStreamCursor,
 		"Authoritative content complete.",
-	} {
-		found := false
-		for _, edit := range edited {
-			if edit["content"] == expected {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("missing edit %q in %+v", expected, edited)
+	}
+	if len(edited) != len(expectedEdits) {
+		t.Fatalf("edit count=%d, want %d: %+v", len(edited), len(expectedEdits), edited)
+	}
+	for i, expected := range expectedEdits {
+		if edited[i]["content"] != expected {
+			t.Fatalf("edit %d=%q, want %q", i, edited[i]["content"], expected)
 		}
 	}
 	for _, messageID := range rest.editedMessageIDs() {
@@ -559,6 +560,56 @@ func TestDiscordHelpers(t *testing.T) {
 	preview := discordPreviewText("Here is code:\n```go\nfmt.Println(\"hello\")")
 	if preview != "Here is code:\n```go\nfmt.Println(\"hello\")\n```"+discordStreamCursor {
 		t.Fatalf("unbalanced streaming preview %q", preview)
+	}
+	emojiChunks := splitMessage(strings.Repeat("😀", 1001), 2000)
+	if len(emojiChunks) != 2 || discordContentLength(emojiChunks[0]) > 2000 || discordContentLength(emojiChunks[1]) > 2000 {
+		t.Fatalf("emoji response was not split by Discord units: lengths=%d,%d", discordContentLength(emojiChunks[0]), discordContentLength(emojiChunks[1]))
+	}
+}
+
+func TestDiscordThinkingShowsOnlyLatestParagraphAndBoundsLongThought(t *testing.T) {
+	thinking := "First paragraph should disappear.\n\nSecond paragraph stays visible."
+	if got := latestThinkingParagraph(thinking); got != "Second paragraph stays visible." {
+		t.Fatalf("latest paragraph = %q", got)
+	}
+	rendered := formatThinkingParagraph(strings.Repeat("reasoning 😀 ", 500), false, true, discordThinkingRenderLimit)
+	if discordContentLength(rendered) > discordThinkingRenderLimit || !strings.Contains(rendered, "[earlier part omitted]") {
+		t.Fatalf("long thinking was not bounded: units=%d text=%q", discordContentLength(rendered), rendered)
+	}
+	if discordContentLength(rendered) < 1950 || !strings.HasSuffix(rendered, strings.TrimSpace(discordStreamCursor)) {
+		t.Fatalf("thinking did not use the available Discord budget: units=%d text=%q", discordContentLength(rendered), rendered)
+	}
+	status := "Searching the web for \"a detailed query\"..."
+	combined := composeRunningToolStatus(strings.Repeat("prior thinking 😀 ", 500), false, status)
+	if discordContentLength(combined) > 2000 || discordContentLength(combined) < 1950 || !strings.HasSuffix(combined, status) || !strings.Contains(combined, "[earlier part omitted]") {
+		t.Fatalf("running tool composition did not prioritize status and fill budget: units=%d text=%q", discordContentLength(combined), combined)
+	}
+}
+
+func TestDiscordMCPToolStatusFormatsSafePrimitiveArguments(t *testing.T) {
+	status := discordToolStatusFor(&agent.ToolStreamPayload{
+		Name: "github.list_issues",
+		Arguments: map[string]interface{}{
+			"state":         "open",
+			"repo":          "api",
+			"owner":         "acme",
+			"authorization": "Bearer private-token",
+			"auth":          "private-auth",
+			"bearer":        "private-bearer",
+			"jwt":           "private-jwt",
+			"session_id":    "private-session",
+			"x-api-key":     "private-key",
+			"privateKey":    "private-camel-key",
+			"sshKey":        "private-ssh-key",
+			"passphrase":    "private-passphrase",
+			"nested":        map[string]interface{}{"hidden": true},
+		},
+	})
+	if status.running != "Running `github.list_issues` with owner=\"acme\", repo=\"api\", state=\"open\"..." {
+		t.Fatalf("unexpected MCP status %q", status.running)
+	}
+	if strings.Contains(status.running, "private-") || strings.Contains(status.running, "nested") || strings.Contains(status.completed, " ms") {
+		t.Fatalf("unsafe MCP status: %+v", status)
 	}
 }
 
