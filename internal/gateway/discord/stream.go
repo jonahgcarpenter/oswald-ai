@@ -16,10 +16,10 @@ import (
 const (
 	discordStreamEditInterval     = 800 * time.Millisecond
 	discordStreamCursor           = " ▉"
-	discordThinkingRenderLimit    = 1900
+	discordThinkingRenderLimit    = 2000
 	discordThinkingRetentionLimit = 8000
 	discordToolArgumentValueLimit = 120
-	discordToolStatusRenderLimit  = 1900
+	discordToolStatusRenderLimit  = 2000
 )
 
 type discordStreamEvent struct {
@@ -109,6 +109,7 @@ type discordStreamState struct {
 	stream          *discordResponseStream
 	active          strings.Builder
 	thinking        string
+	frozenThinking  string
 	messageID       string
 	lastDisplay     string
 	tool            *discordToolStatus
@@ -118,6 +119,7 @@ type discordStreamState struct {
 	thinkingStarted bool
 	thinkingDirty   bool
 	thinkingTrimmed bool
+	frozenTrimmed   bool
 	previewDisabled bool
 }
 
@@ -128,20 +130,19 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 			return
 		}
 		if chunk.Text == "" {
-			if s.messageID == "" {
-				s.show("Thinking...")
-			}
 			return
 		}
 		firstThinkingChunk := !s.thinkingStarted
 		if !s.thinkingStarted {
 			s.thinking = ""
+			s.frozenThinking = ""
 			s.thinkingTrimmed = false
+			s.frozenTrimmed = false
 			s.thinkingStarted = true
 			s.tool = nil
 		}
 		s.appendThinking(chunk.Text)
-		if firstThinkingChunk || s.lastDisplay == "Thinking..." {
+		if firstThinkingChunk {
 			s.showThinking()
 		}
 	case agent.ChunkContent:
@@ -152,15 +153,24 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 		if !s.answerStarted {
 			s.answerStarted = true
 			s.thinking = ""
+			s.frozenThinking = ""
 			s.thinkingStarted = false
 			s.thinkingDirty = false
 			s.thinkingTrimmed = false
+			s.frozenTrimmed = false
 			s.tool = nil
 			s.show(strings.TrimSpace(discordStreamCursor))
 		}
 	case agent.ChunkToolCall:
 		s.active.Reset()
 		s.answerStarted = false
+		if s.thinkingStarted {
+			s.frozenThinking = latestThinkingParagraph(s.thinking)
+			s.frozenTrimmed = s.thinkingTrimmed
+		} else {
+			s.frozenThinking = ""
+			s.frozenTrimmed = false
+		}
 		s.thinking = ""
 		s.thinkingStarted = false
 		s.thinkingDirty = false
@@ -180,6 +190,8 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 		}
 		s.tool.done = true
 		s.tool.isError = chunk.Tool.IsError
+		s.frozenThinking = ""
+		s.frozenTrimmed = false
 		s.showTool()
 	}
 }
@@ -212,7 +224,7 @@ func (s *discordStreamState) showThinking() {
 	if paragraph == "" {
 		return
 	}
-	s.show(formatThinkingParagraph(paragraph, s.thinkingTrimmed))
+	s.show(formatThinkingParagraph(paragraph, s.thinkingTrimmed, true, discordThinkingRenderLimit))
 	s.thinkingDirty = false
 }
 
@@ -225,6 +237,9 @@ func (s *discordStreamState) showTool() {
 		status = s.tool.failed
 	} else if s.tool.done {
 		status = s.tool.completed
+	}
+	if !s.tool.done && s.frozenThinking != "" {
+		status = composeRunningToolStatus(s.frozenThinking, s.frozenTrimmed, status)
 	}
 	s.show(truncateDiscordText(status, discordToolStatusRenderLimit))
 }
@@ -290,31 +305,55 @@ func latestThinkingParagraph(text string) string {
 	return last
 }
 
-func formatThinkingParagraph(paragraph string, omitted bool) string {
+func formatThinkingParagraph(paragraph string, omitted, cursor bool, limit int) string {
 	paragraph = sanitizeDiscordDisplayText(paragraph, true)
-	for {
-		lines := []string{"-# Thinking"}
-		if omitted {
-			lines = append(lines, "-# [earlier part of this thought omitted]")
+	if paragraph == "" || limit <= 0 {
+		return ""
+	}
+	render := func(text string, showOmission bool) string {
+		lines := make([]string, 0, strings.Count(text, "\n")+2)
+		if showOmission {
+			lines = append(lines, "-# [earlier part omitted]")
 		}
-		for _, line := range strings.Split(paragraph, "\n") {
+		for _, line := range strings.Split(text, "\n") {
 			lines = append(lines, "-# "+line)
 		}
-		rendered := strings.Join(lines, "\n")
-		if discordContentLength(rendered) <= discordThinkingRenderLimit {
-			return rendered
+		if cursor && len(lines) > 0 {
+			lines[len(lines)-1] += discordStreamCursor
 		}
-		runes := []rune(paragraph)
-		if len(runes) <= 1 {
-			return truncateDiscordText(rendered, discordThinkingRenderLimit)
-		}
-		drop := len(runes) / 8
-		if drop < 1 {
-			drop = 1
-		}
-		paragraph = strings.TrimLeftFunc(string(runes[drop:]), unicode.IsSpace)
-		omitted = true
+		return strings.Join(lines, "\n")
 	}
+
+	if full := render(paragraph, omitted); discordContentLength(full) <= limit {
+		return full
+	}
+
+	runes := []rune(paragraph)
+	low, high := 0, len(runes)-1
+	best := ""
+	for low <= high {
+		mid := low + (high-low)/2
+		candidate := strings.TrimLeftFunc(string(runes[mid:]), unicode.IsSpace)
+		rendered := render(candidate, true)
+		if discordContentLength(rendered) <= limit {
+			best = rendered
+			high = mid - 1
+		} else {
+			low = mid + 1
+		}
+	}
+	return best
+}
+
+func composeRunningToolStatus(paragraph string, omitted bool, status string) string {
+	status = truncateDiscordText(status, discordToolStatusRenderLimit)
+	separator := "\n\n"
+	thinkingBudget := discordToolStatusRenderLimit - discordContentLength(status) - discordContentLength(separator)
+	thinking := formatThinkingParagraph(paragraph, omitted, false, thinkingBudget)
+	if thinking == "" {
+		return status
+	}
+	return thinking + separator + status
 }
 
 func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
@@ -410,7 +449,7 @@ func formatMCPToolArguments(args map[string]interface{}) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return " with " + truncateDiscordText(strings.Join(parts, ", "), discordToolStatusRenderLimit/2)
+	return " with " + strings.Join(parts, ", ")
 }
 
 func formatToolArgumentValue(value interface{}) (string, bool) {

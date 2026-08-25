@@ -162,7 +162,7 @@ Multimodal request notes:
 Streaming behavior:
 
 - Home Assistant receives correlated `thinking`, `content`, `tool_call`, and `tool_result` frames while the request is running
-- Discord uses one mutable lifecycle message: the current raw-thinking paragraph or current meaningful tool status is temporary, the first visible response replaces it with a cursor and then a cursor-suffixed preview, and the completed response replaces the preview before delivery succeeds. Builtin tool status exposes only purpose-specific fields; MCP status exposes bounded primitive arguments after secret-key filtering. Tool results remain hidden
+- Discord uses one mutable lifecycle message: the current raw-thinking paragraph is rendered as cursor-suffixed subtext, a running tool appears beneath the frozen prior paragraph, and tool completion replaces that thinking before any subsequent paragraph. The first visible response replaces all temporary activity with a cursor and then a cursor-suffixed preview, and the completed response replaces the preview before delivery succeeds. Builtin tool status exposes only purpose-specific fields; MCP status exposes bounded primitive arguments after secret-key filtering. Tool results remain hidden
 - iMessage does not stream token-by-token; it waits for the final response
 
 ## Shared Routing
