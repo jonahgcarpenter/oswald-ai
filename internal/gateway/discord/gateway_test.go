@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -52,8 +53,8 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	if last.Content != "hello discord" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
-	if rest.lastMessageContent() != "discord response" {
-		t.Fatalf("unexpected sent messages: %+v", rest.sentMessages())
+	if rest.lastMessageContent() != "Thinking..." || len(rest.editedMessages()) != 1 || rest.editedMessages()[0]["content"] != "discord response" {
+		t.Fatalf("unexpected lifecycle delivery: sent=%+v edited=%+v", rest.sentMessages(), rest.editedMessages())
 	}
 	if _, ok := dg.lookupReply("sent-1"); !ok {
 		t.Fatal("expected sent bot reply remembered")
@@ -61,6 +62,322 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	principal := chat.lastPrincipal()
 	if principal.CanonicalUserID == "" || principal.Gateway != "discord" || principal.ExternalID != "123" || principal.Assurance != identity.AssuranceDiscordGateway {
 		t.Fatalf("unexpected principal: %+v", principal)
+	}
+}
+
+func TestDiscordHandleDirectMessageStreamsAndFinalizesReply(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)
+	defer b.Shutdown()
+	defer rest.server.Close()
+	const responseText = "A streamed Discord response that is long enough to display."
+	chat.streamChunks = []llm.ChatMessage{{Content: responseText}}
+	chat.response = responseText
+
+	dg.handleMessage(discordMessage("msg-1", "channel-1", "", "123", "Alice", "hello discord"))
+
+	primary := primaryDiscordRequests(chat.requests)
+	if len(primary) != 1 || !primary[0].Stream {
+		t.Fatalf("expected one streaming LLM request, got %+v", primary)
+	}
+	sent := rest.sentMessages()
+	edited := rest.editedMessages()
+	if len(sent) != 1 || sent[0]["content"] != "Thinking..." {
+		t.Fatalf("unexpected progressive sends: %+v", sent)
+	}
+	if len(edited) != 2 || edited[0]["content"] != strings.TrimSpace(discordStreamCursor) || edited[1]["content"] != responseText {
+		t.Fatalf("unexpected final edits: %+v", edited)
+	}
+	ctx, ok := dg.lookupReply("sent-1")
+	if !ok || ctx.Text != responseText {
+		t.Fatalf("final reply context not recorded: %+v, %t", ctx, ok)
+	}
+}
+
+func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "private reasoning"})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "I will look that up before answering."})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search", Arguments: map[string]interface{}{"query": "secret query"}}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", ResultText: "private result", DurationMS: 420}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final streamed response is now arriving."})
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final answer."}); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rest.sentMessages()
+	edited := rest.editedMessages()
+	if len(sent) != 1 || sent[0]["content"] != "Thinking..." {
+		t.Fatalf("expected one lifecycle message, got %+v", sent)
+	}
+	if len(edited) != 5 ||
+		edited[0]["content"] != strings.TrimSpace(discordStreamCursor) ||
+		edited[1]["content"] != "Thinking...\nRunning `web.search`..." ||
+		edited[2]["content"] != "Thinking...\nCompleted `web.search` (420 ms)." ||
+		edited[3]["content"] != strings.TrimSpace(discordStreamCursor) ||
+		edited[4]["content"] != "The final answer." {
+		t.Fatalf("unexpected stream edits: %+v", edited)
+	}
+	serialized, _ := json.Marshal(struct {
+		Sent   []map[string]interface{}
+		Edited []map[string]interface{}
+	}{sent, edited})
+	if strings.Contains(string(serialized), "private reasoning") || strings.Contains(string(serialized), "secret query") || strings.Contains(string(serialized), "private result") {
+		t.Fatalf("private stream data leaked to Discord: %s", serialized)
+	}
+}
+
+func TestDiscordStreamFinalizesLongResponseAcrossMessages(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	responseText := strings.Repeat("long response text ", 260)
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: responseText})
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: responseText}); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := splitMessage(responseText, 2000)
+	sent := rest.sentMessages()
+	edited := rest.editedMessages()
+	if len(chunks) < 2 || len(sent) != len(chunks) || len(edited) != 1 {
+		t.Fatalf("chunks=%d sent=%d edits=%d", len(chunks), len(sent), len(edited))
+	}
+	if edited[0]["content"] != chunks[0] {
+		t.Fatalf("first final chunk mismatch: got %q want %q", edited[0]["content"], chunks[0])
+	}
+	for i := range chunks {
+		ctx, ok := dg.lookupReply(fmt.Sprintf("sent-%d", i+1))
+		if !ok || ctx.Text != chunks[i] {
+			t.Fatalf("chunk %d reply context=%+v found=%t", i, ctx, ok)
+		}
+	}
+}
+
+func TestDiscordEditMessageRetriesRateLimit(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"retry_after":0.001}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"sent-1"}`))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError)}
+	if err := dg.editMessage("channel-1", "sent-1", "final"); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}
+
+func TestDiscordStreamFallsBackWhenFinalEditFails(t *testing.T) {
+	var mu sync.Mutex
+	var posts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		mu.Lock()
+		posts = append(posts, payload["content"].(string))
+		id := len(posts)
+		mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, id)
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "A response preview that is long enough to send."})
+
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The authoritative final answer."}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(posts) != 2 || posts[1] != "The authoritative final answer." {
+		t.Fatalf("unexpected fallback posts: %q", posts)
+	}
+}
+
+func TestDiscordStreamReportsStaleLifecycleCleanupFailure(t *testing.T) {
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			postCount++
+			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, postCount)
+		case http.MethodPatch, http.MethodDelete:
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
+
+	err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The authoritative final answer."})
+	if err == nil || postCount != 2 {
+		t.Fatalf("error=%v post_count=%d, want cleanup error and fallback answer", err, postCount)
+	}
+}
+
+func TestDiscordStreamReportsStaleLifecycleErrorCleanupFailure(t *testing.T) {
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			postCount++
+			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, postCount)
+		case http.MethodPatch, http.MethodDelete:
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
+
+	err := r.SendAgentError("Safe error response.")
+	if err == nil || postCount != 2 {
+		t.Fatalf("error=%v post_count=%d, want cleanup error and fallback error response", err, postCount)
+	}
+}
+
+func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.stream.editInterval = 5 * time.Millisecond
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Preliminary content"})
+	time.Sleep(20 * time.Millisecond)
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 25}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Authoritative content"})
+	time.Sleep(20 * time.Millisecond)
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "Authoritative content complete."}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(rest.sentMessages()) != 1 {
+		t.Fatalf("expected one lifecycle message, got %+v", rest.sentMessages())
+	}
+	edited := rest.editedMessages()
+	for _, expected := range []string{
+		"Preliminary content" + discordStreamCursor,
+		"Thinking...\nRunning `web.search`...",
+		"Thinking...\nCompleted `web.search` (25 ms).",
+		"Authoritative content" + discordStreamCursor,
+		"Authoritative content complete.",
+	} {
+		found := false
+		for _, edit := range edited {
+			if edit["content"] == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing edit %q in %+v", expected, edited)
+		}
+	}
+	for _, messageID := range rest.editedMessageIDs() {
+		if messageID != "sent-1" {
+			t.Fatalf("edit targeted %q, want sent-1", messageID)
+		}
+	}
+}
+
+func TestDiscordStreamReportsFinalContinuationFailure(t *testing.T) {
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			_, _ = w.Write([]byte(`{"id":"sent-1"}`))
+			return
+		}
+		postCount++
+		if postCount > 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"sent-1"}`))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	responseText := strings.Repeat("long response text ", 260)
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: responseText})
+
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: responseText}); err == nil {
+		t.Fatal("expected continuation delivery failure")
+	}
+	first, ok := dg.lookupReply("sent-1")
+	if !ok || first.Text != splitMessage(responseText, 2000)[0] {
+		t.Fatalf("successful first chunk was not remembered: %+v found=%t", first, ok)
+	}
+}
+
+func TestDiscordStreamRecoversFinalAnswerAfterStatusEditFailure(t *testing.T) {
+	postCount := 0
+	patchCount := 0
+	deleteCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			postCount++
+			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, postCount)
+		case http.MethodPatch:
+			patchCount++
+			if patchCount <= 2 {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
+		case http.MethodDelete:
+			deleteCount++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "A commentary preview that is long enough to send."})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 10}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final response is long enough to preview."})
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: "The final response is long enough to preview."}); err != nil {
+		t.Fatal(err)
+	}
+	if deleteCount != 0 || postCount != 1 || patchCount != 3 {
+		t.Fatalf("delete_count=%d post_count=%d patch_count=%d, want 0, 1, and 3", deleteCount, postCount, patchCount)
 	}
 }
 
@@ -239,6 +556,10 @@ func TestDiscordHelpers(t *testing.T) {
 	if resolveGatewayURL("gateway.discord.gg") != "wss://gateway.discord.gg/?v=10&encoding=json" {
 		t.Fatal("unexpected resolved gateway URL")
 	}
+	preview := discordPreviewText("Here is code:\n```go\nfmt.Println(\"hello\")")
+	if preview != "Here is code:\n```go\nfmt.Println(\"hello\")\n```"+discordStreamCursor {
+		t.Fatalf("unbalanced streaming preview %q", preview)
+	}
 }
 
 func TestDiscordGIFVEmbedPrefersAnimatedVideo(t *testing.T) {
@@ -346,20 +667,32 @@ func testDiscordJPEG(t *testing.T) []byte {
 }
 
 type discordFakeChatter struct {
-	mu        sync.Mutex
-	requests  []llm.ChatRequest
-	principal identity.Principal
+	mu           sync.Mutex
+	requests     []llm.ChatRequest
+	principal    identity.Principal
+	streamChunks []llm.ChatMessage
+	response     string
 }
 
 func (f *discordFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
 	f.principal, _ = requestctx.PrincipalFromContext(ctx)
+	streamChunks := append([]llm.ChatMessage(nil), f.streamChunks...)
+	response := f.response
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}
-	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "discord response"}}, nil
+	if req.Stream && cb != nil {
+		for _, chunk := range streamChunks {
+			cb(chunk)
+		}
+	}
+	if response == "" {
+		response = "discord response"
+	}
+	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: response}}, nil
 }
 
 func (f *discordFakeChatter) lastPrincipal() identity.Principal {
@@ -379,9 +712,12 @@ func primaryDiscordRequests(requests []llm.ChatRequest) []llm.ChatRequest {
 }
 
 type fakeDiscordREST struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	sent   []map[string]interface{}
+	server  *httptest.Server
+	mu      sync.Mutex
+	sent    []map[string]interface{}
+	edited  []map[string]interface{}
+	editIDs []string
+	nextID  int
 }
 
 func newFakeDiscordREST(t *testing.T) *fakeDiscordREST {
@@ -400,8 +736,23 @@ func newFakeDiscordREST(t *testing.T) *fakeDiscordREST {
 			}
 			rest.mu.Lock()
 			rest.sent = append(rest.sent, payload)
+			rest.nextID++
+			id := rest.nextID
 			rest.mu.Unlock()
-			_, _ = w.Write([]byte(`{"id":"sent-1"}`))
+			_, _ = fmt.Fprintf(w, `{"id":"sent-%d"}`, id)
+			return
+		}
+		if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/messages/") {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode discord edit payload: %v", err)
+			}
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			rest.mu.Lock()
+			rest.edited = append(rest.edited, payload)
+			rest.editIDs = append(rest.editIDs, id)
+			rest.mu.Unlock()
+			_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
 			return
 		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/messages/") {
@@ -417,6 +768,18 @@ func (r *fakeDiscordREST) sentMessages() []map[string]interface{} {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]map[string]interface{}(nil), r.sent...)
+}
+
+func (r *fakeDiscordREST) editedMessages() []map[string]interface{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]map[string]interface{}(nil), r.edited...)
+}
+
+func (r *fakeDiscordREST) editedMessageIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.editIDs...)
 }
 
 func (r *fakeDiscordREST) lastMessageContent() string {

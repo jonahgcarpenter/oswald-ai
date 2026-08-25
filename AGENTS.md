@@ -162,7 +162,7 @@ Multimodal request notes:
 Streaming behavior:
 
 - Home Assistant receives correlated `thinking`, `content`, `tool_call`, and `tool_result` frames while the request is running
-- Discord does not stream token-by-token; it waits for the final response
+- Discord uses one mutable lifecycle message: generic thinking and compact tool status are temporary, the first visible response replaces them with a cursor and then a cursor-suffixed preview, and the completed response replaces the preview before delivery succeeds. Raw thinking, tool arguments, and tool results remain hidden
 - iMessage does not stream token-by-token; it waits for the final response
 
 ## Shared Routing
@@ -416,6 +416,7 @@ Behavior:
 - Downloads supported image attachments from incoming messages and includes them on the current user turn
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators while the request is running
+- Progressively edits one lifecycle message from generic thinking and tool status into the model response, stopping the typing indicator after the first visible lifecycle state and splitting only authoritative final overflow at Discord's 2,000-character limit
 - Splits long replies to stay under Discord's 2000-character limit
 - Supports text-only, image-only, and text-plus-image messages
 - Supports `/connect` and `/disconnect` account-link commands

@@ -881,7 +881,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 			if streamCallback != nil {
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
-					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil),
+					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
 				})
 			}
 
