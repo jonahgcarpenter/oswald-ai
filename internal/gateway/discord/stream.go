@@ -2,19 +2,24 @@ package discord
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 const (
-	discordStreamEditInterval  = 800 * time.Millisecond
-	discordStreamCursor        = " ▉"
-	discordToolStatusLineLimit = 12
+	discordStreamEditInterval     = 800 * time.Millisecond
+	discordStreamCursor           = " ▉"
+	discordThinkingRenderLimit    = 1900
+	discordThinkingRetentionLimit = 8000
+	discordToolArgumentValueLimit = 120
+	discordToolStatusRenderLimit  = 1900
 )
 
 type discordStreamEvent struct {
@@ -25,10 +30,12 @@ type discordStreamEvent struct {
 }
 
 type discordToolStatus struct {
-	name       string
-	done       bool
-	failed     bool
-	durationMS int64
+	name      string
+	running   string
+	completed string
+	failed    string
+	done      bool
+	isError   bool
 }
 
 type discordResponseStream struct {
@@ -93,7 +100,7 @@ func (s *discordResponseStream) run() {
 				return
 			}
 		case <-ticker.C:
-			state.flushAnswer()
+			state.flush()
 		}
 	}
 }
@@ -101,20 +108,41 @@ func (s *discordResponseStream) run() {
 type discordStreamState struct {
 	stream          *discordResponseStream
 	active          strings.Builder
+	thinking        string
 	messageID       string
 	lastDisplay     string
-	tools           []discordToolStatus
+	tool            *discordToolStatus
 	replyUsed       bool
 	replyMessageID  string
 	answerStarted   bool
+	thinkingStarted bool
+	thinkingDirty   bool
+	thinkingTrimmed bool
 	previewDisabled bool
 }
 
 func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 	switch chunk.Type {
 	case agent.ChunkThinking:
-		if !s.answerStarted {
-			s.showStatus()
+		if s.answerStarted {
+			return
+		}
+		if chunk.Text == "" {
+			if s.messageID == "" {
+				s.show("Thinking...")
+			}
+			return
+		}
+		firstThinkingChunk := !s.thinkingStarted
+		if !s.thinkingStarted {
+			s.thinking = ""
+			s.thinkingTrimmed = false
+			s.thinkingStarted = true
+			s.tool = nil
+		}
+		s.appendThinking(chunk.Text)
+		if firstThinkingChunk || s.lastDisplay == "Thinking..." {
+			s.showThinking()
 		}
 	case agent.ChunkContent:
 		if chunk.Text == "" {
@@ -123,53 +151,82 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 		s.active.WriteString(chunk.Text)
 		if !s.answerStarted {
 			s.answerStarted = true
+			s.thinking = ""
+			s.thinkingStarted = false
+			s.thinkingDirty = false
+			s.thinkingTrimmed = false
+			s.tool = nil
 			s.show(strings.TrimSpace(discordStreamCursor))
 		}
 	case agent.ChunkToolCall:
 		s.active.Reset()
 		s.answerStarted = false
+		s.thinking = ""
+		s.thinkingStarted = false
+		s.thinkingDirty = false
+		s.thinkingTrimmed = false
 		if chunk.Tool != nil && chunk.Tool.Name != "" {
-			s.tools = append(s.tools, discordToolStatus{name: chunk.Tool.Name})
+			status := discordToolStatusFor(chunk.Tool)
+			s.tool = &status
 		}
-		s.showStatus()
+		s.showTool()
 	case agent.ChunkToolResult:
 		if chunk.Tool == nil || chunk.Tool.Name == "" {
 			return
 		}
-		for i := len(s.tools) - 1; i >= 0; i-- {
-			if s.tools[i].name == chunk.Tool.Name && !s.tools[i].done {
-				s.tools[i].done = true
-				s.tools[i].failed = chunk.Tool.IsError
-				s.tools[i].durationMS = chunk.Tool.DurationMS
-				break
-			}
+		if s.tool == nil || s.tool.name != chunk.Tool.Name {
+			status := discordToolStatusFor(chunk.Tool)
+			s.tool = &status
 		}
-		s.showStatus()
+		s.tool.done = true
+		s.tool.isError = chunk.Tool.IsError
+		s.showTool()
 	}
 }
 
-func (s *discordStreamState) showStatus() {
+func (s *discordStreamState) appendThinking(text string) {
+	s.thinking += text
+	runes := []rune(s.thinking)
+	if len(runes) > discordThinkingRetentionLimit {
+		s.thinking = string(runes[len(runes)-discordThinkingRetentionLimit:])
+		s.thinkingTrimmed = true
+	}
+	s.thinkingDirty = true
+}
+
+func (s *discordStreamState) flush() {
 	if s.answerStarted {
+		s.flushAnswer()
 		return
 	}
-	lines := []string{"Thinking..."}
-	start := 0
-	if len(s.tools) > discordToolStatusLineLimit {
-		start = len(s.tools) - discordToolStatusLineLimit
-		lines = append(lines, fmt.Sprintf("%d earlier tool calls completed.", start))
+	if s.thinkingDirty {
+		s.showThinking()
 	}
-	for _, tool := range s.tools[start:] {
-		name := strings.ReplaceAll(tool.name, "`", "")
-		switch {
-		case !tool.done:
-			lines = append(lines, fmt.Sprintf("Running `%s`...", name))
-		case tool.failed:
-			lines = append(lines, fmt.Sprintf("Failed `%s` (%d ms).", name, tool.durationMS))
-		default:
-			lines = append(lines, fmt.Sprintf("Completed `%s` (%d ms).", name, tool.durationMS))
-		}
+}
+
+func (s *discordStreamState) showThinking() {
+	if s.answerStarted || !s.thinkingStarted {
+		return
 	}
-	s.show(strings.Join(lines, "\n"))
+	paragraph := latestThinkingParagraph(s.thinking)
+	if paragraph == "" {
+		return
+	}
+	s.show(formatThinkingParagraph(paragraph, s.thinkingTrimmed))
+	s.thinkingDirty = false
+}
+
+func (s *discordStreamState) showTool() {
+	if s.answerStarted || s.tool == nil {
+		return
+	}
+	status := s.tool.running
+	if s.tool.done && s.tool.isError {
+		status = s.tool.failed
+	} else if s.tool.done {
+		status = s.tool.completed
+	}
+	s.show(truncateDiscordText(status, discordToolStatusRenderLimit))
 }
 
 func (s *discordStreamState) flushAnswer() {
@@ -199,7 +256,7 @@ func (s *discordStreamState) show(content string) {
 }
 
 func discordPreviewText(text string) string {
-	limit := 2000 - utf8.RuneCountInString(discordStreamCursor) - utf8.RuneCountInString("\n```")
+	limit := 2000 - discordContentLength(discordStreamCursor) - discordContentLength("\n```")
 	chunks := splitMessage(text, limit)
 	if len(chunks) == 0 {
 		return strings.TrimSpace(discordStreamCursor)
@@ -209,6 +266,248 @@ func discordPreviewText(text string) string {
 		preview += "\n```"
 	}
 	return preview + discordStreamCursor
+}
+
+func latestThinkingParagraph(text string) string {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	current := make([]string, 0, len(lines))
+	last := ""
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			if paragraph := strings.TrimSpace(strings.Join(current, "\n")); paragraph != "" {
+				last = paragraph
+			}
+			current = current[:0]
+			continue
+		}
+		current = append(current, line)
+	}
+	if paragraph := strings.TrimSpace(strings.Join(current, "\n")); paragraph != "" {
+		return paragraph
+	}
+	return last
+}
+
+func formatThinkingParagraph(paragraph string, omitted bool) string {
+	paragraph = sanitizeDiscordDisplayText(paragraph, true)
+	for {
+		lines := []string{"-# Thinking"}
+		if omitted {
+			lines = append(lines, "-# [earlier part of this thought omitted]")
+		}
+		for _, line := range strings.Split(paragraph, "\n") {
+			lines = append(lines, "-# "+line)
+		}
+		rendered := strings.Join(lines, "\n")
+		if discordContentLength(rendered) <= discordThinkingRenderLimit {
+			return rendered
+		}
+		runes := []rune(paragraph)
+		if len(runes) <= 1 {
+			return truncateDiscordText(rendered, discordThinkingRenderLimit)
+		}
+		drop := len(runes) / 8
+		if drop < 1 {
+			drop = 1
+		}
+		paragraph = strings.TrimLeftFunc(string(runes[drop:]), unicode.IsSpace)
+		omitted = true
+	}
+}
+
+func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
+	name := sanitizeDiscordInline(tool.Name)
+	query := toolStringArgument(tool.Arguments, "query")
+	if tool.WebSearch != nil && tool.WebSearch.Query != "" {
+		query = tool.WebSearch.Query
+	}
+
+	switch tool.Name {
+	case "web.search":
+		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), "Searched the web for "+quoteToolDetail(query), "Web search failed for "+quoteToolDetail(query))
+	case "time.current":
+		timezone := toolStringArgument(tool.Arguments, "timezone")
+		if timezone == "" {
+			timezone = "the requested timezone"
+		}
+		return actionToolStatus(tool.Name, "Checking the time in `"+sanitizeDiscordInline(timezone)+"`", "Checked the time in `"+sanitizeDiscordInline(timezone)+"`", "Time lookup failed for `"+sanitizeDiscordInline(timezone)+"`")
+	case "user_memory_search":
+		detail := memoryFilterDetail(tool.Arguments)
+		if query != "" {
+			detail = " for " + quoteToolDetail(query) + detail
+		}
+		return actionToolStatus(tool.Name, "Searching your memories"+detail, "Searched your memories"+detail, "Memory search failed"+detail)
+	case "user_memory_list":
+		detail := memoryFilterDetail(tool.Arguments)
+		return actionToolStatus(tool.Name, "Listing your memories"+detail, "Listed your memories"+detail, "Memory listing failed"+detail)
+	case "session_transcript_search":
+		return actionToolStatus(tool.Name, "Searching this conversation for "+quoteToolDetail(query), "Searched this conversation for "+quoteToolDetail(query), "Conversation search failed for "+quoteToolDetail(query))
+	case "global_memory_search":
+		if tool.GlobalMemory != nil && tool.GlobalMemory.Query != "" {
+			query = tool.GlobalMemory.Query
+		}
+		return actionToolStatus(tool.Name, "Searching Oswald memory for "+quoteToolDetail(query), "Searched Oswald memory for "+quoteToolDetail(query), "Oswald memory search failed for "+quoteToolDetail(query))
+	default:
+		detail := formatMCPToolArguments(tool.Arguments)
+		return actionToolStatus(tool.Name, "Running `"+name+"`"+detail, "Completed `"+name+"`"+detail, "Failed `"+name+"`"+detail)
+	}
+}
+
+func actionToolStatus(name, running, completed, failed string) discordToolStatus {
+	return discordToolStatus{
+		name:      name,
+		running:   truncateDiscordText(running+"...", discordToolStatusRenderLimit),
+		completed: truncateDiscordText(completed+".", discordToolStatusRenderLimit),
+		failed:    truncateDiscordText(failed+".", discordToolStatusRenderLimit),
+	}
+}
+
+func memoryFilterDetail(args map[string]interface{}) string {
+	filters := make([]string, 0, 2)
+	if scope := toolStringArgument(args, "scope"); scope != "" {
+		filters = append(filters, sanitizeDiscordInline(scope))
+	}
+	if category := toolStringArgument(args, "category"); category != "" {
+		filters = append(filters, sanitizeDiscordInline(category))
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+	return " in " + strings.Join(filters, "/")
+}
+
+func toolStringArgument(args map[string]interface{}, key string) string {
+	value, _ := args[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func quoteToolDetail(value string) string {
+	value = sanitizeDiscordDisplayText(value, false)
+	if value == "" {
+		value = "the requested information"
+	}
+	return strconv.Quote(truncateDiscordText(value, discordToolArgumentValueLimit))
+}
+
+func formatMCPToolArguments(args map[string]interface{}) string {
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		if !isSensitiveToolArgument(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value, ok := formatToolArgumentValue(args[key])
+		if !ok {
+			continue
+		}
+		parts = append(parts, sanitizeDiscordInline(key)+"="+value)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " with " + truncateDiscordText(strings.Join(parts, ", "), discordToolStatusRenderLimit/2)
+}
+
+func formatToolArgumentValue(value interface{}) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return quoteToolDetail(typed), true
+	case bool:
+		return strconv.FormatBool(typed), true
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64), true
+	case float32:
+		return strconv.FormatFloat(float64(typed), 'f', -1, 32), true
+	case int:
+		return strconv.Itoa(typed), true
+	case int64:
+		return strconv.FormatInt(typed, 10), true
+	case []string:
+		values := make([]string, 0, min(len(typed), 4))
+		for i, item := range typed {
+			if i == 4 {
+				break
+			}
+			values = append(values, quoteToolDetail(item))
+		}
+		return "[" + strings.Join(values, ", ") + "]", true
+	case []interface{}:
+		values := make([]string, 0, min(len(typed), 4))
+		for i, item := range typed {
+			if i == 4 {
+				break
+			}
+			formatted, ok := formatToolArgumentValue(item)
+			if !ok {
+				return "", false
+			}
+			values = append(values, formatted)
+		}
+		return "[" + strings.Join(values, ", ") + "]", true
+	default:
+		return "", false
+	}
+}
+
+func isSensitiveToolArgument(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(normalized)
+	for _, fragment := range []string{"auth", "bearer", "credential", "password", "passwd", "passphrase", "secret", "token", "cookie", "header", "key", "jwt", "session"} {
+		if strings.Contains(normalized, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func sanitizeDiscordInline(value string) string {
+	value = sanitizeDiscordDisplayText(value, false)
+	return strings.ReplaceAll(value, "`", "'")
+}
+
+func sanitizeDiscordDisplayText(value string, preserveNewlines bool) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\n' && preserveNewlines {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	if !preserveNewlines {
+		value = strings.Join(strings.Fields(value), " ")
+	}
+	value = strings.ReplaceAll(value, "@", "@\u200b")
+	return strings.TrimSpace(value)
+}
+
+func truncateDiscordText(value string, limit int) string {
+	if discordContentLength(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return ""
+	}
+	remaining := limit - 3
+	var result strings.Builder
+	for _, r := range value {
+		units := 1
+		if r > 0xffff {
+			units = 2
+		}
+		if units > remaining {
+			break
+		}
+		result.WriteRune(r)
+		remaining -= units
+	}
+	return result.String() + "..."
 }
 
 func (s *discordStreamState) finish(response *agent.AgentResponse) error {
