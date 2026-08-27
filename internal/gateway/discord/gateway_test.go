@@ -159,6 +159,106 @@ func TestDiscordStreamFinalizesLongResponseAcrossMessages(t *testing.T) {
 	}
 }
 
+func TestDiscordStreamStartsMutableContinuationAfterFirstChunkFills(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.stream.editInterval = 5 * time.Millisecond
+
+	firstChunk := strings.Repeat("a", 2000)
+	streamed := firstChunk + "second"
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: streamed})
+	waitForDiscordMessages(t, rest, 2)
+
+	sent := rest.sentMessages()
+	if sent[0]["content"] != strings.TrimSpace(discordStreamCursor) {
+		t.Fatalf("first lifecycle message=%q, want initial cursor", sent[0]["content"])
+	}
+	if sent[1]["content"] != "second"+discordStreamCursor {
+		t.Fatalf("continuation preview=%q, want streamed second chunk", sent[1]["content"])
+	}
+	if _, ok := sent[0]["message_reference"]; !ok {
+		t.Fatal("first lifecycle message did not reference the inbound message")
+	}
+	if _, ok := sent[1]["message_reference"]; ok {
+		t.Fatal("continuation lifecycle message unexpectedly included a reply reference")
+	}
+
+	updated := streamed + " continuation"
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: " continuation"})
+	waitForDiscordEdit(t, rest, "sent-2", "second continuation"+discordStreamCursor)
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: updated}); err != nil {
+		t.Fatal(err)
+	}
+
+	chunks := splitMessage(updated, 2000)
+	if len(chunks) != 2 {
+		t.Fatalf("chunk count=%d, want 2", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if discordContentLength(chunk) > 2000 {
+			t.Fatalf("chunk %d exceeds Discord limit: %d", i, discordContentLength(chunk))
+		}
+		ctx, ok := dg.lookupReply(fmt.Sprintf("sent-%d", i+1))
+		if !ok || ctx.Text != chunk {
+			t.Fatalf("chunk %d reply context=%+v found=%t", i, ctx, ok)
+		}
+	}
+}
+
+func TestDiscordStreamDeletesSurplusContinuationWhenFinalResponseShrinks(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.stream.editInterval = 5 * time.Millisecond
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: strings.Repeat("a", 2000) + "temporary continuation"})
+	waitForDiscordMessages(t, rest, 2)
+
+	const finalText = "Short authoritative response."
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: finalText}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := rest.deletedMessageIDs()
+	if len(deleted) != 1 || deleted[0] != "sent-2" {
+		t.Fatalf("deleted lifecycle messages=%v, want [sent-2]", deleted)
+	}
+	ctx, ok := dg.lookupReply("sent-1")
+	if !ok || ctx.Text != finalText {
+		t.Fatalf("final reply context=%+v found=%t", ctx, ok)
+	}
+	if _, ok := dg.lookupReply("sent-2"); ok {
+		t.Fatal("surplus continuation was recorded as authoritative reply context")
+	}
+}
+
+func TestDiscordStreamRemovesAbandonedContinuationBeforeToolProgress(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.stream.editInterval = 5 * time.Millisecond
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: strings.Repeat("a", 2000) + "abandoned continuation"})
+	waitForDiscordMessages(t, rest, 2)
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	waitForDiscordDeletion(t, rest, "sent-2")
+	waitForDiscordEdit(t, rest, "sent-1", "Searching the web for \"the requested information\"...")
+
+	const finalText = "Final answer after the tool call."
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: finalText})
+	if err := r.SendAgentResponse(&agent.AgentResponse{Model: "test-model", Response: finalText}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := rest.deletedMessageIDs()
+	if len(deleted) != 1 || deleted[0] != "sent-2" {
+		t.Fatalf("deleted lifecycle messages=%v, want [sent-2]", deleted)
+	}
+}
+
 func TestDiscordEditMessageRetriesRateLimit(t *testing.T) {
 	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -768,6 +868,7 @@ type fakeDiscordREST struct {
 	sent    []map[string]interface{}
 	edited  []map[string]interface{}
 	editIDs []string
+	deleted []string
 	nextID  int
 }
 
@@ -806,6 +907,14 @@ func newFakeDiscordREST(t *testing.T) *fakeDiscordREST {
 			_, _ = fmt.Fprintf(w, `{"id":%q}`, id)
 			return
 		}
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/messages/") {
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			rest.mu.Lock()
+			rest.deleted = append(rest.deleted, id)
+			rest.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/messages/") {
 			_, _ = w.Write([]byte(`{"id":"fetched","content":"fetched reply","author":{"id":"bot-1","username":"Oswald"}}`))
 			return
@@ -831,6 +940,54 @@ func (r *fakeDiscordREST) editedMessageIDs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.editIDs...)
+}
+
+func (r *fakeDiscordREST) deletedMessageIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.deleted...)
+}
+
+func waitForDiscordMessages(t *testing.T, rest *fakeDiscordREST, count int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(rest.sentMessages()) >= count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("sent message count=%d, want at least %d", len(rest.sentMessages()), count)
+}
+
+func waitForDiscordEdit(t *testing.T, rest *fakeDiscordREST, messageID, content string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		messages := rest.editedMessages()
+		ids := rest.editedMessageIDs()
+		for i := range messages {
+			if ids[i] == messageID && messages[i]["content"] == content {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("edit for %s with content %q was not observed", messageID, content)
+}
+
+func waitForDiscordDeletion(t *testing.T, rest *fakeDiscordREST, messageID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, deletedID := range rest.deletedMessageIDs() {
+			if deletedID == messageID {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("deletion for %s was not observed", messageID)
 }
 
 func (r *fakeDiscordREST) lastMessageContent() string {
