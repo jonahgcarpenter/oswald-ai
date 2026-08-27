@@ -162,7 +162,7 @@ Multimodal request notes:
 Streaming behavior:
 
 - Home Assistant receives correlated `thinking`, `content`, `tool_call`, and `tool_result` frames while the request is running
-- Discord uses one mutable lifecycle message: the current raw-thinking paragraph is rendered as cursor-suffixed subtext, a running tool appears beneath the frozen prior paragraph, and tool completion replaces that thinking before any subsequent paragraph. The first visible response replaces all temporary activity with a cursor and then a cursor-suffixed preview, and the completed response replaces the preview before delivery succeeds. Builtin tool status exposes only purpose-specific fields; MCP status exposes bounded primitive arguments after secret-key filtering. Tool results remain hidden
+- Discord uses ordered lifecycle messages: the current raw-thinking paragraph is rendered as cursor-suffixed subtext, a running tool appears beneath the frozen prior paragraph, and tool completion replaces that thinking before any subsequent paragraph. The first visible response replaces all temporary activity with a cursor and then a cursor-suffixed preview. When streamed content exceeds Discord's limit, each completed chunk is finalized and a new mutable cursor-suffixed continuation starts; final delivery reconciles every lifecycle message with the authoritative response. Builtin tool status exposes only purpose-specific fields; MCP status exposes bounded primitive arguments after secret-key filtering. Tool results remain hidden
 - iMessage does not stream token-by-token; it waits for the final response
 
 ## Shared Routing
@@ -416,7 +416,7 @@ Behavior:
 - Downloads supported image attachments from incoming messages and includes them on the current user turn
 - Unsupported or unusable attachments are described to the model with a short prompt note instead of causing the request to fail
 - Sends typing indicators while the request is running
-- Progressively edits one lifecycle message from the current raw-thinking paragraph or meaningful tool status into the model response, stopping the typing indicator after the first visible lifecycle state and splitting only authoritative final overflow at Discord's 2,000-character limit
+- Progressively edits lifecycle messages from the current raw-thinking paragraph or meaningful tool status into the model response, stopping the typing indicator after the first visible lifecycle state. Completed 2,000-unit response chunks are finalized while the newest continuation remains mutable, and authoritative final delivery reconciles all streamed chunks
 - Splits long replies to stay under Discord's 2000-character limit
 - Supports text-only, image-only, and text-plus-image messages
 - Supports `/connect` and `/disconnect` account-link commands
