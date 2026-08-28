@@ -11,13 +11,17 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
+func testConfig() *config.Config {
+	return &config.Config{SearxngURL: "http://localhost:8080"}
+}
+
 func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	for _, name := range reg.Names() {
@@ -38,7 +42,7 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler("time.current") {
@@ -63,7 +67,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
 	if !reg.HasHandler(toolnames.SessionTranscriptSearch) {
@@ -87,7 +91,7 @@ func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
@@ -103,7 +107,7 @@ func TestRegisterGlobalMemorySearchIsDefaultVisibleWithSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	foundVisible := false
@@ -133,7 +137,7 @@ func TestRegisterCatalogOmitsRemovedGlobalMemoryTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	advertised := map[string]bool{}
@@ -157,7 +161,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
@@ -182,13 +186,46 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestRegisterLimitsOnlyUnproductiveWebSearches(t *testing.T) {
+func TestRegisterAdvertisesStrictWebSearchSchema(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range reg.LLMTools() {
+		if tool.Function.Name != "web.search" {
+			continue
+		}
+		schema := tool.Function.Parameters
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != "query" {
+			t.Fatalf("web.search schema is not strict: %+v", schema)
+		}
+		return
+	}
+	t.Fatal("web.search schema was not advertised")
+}
+
+func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, &config.Config{SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "web.search client") {
+		t.Fatalf("invalid SearXNG URL registration error = %v", err)
+	}
+}
+
+func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,15 +234,20 @@ func TestRegisterLimitsOnlyUnproductiveWebSearches(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing policy for %s", name)
 		}
-		if policy.MaxExecutions != 0 || policy.MaxFailures != 0 {
-			t.Fatalf("%s has a per-tool execution/failure limit: %+v", name, policy)
+		if policy.MaxExecutions != 0 {
+			t.Fatalf("%s has a per-tool execution limit: %+v", name, policy)
 		}
 		wantUnproductive := 0
+		wantFailures := 0
 		if name == "web.search" {
 			wantUnproductive = 2
+			wantFailures = 2
 		}
 		if policy.MaxUnproductive != wantUnproductive {
 			t.Fatalf("%s max unproductive = %d, want %d", name, policy.MaxUnproductive, wantUnproductive)
+		}
+		if policy.MaxFailures != wantFailures {
+			t.Fatalf("%s max failures = %d, want %d", name, policy.MaxFailures, wantFailures)
 		}
 	}
 }

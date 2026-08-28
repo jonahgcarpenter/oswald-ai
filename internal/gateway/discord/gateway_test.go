@@ -37,6 +37,16 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
+func TestDiscordWebSearchStatusReportsDegradation(t *testing.T) {
+	status := discordToolStatusFor(&agent.ToolStreamPayload{
+		Name:      "web.search",
+		WebSearch: &agent.ToolStreamSearchPayload{Query: "current pricing", IsDegraded: true},
+	})
+	if status.completed != "Searched the web for \"current pricing\" with limited sources." {
+		t.Fatalf("completed status = %q", status.completed)
+	}
+}
+
 func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)

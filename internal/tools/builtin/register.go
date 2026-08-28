@@ -19,11 +19,16 @@ import (
 // Register wires all builtin tools into the shared registry.
 func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
-	if err := reg.RegisterHandler("web.search", toolPolicy(2, normalizeSearchArgs), registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
+	searchClient, err := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
+	if err != nil {
+		return fmt.Errorf("failed to initialize web.search client: %w", err)
+	}
+	searchPolicy := toolPolicy(2, normalizeSearchArgs)
+	searchPolicy.MaxFailures = 2
+	if err := reg.RegisterHandler("web.search", searchPolicy, registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
 		return fmt.Errorf("failed to initialize web.search tool: %w", err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("path", cfg.SearxngURL))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"))
 
 	if err := reg.RegisterHandler("time.current", toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
 		return fmt.Errorf("failed to initialize time.current tool: %w", err)

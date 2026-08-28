@@ -61,15 +61,21 @@ const (
 
 // ToolStreamSearchResult is a UI-safe search result emitted for web.search tools.
 type ToolStreamSearchResult struct {
-	Title   string `json:"title,omitempty"`
-	URL     string `json:"url,omitempty"`
-	Content string `json:"content,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Domain      string   `json:"domain,omitempty"`
+	Content     string   `json:"content,omitempty"`
+	Engines     []string `json:"engines,omitempty"`
+	PublishedAt string   `json:"published_at,omitempty"`
+	Score       float64  `json:"score,omitempty"`
 }
 
 // ToolStreamSearchPayload contains structured web.search details for streaming UIs.
 type ToolStreamSearchPayload struct {
-	Query   string                   `json:"query,omitempty"`
-	Results []ToolStreamSearchResult `json:"results,omitempty"`
+	Query               string                   `json:"query,omitempty"`
+	Results             []ToolStreamSearchResult `json:"results,omitempty"`
+	IsDegraded          bool                     `json:"is_degraded,omitempty"`
+	UnresponsiveEngines []string                 `json:"unresponsive_engines,omitempty"`
 }
 
 // ToolStreamPayload contains structured tool data for frontend rendering.
@@ -128,15 +134,23 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 	if query, ok := args["query"].(string); ok {
 		searchPayload.Query = strings.TrimSpace(query)
 	}
-	results := websearch.ParseFormattedResults(result)
-	if len(results) > 0 {
-		searchPayload.Results = make([]ToolStreamSearchResult, 0, len(results))
-		for _, r := range results {
-			searchPayload.Results = append(searchPayload.Results, ToolStreamSearchResult{
-				Title:   r.Title,
-				URL:     r.URL,
-				Content: r.Content,
-			})
+	if !isError {
+		response, err := websearch.DecodeToolResponse(result)
+		if err == nil {
+			searchPayload.IsDegraded = response.Degraded
+			searchPayload.UnresponsiveEngines = response.UnresponsiveEngines
+			searchPayload.Results = make([]ToolStreamSearchResult, 0, len(response.Results))
+			for _, r := range response.Results {
+				searchPayload.Results = append(searchPayload.Results, ToolStreamSearchResult{
+					Title:       r.Title,
+					URL:         r.URL,
+					Domain:      r.Domain,
+					Content:     r.Snippet,
+					Engines:     r.Engines,
+					PublishedAt: r.PublishedAt,
+					Score:       r.Score,
+				})
+			}
 		}
 	}
 	payload.WebSearch = searchPayload
@@ -864,13 +878,18 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				toolContent = fmt.Sprintf("Error: %v", execErr)
 			} else if decision.Allowed {
 				toolContent = result.Content
+				status := "ok"
+				if result.IsDegraded {
+					status = "degraded"
+				}
 				reqLog.Debug("agent.tool.success", "tool execution succeeded",
 					config.F("iteration", iteration),
 					config.F("tool_name", toolName),
 					config.F("tool_outcome", result.Outcome),
 					config.F("reason_code", result.ReasonCode),
+					config.F("is_degraded", result.IsDegraded),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
-					config.F("status", "ok"),
+					config.F("status", status),
 				)
 				// Record a brief annotation for history storage.
 				toolAnnotations = append(toolAnnotations, toolName)

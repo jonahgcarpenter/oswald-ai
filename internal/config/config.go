@@ -25,7 +25,7 @@ type Config struct {
 	ModelContextWindow       int             // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string          // Optional Discord bot token
-	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8888")
+	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8080")
 	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools; zero disables the guard
 	MaxToolCallsPerRequest   int             // Emergency maximum tool handler executions in one primary-agent request (default: 50)
 	MaxToolIterations        int             // Emergency maximum model responses containing tool calls in one request (default: 30)
