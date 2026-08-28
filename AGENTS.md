@@ -483,7 +483,7 @@ Tools are split into schema and runtime layers.
 
 Current builtin tools:
 
-- `web.search` — SearXNG-backed search
+- `web.search` — bounded, degradation-aware SearXNG-backed general web search
 - `time.current` — authoritative current date and time in a requested IANA timezone
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
@@ -491,6 +491,8 @@ Current builtin tools:
 - `global_memory_search` — search administrator-curated facts about Oswald for the authenticated tenant
 An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable user recall are injected automatically. Global memory is not automatically injected; the model calls `global_memory_search` for Oswald implementation, hardware, deployment, version, architecture, configuration, capability, and similar questions. Exact older session details remain available through `session_transcript_search`; deeper durable user retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
 Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
+
+`web.search` sends an explicit `en-US` general-search profile while engine selection and weighting remain deployment-owned in SearXNG. The client validates its backend URL at startup, makes at most two bounded HTTP attempts, decodes at most 2 MiB, validates and canonicalizes up to 50 source-ordered candidates, removes known tracking parameters and duplicate URLs, limits repeated hostnames, and returns up to eight results in a JSON envelope capped at 16 KiB. Titles, snippets, URLs, and metadata are explicitly untrusted external data. Partial engine failures and output truncation produce degraded typed results; the model sees only bounded engine names rather than backend error details. Search queries, result content, URLs, and backend response bodies are not logged.
 
 Optional external tools:
 
@@ -524,7 +526,7 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 ### Tool Governance
 
 - Tool execution errors are converted into tool-response messages so the model can recover
-- Successful handlers return a typed productive or unproductive outcome. `web.search` retires after two unproductive results in one request; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
+- Successful handlers return a typed productive or unproductive outcome. `web.search` retires after two unproductive results or two execution failures in one request; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
 - Exact duplicate successful or unproductive calls are blocked before handler execution, but failed executions release their fingerprint so the exact call can be retried
 - Per-tool execution, failure, and unproductive limits are code-owned policy; zero disables a guard, and exhaustion of an enabled guard removes only that exact tool
 - `MAX_TOOL_CALLS_PER_REQUEST` defaults to `50` actual handler executions as an emergency request-wide ceiling

@@ -101,6 +101,26 @@ func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
 	}
 }
 
+func TestWebSearchToolStreamPayloadDecodesStructuredResults(t *testing.T) {
+	raw := `{"notice":"untrusted","degraded":true,"unresponsive_engines":["seznam"],"results":[{"title":"Result","url":"https://example.com/page","domain":"example.com","snippet":"Snippet","engines":["yandex"],"published_at":"2026-08-28","score":2}]}`
+	payload := toolStreamPayload("web.search", map[string]interface{}{"query": " test query "}, raw, time.Millisecond, false)
+	if payload.WebSearch == nil || payload.WebSearch.Query != "test query" || !payload.WebSearch.IsDegraded {
+		t.Fatalf("unexpected web search payload: %+v", payload)
+	}
+	if strings.Join(payload.WebSearch.UnresponsiveEngines, ",") != "seznam" || len(payload.WebSearch.Results) != 1 {
+		t.Fatalf("missing web search degradation/results: %+v", payload.WebSearch)
+	}
+	result := payload.WebSearch.Results[0]
+	if result.Title != "Result" || result.Domain != "example.com" || result.Content != "Snippet" || result.PublishedAt != "2026-08-28" || result.Score != 2 || strings.Join(result.Engines, ",") != "yandex" {
+		t.Fatalf("unexpected streamed result: %+v", result)
+	}
+
+	malformed := toolStreamPayload("web.search", map[string]interface{}{"query": "test"}, "not-json", time.Millisecond, false)
+	if malformed.WebSearch == nil || len(malformed.WebSearch.Results) != 0 {
+		t.Fatalf("malformed result exposed structured data: %+v", malformed)
+	}
+}
+
 func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "thinking", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "oswald"}}}}}},
@@ -165,7 +185,7 @@ func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := builtin.Register(reg, &config.Config{}, nil, nil, log); err != nil {
+	if err := builtin.Register(reg, &config.Config{SearxngURL: "http://localhost:8080"}, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)

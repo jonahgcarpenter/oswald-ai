@@ -399,7 +399,11 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 
 	switch tool.Name {
 	case "web.search":
-		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), "Searched the web for "+quoteToolDetail(query), "Web search failed for "+quoteToolDetail(query))
+		completed := "Searched the web for " + quoteToolDetail(query)
+		if tool.WebSearch != nil && tool.WebSearch.IsDegraded {
+			completed += " with limited sources"
+		}
+		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), completed, "Web search failed for "+quoteToolDetail(query))
 	case "time.current":
 		timezone := toolStringArgument(tool.Arguments, "timezone")
 		if timezone == "" {
