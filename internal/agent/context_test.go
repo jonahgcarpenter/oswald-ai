@@ -22,8 +22,8 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	wantContents := []string{
 		"deployment policy", "tenant profile",
 		"old user", "old assistant",
-		"middle user", "middle assistant\n\nTools used: web.search",
-		"new user", "new assistant\n\nTools used: web.search, time.current",
+		"middle user", "middle assistant",
+		"new user", "new assistant",
 		"current",
 	}
 	if roles(got.Messages) != strings.Join(wantRoles, ",") {
@@ -42,6 +42,32 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	}
 	if got.SelectedTurnCount != 3 || got.OmittedTurnCount != 0 {
 		t.Fatalf("unexpected counts: selected=%d omitted=%d", got.SelectedTurnCount, got.OmittedTurnCount)
+	}
+}
+
+func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailable(t *testing.T) {
+	history := usermemory.ToolHistory{Version: usermemory.ToolHistoryVersion, Batches: []usermemory.ToolHistoryBatch{{Calls: []usermemory.ToolHistoryCall{{
+		Name: "weather.current", Arguments: map[string]interface{}{"city": "Louisville"}, Status: "succeeded", Outcome: "productive", Result: `{"temperature":72}`, ExecutedAt: "2026-08-28T12:00:00Z",
+	}}}}}
+	turn := usermemory.SessionTurn{ID: 41, UserText: "weather?", AssistantText: "72 degrees", ToolNames: []string{"weather.current"}, ToolHistory: history}
+	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "weather.current"}}}
+
+	full := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, 100000)
+	if roles(full.Messages) != "system,user,assistant,tool,assistant,user" {
+		t.Fatalf("native history roles=%s messages=%+v", roles(full.Messages), full.Messages)
+	}
+	if full.Messages[2].ToolCalls[0].ID != "hist_41_1_1" || full.Messages[3].ToolCallID != "hist_41_1_1" || !strings.Contains(full.Messages[3].Content, "potentially stale") {
+		t.Fatalf("native history correlation=%+v", full.Messages)
+	}
+
+	compact := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, nil, 100000)
+	if roles(compact.Messages) != "system,user,assistant,user" || compact.Messages[2].Content != "72 degrees" {
+		t.Fatalf("unavailable tool did not use compact replay: %+v", compact.Messages)
+	}
+	compactWithTool := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{compactHistoricalTurn(turn)}, tools, 100000)
+	budgetFallback := AssemblePromptContext("policy", "", "follow up", nil, []usermemory.SessionTurn{turn}, tools, compactWithTool.EstimatedAfter)
+	if budgetFallback.SelectedTurnCount != 1 || roles(budgetFallback.Messages) != "system,user,assistant,user" {
+		t.Fatalf("oversized native history did not compact before omission: %+v", budgetFallback)
 	}
 }
 

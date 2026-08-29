@@ -58,6 +58,7 @@ func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) go
 		MaxUnproductive: maxUnproductive,
 		BlockDuplicates: true,
 		NormalizeArgs:   normalize,
+		History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
 }
 

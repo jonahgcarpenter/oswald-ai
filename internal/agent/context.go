@@ -6,6 +6,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 // PromptContext is a role-correct model context assembled within an input
@@ -76,6 +77,7 @@ func AssemblePromptContextWithSummary(
 	tools []llm.Tool,
 	inputLimit int,
 ) PromptContext {
+	recentTurns = prepareHistoricalTurns(recentTurns, tools)
 	required := make([]llm.ChatMessage, 0, 3)
 	required = append(required, llm.ChatMessage{Role: "system", Content: deploymentPolicy})
 	if tenantProfile != "" {
@@ -112,7 +114,12 @@ func AssemblePromptContextWithSummary(
 			candidate := append(selectedNewestFirst, turn)
 			candidateMessages := messagesWithSummaryAndTurns(required, "", candidate)
 			if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
-				break
+				compact := compactHistoricalTurn(turn)
+				candidate = append(selectedNewestFirst, compact)
+				candidateMessages = messagesWithSummaryAndTurns(required, "", candidate)
+				if promptbudget.EstimateRequest(candidateMessages, tools) > inputLimit {
+					break
+				}
 			}
 			selectedNewestFirst = candidate
 		}
@@ -150,7 +157,10 @@ func AssemblePromptContextWithSummary(
 		for _, turn := range recentTurns[len(selectedNewestFirst):] {
 			candidate := append(selectedNewestFirst, turn)
 			if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
-				break
+				candidate = append(selectedNewestFirst, compactHistoricalTurn(turn))
+				if promptbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
+					break
+				}
 			}
 			selectedNewestFirst = candidate
 		}
@@ -163,6 +173,33 @@ func AssemblePromptContextWithSummary(
 	result.OmittedTurnCount = len(recentTurns) - result.SelectedTurnCount
 	result.EstimatedAfter = promptbudget.EstimateRequest(result.Messages, tools)
 	return result
+}
+
+func prepareHistoricalTurns(turns []usermemory.SessionTurn, tools []llm.Tool) []usermemory.SessionTurn {
+	available := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		available[tool.Function.Name] = true
+	}
+	prepared := append([]usermemory.SessionTurn(nil), turns...)
+	for i := range prepared {
+		for _, batch := range prepared[i].ToolHistory.Batches {
+			for _, call := range batch.Calls {
+				if !available[call.Name] || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
+					prepared[i] = compactHistoricalTurn(prepared[i])
+					break
+				}
+			}
+			if len(prepared[i].ToolHistory.Batches) == 0 {
+				break
+			}
+		}
+	}
+	return prepared
+}
+
+func compactHistoricalTurn(turn usermemory.SessionTurn) usermemory.SessionTurn {
+	turn.ToolHistory = usermemory.EmptyToolHistory()
+	return turn
 }
 
 func preservedRecentTailCount(recentTurns []usermemory.SessionTurn, inputLimit int) int {

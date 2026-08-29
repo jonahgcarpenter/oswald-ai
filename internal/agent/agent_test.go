@@ -156,6 +156,13 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	if len(turns) != 1 || strings.Join(turns[0].ToolNames, ",") != "test.lookup" {
 		t.Fatalf("successful tool annotation was not persisted: %+v", turns)
 	}
+	if len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 1 {
+		t.Fatalf("native tool history was not persisted: %+v", turns[0].ToolHistory)
+	}
+	storedCall := turns[0].ToolHistory.Batches[0].Calls[0]
+	if storedCall.Name != "test.lookup" || storedCall.Result != "lookup result" || storedCall.Arguments["q"] != "oswald" || storedCall.Status != "succeeded" {
+		t.Fatalf("stored tool call = %+v", storedCall)
+	}
 }
 
 func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
@@ -989,14 +996,10 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	if description := requestToolDescription(request, "home.turn_on"); description != "Turn on a light" {
 		t.Fatalf("pre-exposed tool description = %q", description)
 	}
-	foundAnnotation := false
 	for _, message := range request.Messages {
-		if message.Role == "assistant" && strings.Contains(message.Content, "Tools used: home.turn_on, home.tools, web.search") {
-			foundAnnotation = true
+		if strings.Contains(message.Content, "Tools used:") {
+			t.Fatalf("internal tool annotation leaked into history: %+v", request.Messages)
 		}
-	}
-	if !foundAnnotation {
-		t.Fatalf("assistant history missing compact tool annotation: %+v", request.Messages)
 	}
 }
 

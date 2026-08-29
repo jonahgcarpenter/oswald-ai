@@ -70,6 +70,36 @@ func TestSearchTranscriptMatchesUserAndAssistantAndQuotesQuerySyntax(t *testing.
 	}
 }
 
+func TestSearchTranscriptIndexesAndReturnsNativeToolHistory(t *testing.T) {
+	store := newTranscriptTestStore(t)
+	seedAccountUsers(t, store, "user-1")
+	generation := bindTranscriptTestSession(t, store, "user-1", "session-1")
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{{
+		Name: "weather.current", Arguments: map[string]interface{}{"city": "Louisville"}, Status: "succeeded", Outcome: "productive", Result: "Forecast marker zephyr, 72 degrees", ExecutedAt: "2026-08-28T12:00:00Z", SearchResult: true,
+	}}}}}
+	trace, searchText, err := EncodeToolHistory(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`INSERT INTO session_turns(canonical_user_id, session_id, session_generation, user_text, assistant_text, tool_trace, tool_search_text, created_at, expires_at, delivered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, "user-1", "session-1", generation, "Check it", "It is 72 degrees.", trace, searchText, formatTime(now), formatTime(now.Add(time.Hour)), formatTime(now)); err != nil {
+		t.Fatal(err)
+	}
+
+	rebuildTestIndexes(t, store)
+	results, err := store.SearchTranscript(context.Background(), "user-1", "session-1", generation, "zephyr", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || len(results[0].Records) != 4 {
+		t.Fatalf("tool transcript results = %+v", results)
+	}
+	call, result := results[0].Records[1], results[0].Records[2]
+	if len(call.ToolCalls) != 1 || call.ToolCalls[0].Name != "weather.current" || result.Role != "tool" || result.ToolCallID != call.ToolCalls[0].ID || !strings.Contains(result.Content, "zephyr") {
+		t.Fatalf("native tool transcript correlation call=%+v result=%+v", call, result)
+	}
+}
+
 func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T) {
 	store := newTranscriptTestStore(t)
 	seedAccountUsers(t, store, "user-1")
