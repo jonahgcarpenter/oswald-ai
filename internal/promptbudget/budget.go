@@ -108,9 +108,9 @@ func EstimateRequest(messages []llm.ChatMessage, tools []llm.Tool) int {
 }
 
 func estimateMessageTokens(msg llm.ChatMessage) int {
-	tokens := estimateTextTokens(msg.Role, msg.Content, msg.Thinking, msg.ToolName)
+	tokens := estimateTextTokens(msg.Role, msg.Content, msg.Thinking, msg.ToolName, msg.ToolCallID)
 	for _, tc := range msg.ToolCalls {
-		tokens += estimateTextTokens(tc.Function.Name)
+		tokens += estimateTextTokens(tc.ID, tc.Function.Name, "function")
 		if encoded, err := json.Marshal(tc.Function.Arguments); err == nil {
 			tokens += estimateTextTokens(string(encoded))
 		}

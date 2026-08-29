@@ -26,6 +26,45 @@ type Result struct {
 	IsDegraded bool
 }
 
+// HistoryMode controls how much of a completed tool call may be retained in
+// durable session history.
+type HistoryMode string
+
+const (
+	HistoryNone     HistoryMode = "none"
+	HistoryMetadata HistoryMode = "metadata"
+	HistoryFull     HistoryMode = "full"
+)
+
+const (
+	defaultHistoryArgumentBytes = 16 * 1024
+	defaultHistoryResultRunes   = 16_000
+)
+
+// HistoryPolicy controls durable and searchable tool-call history. An empty
+// mode defaults to full history so existing registered tools retain continuity.
+type HistoryPolicy struct {
+	Mode             HistoryMode
+	SearchResult     bool
+	MaxArgumentBytes int
+	MaxResultRunes   int
+}
+
+// Effective returns the policy with compatibility defaults applied.
+func (p HistoryPolicy) Effective() HistoryPolicy {
+	if p.Mode == "" {
+		p.Mode = HistoryFull
+		p.SearchResult = true
+	}
+	if p.MaxArgumentBytes == 0 {
+		p.MaxArgumentBytes = defaultHistoryArgumentBytes
+	}
+	if p.MaxResultRunes == 0 {
+		p.MaxResultRunes = defaultHistoryResultRunes
+	}
+	return p
+}
+
 // ArgumentNormalizer returns the semantic argument value used for duplicate
 // detection. It must not retain or mutate the supplied map.
 type ArgumentNormalizer func(map[string]interface{}) interface{}
@@ -37,6 +76,7 @@ type ToolPolicy struct {
 	MaxUnproductive int
 	BlockDuplicates bool
 	NormalizeArgs   ArgumentNormalizer
+	History         HistoryPolicy
 }
 
 // Validate rejects negative limits. A zero limit disables that guard.
@@ -49,6 +89,13 @@ func (p ToolPolicy) Validate() error {
 	}
 	if p.MaxUnproductive < 0 {
 		return fmt.Errorf("max unproductive results must not be negative")
+	}
+	history := p.History.Effective()
+	if history.Mode != HistoryNone && history.Mode != HistoryMetadata && history.Mode != HistoryFull {
+		return fmt.Errorf("invalid history mode %q", history.Mode)
+	}
+	if history.MaxArgumentBytes < 0 || history.MaxResultRunes < 0 {
+		return fmt.Errorf("history limits must not be negative")
 	}
 	return nil
 }

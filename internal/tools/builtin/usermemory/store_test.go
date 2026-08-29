@@ -271,7 +271,7 @@ func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 	}
 }
 
-func TestStoreSessionContextIncludesToolAnnotationsAndScopesUser(t *testing.T) {
+func TestStoreSessionContextKeepsToolMetadataOutOfProseAndScopesUser(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user-1", "user-2")
@@ -288,8 +288,8 @@ func TestStoreSessionContextIncludesToolAnnotationsAndScopesUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(retrieved.Block, "Assistant: first answer\nTools used: github.get_issue, web.search") {
-		t.Fatalf("tool annotation missing from context:\n%s", retrieved.Block)
+	if !strings.Contains(retrieved.Block, "Assistant: first answer") || strings.Contains(retrieved.Block, "Tools used:") {
+		t.Fatalf("internal tool metadata leaked into context prose:\n%s", retrieved.Block)
 	}
 	if strings.Contains(retrieved.Block, "private") || strings.Contains(retrieved.Block, "other.secret") {
 		t.Fatalf("context included another user's turn:\n%s", retrieved.Block)

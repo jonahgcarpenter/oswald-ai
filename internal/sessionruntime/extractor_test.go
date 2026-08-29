@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -35,7 +36,8 @@ func TestLLMExtractorParsesStructuredSummaryAndCandidate(t *testing.T) {
 	content := `{"narrative":"Atlas is active.","open_tasks":["ship"],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[{"source_turn_id":4,"statement":"The user works on Atlas.","evidence":"I work on Atlas.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.name","claim_value":"Atlas"}]}`
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
 	extractor := NewLLMExtractor(client, "model", 2048)
-	artifact, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted."}})
+	history := usermemory.ToolHistory{Version: usermemory.ToolHistoryVersion, Batches: []usermemory.ToolHistoryBatch{{Calls: []usermemory.ToolHistoryCall{{Name: "project.lookup", Status: "succeeded", Result: "Atlas is active", ExecutedAt: "2026-08-28T12:00:00Z"}}}}}
+	artifact, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +59,9 @@ func TestLLMExtractorParsesStructuredSummaryAndCandidate(t *testing.T) {
 	}
 	if len(request.Tools) != 1 || request.Tools[0].Function.Name != sessionSummarySaveToolName {
 		t.Fatalf("tools=%+v", request.Tools)
+	}
+	if !strings.Contains(request.Messages[1].Content, "project.lookup") || !strings.Contains(request.Messages[1].Content, "Atlas is active") {
+		t.Fatalf("compaction request omitted tool history: %+v", request.Messages)
 	}
 	parameters := request.Tools[0].Function.Parameters
 	if parameters.AdditionalProperties == nil || *parameters.AdditionalProperties || len(parameters.Required) != 7 {

@@ -111,12 +111,63 @@ INSERT INTO memory_candidates(
 	if err := reopened.SQL().QueryRow(`SELECT COUNT(*) FROM schema_migration_versions`).Scan(&count); err != nil || count != len(orderedMigrations()) {
 		t.Fatalf("baseline reapplied: count=%d err=%v", count, err)
 	}
-	var persistedAnnotations string
-	if err := reopened.SQL().QueryRow(`SELECT tool_names FROM session_turns WHERE canonical_user_id = 'restart-user'`).Scan(&persistedAnnotations); err != nil {
+	var persistedAnnotations, toolTrace, toolSearchText string
+	if err := reopened.SQL().QueryRow(`SELECT tool_names, tool_trace, tool_search_text FROM session_turns WHERE canonical_user_id = 'restart-user'`).Scan(&persistedAnnotations, &toolTrace, &toolSearchText); err != nil {
 		t.Fatal(err)
 	}
 	if persistedAnnotations != toolAnnotations {
 		t.Fatalf("persisted tool names changed across restart: annotations=%q", persistedAnnotations)
+	}
+	if toolTrace != `{"version":1,"batches":[]}` || toolSearchText != "" {
+		t.Fatalf("unexpected legacy tool history defaults trace=%q search=%q", toolTrace, toolSearchText)
+	}
+	if _, err := reopened.SQL().Exec(`UPDATE session_turns SET tool_trace = '{"version":1,"batches":[{}]}' WHERE canonical_user_id = 'restart-user'`); err == nil {
+		t.Fatal("mutable session tool history was accepted")
+	}
+}
+
+func TestPermanentV405UpgradesPrefixWithEmptyToolHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := orderedMigrations()
+	for _, migration := range migrations[:len(migrations)-1] {
+		if _, err := raw.Exec(migration.sql); err != nil {
+			raw.Close() // nolint:errcheck
+			t.Fatalf("apply prefix migration %s: %v", migration.name, err)
+		}
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migration_versions (version INTEGER PRIMARY KEY CHECK (version > 0), name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL CHECK (length(checksum) = 64), applied_at TEXT NOT NULL)`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:len(migrations)-1] {
+		if _, err := raw.Exec(`INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (?, ?, ?, datetime('now'))`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
+			raw.Close() // nolint:errcheck
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user'); INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES ('session', 'user', 'question', 'answer', datetime('now'))`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var trace, searchText string
+	if err := db.SQL().QueryRow(`SELECT tool_trace, tool_search_text FROM session_turns`).Scan(&trace, &searchText); err != nil {
+		t.Fatal(err)
+	}
+	if trace != `{"version":1,"batches":[]}` || searchText != "" {
+		t.Fatalf("upgraded defaults trace=%q search=%q", trace, searchText)
 	}
 }
 
@@ -346,7 +397,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 12, "index": 26, "trigger": 21, "view": 0} {
+	for objectType, want := range map[string]int{"table": 12, "index": 26, "trigger": 22, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

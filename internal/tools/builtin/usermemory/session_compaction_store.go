@@ -299,7 +299,7 @@ func (s *Store) RecentCompletedExchangesAfter(ctx context.Context, userID, sessi
 		return nil, err
 	}
 	rows, err := s.sql.QueryContext(ctx, `
-SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at
+SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ?
 	AND id > ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL
@@ -395,7 +395,7 @@ func (s *Store) DeliveredSessionTurnsRange(ctx context.Context, userID, sessionI
 }
 
 func (s *Store) deliveredSessionTurnsRange(ctx context.Context, userID, sessionID string, generation int, afterTurnID, throughTurnID int64, limit int, stopAtUndelivered bool) ([]SessionTurn, error) {
-	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, created_at, expires_at
+	query := `SELECT id, session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, created_at, expires_at
 FROM session_turns
 WHERE canonical_user_id = ? AND session_id = ? AND session_generation = ? AND delivered_at IS NOT NULL AND id > ?`
 	args := []any{userID, sessionID, generation, afterTurnID}

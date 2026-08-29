@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -431,6 +432,57 @@ func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {
 	}
 }
 
+func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) usermemory.ToolHistoryCall {
+	call := usermemory.ToolHistoryCall{
+		Name:         strings.TrimSpace(tc.Function.Name),
+		HistoryMode:  string(policy.Mode),
+		Status:       "succeeded",
+		Outcome:      string(result.Outcome),
+		ReasonCode:   result.ReasonCode,
+		IsDegraded:   result.IsDegraded,
+		Result:       toolContent,
+		ExecutedAt:   executedAt.Format(time.RFC3339Nano),
+		SearchResult: policy.SearchResult,
+	}
+	if !decision.Allowed {
+		call.Status = "blocked"
+		call.Outcome = ""
+		call.ReasonCode = decision.ReasonCode
+	} else if execErr != nil {
+		call.Status = "failed"
+		call.Outcome = ""
+		call.ReasonCode = "execution_error"
+	}
+	if policy.Mode == governance.HistoryMetadata {
+		call.Arguments = map[string]interface{}{}
+		call.Result = "Historical tool result omitted by policy."
+		call.ArgumentsTruncated = true
+		call.ResultTruncated = true
+		call.SearchResult = false
+		return call
+	}
+	call.Arguments = tc.Function.Arguments
+	if call.Arguments == nil {
+		call.Arguments = map[string]interface{}{}
+	}
+	if encoded, err := json.Marshal(call.Arguments); err != nil || len(encoded) > policy.MaxArgumentBytes {
+		call.Arguments = map[string]interface{}{}
+		call.ArgumentsTruncated = true
+	}
+	runes := []rune(call.Result)
+	if len(runes) > policy.MaxResultRunes {
+		notice := []rune("\n[Historical result truncated.]")
+		keep := policy.MaxResultRunes - len(notice)
+		if keep > 0 {
+			call.Result = string(runes[:keep]) + string(notice)
+		} else {
+			call.Result = string(notice[:policy.MaxResultRunes])
+		}
+		call.ResultTruncated = true
+	}
+	return call
+}
+
 func governanceResultText(reason string) string {
 	switch reason {
 	case governance.ReasonDuplicate:
@@ -711,6 +763,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	// These are appended to the stored assistant message so future turns
 	// show what tools were called without ballooning history size.
 	var toolAnnotations []string
+	toolHistory := usermemory.EmptyToolHistory()
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -833,6 +886,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		// Execute each tool call and inject the results as tool response messages.
 		// NOTE: Most models only emit one tool call at a time, but we handle
 		// multiple to be safe.
+		historyBatch := usermemory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
@@ -875,7 +929,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 					config.F("status", "error"),
 					config.ErrorField(execErr),
 				)
-				toolContent = fmt.Sprintf("Error: %v", execErr)
+				toolContent = "Error: " + truncate(config.SafeErrorText(execErr), 1000)
 			} else if decision.Allowed {
 				toolContent = result.Content
 				status := "ok"
@@ -891,7 +945,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
 					config.F("status", status),
 				)
-				// Record a brief annotation for history storage.
+				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
 			if decision.Allowed {
@@ -910,6 +964,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				ToolCallID: toolCallID,
 				Content:    toolContent,
 			})
+			historyPolicy := policy.History.Effective()
+			if !advertised {
+				historyPolicy.Mode = governance.HistoryMetadata
+				historyPolicy.SearchResult = false
+			}
+			if historyPolicy.Mode != governance.HistoryNone {
+				historyBatch.Calls = append(historyBatch.Calls, persistedToolCall(tc, historyPolicy, decision, result, execErr, toolContent, time.Now().UTC()))
+			}
 			stats := toolGovernor.Stats(toolName)
 			reqLog.Debug("agent.tool.governance", "updated request-local tool governance",
 				config.F("tool_name", toolName),
@@ -921,6 +983,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				config.F("tool_duplicate_count", stats.Duplicates),
 				config.F("tool_blocked_count", stats.Blocked),
 				config.F("is_tool_retired", advertised && toolGovernor.IsToolRetired(toolName, policy)))
+		}
+		if len(historyBatch.Calls) > 0 {
+			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
@@ -1030,10 +1095,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
 	var storedTurn usermemory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
-		storedReplay := usermemory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations)}
+		storedReplay := usermemory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := completedPromptPressure(promptContext, storedReplay)
 		var err error
-		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressure(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
+		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressureAndHistory(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, toolHistory, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 		}
