@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -79,6 +80,15 @@ type ToolStreamSearchPayload struct {
 	UnresponsiveEngines []string                 `json:"unresponsive_engines,omitempty"`
 }
 
+// ToolStreamFetchPayload contains privacy-safe web.fetch details for streaming UIs.
+type ToolStreamFetchPayload struct {
+	Title       string `json:"title,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	Source      string `json:"source,omitempty"`
+	IsTruncated bool   `json:"is_truncated,omitempty"`
+	IsDegraded  bool   `json:"is_degraded,omitempty"`
+}
+
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
 	Name         string                         `json:"name"`
@@ -87,6 +97,7 @@ type ToolStreamPayload struct {
 	DurationMS   int64                          `json:"duration_ms,omitempty"`
 	IsError      bool                           `json:"is_error,omitempty"`
 	WebSearch    *ToolStreamSearchPayload       `json:"web.search,omitempty"`
+	WebFetch     *ToolStreamFetchPayload        `json:"web.fetch,omitempty"`
 	UserMemory   *ToolStreamUserMemoryPayload   `json:"user_memory,omitempty"`
 	GlobalMemory *ToolStreamGlobalMemoryPayload `json:"global_memory,omitempty"`
 }
@@ -119,6 +130,22 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		ResultText: result,
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
+	}
+	if toolName == "web.fetch" {
+		payload.Arguments = nil
+		payload.ResultText = ""
+		fetchPayload := &ToolStreamFetchPayload{}
+		if !isError && result != "" {
+			if response, err := webfetch.DecodeToolResponse(result); err == nil {
+				fetchPayload.Title = response.Title
+				fetchPayload.ContentType = response.ContentType
+				fetchPayload.Source = response.Source
+				fetchPayload.IsTruncated = response.IsTruncated
+				fetchPayload.IsDegraded = response.IsDegraded
+			}
+		}
+		payload.WebFetch = fetchPayload
+		return payload
 	}
 
 	if toolName != "web.search" {

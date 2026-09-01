@@ -84,7 +84,7 @@ type messageResponse struct {
 	} `json:"author"`
 }
 
-// Embed describes Discord link-preview media that can be treated like an image.
+// Embed describes Discord direct-media embeds and derived webpage previews.
 type Embed struct {
 	Type      string     `json:"type,omitempty"`
 	URL       string     `json:"url,omitempty"`

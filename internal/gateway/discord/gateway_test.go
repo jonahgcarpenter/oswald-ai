@@ -47,6 +47,24 @@ func TestDiscordWebSearchStatusReportsDegradation(t *testing.T) {
 	}
 }
 
+func TestDiscordWebFetchStatusDoesNotExposeURLOrContent(t *testing.T) {
+	status := discordToolStatusFor(&agent.ToolStreamPayload{
+		Name:       "web.fetch",
+		Arguments:  map[string]interface{}{"url": "https://example.com/private-path"},
+		ResultText: "private fetched content",
+		WebFetch:   &agent.ToolStreamFetchPayload{Title: "Untrusted title", IsDegraded: true},
+	})
+	combined := status.running + status.completed + status.failed
+	if status.completed != "Fetched the requested public page with limited extraction." {
+		t.Fatalf("completed status = %q", status.completed)
+	}
+	for _, secret := range []string{"private-path", "private fetched content", "Untrusted title"} {
+		if strings.Contains(combined, secret) {
+			t.Fatalf("web fetch status exposed %q: %s", secret, combined)
+		}
+	}
+}
+
 func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)
@@ -744,6 +762,96 @@ func TestDiscordMCPToolStatusFormatsSafePrimitiveArguments(t *testing.T) {
 	}
 	if strings.Contains(status.running, "private-") || strings.Contains(status.running, "nested") || strings.Contains(status.completed, " ms") {
 		t.Fatalf("unsafe MCP status: %+v", status)
+	}
+}
+
+func TestDiscordEmbedIntentionalMediaClassification(t *testing.T) {
+	tests := []struct {
+		embedType string
+		want      bool
+	}{
+		{embedType: "image", want: true},
+		{embedType: " IMAGE ", want: true},
+		{embedType: "gifv", want: true},
+		{embedType: "GIFV", want: true},
+		{embedType: ""},
+		{embedType: "article"},
+		{embedType: "link"},
+		{embedType: "rich"},
+		{embedType: "video"},
+		{embedType: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.embedType, func(t *testing.T) {
+			if got := discordEmbedIsIntentionalMedia(Embed{Type: test.embedType}); got != test.want {
+				t.Fatalf("discordEmbedIsIntentionalMedia(%q) = %t, want %t", test.embedType, got, test.want)
+			}
+		})
+	}
+}
+
+func TestDiscordWebpagePreviewEmbedsAreIgnoredAndURLPreserved(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(testDiscordJPEG(t))
+	}))
+	defer server.Close()
+	dg := &Gateway{HTTPClient: server.Client(), Log: config.NewLogger(config.LevelError)}
+	const pageURL = "https://docs.example.com/guide"
+	for _, embedType := range []string{"article", "link", "rich"} {
+		embed := Embed{
+			Type: embedType, URL: pageURL,
+			Image: EmbedImage{ProxyURL: server.URL + "/image.jpg"}, Thumbnail: EmbedImage{URL: server.URL + "/thumbnail.jpg"},
+		}
+		images, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1)
+		if len(images) != 0 || len(unsupported) != 0 {
+			t.Fatalf("%s preview produced images=%d unsupported=%v", embedType, len(images), unsupported)
+		}
+		if labels := discordEmbedLabels([]Embed{embed}); len(labels) != 0 {
+			t.Fatalf("%s preview labels = %v", embedType, labels)
+		}
+		if got := stripEmbedURLsFromText("Please inspect "+pageURL, []Embed{embed}); got != "Please inspect "+pageURL {
+			t.Fatalf("%s preview text = %q", embedType, got)
+		}
+	}
+	if requestCount != 0 {
+		t.Fatalf("webpage previews triggered %d media requests", requestCount)
+	}
+}
+
+func TestDiscordDirectImageEmbedRemainsIntentionalMedia(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(testDiscordJPEG(t))
+	}))
+	defer server.Close()
+	dg := &Gateway{HTTPClient: server.Client(), Log: config.NewLogger(config.LevelError)}
+	const imageURL = "https://images.example.com/photo.jpg"
+	embed := Embed{Type: "image", URL: imageURL, Image: EmbedImage{ProxyURL: server.URL + "/photo.jpg"}}
+	images, unsupported := dg.loadEmbedImagesLimit([]Embed{embed}, 1)
+	if len(images) != 1 || len(unsupported) != 0 {
+		t.Fatalf("images=%d unsupported=%v", len(images), unsupported)
+	}
+	if got := stripEmbedURLsFromText(imageURL, []Embed{embed}); got != "" {
+		t.Fatalf("direct image URL was not stripped: %q", got)
+	}
+}
+
+func TestDiscordMixedEmbedsStripOnlyDirectMediaURL(t *testing.T) {
+	const pageURL = "https://docs.example.com/guide"
+	const imageURL = "https://images.example.com/photo.jpg"
+	embeds := []Embed{
+		{Type: "article", URL: pageURL, Thumbnail: EmbedImage{URL: "https://cdn.example.com/preview.jpg"}},
+		{Type: "image", URL: imageURL, Image: EmbedImage{URL: "https://cdn.example.com/photo.jpg"}},
+	}
+	text := "Compare " + pageURL + " " + imageURL
+	if got := stripEmbedURLsFromText(text, embeds); got != "Compare "+pageURL {
+		t.Fatalf("mixed embed text = %q", got)
+	}
+	if labels := discordEmbedLabels(embeds); len(labels) != 1 {
+		t.Fatalf("mixed embed labels = %v", labels)
 	}
 }
 

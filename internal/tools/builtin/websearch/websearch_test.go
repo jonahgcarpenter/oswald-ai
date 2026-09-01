@@ -27,11 +27,11 @@ func (f *fakeSearcher) Search(_ context.Context, query string) (SearchResponse, 
 	return f.response, f.err
 }
 
-func newTestClient(t *testing.T, baseURL string) *Client {
+func newTestClient(t *testing.T, baseURL string) *SearxngClient {
 	t.Helper()
-	client, err := NewClient(baseURL, config.NewLogger(config.LevelError))
+	client, err := NewSearxngClient(baseURL, config.NewLogger(config.LevelError))
 	if err != nil {
-		t.Fatalf("NewClient(%q): %v", baseURL, err)
+		t.Fatalf("NewSearxngClient(%q): %v", baseURL, err)
 	}
 	return client
 }
@@ -43,14 +43,14 @@ func TestNewClientValidatesBaseURL(t *testing.T) {
 		"https://user@example.com", "https://example.com?q=1", "https://example.com/#fragment",
 	}
 	for _, value := range invalid {
-		if _, err := NewClient(value, nil); err == nil {
-			t.Errorf("NewClient(%q) returned nil error", value)
+		if _, err := NewSearxngClient(value, nil); err == nil {
+			t.Errorf("NewSearxngClient(%q) returned nil error", value)
 		}
 	}
-	if _, err := NewClient("https://example.com/searx/", nil); err != nil {
+	if _, err := NewSearxngClient("https://example.com/searx/", nil); err != nil {
 		t.Fatalf("valid path-prefix URL rejected: %v", err)
 	}
-	if _, err := NewClient("HTTPS://example.com", nil); err != nil {
+	if _, err := NewSearxngClient("HTTPS://example.com", nil); err != nil {
 		t.Fatalf("case-insensitive HTTP scheme rejected: %v", err)
 	}
 }
@@ -94,7 +94,10 @@ func TestClientValidatesQuery(t *testing.T) {
 		}
 	}
 	if err := validateQuery(strings.Repeat("界", maxQueryRunes)); err != nil {
-		t.Fatalf("500-rune query rejected: %v", err)
+		t.Fatalf("400-character query rejected: %v", err)
+	}
+	if err := validateQuery(strings.Repeat("word ", maxQueryWords+1)); err == nil {
+		t.Fatal("51-word query was accepted")
 	}
 }
 
@@ -332,7 +335,7 @@ func TestNormalizationBoundsTextAndEngineNames(t *testing.T) {
 		engines[i] = fmt.Sprintf("engine-%d-%s", i, strings.Repeat("x", 100))
 	}
 	result, ok := normalizeResult(searxngResult{
-		Title: strings.Repeat("界", 300), URL: "https://public.example/", Content: strings.Repeat("界", 900), Engines: engines,
+		Title: strings.Repeat("界", 300), URL: "https://public.example/", Content: strings.Repeat("界", maxSnippetRunes+100), Engines: engines,
 	})
 	if !ok {
 		t.Fatal("valid result rejected")

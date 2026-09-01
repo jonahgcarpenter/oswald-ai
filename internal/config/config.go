@@ -25,7 +25,8 @@ type Config struct {
 	ModelContextWindow       int             // Optional model context-window override for prompt budgeting
 	ModelMaxOutputTokens     int             // Optional model output-token reserve override for prompt budgeting
 	DiscordToken             string          // Optional Discord bot token
-	SearxngURL               string          // SearXNG base URL for web search (default: "http://localhost:8080")
+	BraveAPIKey              string          // Optional Brave Search API subscription token
+	SearxngURL               string          // Optional SearXNG base URL for web search
 	MaxToolFailureRetries    int             // Maximum consecutive tool execution failures before the agent stops retrying tools; zero disables the guard
 	MaxToolCallsPerRequest   int             // Emergency maximum tool handler executions in one primary-agent request (default: 50)
 	MaxToolIterations        int             // Emergency maximum model responses containing tool calls in one request (default: 30)
@@ -77,7 +78,8 @@ func Load() (*Config, error) {
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
-		SearxngURL:               getEnv("SEARXNG_URL", "http://localhost:8080"),
+		BraveAPIKey:              getEnv("BRAVE_API_KEY", ""),
+		SearxngURL:               getEnv("SEARXNG_URL", ""),
 		MaxToolFailureRetries:    getEnvInt("MAX_TOOL_FAILURE_RETRIES", 0),
 		MaxToolCallsPerRequest:   getEnvInt("MAX_TOOL_CALLS_PER_REQUEST", 50),
 		MaxToolIterations:        getEnvInt("MAX_TOOL_ITERATIONS_PER_REQUEST", 30),

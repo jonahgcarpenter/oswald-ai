@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -19,16 +20,67 @@ import (
 // Register wires all builtin tools into the shared registry.
 func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	searchClient, err := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
-	if err != nil {
-		return fmt.Errorf("failed to initialize web.search client: %w", err)
+	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
+	searxngURL := strings.TrimSpace(cfg.SearxngURL)
+	var braveClient websearch.Searcher
+	var searxngClient websearch.Searcher
+	if braveKey != "" {
+		client, err := websearch.NewBraveClient(braveKey, log.Server("tool.web.search"))
+		if err != nil {
+			return fmt.Errorf("failed to initialize Brave web.search client: %w", err)
+		}
+		braveClient = client
 	}
-	searchPolicy := toolPolicy(2, normalizeSearchArgs)
-	searchPolicy.MaxFailures = 2
-	if err := reg.RegisterHandler("web.search", searchPolicy, registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
-		return fmt.Errorf("failed to initialize web.search tool: %w", err)
+	if searxngURL != "" {
+		client, err := websearch.NewSearxngClient(searxngURL, log.Server("tool.web.search"))
+		if err != nil {
+			return fmt.Errorf("failed to initialize SearXNG web.search client: %w", err)
+		}
+		searxngClient = client
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"))
+
+	var searcher websearch.Searcher
+	primary := ""
+	fallback := ""
+	switch {
+	case braveClient != nil && searxngClient != nil:
+		searcher = websearch.NewFallbackSearcher(braveClient, searxngClient)
+		primary, fallback = "brave", "searxng"
+	case braveClient != nil:
+		searcher = braveClient
+		primary = "brave"
+	case searxngClient != nil:
+		searcher = searxngClient
+		primary = "searxng"
+	default:
+		for _, name := range []string{"web.fetch", "web.search"} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", "web.search,web.fetch"), config.F("status", "ok"))
+	}
+	if searcher != nil {
+		searchPolicy := toolPolicy(2, normalizeSearchArgs)
+		searchPolicy.MaxFailures = 2
+		if err := reg.RegisterHandler("web.search", searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
+			return fmt.Errorf("failed to initialize web.search tool: %w", err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
+
+		fetchPolicy := governance.ToolPolicy{
+			MaxExecutions:   4,
+			MaxFailures:     2,
+			MaxUnproductive: 2,
+			BlockDuplicates: true,
+			NormalizeArgs:   normalizeFetchArgs,
+			History:         governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		}
+		if err := reg.RegisterHandler("web.fetch", fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
+			return fmt.Errorf("failed to initialize web.fetch tool: %w", err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", "web.fetch"))
+	}
 
 	if err := reg.RegisterHandler("time.current", toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
 		return fmt.Errorf("failed to initialize time.current tool: %w", err)
@@ -69,6 +121,11 @@ func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) go
 
 func normalizeSearchArgs(args map[string]interface{}) interface{} {
 	return map[string]interface{}{"query": normalizedString(args, "query", true)}
+}
+
+func normalizeFetchArgs(args map[string]interface{}) interface{} {
+	value, _ := args["url"].(string)
+	return map[string]interface{}{"url": webfetch.NormalizeURL(value)}
 }
 
 func normalizeTimeArgs(args map[string]interface{}) interface{} {
