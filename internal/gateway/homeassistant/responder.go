@@ -33,6 +33,10 @@ func (r *runtimeResponder) SendAgentError(_ string) error {
 	return r.sendError("request_failed", "Oswald could not process the request.")
 }
 
+func (r *runtimeResponder) CancelAgentResponse() error {
+	return r.sendError("request_canceled", "The request was canceled.")
+}
+
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return r.sendError("request_failed", "Oswald returned no response.")

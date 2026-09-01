@@ -28,6 +28,7 @@ type discordStreamEvent struct {
 	response  *agent.AgentResponse
 	errorText string
 	result    chan error
+	abort     bool
 }
 
 type discordToolStatus struct {
@@ -49,6 +50,8 @@ type discordResponseStream struct {
 	events       chan discordStreamEvent
 	startOnce    sync.Once
 	editInterval time.Duration
+	terminalMu   sync.Mutex
+	terminal     bool
 }
 
 func newDiscordResponseStream(responder *runtimeResponder) *discordResponseStream {
@@ -67,22 +70,40 @@ func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
 	if chunk.Type == agent.ChunkStatus {
 		return
 	}
+	s.terminalMu.Lock()
+	terminal := s.terminal
+	s.terminalMu.Unlock()
+	if terminal {
+		return
+	}
 	s.start()
 	s.events <- discordStreamEvent{chunk: &chunk}
 }
 
 func (s *discordResponseStream) Finish(response *agent.AgentResponse) error {
-	s.start()
-	result := make(chan error, 1)
-	s.events <- discordStreamEvent{response: response, result: result}
-	return <-result
+	return s.terminalEvent(discordStreamEvent{response: response})
 }
 
 func (s *discordResponseStream) Fail(text string) error {
+	return s.terminalEvent(discordStreamEvent{errorText: text})
+}
+
+func (s *discordResponseStream) Abort() error {
+	return s.terminalEvent(discordStreamEvent{abort: true})
+}
+
+func (s *discordResponseStream) terminalEvent(event discordStreamEvent) error {
+	s.terminalMu.Lock()
+	if s.terminal {
+		s.terminalMu.Unlock()
+		return nil
+	}
+	s.terminal = true
+	s.terminalMu.Unlock()
 	s.start()
-	result := make(chan error, 1)
-	s.events <- discordStreamEvent{errorText: text, result: result}
-	return <-result
+	event.result = make(chan error, 1)
+	s.events <- event
+	return <-event.result
 }
 
 func (s *discordResponseStream) run() {
@@ -99,6 +120,10 @@ func (s *discordResponseStream) run() {
 			}
 			if event.response != nil {
 				event.result <- state.finish(event.response)
+				return
+			}
+			if event.abort {
+				event.result <- state.discardLifecycleMessages()
 				return
 			}
 			if event.result != nil {

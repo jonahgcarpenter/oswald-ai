@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -81,7 +82,12 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				SessionKey: req.SessionKey, DisplayName: req.DisplayName, ClientID: req.ClientID,
 				Raw: decision.Prompt,
 			}
-			fenceTargets, resolveErr := deps.Commands.ResolveFenceTargets(context.Background(), commandReq)
+			definition, _ := deps.Commands.Definition(commandName)
+			var fenceTargets []string
+			var resolveErr error
+			if !definition.OutOfBand {
+				fenceTargets, resolveErr = deps.Commands.ResolveFenceTargets(context.Background(), commandReq)
+			}
 			executeCommand := func() error {
 				if resolveErr != nil {
 					commandErr = resolveErr
@@ -115,8 +121,7 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 				}
 				return commandErr
 			}
-			if deps.Broker != nil {
-				definition, _ := deps.Commands.Definition(commandName)
+			if deps.Broker != nil && !definition.OutOfBand {
 				if definition.UserExclusive || len(fenceTargets) > 0 {
 					fenceTargets = append(fenceTargets, userID)
 					commandErr = deps.Broker.RunUsersExclusive(context.Background(), fenceTargets, executeCommand)
@@ -214,6 +219,14 @@ func Execute(req Request, deps Dependencies, responder Responder) Outcome {
 	}
 
 	if result.Err != nil {
+		if errors.Is(result.Err, broker.ErrAgentWorkCanceled) {
+			if cancelResponder, ok := responder.(CancellationResponder); ok {
+				if err := cancelResponder.CancelAgentResponse(); err != nil {
+					log.Warn("gateway.response.cancel_cleanup_failed", "failed to clean up canceled agent response", config.F("request_id", req.RequestID), config.F("chat_id", req.ChatID), config.F("status", "degraded"), config.ErrorField(err))
+				}
+			}
+			return Outcome{Action: decision.Action, Reason: "request_canceled", Err: result.Err}
+		}
 		log.Error("gateway.response.failed", "agent processing failed", config.F("request_id", req.RequestID), config.ErrorField(result.Err))
 		err := responder.SendAgentError(config.SafeErrorText(result.Err))
 		if err != nil {

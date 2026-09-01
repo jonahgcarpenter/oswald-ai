@@ -115,10 +115,6 @@ func main() {
 	indexService.Start(context.Background())
 	maintenanceService := maintenanceruntime.NewService(userMemStore, cfg.RetentionPolicy, rootLog)
 	maintenanceService.Start(context.Background())
-	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), bootstrapCommand, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager})
-	if err != nil {
-		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
-	}
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", config.DefaultAccountLinkPath))
 
 	toolRegistry, err := tools.NewRegistryFromConfig(cfg, userMemStore, globalMemStore, rootLog)
@@ -141,19 +137,6 @@ func main() {
 		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
 	}
 
-	runtimeInvalidationBus := runtimeinvalidation.NewBus()
-	runtimeDeps := gatewayruntime.Dependencies{
-		Commands:               commandService,
-		Access:                 accountLinkService,
-		Log:                    rootLog,
-		Formation:              formationService,
-		Compaction:             compactionService,
-		RuntimeInvalidationBus: runtimeInvalidationBus,
-	}
-	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
-	if err != nil {
-		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
-	}
 	agentEngine := agent.NewAgent(
 		llmClient,
 		toolRegistry,
@@ -175,6 +158,24 @@ func main() {
 	// limit and routes responses back to the originating gateway.
 	requestBroker := broker.NewBroker(agentEngine, cfg.WorkerPoolSize, rootLog.Server("broker"))
 	requestBroker.Start()
+	commandService, err := commandbuiltin.NewServiceWithGlobalMemory(accountLinkService, userMemStore, globalMemStore, rootLog.Server("commands"), bootstrapCommand, commandbuiltin.MCPDeps{Store: mcpStore, Manager: mcpManager, Canceler: requestBroker})
+	if err != nil {
+		log.Fatal("app.commands.init_failed", "failed to initialize command service", config.ErrorField(err))
+	}
+	runtimeInvalidationBus := runtimeinvalidation.NewBus()
+	runtimeDeps := gatewayruntime.Dependencies{
+		Broker:                 requestBroker,
+		Commands:               commandService,
+		Access:                 accountLinkService,
+		Log:                    rootLog,
+		Formation:              formationService,
+		Compaction:             compactionService,
+		RuntimeInvalidationBus: runtimeInvalidationBus,
+	}
+	activeGateways, err := gateway.NewServicesFromConfig(cfg, accountLinkService, runtimeDeps, rootLog)
+	if err != nil {
+		log.Fatal("app.gateways.init_failed", "failed to initialize gateways", config.ErrorField(err))
+	}
 	formationService.SetLowPriorityGate(requestBroker)
 	compactionService.SetLowPriorityGate(requestBroker)
 	formationService.Start(context.Background())

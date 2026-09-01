@@ -118,6 +118,10 @@ func (r *runtimeResponder) SendAgentError(text string) error {
 	return r.stream.Fail(text)
 }
 
+func (r *runtimeResponder) CancelAgentResponse() error {
+	return r.stream.Abort()
+}
+
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return nil

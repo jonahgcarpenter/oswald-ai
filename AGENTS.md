@@ -16,7 +16,7 @@ It exposes that loop through Discord, an optional Home Assistant WebSocket gatew
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Every newly saved server requires an operator-provided description, which is used verbatim as the model-visible `<server>.tools` description. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Servers migrated without descriptions remain model-hidden until they are updated. Remote MCP tools are not filtered for read-only behavior.
 
-Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/memories`, `/bootstrap`, user MCP management, and admin-only `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Memory and global-memory mutations are commands and are never exposed to the model as tools.
+Gateway-level slash commands are separate from model tools. Builtin commands include `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/bootstrap`, user MCP management, and admin-only `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and global MCP commands. Memory and global-memory mutations are commands and are never exposed to the model as tools.
 
 Oswald supports multimodal user input for the active turn: text-only, image-only, and text-plus-image requests can be sent through every gateway when the active LLM gateway model route supports images.
 
@@ -65,10 +65,10 @@ Current layers:
 8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex
 9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Create the command service, including `/memories`, `/bootstrap`, and administrator global-memory management
-12. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
-13. Create the runtime invalidation bus and build enabled gateways
-14. Create the agent, start the broker worker pool, and then start formation and compaction with the broker's low-priority model gate
+11. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+12. Create the agent and start the broker worker pool
+13. Create the command service, including `/stop`, `/memories`, `/bootstrap`, and administrator global-memory management, then create the runtime invalidation bus and build enabled gateways
+14. Start formation and compaction with the broker's low-priority model gate
 15. Start each gateway in its own goroutine
 16. Wait for shutdown signal, stop maintenance, drain the broker, stop index/formation/compaction workers, and close MCP clients; the current gateway interface has no graceful stop method, so gateway listeners remain live until `main` returns and deferred database closes run
 
@@ -107,12 +107,13 @@ The loop is iterative, not single-pass. The model may call tools zero or more ti
 
 The broker lives in `internal/broker/` and sits between gateways and the agent.
 
-- Requests and commands are scheduled in FIFO lanes keyed by canonical user and session
+- Requests and ordinary commands are scheduled in FIFO lanes keyed by canonical user and session; `/stop` executes out of band so it cannot wait behind the request it needs to cancel
 - Only the head of each lane can occupy a worker, so independent conversations can run in parallel without concurrent work in the same session
 - A fixed worker pool limits concurrent lane-head execution
 - The additional queued-work allowance is `10`; the global outstanding cap is `10 + WORKER_POOL_SIZE`, including active work
 - If the outstanding cap is reached, the broker returns an immediate fallback response instead of blocking forever
 - Shutdown rejects new work, cancels active and queued agent contexts, and drains accepted lane operations before returning
+- `/stop` cancels only the active foreground agent request in the caller's current session and preserves queued prompts. Administrator-only `/stop all` cancels all active and queued foreground agent requests. Neither command cancels gateway commands or durable background work
 
 Relevant config:
 
@@ -125,7 +126,7 @@ The core runtime is `(*Agent).Process()` in `internal/agent/agent.go`.
 
 Per request it does the following:
 
-1. Use the broker-owned lifecycle context so shutdown cancellation propagates through model and tool work without imposing an Oswald generation deadline
+1. Use a per-request context derived from the broker lifecycle context so shutdown and stop-command cancellation propagate through model and tool work without imposing an Oswald generation deadline
 2. Inject the resolved principal into context so tools derive tenant ownership from its canonical user
 3. Read `data/memory/soul/soul.md` fresh from disk
 4. Build deployment policy from soul content and gateway instructions

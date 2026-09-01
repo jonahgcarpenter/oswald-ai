@@ -50,6 +50,9 @@ func NewServiceWithCommands(commands ...Command) (*Service, error) {
 		if definition.Name == "" {
 			return nil, fmt.Errorf("command definition missing name")
 		}
+		if definition.OutOfBand && definition.UserExclusive {
+			return nil, fmt.Errorf("out-of-band command %s cannot be user-exclusive", definition.Name)
+		}
 		if _, exists := service.handlers[definition.Name]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateCommand, definition.Name)
 		}
@@ -57,6 +60,9 @@ func NewServiceWithCommands(commands ...Command) (*Service, error) {
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateCommand, definition.Name)
 		}
 		resolver, resolvesTargets := handler.(FenceTargetResolver)
+		if definition.OutOfBand && resolvesTargets {
+			return nil, fmt.Errorf("out-of-band command %s cannot resolve fence targets", definition.Name)
+		}
 		handler = applyMiddleware(handler, command.Middleware)
 		service.handlers[definition.Name] = handler
 		if resolvesTargets {

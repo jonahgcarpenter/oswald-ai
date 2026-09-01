@@ -584,6 +584,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.
@@ -808,6 +811,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			reqLog.Error("agent.model.error", "model call failed", config.F("iteration", iteration), config.ErrorField(err))
 			if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
@@ -824,6 +830,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 					config.F("status", "retry"),
 				)
 				resp, err = a.chatClient.Chat(ctx, req, chatCallback)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
 				if err == nil {
 					reqLog.Warn("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
@@ -854,6 +863,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
 				return &AgentResponse{Model: a.model, Response: errorText, Error: errorText}, nil
 			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
 
 		normalizeToolCallIDs(&resp.Message, iteration)
@@ -911,6 +923,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 			}
 			if decision.Allowed {
 				result, execErr = a.executeTool(ctx, request.Principal, toolName, tc.Function.Arguments, toolExposure)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, ctxErr
+				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
 			} else {
 				toolContent = governanceResultText(decision.ReasonCode)
@@ -1008,6 +1023,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			reqLog.Error("agent.model.error", "model finish failed after tool failures", config.ErrorField(err))
 			if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
@@ -1057,6 +1075,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		)
 		retryResp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
 				config.F("status", "degraded"),
 				config.ErrorField(err),
@@ -1088,6 +1109,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				config.F("status", "degraded"),
 			)
 		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)

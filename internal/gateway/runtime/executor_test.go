@@ -317,6 +317,40 @@ func TestExecuteSerializesCommandBehindAgentRequest(t *testing.T) {
 	}
 }
 
+func TestExecuteRunsOutOfBandStopAheadOfActiveLaneRequest(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &cancelAwareRuntimeProcessor{started: make(chan struct{})}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	stopHandler := outOfBandStopHandler{broker: b}
+	service, err := commands.NewService(stopHandler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := Dependencies{Broker: b, Commands: service, Log: log}
+	principal := testPrincipal("user")
+	agentResponder := &fakeResponder{}
+	agentDone := make(chan Outcome, 1)
+	go func() {
+		agentDone <- Execute(Request{RequestID: "agent", Principal: principal, SessionKey: "session", Text: "hello"}, deps, agentResponder)
+	}()
+	<-processor.started
+	stopResponder := &fakeResponder{}
+	stopOutcome := Execute(Request{RequestID: "stop", Principal: principal, SessionKey: "session", Text: "/stop"}, deps, stopResponder)
+	if stopOutcome.Err != nil || stopResponder.command.Text != "Stopped." {
+		t.Fatalf("stop outcome=%+v response=%+v", stopOutcome, stopResponder.command)
+	}
+	select {
+	case outcome := <-agentDone:
+		if !errors.Is(outcome.Err, broker.ErrAgentWorkCanceled) || !agentResponder.canceled {
+			t.Fatalf("agent outcome=%+v responder=%+v", outcome, agentResponder)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active request was not canceled")
+	}
+}
+
 func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	b := broker.NewBroker(nil, 4, log)
@@ -409,6 +443,7 @@ type fakeResponder struct {
 	agent    *agent.AgentResponse
 	agentErr string
 	sendErr  error
+	canceled bool
 }
 
 type fenceCheckingResponder struct {
@@ -457,6 +492,11 @@ func (r *fakeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 
 func (r *fakeResponder) SendAgentError(text string) error {
 	r.agentErr = text
+	return nil
+}
+
+func (r *fakeResponder) CancelAgentResponse() error {
+	r.canceled = true
 	return nil
 }
 
@@ -541,6 +581,27 @@ func (runtimeFakeChatter) Chat(context.Context, llm.ChatRequest, func(llm.ChatMe
 type blockingRuntimeProcessor struct {
 	started chan struct{}
 	release chan struct{}
+}
+
+type cancelAwareRuntimeProcessor struct {
+	started chan struct{}
+}
+
+type outOfBandStopHandler struct{ broker *broker.Broker }
+
+func (outOfBandStopHandler) Definition() commands.Definition {
+	return commands.Definition{Name: "stop", OutOfBand: true}
+}
+
+func (h outOfBandStopHandler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	h.broker.CancelActiveAgentWork(req.Principal.CanonicalUserID, req.SessionKey)
+	return commands.Result{Text: "Stopped."}, nil
+}
+
+func (p *cancelAwareRuntimeProcessor) Process(ctx context.Context, _ agent.Request) (*agent.AgentResponse, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 func (p *blockingRuntimeProcessor) Process(context.Context, agent.Request) (*agent.AgentResponse, error) {
