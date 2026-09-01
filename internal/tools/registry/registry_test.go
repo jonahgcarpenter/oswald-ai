@@ -150,6 +150,10 @@ func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
 	if tools[1].Function.Description != "Github MCP tool: Get issue" {
 		t.Fatalf("unexpected MCP description %q", tools[1].Function.Description)
 	}
+	tools = reg.LLMToolsForVisibility(ToolVisibility{HiddenBuiltins: map[string]bool{"builtin.tool": true}})
+	if len(tools) != 0 {
+		t.Fatalf("request-hidden builtin remained visible: %+v", tools)
+	}
 
 	builtin := reg.BuiltinCatalog()
 	if len(builtin) != 1 || builtin[0].Name != "builtin.tool" {

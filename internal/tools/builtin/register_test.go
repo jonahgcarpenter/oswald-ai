@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
@@ -291,7 +292,7 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, name := range reg.Names() {
+	for _, name := range reg.EnabledBuiltinNames() {
 		policy, ok := reg.Policy(name)
 		if !ok {
 			t.Fatalf("missing policy for %s", name)
@@ -315,6 +316,81 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		}
 		if policy.MaxFailures != wantFailures {
 			t.Fatalf("%s max failures = %d, want %d", name, policy.MaxFailures, wantFailures)
+		}
+	}
+}
+
+func TestRegisterComfyUIProviderMatrix(t *testing.T) {
+	for _, test := range []struct {
+		name, url string
+		enabled   bool
+	}{
+		{name: "blank"}, {name: "whitespace", url: "  "}, {name: "configured", url: "http://localhost:8188", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := config.NewLogger(config.LevelError)
+			reg := newTestRegistry(t, log)
+			cfg := testConfig()
+			cfg.ComfyUIURL = test.url
+			cfg.ComfyUIGenerationTimeout = 2 * time.Minute
+			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
+			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+			if err := Register(reg, cfg, nil, nil, log); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
+				_, visible := reg.LLMTool(name)
+				if visible != test.enabled || reg.HasHandler(name) != test.enabled {
+					t.Fatalf("%s visible=%t handler=%t", name, visible, reg.HasHandler(name))
+				}
+				reserved := false
+				for _, loaded := range reg.Names() {
+					reserved = reserved || loaded == name
+				}
+				if !reserved {
+					t.Fatalf("%s is not reserved", name)
+				}
+				if test.enabled {
+					policy, ok := reg.Policy(name)
+					if !ok || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
+						t.Fatalf("%s policy=%+v", name, policy)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRegisterComfyUISchemasExposeOnlyPrompts(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg := newTestRegistry(t, log)
+	cfg := testConfig()
+	cfg.ComfyUIURL = "http://localhost:8188"
+	cfg.ComfyUIGenerationTimeout = 2 * time.Minute
+	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
+	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+	if err := Register(reg, cfg, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
+		tool, ok := reg.LLMTool(name)
+		if !ok {
+			t.Fatalf("missing %s", name)
+		}
+		schema := tool.Function.Parameters
+		if len(schema.Properties) != 2 || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+			t.Fatalf("%s schema=%+v", name, schema)
+		}
+		prompt, ok := schema.Properties["prompt"]
+		if !ok {
+			t.Fatalf("%s missing prompt", name)
+		}
+		negative, ok := schema.Properties["negative_prompt"]
+		if !ok {
+			t.Fatalf("%s missing negative_prompt", name)
+		}
+		if prompt.MinLength == nil || *prompt.MinLength != 1 || prompt.MaxLength == nil || *prompt.MaxLength != 2000 || negative.MaxLength == nil || *negative.MaxLength != 2000 {
+			t.Fatalf("%s prompt bounds are missing: %+v", name, schema.Properties)
 		}
 	}
 }

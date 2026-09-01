@@ -6,6 +6,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 type runtimeResponder struct {
@@ -53,6 +54,14 @@ func (r *runtimeResponder) CancelAgentResponse() error { return nil }
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return nil
+	}
+	if err := media.ValidateOutputAttachments(response.Attachments); err != nil {
+		return err
+	}
+	for _, attachment := range response.Attachments {
+		if err := r.gateway.sendCommandAttachment(r.chatGUID, attachment); err != nil {
+			return err
+		}
 	}
 	responseText := strings.TrimSpace(response.Response)
 	if responseText == "" {

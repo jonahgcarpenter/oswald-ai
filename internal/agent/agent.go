@@ -118,9 +118,10 @@ type ToolStreamGlobalMemoryPayload struct {
 // StreamChunk is a single typed token event streamed to gateways during Process().
 // Gateways receive thinking tokens, content tokens, and agent status messages via this type.
 type StreamChunk struct {
-	Type StreamChunkType    `json:"type"`
-	Text string             `json:"text,omitempty"`
-	Tool *ToolStreamPayload `json:"tool,omitempty"`
+	Type        StreamChunkType          `json:"type"`
+	Text        string                   `json:"text,omitempty"`
+	Tool        *ToolStreamPayload       `json:"tool,omitempty"`
+	Attachments []media.OutputAttachment `json:"-"`
 }
 
 func toolStreamPayload(toolName string, args map[string]interface{}, result string, duration time.Duration, isError bool) *ToolStreamPayload {
@@ -130,6 +131,11 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		ResultText: result,
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
+	}
+	if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
+		payload.Arguments = nil
+		payload.ResultText = ""
+		return payload
 	}
 	if toolName == "web.fetch" {
 		payload.Arguments = nil
@@ -232,11 +238,12 @@ type ModelMetrics struct {
 
 // AgentResponse is the final payload returned to the gateway after processing.
 type AgentResponse struct {
-	Model    string        `json:"model"`
-	Response string        `json:"response,omitempty"`
-	Thinking string        `json:"thinking,omitempty"` // reasoning tokens emitted before the response
-	Error    string        `json:"error,omitempty"`
-	Metrics  *ModelMetrics `json:"metrics,omitempty"`
+	Model       string                   `json:"model"`
+	Response    string                   `json:"response,omitempty"`
+	Thinking    string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	Error       string                   `json:"error,omitempty"`
+	Metrics     *ModelMetrics            `json:"metrics,omitempty"`
+	Attachments []media.OutputAttachment `json:"-"`
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`
@@ -625,7 +632,17 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		Model:           a.model,
 		CurrentUserText: formationSourceText,
 	})
+	contextImages := make([]requestctx.InputImage, 0, len(userImages))
+	for _, image := range userImages {
+		contextImages = append(contextImages, requestctx.InputImage{MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
+	}
+	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := toolruntime.NewExposure()
+	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
+		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
+	} else if len(userImages) == 0 {
+		toolExposure.HideBuiltins(toolnames.ComfyUIImageToImage)
+	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
 
@@ -813,6 +830,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	}
 
 	var lastResp *llm.ChatResponse
+	var outputAttachments []media.OutputAttachment
 	toolFailureBudgetExhausted := false
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
@@ -953,6 +971,16 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr
 				}
+				if execErr == nil && len(result.Attachments) > 0 {
+					candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
+					if result.Outcome != governance.OutcomeProductive {
+						execErr = fmt.Errorf("tool returned attachments without a productive result")
+					} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
+						execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+					} else {
+						outputAttachments = candidate
+					}
+				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
 			} else {
 				toolContent = governanceResultText(decision.ReasonCode)
@@ -994,9 +1022,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				toolExecutionCount++
 			}
 			if streamCallback != nil {
+				var streamAttachments []media.OutputAttachment
+				if decision.Allowed && execErr == nil && len(result.Attachments) > 0 {
+					streamAttachments = append([]media.OutputAttachment(nil), result.Attachments...)
+				}
 				streamCallback(StreamChunk{
-					Type: ChunkToolResult,
-					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Type:        ChunkToolResult,
+					Tool:        toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Attachments: streamAttachments,
 				})
 			}
 
@@ -1174,6 +1207,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		Response:          finalContent,
 		Thinking:          finalThinking,
 		Metrics:           mapMetrics(lastResp),
+		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
 	}, nil

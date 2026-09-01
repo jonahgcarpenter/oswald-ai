@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -289,7 +290,7 @@ func TestSearchHandlerRendersDirectJSONSharedAcrossTenants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second {
+	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("tenant results differ:\nA: %s\nB: %s", first.Content, second.Content)
 	}
 	if first.Outcome != governance.OutcomeProductive {

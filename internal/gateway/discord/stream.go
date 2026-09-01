@@ -11,7 +11,9 @@ import (
 	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 const (
@@ -77,7 +79,17 @@ func (s *discordResponseStream) Push(chunk agent.StreamChunk) {
 		return
 	}
 	s.start()
-	s.events <- discordStreamEvent{chunk: &chunk}
+	event := discordStreamEvent{chunk: &chunk}
+	if len(chunk.Attachments) > 0 {
+		event.result = make(chan error, 1)
+	}
+	s.events <- event
+	if event.result != nil {
+		if err := <-event.result; err != nil {
+			s.responder.gateway.log().Warn("gateway.attachment.stream_failed", "failed to deliver streamed discord attachment",
+				config.F("request_id", s.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}
 }
 
 func (s *discordResponseStream) Finish(response *agent.AgentResponse) error {
@@ -115,7 +127,14 @@ func (s *discordResponseStream) run() {
 		select {
 		case event := <-s.events:
 			if event.chunk != nil {
+				var eventErr error
+				if len(event.chunk.Attachments) > 0 {
+					eventErr = state.deliverAttachments(event.chunk.Attachments)
+				}
 				state.consume(*event.chunk)
+				if event.result != nil {
+					event.result <- eventErr
+				}
 				continue
 			}
 			if event.response != nil {
@@ -151,6 +170,8 @@ type discordStreamState struct {
 	thinkingTrimmed bool
 	frozenTrimmed   bool
 	previewDisabled bool
+	attachmentCount int
+	attachmentErr   error
 }
 
 func (s *discordStreamState) consume(chunk agent.StreamChunk) {
@@ -619,13 +640,14 @@ func truncateDiscordText(value string, limit int) string {
 }
 
 func (s *discordStreamState) finish(response *agent.AgentResponse) error {
+	attachmentErr := s.deliverRemainingAttachments(response.Attachments)
 	responseText := response.Response
 	chunks := splitMessage(responseText, 2000)
 	log := s.stream.responder.gateway.log()
 	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", response.Model))
 
 	if len(chunks) == 0 {
-		return s.discardLifecycleMessages()
+		return errors.Join(attachmentErr, s.discardLifecycleMessages())
 	}
 
 	sentCount := 0
@@ -667,13 +689,49 @@ func (s *discordStreamState) finish(response *agent.AgentResponse) error {
 		messageID, err := s.send(chunk)
 		if err != nil {
 			log.Error("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", s.stream.responder.requestID), config.F("chunk_index", finalizedCount+i+1), config.ErrorField(err))
-			return err
+			return errors.Join(attachmentErr, err)
 		}
 		s.remember(messageID, chunk)
 		sentCount++
 	}
 	log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", s.stream.responder.requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
-	return lifecycleErr
+	return errors.Join(attachmentErr, lifecycleErr)
+}
+
+func (s *discordStreamState) deliverRemainingAttachments(attachments []media.OutputAttachment) error {
+	if s.attachmentErr != nil {
+		return s.attachmentErr
+	}
+	if err := media.ValidateOutputAttachments(attachments); err != nil {
+		return err
+	}
+	if s.attachmentCount > len(attachments) {
+		return fmt.Errorf("streamed attachment count exceeds final attachment count")
+	}
+	return s.deliverAttachments(attachments[s.attachmentCount:])
+}
+
+func (s *discordStreamState) deliverAttachments(attachments []media.OutputAttachment) error {
+	if s.attachmentErr != nil {
+		return s.attachmentErr
+	}
+	if err := media.ValidateOutputAttachments(attachments); err != nil {
+		s.attachmentErr = err
+		return err
+	}
+	for i := range attachments {
+		replyToID := ""
+		if !s.replyUsed {
+			replyToID = s.stream.responder.replyToID
+		}
+		if _, err := s.stream.responder.gateway.sendCommandAttachment(s.stream.responder.channelID, commands.Result{Attachment: &attachments[i]}, replyToID); err != nil {
+			s.attachmentErr = err
+			return err
+		}
+		s.replyUsed = true
+		s.attachmentCount++
+	}
+	return nil
 }
 
 func (s *discordStreamState) fail(text string) error {

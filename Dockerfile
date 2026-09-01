@@ -14,6 +14,7 @@ RUN go mod download
 
 COPY cmd/ ./cmd/
 COPY data/tools/ ./data/tools/
+COPY data/workflows/ ./data/workflows/
 COPY data/memory/soul/soul.md ./data/memory/soul/soul.md
 COPY internal/ ./internal/
 

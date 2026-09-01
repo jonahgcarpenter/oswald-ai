@@ -44,6 +44,9 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) erro
 	if response.Error != "" {
 		return r.sendError("request_failed", "Oswald could not process the request.")
 	}
+	if len(response.Attachments) > 0 {
+		return r.sendError("agent_attachments_unsupported", "Home Assistant does not support generated attachments.")
+	}
 	return r.sendResult(response.Response, response.Model, response.Metrics)
 }
 

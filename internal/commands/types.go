@@ -3,21 +3,19 @@ package commands
 import (
 	"context"
 	"fmt"
-	"mime"
-	"strings"
-	"unicode"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
 	// MaxAttachmentBytes is the maximum size of one command attachment.
-	MaxAttachmentBytes = 8 << 20
+	MaxAttachmentBytes = media.MaxOutputAttachmentBytes
 	// MaxAttachments is the maximum number of attachments in one command response.
-	MaxAttachments = 10
+	MaxAttachments = media.MaxOutputAttachments
 	// MaxTotalAttachmentBytes is the maximum combined attachment size in one command response.
-	MaxTotalAttachmentBytes = MaxAttachments * MaxAttachmentBytes
+	MaxTotalAttachmentBytes = media.MaxTotalOutputAttachmentBytes
 )
 
 // Definition describes a command registered with the command service.
@@ -48,44 +46,7 @@ type Request struct {
 }
 
 // Attachment is an in-memory file delivered with a command response.
-type Attachment struct {
-	Filename string
-	MIMEType string
-	Data     []byte
-}
-
-// Validate checks that the attachment is safe for transport delivery.
-func (a Attachment) Validate() error {
-	filename := strings.TrimSpace(a.Filename)
-	if filename == "" {
-		return fmt.Errorf("command attachment filename is required")
-	}
-	if filename != a.Filename {
-		return fmt.Errorf("command attachment filename has leading or trailing whitespace")
-	}
-	if filename == "." || filename == ".." || strings.ContainsAny(filename, `/\\`) {
-		return fmt.Errorf("command attachment filename must be a base name")
-	}
-	if len(filename) > 255 {
-		return fmt.Errorf("command attachment filename exceeds 255 bytes")
-	}
-	for _, r := range filename {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("command attachment filename contains control characters")
-		}
-	}
-	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(a.MIMEType))
-	if err != nil || mediaType == "" || !strings.Contains(mediaType, "/") {
-		return fmt.Errorf("command attachment MIME type is invalid")
-	}
-	if len(a.Data) == 0 {
-		return fmt.Errorf("command attachment data is required")
-	}
-	if len(a.Data) > MaxAttachmentBytes {
-		return fmt.Errorf("command attachment exceeds %d bytes", MaxAttachmentBytes)
-	}
-	return nil
-}
+type Attachment = media.OutputAttachment
 
 // Result is the user-facing command response.
 type Result struct {
@@ -111,23 +72,8 @@ func (r Result) OrderedAttachments() []Attachment {
 // ValidateAttachments validates per-file and aggregate transport limits.
 func (r Result) ValidateAttachments() error {
 	attachments := r.OrderedAttachments()
-	if len(attachments) > MaxAttachments {
-		return fmt.Errorf("command response exceeds %d attachments", MaxAttachments)
-	}
-	filenames := make(map[string]struct{}, len(attachments))
-	totalBytes := 0
-	for i, attachment := range attachments {
-		if err := attachment.Validate(); err != nil {
-			return fmt.Errorf("command attachment %d: %w", i+1, err)
-		}
-		if _, exists := filenames[attachment.Filename]; exists {
-			return fmt.Errorf("command response contains duplicate filename %q", attachment.Filename)
-		}
-		filenames[attachment.Filename] = struct{}{}
-		totalBytes += len(attachment.Data)
-		if totalBytes > MaxTotalAttachmentBytes {
-			return fmt.Errorf("command response attachments exceed %d total bytes", MaxTotalAttachmentBytes)
-		}
+	if err := media.ValidateOutputAttachments(attachments); err != nil {
+		return fmt.Errorf("invalid command attachments: %w", err)
 	}
 	return nil
 }

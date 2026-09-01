@@ -47,6 +47,8 @@ type ToolParameterProperty struct {
 	MaxItems             *int                             `json:"maxItems,omitempty"`
 	Minimum              *float64                         `json:"minimum,omitempty"`
 	Maximum              *float64                         `json:"maximum,omitempty"`
+	MinLength            *int                             `json:"minLength,omitempty"`
+	MaxLength            *int                             `json:"maxLength,omitempty"`
 	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 

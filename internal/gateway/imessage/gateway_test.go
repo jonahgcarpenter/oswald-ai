@@ -24,6 +24,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
@@ -99,42 +100,37 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	}
 }
 
-func TestIMessageCommandAttachmentUploadAndSend(t *testing.T) {
-	var uploadFilename, uploadMIME string
-	var uploadData []byte
-	var sent sendAttachmentRequest
+func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
+	var filename, mimeType, chatGUID, name, tempGUID string
+	var attachmentData []byte
+	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		if r.URL.Query().Get("password") != "pw" {
 			t.Fatalf("missing BlueBubbles password")
 		}
-		switch r.URL.Path {
-		case "/api/v1/attachment/upload":
-			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
-				t.Fatalf("parse upload: %v", err)
-			}
-			file, header, err := r.FormFile("attachment")
-			if err != nil {
-				t.Fatalf("read attachment: %v", err)
-			}
-			defer file.Close()
-			uploadFilename = header.Filename
-			uploadMIME = header.Header.Get("Content-Type")
-			uploadData, err = io.ReadAll(file)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, _ = w.Write([]byte(`{"data":{"path":"upload-id/export.json"}}`))
-		case "/api/v1/message/attachment":
-			if r.Header.Get("Content-Type") != "application/json" {
-				t.Fatalf("unexpected send content type %q", r.Header.Get("Content-Type"))
-			}
-			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
-				t.Fatalf("decode attachment send: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
-		default:
+		if r.URL.Path != "/api/v1/message/attachment" {
 			http.NotFound(w, r)
+			return
 		}
+		if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+			t.Fatalf("parse attachment: %v", err)
+		}
+		file, header, err := r.FormFile("attachment")
+		if err != nil {
+			t.Fatalf("read attachment: %v", err)
+		}
+		defer file.Close()
+		filename = header.Filename
+		mimeType = header.Header.Get("Content-Type")
+		attachmentData, err = io.ReadAll(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chatGUID = r.FormValue("chatGuid")
+		name = r.FormValue("name")
+		tempGUID = r.FormValue("tempGuid")
+		_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
@@ -142,41 +138,22 @@ func TestIMessageCommandAttachmentUploadAndSend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uploadFilename != "export.json" || uploadMIME != "application/json" || string(uploadData) != "private-content" {
-		t.Fatalf("unexpected upload filename=%q mime=%q data=%q", uploadFilename, uploadMIME, uploadData)
-	}
-	if sent.ChatGUID != "chat-1" || sent.AttachmentGUID != "upload-id/export.json" || sent.Name != "export.json" || sent.TempGUID == "" {
-		t.Fatalf("unexpected attachment send: %+v", sent)
+	if requestCount != 1 || filename != "export.json" || mimeType != "application/json" || string(attachmentData) != "private-content" || chatGUID != "chat-1" || name != "export.json" || tempGUID == "" {
+		t.Fatalf("unexpected attachment request count=%d filename=%q mime=%q data=%q chat=%q name=%q temp_set=%t", requestCount, filename, mimeType, attachmentData, chatGUID, name, tempGUID != "")
 	}
 }
 
 func TestIMessageCommandAttachmentProviderFailures(t *testing.T) {
-	tests := []struct {
-		name      string
-		failPath  string
-		wantCalls int
-	}{
-		{name: "upload", failPath: "/api/v1/attachment/upload", wantCalls: 1},
-		{name: "send", failPath: "/api/v1/message/attachment", wantCalls: 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				if r.URL.Path == tt.failPath {
-					http.Error(w, "private-content", http.StatusBadGateway)
-					return
-				}
-				_, _ = w.Write([]byte(`{"data":{"path":"upload-id/export.json"}}`))
-			}))
-			defer server.Close()
-			g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-			err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
-			if err == nil || strings.Contains(err.Error(), "private-content") || calls != tt.wantCalls {
-				t.Fatalf("error=%v calls=%d", err, calls)
-			}
-		})
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "private-content", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err == nil || strings.Contains(err.Error(), "private-content") || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
 	}
 }
 
@@ -187,7 +164,7 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 		case "/api/v1/message/text":
 			calls = append(calls, "text")
 			_, _ = w.Write([]byte(`{"data":{"guid":"text-1"}}`))
-		case "/api/v1/attachment/upload":
+		case "/api/v1/message/attachment":
 			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
 				t.Fatal(err)
 			}
@@ -196,18 +173,11 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 				t.Fatal(err)
 			}
 			_ = file.Close()
-			calls = append(calls, "upload:"+header.Filename)
+			calls = append(calls, "send:"+header.Filename)
 			if header.Filename == "part002" {
 				http.Error(w, "failed", http.StatusBadGateway)
 				return
 			}
-			_, _ = w.Write([]byte(`{"data":{"path":"uploaded/` + header.Filename + `"}}`))
-		case "/api/v1/message/attachment":
-			var sent sendAttachmentRequest
-			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
-				t.Fatal(err)
-			}
-			calls = append(calls, "send:"+sent.Name)
 			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-1"}}`))
 		default:
 			http.NotFound(w, r)
@@ -224,9 +194,43 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 	if err == nil {
 		t.Fatal("second-part failure was ignored")
 	}
-	want := []string{"upload:part001", "send:part001", "upload:part002"}
+	want := []string{"send:part001", "send:part002"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls=%v want %v", calls, want)
+	}
+}
+
+func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/message/attachment":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Fatal(err)
+			}
+			_, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, "attachment:"+header.Filename)
+			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-guid"}}`))
+		case "/api/v1/message/text":
+			calls = append(calls, "text")
+			_, _ = w.Write([]byte(`{"data":{"guid":"text-guid"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request"}
+	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"attachment:generated.png", "text"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
 	}
 }
 

@@ -103,19 +103,6 @@ type sendTextResponse struct {
 	} `json:"error,omitempty"`
 }
 
-type uploadAttachmentResponse struct {
-	Data struct {
-		Path string `json:"path"`
-	} `json:"data"`
-}
-
-type sendAttachmentRequest struct {
-	ChatGUID       string `json:"chatGuid"`
-	AttachmentGUID string `json:"attachmentGuid"`
-	Name           string `json:"name"`
-	TempGUID       string `json:"tempGuid"`
-}
-
 type messageLookupResponse struct {
 	Data  messageLookupData `json:"data"`
 	Error *struct {
