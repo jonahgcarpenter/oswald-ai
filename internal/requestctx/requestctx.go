@@ -14,6 +14,7 @@ const (
 	requestMetaKey contextKey = "request_meta"
 	principalKey   contextKey = "principal"
 	toolExposeKey  contextKey = "tool_exposer"
+	inputImagesKey contextKey = "input_images"
 )
 
 // ToolExposer records tools that should become visible for the active request.
@@ -28,6 +29,13 @@ type Metadata struct {
 	SessionGeneration int
 	Model             string
 	CurrentUserText   string
+}
+
+// InputImage is a request-scoped copy of one normalized current-turn image.
+type InputImage struct {
+	MIMEType string
+	Data     string
+	Source   string
 }
 
 // WithPrincipal returns a copy of ctx with the resolved request actor attached.
@@ -61,4 +69,15 @@ func WithToolExposer(ctx context.Context, exposer ToolExposer) context.Context {
 func ToolExposerFromContext(ctx context.Context) ToolExposer {
 	exposer, _ := ctx.Value(toolExposeKey).(ToolExposer)
 	return exposer
+}
+
+// WithInputImages attaches a defensive copy of current-turn images to ctx.
+func WithInputImages(ctx context.Context, images []InputImage) context.Context {
+	return context.WithValue(ctx, inputImagesKey, append([]InputImage(nil), images...))
+}
+
+// InputImagesFromContext returns a defensive copy of current-turn images.
+func InputImagesFromContext(ctx context.Context) []InputImage {
+	images, _ := ctx.Value(inputImagesKey).([]InputImage)
+	return append([]InputImage(nil), images...)
 }

@@ -24,6 +24,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
@@ -227,6 +228,43 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 	want := []string{"upload:part001", "send:part001", "upload:part002"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls=%v want %v", calls, want)
+	}
+}
+
+func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/attachment/upload":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Fatal(err)
+			}
+			_, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, "upload:"+header.Filename)
+			_, _ = w.Write([]byte(`{"data":{"path":"uploaded/generated.png"}}`))
+		case "/api/v1/message/attachment":
+			calls = append(calls, "attachment")
+			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-guid"}}`))
+		case "/api/v1/message/text":
+			calls = append(calls, "text")
+			_, _ = w.Write([]byte(`{"data":{"guid":"text-guid"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request"}
+	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"upload:generated.png", "attachment", "text"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
 	}
 }
 

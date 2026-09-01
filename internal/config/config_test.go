@@ -150,6 +150,51 @@ func TestLoadOptionalWebSearchProviders(t *testing.T) {
 	}
 }
 
+func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
+	for _, key := range []string{"COMFYUI_URL", "COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", "COMFYUI_GENERATION_TIMEOUT"} {
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ComfyUIURL != "" || cfg.ComfyUITextToImageWorkflowPath != DefaultComfyUITextToImageWorkflowPath || cfg.ComfyUIImageToImageWorkflowPath != DefaultComfyUIImageToImageWorkflowPath || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
+		t.Fatalf("unexpected ComfyUI defaults: %+v", cfg)
+	}
+
+	for _, invalid := range []string{"localhost:8188", "ftp://example.com", "http:///missing", "http://user@example.com", "http://example.com?x=1", "http://example.com#fragment"} {
+		t.Run(invalid, func(t *testing.T) {
+			t.Setenv("COMFYUI_URL", invalid)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COMFYUI_URL") {
+				t.Fatalf("Load error = %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadComfyUIOverrides(t *testing.T) {
+	t.Setenv("COMFYUI_URL", " https://comfy.example/base ")
+	t.Setenv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "text.json")
+	t.Setenv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", "image.json")
+	t.Setenv("COMFYUI_GENERATION_TIMEOUT", "45s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ComfyUIURL != "https://comfy.example/base" || cfg.ComfyUITextToImageWorkflowPath != "text.json" || cfg.ComfyUIImageToImageWorkflowPath != "image.json" || cfg.ComfyUIGenerationTimeout != 45*time.Second {
+		t.Fatalf("unexpected ComfyUI config: %+v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidComfyUITimeout(t *testing.T) {
+	t.Setenv("COMFYUI_GENERATION_TIMEOUT", "0s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "COMFYUI_GENERATION_TIMEOUT") {
+		t.Fatalf("Load error = %v", err)
+	}
+}
+
 func TestLoadRetentionPolicyDefaults(t *testing.T) {
 	unsetRetentionEnv(t)
 

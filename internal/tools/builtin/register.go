@@ -8,6 +8,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -20,6 +21,39 @@ import (
 // Register wires all builtin tools into the shared registry.
 func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
+	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
+	if comfyURL == "" {
+		for _, name := range []string{toolnames.ComfyUIImageToImage, toolnames.ComfyUITextToImage} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled ComfyUI tools because no server is configured", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage), config.F("status", "ok"))
+	} else {
+		textWorkflow, err := comfyui.LoadWorkflow(cfg.ComfyUITextToImageWorkflowPath, comfyui.TextToImage)
+		if err != nil {
+			return err
+		}
+		imageWorkflow, err := comfyui.LoadWorkflow(cfg.ComfyUIImageToImageWorkflowPath, comfyui.ImageToImage)
+		if err != nil {
+			return err
+		}
+		client, err := comfyui.NewClient(comfyURL, cfg.ComfyUIGenerationTimeout)
+		if err != nil {
+			return fmt.Errorf("initialize ComfyUI client: %w", err)
+		}
+		policy := governance.ToolPolicy{
+			BlockDuplicates: true, NormalizeArgs: normalizeComfyArgs,
+			History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		}
+		if err := reg.RegisterHandler(toolnames.ComfyUITextToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.TextToImage, textWorkflow, client, log))); err != nil {
+			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUITextToImage, err)
+		}
+		if err := reg.RegisterHandler(toolnames.ComfyUIImageToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.ImageToImage, imageWorkflow, client, log))); err != nil {
+			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUIImageToImage, err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured ComfyUI image tools", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage))
+	}
 	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
 	searxngURL := strings.TrimSpace(cfg.SearxngURL)
 	var braveClient websearch.Searcher
@@ -126,6 +160,13 @@ func normalizeSearchArgs(args map[string]interface{}) interface{} {
 func normalizeFetchArgs(args map[string]interface{}) interface{} {
 	value, _ := args["url"].(string)
 	return map[string]interface{}{"url": webfetch.NormalizeURL(value)}
+}
+
+func normalizeComfyArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"prompt":          normalizedString(args, "prompt", false),
+		"negative_prompt": normalizedString(args, "negative_prompt", false),
+	}
 }
 
 func normalizeTimeArgs(args map[string]interface{}) interface{} {

@@ -35,3 +35,17 @@ func TestToolExposerRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected exposer calls: %+v", exposer.names)
 	}
 }
+
+func TestInputImagesUseDefensiveCopies(t *testing.T) {
+	images := []InputImage{{MIMEType: "image/png", Data: "encoded", Source: "source"}}
+	ctx := WithInputImages(context.Background(), images)
+	images[0].Data = "mutated-input"
+	got := InputImagesFromContext(ctx)
+	if len(got) != 1 || got[0].Data != "encoded" {
+		t.Fatalf("stored images were mutated: %+v", got)
+	}
+	got[0].Data = "mutated-output"
+	if again := InputImagesFromContext(ctx); again[0].Data != "encoded" {
+		t.Fatalf("returned images shared context storage: %+v", again)
+	}
+}

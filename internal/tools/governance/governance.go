@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 // Outcome classifies a successful tool execution by whether it produced useful
@@ -20,10 +22,11 @@ const (
 
 // Result is the shared result returned by builtin and MCP tools.
 type Result struct {
-	Content    string
-	Outcome    Outcome
-	ReasonCode string
-	IsDegraded bool
+	Content     string
+	Outcome     Outcome
+	ReasonCode  string
+	IsDegraded  bool
+	Attachments []media.OutputAttachment
 }
 
 // HistoryMode controls how much of a completed tool call may be retained in

@@ -59,6 +59,7 @@ type CatalogEntry struct {
 // ToolVisibility controls which non-default tools are sent to the model.
 type ToolVisibility struct {
 	ExposedMCPTools map[string]bool
+	HiddenBuiltins  map[string]bool
 }
 
 // Registry maps tool names to their parsed Spec and registered Handler.
@@ -217,6 +218,9 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
 		if spec.Source == ToolSourceBuiltin && r.disabled[spec.Name] {
+			continue
+		}
+		if spec.Source == ToolSourceBuiltin && visibility.HiddenBuiltins[spec.Name] {
 			continue
 		}
 		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {

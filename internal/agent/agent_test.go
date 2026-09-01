@@ -211,6 +211,52 @@ func TestPersistedMetadataToolCallOmitsArgumentsAndResult(t *testing.T) {
 	}
 }
 
+func TestComfyUIToolStreamPayloadOmitsPromptsAndResults(t *testing.T) {
+	payload := toolStreamPayload(toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": "private prompt", "negative_prompt": "private negative"}, `{"status":"generated"}`, time.Millisecond, false)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Arguments != nil || payload.ResultText != "" || strings.Contains(string(encoded), "private") || strings.Contains(string(encoded), "generated") {
+		t.Fatalf("ComfyUI stream exposed private data: %s", encoded)
+	}
+}
+
+func TestProcessPropagatesToolAttachmentsWithoutPersistingBytes(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "image-call", Function: llm.ToolFunction{Name: "test.image", Arguments: map[string]interface{}{"prompt": "private prompt"}}}}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "attached"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	privateBytes := []byte("private-image-bytes")
+	policy := testToolPolicy()
+	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
+	if err := reg.RegisterTool(registry.Spec{Name: "test.image", Description: "Image"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: `{"attachment_count":1}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: privateBytes}}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a, store := newTestAgent(t, chat, nil, reg)
+	response, err := processAgent(a, "attachment", "discord", "session", "user-1", "Display", "draw", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, privateBytes) {
+		t.Fatalf("attachments were not propagated: %+v", response.Attachments)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("turns=%+v err=%v", turns, err)
+	}
+	encoded, err := json.Marshal(turns[0].ToolHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, privateBytes) || bytes.Contains(encoded, []byte(base64.StdEncoding.EncodeToString(privateBytes))) || bytes.Contains(encoded, []byte("private prompt")) {
+		t.Fatalf("tool history retained private attachment data: %s", encoded)
+	}
+}
+
 func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "thinking", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "oswald"}}}}}},
@@ -295,6 +341,40 @@ func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 		if !requestHasTool(request, name) {
 			t.Fatalf("expected tool missing from primary request: %s", name)
 		}
+	}
+}
+
+func TestProcessHidesComfyUIToolsByGatewayAndCurrentImages(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		gateway   string
+		images    []llm.InputImage
+		wantText  bool
+		wantImage bool
+	}{
+		{name: "discord text only", gateway: "discord", wantText: true},
+		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantText: true, wantImage: true},
+		{name: "home assistant", gateway: "homeassistant", images: []llm.InputImage{testInputImage(t, 2, 2)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+			reg := registry.New(config.NewLogger(config.LevelError))
+			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
+				if err := reg.RegisterTool(registry.Spec{Name: name, Description: name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+					return productiveResult("unused"), nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a, _ := newTestAgent(t, chat, nil, reg)
+			if _, err := processAgent(a, "visibility", test.gateway, "session", "user-1", "Display", "hello", test.images, nil); err != nil {
+				t.Fatal(err)
+			}
+			request := primaryRequests(chat.requests)[0]
+			if requestHasTool(request, toolnames.ComfyUITextToImage) != test.wantText || requestHasTool(request, toolnames.ComfyUIImageToImage) != test.wantImage {
+				t.Fatalf("tools=%+v want text=%t image=%t", request.Tools, test.wantText, test.wantImage)
+			}
+		})
 	}
 }
 

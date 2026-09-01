@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
@@ -620,6 +622,42 @@ func TestDiscordCommandAttachmentProviderFailure(t *testing.T) {
 	}}, "")
 	if err == nil || strings.Contains(err.Error(), "private-content") {
 		t.Fatalf("unexpected provider error: %v", err)
+	}
+}
+
+func TestDiscordAgentResponseDeliversAttachmentBeforeFinalText(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Fatal(err)
+			}
+			file, header, err := r.FormFile("files[0]")
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := io.ReadAll(file)
+			_ = file.Close()
+			calls = append(calls, "attachment:"+header.Filename+":"+string(data))
+		} else {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, "text:"+payload["content"].(string))
+		}
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":"message-%d"}`, len(calls))))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	responder := newRuntimeResponder(dg, "request", "channel-1", "source-1", "session", "user")
+	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"attachment:generated.png:image-data", "text:generated"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
 	}
 }
 
