@@ -122,6 +122,34 @@ func TestLoadLeavesOptionalGatewayPortsDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadOptionalWebSearchProviders(t *testing.T) {
+	tests := []struct {
+		name        string
+		brave       string
+		searxng     string
+		wantBrave   string
+		wantSearxng string
+	}{
+		{name: "neither"},
+		{name: "brave only", brave: "brave-secret", wantBrave: "brave-secret"},
+		{name: "searxng only", searxng: "https://search.example", wantSearxng: "https://search.example"},
+		{name: "both", brave: "brave-secret", searxng: "https://search.example", wantBrave: "brave-secret", wantSearxng: "https://search.example"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BRAVE_API_KEY", test.brave)
+			t.Setenv("SEARXNG_URL", test.searxng)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BraveAPIKey != test.wantBrave || cfg.SearxngURL != test.wantSearxng {
+				t.Fatalf("web search config = brave:%q searxng:%q", cfg.BraveAPIKey, cfg.SearxngURL)
+			}
+		})
+	}
+}
+
 func TestLoadRetentionPolicyDefaults(t *testing.T) {
 	unsetRetentionEnv(t)
 

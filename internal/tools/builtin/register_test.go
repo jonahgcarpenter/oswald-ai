@@ -15,6 +15,15 @@ func testConfig() *config.Config {
 	return &config.Config{SearxngURL: "http://localhost:8080"}
 }
 
+func newTestRegistry(t *testing.T, log *config.Logger) *registry.Registry {
+	t.Helper()
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
 func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
@@ -214,8 +223,48 @@ func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "web.search client") {
+	if err := Register(reg, &config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web.search client") {
 		t.Fatalf("invalid SearXNG URL registration error = %v", err)
+	}
+}
+
+func TestRegisterWebSearchProviderMatrix(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		wantShown bool
+	}{
+		{name: "neither", cfg: &config.Config{}, wantShown: false},
+		{name: "brave", cfg: &config.Config{BraveAPIKey: "secret"}, wantShown: true},
+		{name: "searxng", cfg: &config.Config{SearxngURL: "http://localhost:8080"}, wantShown: true},
+		{name: "both", cfg: &config.Config{BraveAPIKey: "secret", SearxngURL: "http://localhost:8080"}, wantShown: true},
+		{name: "whitespace", cfg: &config.Config{BraveAPIKey: "  ", SearxngURL: "\t"}, wantShown: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			log := config.NewLogger(config.LevelError)
+			reg := newTestRegistry(t, log)
+			if err := Register(reg, test.cfg, nil, nil, log); err != nil {
+				t.Fatal(err)
+			}
+			_, shown := reg.LLMTool("web.search")
+			if shown != test.wantShown || reg.HasHandler("web.search") != test.wantShown {
+				t.Fatalf("web.search shown=%t handler=%t", shown, reg.HasHandler("web.search"))
+			}
+			if test.wantShown {
+				policy, ok := reg.Policy("web.search")
+				if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
+					t.Fatalf("web.search history policy = %+v", policy.History)
+				}
+			}
+			reserved := false
+			for _, name := range reg.Names() {
+				reserved = reserved || name == "web.search"
+			}
+			if !reserved {
+				t.Fatal("web.search name was not reserved")
+			}
+		})
 	}
 }
 

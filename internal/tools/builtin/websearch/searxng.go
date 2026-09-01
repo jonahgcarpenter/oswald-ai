@@ -24,10 +24,11 @@ const (
 	maxResults             = 8
 	maxCandidates          = 50
 	maxResponseBytes       = 2 << 20
-	maxQueryRunes          = 500
+	maxQueryRunes          = 400
+	maxQueryWords          = 50
 	maxURLBytes            = 2048
 	maxTitleRunes          = 240
-	maxSnippetRunes        = 800
+	maxSnippetRunes        = 1200
 	maxEngineNames         = 8
 	maxEngineNameRunes     = 64
 	maxUnresponsiveEngines = 8
@@ -41,16 +42,16 @@ var trackingParameters = map[string]struct{}{
 	"mc_cid": {}, "mc_eid": {}, "_ga": {}, "_gl": {},
 }
 
-// Client implements Searcher against a SearXNG instance.
-type Client struct {
+// SearxngClient implements Searcher against a SearXNG instance.
+type SearxngClient struct {
 	searchURL  url.URL
 	httpClient *http.Client
 	log        *config.Logger
 }
 
-// NewClient creates a SearXNG web search client targeting an absolute HTTP(S)
+// NewSearxngClient creates a SearXNG web search client targeting an absolute HTTP(S)
 // base URL. A path prefix is preserved when constructing the search endpoint.
-func NewClient(baseURL string, log *config.Logger) (*Client, error) {
+func NewSearxngClient(baseURL string, log *config.Logger) (*SearxngClient, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err == nil {
 		parsed.Scheme = strings.ToLower(parsed.Scheme)
@@ -64,7 +65,7 @@ func NewClient(baseURL string, log *config.Logger) (*Client, error) {
 	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/search"
 	parsed.RawPath = ""
 	searchOrigin := parsed.Scheme + "://" + parsed.Host
-	return &Client{
+	return &SearxngClient{
 		searchURL: *parsed,
 		httpClient: &http.Client{
 			Timeout: httpTimeout,
@@ -80,7 +81,7 @@ func NewClient(baseURL string, log *config.Logger) (*Client, error) {
 }
 
 // Search queries SearXNG and returns only validated public web results.
-func (c *Client) Search(ctx context.Context, query string) (SearchResponse, error) {
+func (c *SearxngClient) Search(ctx context.Context, query string) (SearchResponse, error) {
 	startedAt := time.Now()
 	if err := validateQuery(query); err != nil {
 		return SearchResponse{}, err
@@ -157,7 +158,7 @@ func (c *Client) Search(ctx context.Context, query string) (SearchResponse, erro
 
 func validateQuery(query string) error {
 	if !utf8.ValidString(query) || utf8.RuneCountInString(query) > maxQueryRunes {
-		return errors.New("search query exceeded 500 runes or was invalid UTF-8")
+		return errors.New("search query exceeded 400 characters or was invalid UTF-8")
 	}
 	for _, r := range query {
 		if unicode.IsControl(r) {
@@ -166,6 +167,9 @@ func validateQuery(query string) error {
 	}
 	if strings.TrimSpace(query) == "" {
 		return errors.New("search query was empty")
+	}
+	if len(strings.Fields(query)) > maxQueryWords {
+		return errors.New("search query exceeded 50 words")
 	}
 	return nil
 }
@@ -252,7 +256,11 @@ func normalizeResult(candidate searxngResult) (SearchResult, bool) {
 	}
 
 	engines := mergeNames(nil, append([]string{candidate.Engine}, candidate.Engines...), maxEngineNames)
-	snippet := truncateRunes(cleanText(candidate.Content), maxSnippetRunes)
+	snippet := cleanText(candidate.Content)
+	if candidate.PreserveWhitespace {
+		snippet = cleanContextText(candidate.Content)
+	}
+	snippet = truncateRunes(snippet, maxSnippetRunes)
 	return SearchResult{
 		Title:       title,
 		URL:         canonical,
@@ -299,6 +307,19 @@ func cleanText(value string) string {
 		builder.WriteRune(r)
 	}
 	return strings.Join(strings.Fields(builder.String()), " ")
+}
+
+func cleanContextText(value string) string {
+	value = html.UnescapeString(strings.ReplaceAll(value, "\r\n", "\n"))
+	var builder strings.Builder
+	for _, r := range value {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			builder.WriteRune(' ')
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func truncateRunes(value string, limit int) string {
@@ -380,22 +401,23 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (c *Client) logRetry(ctx context.Context, status, attempt int) {
+func (c *SearxngClient) logRetry(ctx context.Context, status, attempt int) {
 	if c.log == nil {
 		return
 	}
-	fields := requestLogFields(ctx, config.F("attempt", attempt), config.F("status", "retry"))
+	fields := requestLogFields(ctx, config.F("provider", "searxng"), config.F("attempt", attempt), config.F("status", "retry"))
 	if status != 0 {
 		fields = append(fields, config.F("http_status", status))
 	}
 	c.log.Warn("tool.web.search.retry", "retrying web search request", fields...)
 }
 
-func (c *Client) logRequestFailure(ctx context.Context, status, attempt int, duration time.Duration) {
+func (c *SearxngClient) logRequestFailure(ctx context.Context, status, attempt int, duration time.Duration) {
 	if c.log == nil {
 		return
 	}
 	fields := requestLogFields(ctx,
+		config.F("provider", "searxng"),
 		config.F("attempt_count", attempt),
 		config.F("duration_ms", duration.Milliseconds()),
 		config.F("status", "error"),
@@ -406,7 +428,7 @@ func (c *Client) logRequestFailure(ctx context.Context, status, attempt int, dur
 	c.log.Warn("tool.web.search.request_failed", "web search request failed", fields...)
 }
 
-func (c *Client) logCompletion(ctx context.Context, query string, responseBytes int, response SearchResponse, duration time.Duration) {
+func (c *SearxngClient) logCompletion(ctx context.Context, query string, responseBytes int, response SearchResponse, duration time.Duration) {
 	if c.log == nil {
 		return
 	}
@@ -415,6 +437,7 @@ func (c *Client) logCompletion(ctx context.Context, query string, responseBytes 
 		status = "degraded"
 	}
 	fields := requestLogFields(ctx,
+		config.F("provider", "searxng"),
 		config.F("query_chars", utf8.RuneCountInString(query)),
 		config.F("response_bytes", responseBytes),
 		config.F("candidate_count", response.Stats.CandidateCount),

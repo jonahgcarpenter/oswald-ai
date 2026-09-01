@@ -23,6 +23,7 @@ func NewRegistryFromConfig(cfg *config.Config, userMemStore *usermemory.Store, g
 		return nil, err
 	}
 
-	bootstrapLog.Info("tool.bootstrap.enabled", "enabled tools", config.F("tool_count", reg.Count()), config.F("tools", strings.Join(reg.Names(), ",")))
+	enabled := reg.EnabledBuiltinNames()
+	bootstrapLog.Info("tool.bootstrap.enabled", "enabled tools", config.F("tool_count", len(enabled)), config.F("tools", strings.Join(enabled, ",")))
 	return reg, nil
 }

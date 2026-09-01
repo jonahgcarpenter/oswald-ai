@@ -1,6 +1,6 @@
 # Oswald AI - Uncensored Digital Servant
 
-> Fully local, fully uncensored, zero costly API dependencies.
+> Fully local, fully uncensored, with no paid API required.
 
 ## Overview
 
@@ -59,6 +59,19 @@ Replies to Oswald do not need another mention:
 [Reply to Oswald's message]
 Can you elaborate on that?
 ```
+
+## Web Search
+
+Web search is optional. Configure `BRAVE_API_KEY`, `SEARXNG_URL`, both, or neither:
+
+| Configuration | Behavior |
+| --- | --- |
+| Brave only | Use Brave's metered Search-plan LLM Context API. |
+| SearXNG only | Use the configured self-hosted SearXNG instance. |
+| Both | Use Brave first and fall back to SearXNG when Brave fails or has no usable result. |
+| Neither | Start normally without advertising `web.search` to the model. |
+
+Brave requires an activated Search plan and billing information. Its pricing, monthly credits, query retention, and terms can change; consult Brave's current API documentation before enabling it. Oswald sends concise search queries to Brave and retains bounded successful tool-call history with the active conversation. SearXNG remains the no-paid-API alternative, and its engine selection and weighting stay deployment-owned.
 
 ## Bootstrap
 

@@ -14,7 +14,7 @@ Search again only when a specific, important fact remains unresolved and is nece
 
 Never issue minor reformulations of an already successful query. Do not repeat searches merely for additional confirmation, collect redundant sources, or search for facts already supported by adequate results. Once the available evidence is sufficient, answer the user.
 
-Use short, factual search language. Avoid emotional, conversational, or rhetorical phrasing. Returns a bounded JSON envelope containing up to eight diverse results with titles, URLs, snippets, source metadata, and degradation status.
+Use short, factual search language. Queries must contain at most 400 characters and 50 words. Avoid emotional, conversational, or rhetorical phrasing. Returns a bounded JSON envelope containing up to eight diverse results with titles, URLs, extracted snippets or search descriptions, source metadata, and degradation status.
 
 **CRITICAL OPERATIONAL RULE - READ BEFORE SEARCHING:**
 
@@ -42,7 +42,7 @@ You must evaluate the user's intent before executing a web search. DO NOT initia
   "properties": {
     "query": {
       "type": "string",
-      "description": "A concise factual public-web search query without secrets or unnecessary personal information"
+      "description": "A concise factual public-web search query of at most 400 characters and 50 words, without secrets or unnecessary personal information"
     }
   },
   "required": ["query"],

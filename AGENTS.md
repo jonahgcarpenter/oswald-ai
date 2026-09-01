@@ -5,14 +5,14 @@ This file is the internal technical reference for how Oswald AI works today. `RE
 ## Project Overview
 
 Oswald AI is a Go application built around a single LLM gateway-backed agent loop. SQLite and sqlite-vec use CGO-backed libraries, and Discord GIFV extraction optionally invokes external `ffmpeg` and `ffprobe` executables.
-It exposes that loop through Discord, an optional Home Assistant WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with six builtin model tools:
+It exposes that loop through Discord, an optional Home Assistant WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with five always-enabled builtin model tools plus optional `web.search`:
 
-- `web.search`
 - `time.current`
 - `user_memory_search`
 - `user_memory_list`
 - `session_transcript_search`
 - `global_memory_search`
+- `web.search` when Brave or SearXNG is configured
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Every newly saved server requires an operator-provided description, which is used verbatim as the model-visible `<server>.tools` description. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Servers migrated without descriptions remain model-hidden until they are updated. Remote MCP tools are not filtered for read-only behavior.
 
@@ -65,7 +65,7 @@ Current layers:
 8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex
 9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Load the six model-visible builtin schemas from `data/tools/*.md`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+11. Load the six builtin schemas from `data/tools/*.md`, conditionally enable `web.search`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 12. Create the agent and start the broker worker pool
 13. Create the command service, including `/stop`, `/memories`, `/bootstrap`, and administrator global-memory management, then create the runtime invalidation bus and build enabled gateways
 14. Start formation and compaction with the broker's low-priority model gate
@@ -139,12 +139,14 @@ Per request it does the following:
 11. Build the chat message array: deployment policy as `system`, frozen tenant profile as `user`, optional generated summary as lower-authority untrusted historical reference data, recent `user`/`assistant` pairs in chronological order, and the current request plus explicitly untrusted recall as the final `user` message with any current-turn images
 12. Call the LLM gateway with default-visible tools plus recent or dynamically discovered MCP tools exposed for this request
 13. If the model emits tool calls:
-   - authorize every call against the exact catalog advertised for that model iteration
-   - block exact request-local duplicates using a hash of the tool name and normalized canonical arguments
-   - execute allowed handlers and classify successful results as productive or unproductive
-   - append exactly one correlated `tool` result for every declared call, including blocked calls in multi-call batches
-   - retire only a tool that exhausts its configured execution, failure, or unproductive-result allowance
-   - repeat until no tool calls remain or a global tool-governance limit is hit
+
+- authorize every call against the exact catalog advertised for that model iteration
+- block exact request-local duplicates using a hash of the tool name and normalized canonical arguments
+- execute allowed handlers and classify successful results as productive or unproductive
+- append exactly one correlated `tool` result for every declared call, including blocked calls in multi-call batches
+- retire only a tool that exhausts its configured execution, failure, or unproductive-result allowance
+- repeat until no tool calls remain or a global tool-governance limit is hit
+
 14. If the global execution, tool-iteration, or consecutive-failure budget is exhausted, make one final model call with all tools disabled
 15. Persist the cleaned final user message, final assistant reply, successful tool-name continuity projection, and bounded immutable native tool-call/result trace to the active session generation
 16. Return the final `AgentResponse`
@@ -185,12 +187,12 @@ Gateway-neutral routing policy lives in `internal/routing/` and shared gateway e
 
 Oswald keeps four distinct memory layers.
 
-| Layer                  | Storage                    | Purpose                                     | Mutable by agent |
-| ---------------------- | -------------------------- | ------------------------------------------- | ---------------- |
-| Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality           | No               |
-| Global memory          | SQLite `global_memories`   | Administrator-curated facts about Oswald shared across tenants | No |
-| Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart     | Yes              |
-| Session chat memory    | SQLite `session_turns`     | Conversation history for the active session | Implicitly       |
+| Layer                  | Storage                    | Purpose                                                        | Mutable by agent |
+| ---------------------- | -------------------------- | -------------------------------------------------------------- | ---------------- |
+| Soul memory            | `data/memory/soul/soul.md` | Identity, directives, personality                              | No               |
+| Global memory          | SQLite `global_memories`   | Administrator-curated facts about Oswald shared across tenants | No               |
+| Persistent user memory | SQLite `memory_entries`    | Facts about a user that survive restart                        | Yes              |
+| Session chat memory    | SQLite `session_turns`     | Conversation history for the active session                    | Implicitly       |
 
 ### Soul Memory
 
@@ -294,17 +296,17 @@ Runtime invalidation is in-process and transport-neutral. Account disconnect, us
 
 Retention configuration uses positive Go durations and a positive batch size:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MEMORY_RETIRED_INDEX_RETENTION` | `168h` | Retain internally generated retired/failed index tables. |
-| `MEMORY_SESSION_INACTIVITY` | `24h` | Active session lifetime before expiry cleanup. |
-| `MEMORY_PENDING_DELIVERY_TIMEOUT` | `15m` | Mark a persisted turn with no delivery outcome as terminally failed so it cannot indefinitely block compaction. |
-| `MEMORY_SUCCESSFUL_JOB_RETENTION` | `168h` | Retain successful/skipped formation and compaction jobs. |
-| `MEMORY_DEAD_JOB_RETENTION` | `720h` | Retain permanently failed formation and compaction jobs. |
-| `MEMORY_ACCOUNT_CHALLENGE_GRACE` | `24h` | Additional retention after account-link challenge expiry. |
-| `MEMORY_MAINTENANCE_INTERVAL` | `1h` | Serialized sweep interval after the immediate startup sweep. |
-| `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h` | Minimum interval between `PRAGMA optimize` runs. |
-| `MEMORY_MAINTENANCE_BATCH_SIZE` | `100` | Per-category row bound for one sweep. |
+| Variable                            | Default | Purpose                                                                                                         |
+| ----------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| `MEMORY_RETIRED_INDEX_RETENTION`    | `168h`  | Retain internally generated retired/failed index tables.                                                        |
+| `MEMORY_SESSION_INACTIVITY`         | `24h`   | Active session lifetime before expiry cleanup.                                                                  |
+| `MEMORY_PENDING_DELIVERY_TIMEOUT`   | `15m`   | Mark a persisted turn with no delivery outcome as terminally failed so it cannot indefinitely block compaction. |
+| `MEMORY_SUCCESSFUL_JOB_RETENTION`   | `168h`  | Retain successful/skipped formation and compaction jobs.                                                        |
+| `MEMORY_DEAD_JOB_RETENTION`         | `720h`  | Retain permanently failed formation and compaction jobs.                                                        |
+| `MEMORY_ACCOUNT_CHALLENGE_GRACE`    | `24h`   | Additional retention after account-link challenge expiry.                                                       |
+| `MEMORY_MAINTENANCE_INTERVAL`       | `1h`    | Serialized sweep interval after the immediate startup sweep.                                                    |
+| `MEMORY_DATABASE_OPTIMIZE_INTERVAL` | `24h`   | Minimum interval between `PRAGMA optimize` runs.                                                                |
+| `MEMORY_MAINTENANCE_BATCH_SIZE`     | `100`   | Per-category row bound for one sweep.                                                                           |
 
 Fallback memory extraction and session-compaction model calls are always enabled and share one broker-owned low-priority permit. They run only with no active or queued foreground work, and accepted foreground work cancels and durably defers the background call without consuming its provider retry budget.
 
@@ -484,16 +486,18 @@ Tools are split into schema and runtime layers.
 
 Current builtin tools:
 
-- `web.search` — bounded, degradation-aware SearXNG-backed general web search
+- `web.search` — optional bounded Brave LLM Context search with optional SearXNG-only or Brave-first fallback operation
 - `time.current` — authoritative current date and time in a requested IANA timezone
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
 - `session_transcript_search` — search delivered role-preserving exchanges in the authenticated current session's active generation for exact episodic details
 - `global_memory_search` — search administrator-curated facts about Oswald for the authenticated tenant
-An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable user recall are injected automatically. Global memory is not automatically injected; the model calls `global_memory_search` for Oswald implementation, hardware, deployment, version, architecture, configuration, capability, and similar questions. Exact older session details remain available through `session_transcript_search`; deeper durable user retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
-Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
+  An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable user recall are injected automatically. Global memory is not automatically injected; the model calls `global_memory_search` for Oswald implementation, hardware, deployment, version, architecture, configuration, capability, and similar questions. Exact older session details remain available through `session_transcript_search`; deeper durable user retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
+  Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
-`web.search` sends an explicit `en-US` general-search profile while engine selection and weighting remain deployment-owned in SearXNG. The client validates its backend URL at startup, makes at most two bounded HTTP attempts, decodes at most 2 MiB, validates and canonicalizes up to 50 source-ordered candidates, removes known tracking parameters and duplicate URLs, limits repeated hostnames, and returns up to eight results in a JSON envelope capped at 16 KiB. Titles, snippets, URLs, and metadata are explicitly untrusted external data. Partial engine failures and output truncation produce degraded typed results; the model sees only bounded engine names rather than backend error details. Search queries, result content, URLs, and backend response bodies are not logged.
+`web.search` is enabled when `BRAVE_API_KEY`, `SEARXNG_URL`, or both are configured and is model-hidden when neither is present while its name remains reserved against MCP tools. Brave uses `POST https://api.search.brave.com/res/v1/llm/context` with `Api-Version: 2026-07-31`, a 30-second timeout, US English targeting, spellcheck, SafeSearch `off`, balanced relevance, at most eight URLs, and an approximate 3,072-token context budget. One process admits at most 50 Brave attempts in a rolling second. Explicit `408`, short-window `429`, and selected `5xx` responses may retry once; ambiguous transport failures, timeouts, long quota windows, malformed successes, and oversized successes do not retry because a completed metered request may already have been billed. With both providers, Brave is primary and SearXNG runs only after Brave failure or no usable Brave result. Brave failure makes fallback output degraded; clean Brave emptiness does not. SearXNG retains its explicit `en-US` general-search profile while engine selection and weighting remain deployment-owned.
+
+Every provider response is decoded within 2 MiB, validated and canonicalized across at most 50 source-ordered candidates, stripped of known tracking parameters and duplicate URLs, limited to two results per hostname and eight final results, and encoded in a model-facing JSON envelope capped at 16 KiB. Titles, snippets, URLs, and metadata are explicitly untrusted external data. Partial provider/engine failures and output truncation produce degraded typed results; the model sees only bounded source names rather than backend error details. API keys, search queries, result content, URLs, rate-limit headers, and backend response bodies are not logged. Successful bounded web-search arguments and results remain in normal full session tool history.
 
 Optional external tools:
 
@@ -597,10 +601,10 @@ gofmt -w .
 
 ## Test Standards
 
-Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no live model gateway, Discord, BlueBubbles, MCP server, SearXNG, or embedding service access.
+Tests run in GitHub Actions without project secrets or local `.env` variables, so every test must pass in a sandbox environment with no live model gateway, Discord, BlueBubbles, MCP server, Brave, SearXNG, or embedding service access.
 
 - Use fake LLM clients, fake gateway transports, `httptest` servers, temporary directories, and isolated temporary SQLite databases
-- Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `MCP_CONFIG_ENCRYPTION_KEY`, `SEARXNG_URL`, or model budget variables in tests
+- Do not require `LLM_GATEWAY_*`, `DISCORD_TOKEN`, `BLUEBUBBLES_*`, `MCP_CONFIG_ENCRYPTION_KEY`, `BRAVE_API_KEY`, `SEARXNG_URL`, or model budget variables in tests
 - Do not make live network calls from normal unit tests; external integrations must be mocked or guarded behind explicit opt-in checks
 - Tests may validate request/response mapping and error handling, but they should not depend on a real model response
 - Keep test data deterministic and avoid relying on existing files under `data/database/`, `data/accounts/`, or user memory directories
@@ -802,6 +806,7 @@ Current startup requirements:
 - Missing or invalid settings disable the affected gateway without failing immediately, but application startup fails if no gateway is configured correctly
 - `MCP_CONFIG_ENCRYPTION_KEY` is required because the MCP store is initialized unconditionally, even when no server is configured
 - `LLM_GATEWAY_URL` defaults to `http://localhost:8080`; API and virtual keys are optional
+- `BRAVE_API_KEY` and `SEARXNG_URL` independently enable optional web search. Brave is primary when both are configured; malformed explicit SearXNG URLs fail startup; neither is required
 - The configured Bifrost gateway must enable a Logs Store for async chat and embedding routes and should use a finite provider timeout suitable for the deployment's slowest model
 
 ## Key Files
@@ -829,7 +834,7 @@ Current startup requirements:
 | `internal/tools/runtime/`                      | Request-local tool exposure state            |
 | `internal/tools/bootstrap.go`                  | Tool registry assembly                       |
 | `internal/tools/builtin/`                      | Builtin tool wiring and handlers             |
-| `internal/tools/builtin/globalmemory/`         | Shared global-memory store and handler        |
+| `internal/tools/builtin/globalmemory/`         | Shared global-memory store and handler       |
 | `internal/tools/builtin/usermemory/store.go`   | Persistent per-user memory store             |
 | `internal/soul/store.go`                       | Read-only soul system-prompt loader          |
 | `internal/commands/service.go`                 | Shared command service                       |
@@ -837,7 +842,7 @@ Current startup requirements:
 | `internal/commands/bootstrap/`                 | Process-local first-administrator bootstrap  |
 | `internal/commands/accountlinking/store.go`    | Canonical account link store                 |
 | `internal/commands/usermanagement/commands.go` | Admin and ban command handlers               |
-| `internal/identity/principal.go`                | Typed request principal and assurance        |
+| `internal/identity/principal.go`               | Typed request principal and assurance        |
 | `internal/requestctx/requestctx.go`            | Request metadata propagation through context |
 | `internal/media/images.go`                     | Image normalization and validation           |
 | `internal/media/video.go`                      | Discord GIFV contact-sheet extraction        |
@@ -894,7 +899,7 @@ Changes apply on the next request because the soul file is read fresh each time.
 - Bifrost async job IDs are not persisted and async chat jobs have no documented cancellation endpoint, so process restart or post-submission cancellation may leave remote work running until Bifrost's independently configured provider timeout
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Only six builtin model tools ship locally; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Five builtin model tools are always enabled and `web.search` is enabled only with Brave or SearXNG configuration; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
 - Application hard deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication
 - After the first successful embedding-dimension probe, the dimension is cached for the process lifetime; gateway-side route or dimension changes are not recognized until restart

@@ -38,13 +38,35 @@ type searxngResponse struct {
 }
 
 type searxngResult struct {
-	Title         string   `json:"title"`
-	URL           string   `json:"url"`
-	Content       string   `json:"content"`
-	Score         float64  `json:"score"`
-	Engine        string   `json:"engine"`
-	Engines       []string `json:"engines"`
-	Positions     []int    `json:"positions"`
-	Category      string   `json:"category"`
-	PublishedDate string   `json:"publishedDate"`
+	Title              string   `json:"title"`
+	URL                string   `json:"url"`
+	Content            string   `json:"content"`
+	Score              float64  `json:"score"`
+	Engine             string   `json:"engine"`
+	Engines            []string `json:"engines"`
+	Positions          []int    `json:"positions"`
+	Category           string   `json:"category"`
+	PublishedDate      string   `json:"publishedDate"`
+	PreserveWhitespace bool     `json:"-"`
+}
+
+type braveContextResponse struct {
+	Grounding *braveGrounding               `json:"grounding"`
+	Sources   map[string]braveContextSource `json:"sources"`
+}
+
+type braveGrounding struct {
+	Generic *[]braveContextResult `json:"generic"`
+}
+
+type braveContextResult struct {
+	URL      string   `json:"url"`
+	Title    string   `json:"title"`
+	Snippets []string `json:"snippets"`
+}
+
+type braveContextSource struct {
+	Title    string   `json:"title"`
+	Hostname string   `json:"hostname"`
+	Age      []string `json:"age"`
 }

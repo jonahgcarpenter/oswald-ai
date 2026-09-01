@@ -68,6 +68,7 @@ type Registry struct {
 	specs    map[string]Spec
 	handlers map[string]Handler
 	policies map[string]governance.ToolPolicy
+	disabled map[string]bool
 	log      *config.Logger
 }
 
@@ -78,8 +79,26 @@ func New(log *config.Logger) *Registry {
 		specs:    make(map[string]Spec),
 		handlers: make(map[string]Handler),
 		policies: make(map[string]governance.ToolPolicy),
+		disabled: make(map[string]bool),
 		log:      log,
 	}
+}
+
+// DisableBuiltin keeps a builtin name reserved while removing it from model-visible catalogs.
+func (r *Registry) DisableBuiltin(name string) error {
+	spec, ok := r.specs[name]
+	if !ok {
+		return fmt.Errorf("cannot disable builtin %q: no tool spec loaded with that name", name)
+	}
+	if spec.Source != ToolSourceBuiltin {
+		return fmt.Errorf("cannot disable builtin %q: tool source is %q", name, spec.Source)
+	}
+	if _, ok := r.handlers[name]; ok {
+		return fmt.Errorf("cannot disable builtin %q after registering its handler", name)
+	}
+	r.disabled[name] = true
+	r.log.Debug("tool.registry.builtin_disabled", "disabled builtin tool", config.F("tool_name", name))
+	return nil
 }
 
 // NewFromDirectory creates a Registry and loads tool definitions from dir.
@@ -197,6 +216,9 @@ func (r *Registry) LLMTool(name string) (llm.Tool, bool) {
 func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
+		if spec.Source == ToolSourceBuiltin && r.disabled[spec.Name] {
+			continue
+		}
 		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {
 			continue
 		}
@@ -234,12 +256,25 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 func (r *Registry) BuiltinCatalog() []CatalogEntry {
 	entries := make([]CatalogEntry, 0)
 	for _, spec := range r.orderedSpecs() {
-		if spec.Source != ToolSourceBuiltin {
+		if spec.Source != ToolSourceBuiltin || r.disabled[spec.Name] {
 			continue
 		}
 		entries = append(entries, catalogEntry(spec))
 	}
 	return entries
+}
+
+// EnabledBuiltinNames returns executable, model-visible builtin names in stable order.
+func (r *Registry) EnabledBuiltinNames() []string {
+	names := make([]string, 0, len(r.handlers))
+	for name := range r.handlers {
+		spec, ok := r.specs[name]
+		if ok && spec.Source == ToolSourceBuiltin && !r.disabled[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CatalogBySource returns tool definitions for source in stable order.

@@ -161,6 +161,38 @@ func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
 	}
 }
 
+func TestDisableBuiltinHidesToolButKeepsNameReserved(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterSpec(Spec{Name: "web.search", Description: "Search", Source: ToolSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DisableBuiltin("web.search"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.LLMTool("web.search"); ok || len(reg.BuiltinCatalog()) != 0 {
+		t.Fatal("disabled builtin remained model-visible")
+	}
+	if names := reg.Names(); len(names) != 1 || names[0] != "web.search" {
+		t.Fatalf("reserved names = %v", names)
+	}
+	if len(reg.EnabledBuiltinNames()) != 0 {
+		t.Fatalf("enabled builtins = %v", reg.EnabledBuiltinNames())
+	}
+}
+
+func TestDisableBuiltinRejectsUnknownAndMCPTools(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	if err := reg.DisableBuiltin("missing"); err == nil {
+		t.Fatal("unknown builtin was disabled")
+	}
+	if err := reg.RegisterSpec(Spec{Name: "server.tool", Source: ToolSourceMCP}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DisableBuiltin("server.tool"); err == nil {
+		t.Fatal("MCP tool was disabled as builtin")
+	}
+}
+
 func TestParseToolMarkdownRejectsMissingSections(t *testing.T) {
 	if _, err := parseToolMarkdown("# missing.description\n\n## Parameters\n\n| Name | Type | Required | Description |\n| ---- | ---- | -------- | ----------- |"); err == nil {
 		t.Fatal("expected missing description error")
