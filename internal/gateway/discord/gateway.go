@@ -830,6 +830,9 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 	images := make([]llm.InputImage, 0, len(embeds))
 	unsupported := make([]string, 0)
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		label := discordEmbedLabel(embed)
 		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
@@ -875,11 +878,23 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 func discordEmbedLabels(embeds []Embed) []string {
 	labels := make([]string, 0, len(embeds))
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		if discordEmbedVideoURL(embed) != "" || discordEmbedImageURL(embed) != "" {
 			labels = append(labels, discordEmbedLabel(embed))
 		}
 	}
 	return labels
+}
+
+func discordEmbedIsIntentionalMedia(embed Embed) bool {
+	switch strings.ToLower(strings.TrimSpace(embed.Type)) {
+	case "image", "gifv":
+		return true
+	default:
+		return false
+	}
 }
 
 func discordEmbedLabel(embed Embed) string {
@@ -924,6 +939,9 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 	urls := make([]string, 0, len(embeds)*7)
 	seen := make(map[string]struct{}, len(embeds)*7)
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		for _, rawURL := range []string{
 			embed.URL,
 			embed.Image.URL,

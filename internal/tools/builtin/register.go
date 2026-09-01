@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -52,10 +53,12 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 		searcher = searxngClient
 		primary = "searxng"
 	default:
-		if err := reg.DisableBuiltin("web.search"); err != nil {
-			return fmt.Errorf("failed to disable web.search tool: %w", err)
+		for _, name := range []string{"web.fetch", "web.search"} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
 		}
-		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web search tool because no provider is configured", config.F("tool_name", "web.search"), config.F("status", "ok"))
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", "web.search,web.fetch"), config.F("status", "ok"))
 	}
 	if searcher != nil {
 		searchPolicy := toolPolicy(2, normalizeSearchArgs)
@@ -64,6 +67,19 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 			return fmt.Errorf("failed to initialize web.search tool: %w", err)
 		}
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
+
+		fetchPolicy := governance.ToolPolicy{
+			MaxExecutions:   4,
+			MaxFailures:     2,
+			MaxUnproductive: 2,
+			BlockDuplicates: true,
+			NormalizeArgs:   normalizeFetchArgs,
+			History:         governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		}
+		if err := reg.RegisterHandler("web.fetch", fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
+			return fmt.Errorf("failed to initialize web.fetch tool: %w", err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", "web.fetch"))
 	}
 
 	if err := reg.RegisterHandler("time.current", toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
@@ -105,6 +121,11 @@ func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) go
 
 func normalizeSearchArgs(args map[string]interface{}) interface{} {
 	return map[string]interface{}{"query": normalizedString(args, "query", true)}
+}
+
+func normalizeFetchArgs(args map[string]interface{}) interface{} {
+	value, _ := args["url"].(string)
+	return map[string]interface{}{"url": webfetch.NormalizeURL(value)}
 }
 
 func normalizeTimeArgs(args map[string]interface{}) interface{} {

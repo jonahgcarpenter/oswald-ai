@@ -179,6 +179,38 @@ func TestWebSearchToolStreamPayloadDecodesStructuredResults(t *testing.T) {
 	}
 }
 
+func TestWebFetchToolStreamPayloadOmitsURLAndContent(t *testing.T) {
+	raw := `{"notice":"untrusted","url":"https://example.com/private-path","title":"Example","content_type":"text/html","source":"direct","content":"private fetched content","is_truncated":true,"is_degraded":true}`
+	payload := toolStreamPayload("web.fetch", map[string]interface{}{"url": "https://example.com/private-path"}, raw, time.Millisecond, false)
+	if payload.WebFetch == nil || payload.WebFetch.Title != "Example" || payload.WebFetch.ContentType != "text/html" || payload.WebFetch.Source != "direct" || !payload.WebFetch.IsTruncated || !payload.WebFetch.IsDegraded {
+		t.Fatalf("unexpected web fetch payload: %+v", payload)
+	}
+	if payload.Arguments != nil || payload.ResultText != "" {
+		t.Fatalf("web fetch stream retained private data: %+v", payload)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private-path") || strings.Contains(string(encoded), "private fetched content") {
+		t.Fatalf("web fetch stream exposed URL or content: %s", encoded)
+	}
+
+	malformed := toolStreamPayload("web.fetch", map[string]interface{}{"url": "https://example.com/secret"}, "not-json", time.Millisecond, false)
+	if malformed.WebFetch == nil || malformed.Arguments != nil || malformed.ResultText != "" {
+		t.Fatalf("malformed fetch result exposed data: %+v", malformed)
+	}
+}
+
+func TestPersistedMetadataToolCallOmitsArgumentsAndResult(t *testing.T) {
+	tc := llm.ToolCall{Function: llm.ToolFunction{Name: "web.fetch", Arguments: map[string]interface{}{"url": "https://example.com/private"}}}
+	policy := governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}.Effective()
+	call := persistedToolCall(tc, policy, governance.Decision{Allowed: true}, governance.Result{Outcome: governance.OutcomeProductive}, nil, "private page content", time.Now())
+	if call.HistoryMode != string(governance.HistoryMetadata) || len(call.Arguments) != 0 || call.Result != "Historical tool result omitted by policy." || !call.ArgumentsTruncated || !call.ResultTruncated || call.SearchResult {
+		t.Fatalf("metadata history retained tool data: %+v", call)
+	}
+}
+
 func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "thinking", ToolCalls: []llm.ToolCall{{ID: "call-1", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{"q": "oswald"}}}}}},

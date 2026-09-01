@@ -423,6 +423,12 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 	}
 
 	switch tool.Name {
+	case "web.fetch":
+		completed := "Fetched the requested public page"
+		if tool.WebFetch != nil && tool.WebFetch.IsDegraded {
+			completed += " with limited extraction"
+		}
+		return actionToolStatus(tool.Name, "Fetching the requested public page", completed, "Public page fetch failed")
 	case "web.search":
 		completed := "Searched the web for " + quoteToolDetail(query)
 		if tool.WebSearch != nil && tool.WebSearch.IsDegraded {

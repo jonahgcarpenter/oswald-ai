@@ -5,7 +5,7 @@ This file is the internal technical reference for how Oswald AI works today. `RE
 ## Project Overview
 
 Oswald AI is a Go application built around a single LLM gateway-backed agent loop. SQLite and sqlite-vec use CGO-backed libraries, and Discord GIFV extraction optionally invokes external `ffmpeg` and `ffprobe` executables.
-It exposes that loop through Discord, an optional Home Assistant WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with five always-enabled builtin model tools plus optional `web.search`:
+It exposes that loop through Discord, an optional Home Assistant WebSocket gateway, and an iMessage gateway backed by BlueBubbles, and ships with five always-enabled builtin model tools plus optional web tools:
 
 - `time.current`
 - `user_memory_search`
@@ -13,6 +13,7 @@ It exposes that loop through Discord, an optional Home Assistant WebSocket gatew
 - `session_transcript_search`
 - `global_memory_search`
 - `web.search` when Brave or SearXNG is configured
+- `web.fetch` when Brave or SearXNG is configured
 
 Oswald can also expose additional tools from configured MCP servers. MCP server configurations are stored in SQLite as either global servers visible to all users or user servers visible only to one canonical user. Every newly saved server requires an operator-provided description, which is used verbatim as the model-visible `<server>.tools` description. Actual MCP tools are hidden by default and become request-locally visible either after `<server>.tools` discovers them or when a successful tool from one of the latest four eligible exchanges remains visible and available for continuity. Servers migrated without descriptions remain model-hidden until they are updated. Remote MCP tools are not filtered for read-only behavior.
 
@@ -65,7 +66,7 @@ Current layers:
 8. Open separate MCP and account-link handles to the same database; each open reruns idempotent ordered initialization under the process schema mutex
 9. If no administrator exists, generate a process-local single-use bootstrap code and print instructions for claiming it from an authenticated Discord or iMessage account
 10. Start the derived-index lifecycle worker and the immediate-then-periodic maintenance worker
-11. Load the six builtin schemas from `data/tools/*.md`, conditionally enable `web.search`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
+11. Load the seven builtin schemas from `data/tools/*.md`, conditionally enable `web.search` and `web.fetch`, construct the private background memory extractor, and construct durable formation and session-compaction workers; `mcp.Provider` creates discovery tools per request rather than registering them during bootstrap
 12. Create the agent and start the broker worker pool
 13. Create the command service, including `/stop`, `/memories`, `/bootstrap`, and administrator global-memory management, then create the runtime invalidation bus and build enabled gateways
 14. Start formation and compaction with the broker's low-priority model gate
@@ -487,6 +488,7 @@ Tools are split into schema and runtime layers.
 Current builtin tools:
 
 - `web.search` — optional bounded Brave LLM Context search with optional SearXNG-only or Brave-first fallback operation
+- `web.fetch` — optional guarded direct retrieval of readable public HTML, plain text, JSON, and public X/Twitter posts
 - `time.current` — authoritative current date and time in a requested IANA timezone
 - `user_memory_search` — run deeper tenant-scoped hybrid retrieval with confidence and provenance
 - `user_memory_list` — inspect active stored user facts
@@ -495,7 +497,9 @@ Current builtin tools:
   An untrusted compacted summary, recent completed exchanges, and bounded query-relevant durable user recall are injected automatically. Global memory is not automatically injected; the model calls `global_memory_search` for Oswald implementation, hardware, deployment, version, architecture, configuration, capability, and similar questions. Exact older session details remain available through `session_transcript_search`; deeper durable user retrieval remains model-directed through `user_memory_search` and `user_memory_list`. User-memory mutation is not exposed to the primary model.
   Current time is not injected into the system prompt; the model must call `time.current` when an answer depends on it.
 
-`web.search` is enabled when `BRAVE_API_KEY`, `SEARXNG_URL`, or both are configured and is model-hidden when neither is present while its name remains reserved against MCP tools. Brave uses `POST https://api.search.brave.com/res/v1/llm/context` with `Api-Version: 2026-07-31`, a 30-second timeout, US English targeting, spellcheck, SafeSearch `off`, balanced relevance, at most eight URLs, and an approximate 3,072-token context budget. One process admits at most 50 Brave attempts in a rolling second. Explicit `408`, short-window `429`, and selected `5xx` responses may retry once; ambiguous transport failures, timeouts, long quota windows, malformed successes, and oversized successes do not retry because a completed metered request may already have been billed. With both providers, Brave is primary and SearXNG runs only after Brave failure or no usable Brave result. Brave failure makes fallback output degraded; clean Brave emptiness does not. SearXNG retains its explicit `en-US` general-search profile while engine selection and weighting remain deployment-owned.
+`web.search` and `web.fetch` are enabled when `BRAVE_API_KEY`, `SEARXNG_URL`, or both are configured and are model-hidden when neither is present while their names remain reserved against MCP tools. Brave uses `POST https://api.search.brave.com/res/v1/llm/context` with `Api-Version: 2026-07-31`, a 30-second timeout, US English targeting, spellcheck, SafeSearch `off`, balanced relevance, at most eight URLs, and an approximate 3,072-token context budget. One process admits at most 50 Brave attempts in a rolling second. Explicit `408`, short-window `429`, and selected `5xx` responses may retry once; ambiguous transport failures, timeouts, long quota windows, malformed successes, and oversized successes do not retry because a completed metered request may already have been billed. With both providers, Brave is primary and SearXNG runs only after Brave failure or no usable Brave result. Brave failure makes fallback output degraded; clean Brave emptiness does not. SearXNG retains its explicit `en-US` general-search profile while engine selection and weighting remain deployment-owned.
+
+`web.fetch` accepts only public HTTP(S) URLs on ports 80 and 443. It rejects userinfo, secret-like query parameters, local/special hostnames, and non-public IPv4/IPv6 ranges; resolves and validates every DNS answer immediately before dialing an exact IP; disables environment proxies and connection reuse; and reapplies validation to at most three redirects without allowing HTTPS downgrade. Responses have strict timeout, header, decoded-body, MIME, and model-envelope bounds. HTML is reduced to readable text, JSON is validated, and binary formats are rejected. Recognized public X/Twitter status URLs use `https://publish.x.com/oembed` first and fall back to guarded direct retrieval. Fetch arguments and results use metadata-only durable history and are not transcript-searchable.
 
 Every provider response is decoded within 2 MiB, validated and canonicalized across at most 50 source-ordered candidates, stripped of known tracking parameters and duplicate URLs, limited to two results per hostname and eight final results, and encoded in a model-facing JSON envelope capped at 16 KiB. Titles, snippets, URLs, and metadata are explicitly untrusted external data. Partial provider/engine failures and output truncation produce degraded typed results; the model sees only bounded source names rather than backend error details. API keys, search queries, result content, URLs, rate-limit headers, and backend response bodies are not logged. Successful bounded web-search arguments and results remain in normal full session tool history.
 
@@ -531,7 +535,7 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 ### Tool Governance
 
 - Tool execution errors are converted into tool-response messages so the model can recover
-- Successful handlers return a typed productive or unproductive outcome. `web.search` retires after two unproductive results or two execution failures in one request; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
+- Successful handlers return a typed productive or unproductive outcome. `web.search` retires after two unproductive results or two execution failures in one request; `web.fetch` permits four executions and retires after two unproductive results or two execution failures; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
 - Exact duplicate successful or unproductive calls are blocked before handler execution, but failed executions release their fingerprint so the exact call can be retried
 - Per-tool execution, failure, and unproductive limits are code-owned policy; zero disables a guard, and exhaustion of an enabled guard removes only that exact tool
 - `MAX_TOOL_CALLS_PER_REQUEST` defaults to `50` actual handler executions as an emergency request-wide ceiling
@@ -899,7 +903,8 @@ Changes apply on the next request because the soul file is read fresh each time.
 - Bifrost async job IDs are not persisted and async chat jobs have no documented cancellation endpoint, so process restart or post-submission cancellation may leave remote work running until Bifrost's independently configured provider timeout
 - The MCP encryption key is required at startup even when no server is configured; MCP tools are not read-only filtered, and only public HTTPS streamable-HTTP endpoints are usable
 - Formation startup reconciliation only recreates missing jobs for eligible turns from the previous 24 hours
-- Five builtin model tools are always enabled and `web.search` is enabled only with Brave or SearXNG configuration; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Five builtin model tools are always enabled and `web.search` plus `web.fetch` are enabled only with Brave or SearXNG configuration; `global_memory_search` is the sole model-visible global-memory operation, and additional tools require MCP discovery or eligible recent-tool pre-exposure
+- Direct web fetching cannot render JavaScript-only pages, bypass authentication or bot challenges, or extract PDFs and binary media; public X/Twitter post retrieval depends on the unauthenticated oEmbed representation or ordinary public HTML remaining available
 - Application hard deletion cannot remove copies already retained by external database backups or log sinks; operators must configure those systems' retention separately
 - While a replacement vector revision builds, semantic recall uses the old live revision and its embedding model; that old model must remain provider-accessible until replacement publication
 - After the first successful embedding-dimension probe, the dimension is cached for the process lifetime; gateway-side route or dimension changes are not recognized until restart

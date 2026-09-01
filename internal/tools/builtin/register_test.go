@@ -174,6 +174,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
+		"web.fetch":                       true,
 		"web.search":                      true,
 		"time.current":                    true,
 		toolnames.UserMemorySearch:        true,
@@ -195,7 +196,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestRegisterAdvertisesStrictWebSearchSchema(t *testing.T) {
+func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -204,17 +205,21 @@ func TestRegisterAdvertisesStrictWebSearchSchema(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
+	wantParameter := map[string]string{"web.fetch": "url", "web.search": "query"}
 	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name != "web.search" {
+		parameter, exists := wantParameter[tool.Function.Name]
+		if !exists {
 			continue
 		}
 		schema := tool.Function.Parameters
-		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != "query" {
-			t.Fatalf("web.search schema is not strict: %+v", schema)
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != parameter {
+			t.Fatalf("%s schema is not strict: %+v", tool.Function.Name, schema)
 		}
-		return
+		delete(wantParameter, tool.Function.Name)
 	}
-	t.Fatal("web.search schema was not advertised")
+	if len(wantParameter) != 0 {
+		t.Fatalf("web schemas were not advertised: %v", wantParameter)
+	}
 }
 
 func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
@@ -247,22 +252,30 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 			if err := Register(reg, test.cfg, nil, nil, log); err != nil {
 				t.Fatal(err)
 			}
-			_, shown := reg.LLMTool("web.search")
-			if shown != test.wantShown || reg.HasHandler("web.search") != test.wantShown {
-				t.Fatalf("web.search shown=%t handler=%t", shown, reg.HasHandler("web.search"))
-			}
-			if test.wantShown {
-				policy, ok := reg.Policy("web.search")
-				if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
-					t.Fatalf("web.search history policy = %+v", policy.History)
+			for _, toolName := range []string{"web.fetch", "web.search"} {
+				_, shown := reg.LLMTool(toolName)
+				if shown != test.wantShown || reg.HasHandler(toolName) != test.wantShown {
+					t.Fatalf("%s shown=%t handler=%t", toolName, shown, reg.HasHandler(toolName))
 				}
-			}
-			reserved := false
-			for _, name := range reg.Names() {
-				reserved = reserved || name == "web.search"
-			}
-			if !reserved {
-				t.Fatal("web.search name was not reserved")
+				if test.wantShown {
+					policy, ok := reg.Policy(toolName)
+					if !ok {
+						t.Fatalf("missing %s policy", toolName)
+					}
+					if toolName == "web.search" && (policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult) {
+						t.Fatalf("web.search history policy = %+v", policy.History)
+					}
+					if toolName == "web.fetch" && (policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult) {
+						t.Fatalf("web.fetch history policy = %+v", policy.History)
+					}
+				}
+				reserved := false
+				for _, name := range reg.Names() {
+					reserved = reserved || name == toolName
+				}
+				if !reserved {
+					t.Fatalf("%s name was not reserved", toolName)
+				}
 			}
 		})
 	}
@@ -283,14 +296,19 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing policy for %s", name)
 		}
-		if policy.MaxExecutions != 0 {
-			t.Fatalf("%s has a per-tool execution limit: %+v", name, policy)
-		}
+		wantExecutions := 0
 		wantUnproductive := 0
 		wantFailures := 0
 		if name == "web.search" {
 			wantUnproductive = 2
 			wantFailures = 2
+		} else if name == "web.fetch" {
+			wantExecutions = 4
+			wantUnproductive = 2
+			wantFailures = 2
+		}
+		if policy.MaxExecutions != wantExecutions {
+			t.Fatalf("%s max executions = %d, want %d", name, policy.MaxExecutions, wantExecutions)
 		}
 		if policy.MaxUnproductive != wantUnproductive {
 			t.Fatalf("%s max unproductive = %d, want %d", name, policy.MaxUnproductive, wantUnproductive)
