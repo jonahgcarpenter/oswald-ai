@@ -11,6 +11,7 @@ import (
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
 	memoriescommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/memories"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
+	stopcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/stop"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
@@ -20,8 +21,9 @@ import (
 
 // MCPDeps contains optional dependencies for MCP management commands.
 type MCPDeps struct {
-	Store   *mcpmanager.Store
-	Manager *mcpmanager.Manager
+	Store    *mcpmanager.Store
+	Manager  *mcpmanager.Manager
+	Canceler stopcommands.Canceler
 }
 
 // NewService creates the application command service with all built-in commands.
@@ -41,6 +43,9 @@ func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemor
 	}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
+	}
+	if len(optionalMCP) > 0 && optionalMCP[0].Canceler != nil {
+		registrations = append(registrations, commands.Command{Handler: stopcommands.New(optionalMCP[0].Canceler, users, users)})
 	}
 	if bootstrap != nil {
 		registrations = append(registrations, commands.Command{Handler: bootstrap})

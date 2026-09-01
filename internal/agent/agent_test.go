@@ -47,6 +47,64 @@ func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
 	}
 }
 
+func TestProcessReturnsBeforeProviderCallWhenCanceled(t *testing.T) {
+	chat := &fakeChatter{}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	response, err := agent.Process(ctx, Request{
+		RequestID: "canceled", SessionKey: "session", Prompt: "hello",
+		Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken},
+	})
+	if !errors.Is(err, context.Canceled) || response != nil {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	if len(chat.requests) != 0 {
+		t.Fatalf("provider received %d requests", len(chat.requests))
+	}
+}
+
+func TestProcessPropagatesCancellationDuringProviderCallWithoutPersistence(t *testing.T) {
+	chat := &cancelingChatter{started: make(chan struct{})}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct {
+		response *AgentResponse
+		err      error
+	}, 1)
+	go func() {
+		response, err := agent.Process(ctx, Request{
+			RequestID: "canceled", SessionKey: "session", Prompt: "hello",
+			Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken},
+		})
+		done <- struct {
+			response *AgentResponse
+			err      error
+		}{response: response, err: err}
+	}()
+	<-chat.started
+	cancel()
+	result := <-done
+	if !errors.Is(result.err, context.Canceled) || result.response != nil {
+		t.Fatalf("response=%+v err=%v", result.response, result.err)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 0 {
+		t.Fatalf("persisted canceled turns: %+v", turns)
+	}
+}
+
+type cancelingChatter struct{ started chan struct{} }
+
+func (c *cancelingChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+	close(c.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)

@@ -141,6 +141,30 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	}
 }
 
+func TestDiscordCancellationRemovesPartialLifecycleOutput(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	r.stream.editInterval = time.Millisecond
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "partial reasoning"})
+	deadline := time.Now().Add(time.Second)
+	for len(rest.sentMessages()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(rest.sentMessages()) != 1 {
+		t.Fatalf("partial lifecycle message was not sent: %+v", rest.sentMessages())
+	}
+	if err := r.CancelAgentResponse(); err != nil {
+		t.Fatal(err)
+	}
+	deleted := rest.deletedMessageIDs()
+	if len(deleted) != 1 || deleted[0] != "sent-1" {
+		t.Fatalf("deleted lifecycle messages = %v", deleted)
+	}
+	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "late content"})
+}
+
 func TestDiscordStreamFinalizesLongResponseAcrossMessages(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	defer rest.server.Close()

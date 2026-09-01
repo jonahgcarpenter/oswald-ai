@@ -21,7 +21,15 @@ var (
 	ErrQueueFull = errors.New("broker queue full")
 	// ErrShuttingDown indicates that the broker no longer accepts new work.
 	ErrShuttingDown = errors.New("broker is shutting down")
+	// ErrAgentWorkCanceled indicates that a stop command canceled foreground agent work.
+	ErrAgentWorkCanceled = errors.New("agent work canceled")
 )
+
+// CancelReport describes foreground agent work affected by a cancellation request.
+type CancelReport struct {
+	ActiveSignaled int
+	QueuedCanceled int
+}
 
 // LaneKey identifies work that must execute serially and in acceptance order.
 type LaneKey struct {
@@ -62,7 +70,21 @@ type work struct {
 	releasedFences  []bool
 	exclusive       bool
 	gated           bool
+	ctx             context.Context
+	cancel          context.CancelCauseFunc
+	ownerUserID     string
+	state           workState
+	deliverOnce     sync.Once
 }
+
+type workState uint8
+
+const (
+	workQueued workState = iota
+	workRunning
+	workCanceled
+	workCompleted
+)
 
 type userFence struct {
 	mu             sync.Mutex
@@ -209,21 +231,29 @@ func (b *Broker) Submit(req *Request) error {
 	if req.ResponseChan == nil {
 		req.ResponseChan = make(chan Result, 1)
 	}
-	w := &work{
-		key:     laneKey(req.Principal, req.SessionKey),
-		request: req,
+	requestCtx, cancel := context.WithCancelCause(b.lifecycleCtx)
+	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
+	deliver := func(result Result) {
+		w.deliverOnce.Do(func() { deliverResult(req.ResponseChan, result) })
 	}
 	w.run = func() error {
+		if cause := context.Cause(w.ctx); cause != nil {
+			deliver(Result{Err: cause})
+			return nil
+		}
 		if req.RefreshPrincipal != nil {
 			resolved := false
 			for attempt := 0; attempt < 8; attempt++ {
 				previousUserID := req.Principal.CanonicalUserID
 				principal, err := req.RefreshPrincipal(req.Principal)
 				if err != nil {
-					deliverResult(req.ResponseChan, Result{Principal: req.Principal, Err: err})
+					deliver(Result{Principal: req.Principal, Err: err})
 					return nil
 				}
 				req.Principal = principal
+				b.mu.Lock()
+				w.ownerUserID = principal.CanonicalUserID
+				b.mu.Unlock()
 				if principal.CanonicalUserID == previousUserID {
 					resolved = true
 					break
@@ -232,27 +262,36 @@ func (b *Broker) Submit(req *Request) error {
 			}
 			if !resolved {
 				err := fmt.Errorf("principal ownership changed too many times while queued")
-				deliverResult(req.ResponseChan, Result{Principal: req.Principal, Err: err})
+				deliver(Result{Principal: req.Principal, Err: err})
 				return nil
 			}
 		}
-		resp, err := b.agent.Process(b.lifecycleCtx, agent.Request{
+		if cause := context.Cause(w.ctx); cause != nil {
+			deliver(Result{Principal: req.Principal, Err: cause})
+			return nil
+		}
+		resp, err := b.agent.Process(w.ctx, agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect,
 		})
-		deliverResult(req.ResponseChan, Result{Response: resp, Principal: req.Principal, Err: err})
+		if cause := context.Cause(w.ctx); cause != nil {
+			err = cause
+			resp = nil
+		}
+		deliver(Result{Response: resp, Principal: req.Principal, Err: err})
 		return nil
 	}
 	w.finish = func(err error) {
 		if err != nil {
-			deliverResult(req.ResponseChan, Result{Err: err})
+			deliver(Result{Err: err})
 		}
 	}
 	b.log.Debug("broker.request.queued", "queued broker request",
 		config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
 		config.F("chat_id", req.ChatID), config.F("session_id", req.SessionKey))
 	if err := b.enqueue(w); err != nil {
+		cancel(err)
 		reason := "queue_full"
 		text := "request rejected: broker queue full"
 		if errors.Is(err, ErrShuttingDown) {
@@ -266,6 +305,51 @@ func (b *Broker) Submit(req *Request) error {
 		return err
 	}
 	return nil
+}
+
+// CancelActiveAgentWork cancels the currently running foreground request in one conversation.
+func (b *Broker) CancelActiveAgentWork(canonicalUserID, sessionID string) CancelReport {
+	canonicalUserID = strings.TrimSpace(canonicalUserID)
+	sessionID = strings.TrimSpace(sessionID)
+	if canonicalUserID == "" || sessionID == "" {
+		return CancelReport{}
+	}
+	return b.cancelAgentWork(func(w *work) bool {
+		return w.state == workRunning && w.ownerUserID == canonicalUserID && w.key.SessionID == sessionID
+	})
+}
+
+// CancelAllAgentWork cancels all active and queued foreground agent requests.
+func (b *Broker) CancelAllAgentWork() CancelReport {
+	return b.cancelAgentWork(func(w *work) bool {
+		return w.state == workRunning || w.state == workQueued
+	})
+}
+
+func (b *Broker) cancelAgentWork(matches func(*work) bool) CancelReport {
+	b.mu.Lock()
+	var report CancelReport
+	var canceled []*work
+	for _, lane := range b.lanes {
+		for _, w := range lane {
+			if w.request == nil || !matches(w) {
+				continue
+			}
+			if w.state == workRunning {
+				report.ActiveSignaled++
+			} else {
+				report.QueuedCanceled++
+			}
+			w.state = workCanceled
+			w.cancel(ErrAgentWorkCanceled)
+			canceled = append(canceled, w)
+		}
+	}
+	b.mu.Unlock()
+	for _, w := range canceled {
+		w.deliverOnce.Do(func() { deliverResult(w.request.ResponseChan, Result{Err: ErrAgentWorkCanceled}) })
+	}
+	return report
 }
 
 // RunInLane runs a synchronous gateway operation in the same FIFO lane used by agent work.
@@ -424,12 +508,23 @@ func (b *Broker) runWorker(id int) {
 	defer b.workerWG.Done()
 	b.log.Debug("broker.worker.started", "broker worker started", config.F("worker_id", id))
 	for w := range b.ready {
+		b.mu.Lock()
+		canceled := w.state == workCanceled
+		if !canceled {
+			w.state = workRunning
+		}
+		b.mu.Unlock()
 		if w.request != nil {
 			b.log.Debug("broker.worker.processing", "broker worker processing request",
 				config.F("worker_id", id), config.F("request_id", w.request.RequestID),
 				config.F("gateway", w.request.Principal.Gateway), config.F("chat_id", w.request.ChatID))
 		}
-		err := safeRun(w.run)
+		var err error
+		if canceled {
+			err = ErrAgentWorkCanceled
+		} else {
+			err = safeRun(w.run)
+		}
 		w.finish(err)
 		if w.gated {
 			for i := len(w.fences) - 1; i >= 0; i-- {
@@ -471,6 +566,7 @@ func (b *Broker) transferReaderFence(w *work, canonicalUserID string) {
 
 func (b *Broker) complete(completed *work) {
 	b.mu.Lock()
+	completed.state = workCompleted
 	lane := b.lanes[completed.key]
 	if len(lane) > 0 {
 		lane = lane[1:]

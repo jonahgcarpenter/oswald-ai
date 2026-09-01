@@ -72,6 +72,11 @@ type Responder interface {
 	SendAgentError(text string) error
 }
 
+// CancellationResponder performs optional transport-specific cleanup for a stopped request.
+type CancellationResponder interface {
+	CancelAgentResponse() error
+}
+
 // Outcome describes how a normalized request was handled.
 type Outcome struct {
 	Action routing.Action

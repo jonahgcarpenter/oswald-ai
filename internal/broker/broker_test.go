@@ -752,12 +752,93 @@ func TestBrokerShutdownCancelsActiveAgentRequest(t *testing.T) {
 	}
 }
 
+func TestCancelActiveAgentWorkPreservesQueuedRequest(t *testing.T) {
+	processor := &sequencedCancelProcessor{started: make(chan string, 2)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	active := &Request{RequestID: "active", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
+	queued := &Request{RequestID: "queued", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
+	if err := b.Submit(active); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Submit(queued); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-processor.started; got != "active" {
+		t.Fatalf("first request = %q", got)
+	}
+	report := b.CancelActiveAgentWork("user", "session")
+	if report.ActiveSignaled != 1 || report.QueuedCanceled != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+	if result := <-active.ResponseChan; !errors.Is(result.Err, ErrAgentWorkCanceled) {
+		t.Fatalf("active error = %v", result.Err)
+	}
+	if got := <-processor.started; got != "queued" {
+		t.Fatalf("second request = %q", got)
+	}
+	select {
+	case result := <-queued.ResponseChan:
+		if result.Err != nil || result.Response == nil || result.Response.Response != "queued complete" {
+			t.Fatalf("queued result = %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued request did not run after active cancellation")
+	}
+}
+
+func TestCancelAllAgentWorkImmediatelyCompletesQueuedRequests(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 2)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	requests := []*Request{
+		{RequestID: "one", Principal: principal, SessionKey: "one", ResponseChan: make(chan Result, 1)},
+		{RequestID: "two", Principal: principal, SessionKey: "two", ResponseChan: make(chan Result, 1)},
+	}
+	for _, req := range requests {
+		if err := b.Submit(req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report := b.CancelAllAgentWork()
+	if report.ActiveSignaled != 0 || report.QueuedCanceled != 2 {
+		t.Fatalf("report = %+v", report)
+	}
+	for _, req := range requests {
+		if result := <-req.ResponseChan; !errors.Is(result.Err, ErrAgentWorkCanceled) {
+			t.Fatalf("%s error = %v", req.RequestID, result.Err)
+		}
+	}
+	b.Start()
+	select {
+	case req := <-processor.requests:
+		t.Fatalf("canceled queued request reached processor: %+v", req)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 type captureProcessor struct {
 	requests chan agent.Request
 }
 
 type cancelProcessor struct {
 	started chan struct{}
+}
+
+type sequencedCancelProcessor struct {
+	started chan string
+}
+
+func (p *sequencedCancelProcessor) Process(ctx context.Context, req agent.Request) (*agent.AgentResponse, error) {
+	p.started <- req.RequestID
+	if req.RequestID == "active" {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return &agent.AgentResponse{Response: "queued complete"}, nil
 }
 
 func (p *cancelProcessor) Process(ctx context.Context, _ agent.Request) (*agent.AgentResponse, error) {

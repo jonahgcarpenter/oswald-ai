@@ -28,6 +28,7 @@ type Definition struct {
 	Usage         string
 	AdminOnly     bool
 	UserExclusive bool
+	OutOfBand     bool
 }
 
 // Request is the gateway-neutral command execution context. Conversation scope

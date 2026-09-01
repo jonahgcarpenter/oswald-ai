@@ -48,6 +48,8 @@ func (r *runtimeResponder) SendAgentError(text string) error {
 	return r.sendAndRemember(text)
 }
 
+func (r *runtimeResponder) CancelAgentResponse() error { return nil }
+
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return nil
