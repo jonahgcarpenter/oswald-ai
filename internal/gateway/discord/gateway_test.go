@@ -661,6 +661,100 @@ func TestDiscordAgentResponseDeliversAttachmentBeforeFinalText(t *testing.T) {
 	}
 }
 
+func TestDiscordStreamsAttachmentBeforeRequestingFinalText(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+	attachmentStarted := make(chan struct{})
+	releaseAttachment := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Error(err)
+			}
+			file, header, err := r.FormFile("files[0]")
+			if err != nil {
+				t.Error(err)
+			} else {
+				_ = file.Close()
+			}
+			mu.Lock()
+			calls = append(calls, "attachment:"+header.Filename)
+			mu.Unlock()
+			close(attachmentStarted)
+			<-releaseAttachment
+		} else {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			mu.Lock()
+			calls = append(calls, strings.ToLower(r.Method)+":"+fmt.Sprint(payload["content"]))
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"id":"message-1"}`))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	responder := newRuntimeResponder(dg, "request", "channel-1", "source-1", "session", "user")
+	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
+	streamReturned := make(chan struct{})
+	go func() {
+		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "comfyui.text_to_image"}, Attachments: []media.OutputAttachment{attachment}})
+		close(streamReturned)
+	}()
+	<-attachmentStarted
+	select {
+	case <-streamReturned:
+		t.Fatal("stream callback returned before Discord completed the attachment request")
+	default:
+	}
+	close(releaseAttachment)
+	<-streamReturned
+
+	responder.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "generated"})
+	if err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	attachmentCount := 0
+	finalTextIndex := -1
+	for i, call := range calls {
+		if strings.HasPrefix(call, "attachment:") {
+			attachmentCount++
+		}
+		if strings.HasSuffix(call, ":generated") {
+			finalTextIndex = i
+		}
+	}
+	if len(calls) == 0 || calls[0] != "attachment:generated.png" || attachmentCount != 1 || finalTextIndex <= 0 {
+		t.Fatalf("calls=%v", calls)
+	}
+}
+
+func TestDiscordDoesNotRetryFailedStreamAttachmentAtFinalDelivery(t *testing.T) {
+	attachmentCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			attachmentCalls++
+			http.Error(w, "provider body", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"message-1"}`))
+	}))
+	defer server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	responder := newRuntimeResponder(dg, "request", "channel-1", "source-1", "session", "user")
+	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
+	responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Attachments: []media.OutputAttachment{attachment}})
+	if err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{attachment}}); err == nil {
+		t.Fatal("streamed attachment failure was not returned at final delivery")
+	}
+	if attachmentCalls != 1 {
+		t.Fatalf("attachment calls=%d, want 1", attachmentCalls)
+	}
+}
+
 func TestDiscordIgnoresUnmentionedGuildMessage(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)

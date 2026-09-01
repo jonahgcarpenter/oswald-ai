@@ -118,9 +118,10 @@ type ToolStreamGlobalMemoryPayload struct {
 // StreamChunk is a single typed token event streamed to gateways during Process().
 // Gateways receive thinking tokens, content tokens, and agent status messages via this type.
 type StreamChunk struct {
-	Type StreamChunkType    `json:"type"`
-	Text string             `json:"text,omitempty"`
-	Tool *ToolStreamPayload `json:"tool,omitempty"`
+	Type        StreamChunkType          `json:"type"`
+	Text        string                   `json:"text,omitempty"`
+	Tool        *ToolStreamPayload       `json:"tool,omitempty"`
+	Attachments []media.OutputAttachment `json:"-"`
 }
 
 func toolStreamPayload(toolName string, args map[string]interface{}, result string, duration time.Duration, isError bool) *ToolStreamPayload {
@@ -1021,9 +1022,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 				toolExecutionCount++
 			}
 			if streamCallback != nil {
+				var streamAttachments []media.OutputAttachment
+				if decision.Allowed && execErr == nil && len(result.Attachments) > 0 {
+					streamAttachments = append([]media.OutputAttachment(nil), result.Attachments...)
+				}
 				streamCallback(StreamChunk{
-					Type: ChunkToolResult,
-					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Type:        ChunkToolResult,
+					Tool:        toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Attachments: streamAttachments,
 				})
 			}
 
