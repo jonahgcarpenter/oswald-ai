@@ -60,29 +60,6 @@ Replies to Oswald do not need another mention:
 Can you elaborate on that?
 ```
 
-## Web Access
-
-Web search and direct public-page fetching are optional. Configure `BRAVE_API_KEY`, `SEARXNG_URL`, both, or neither:
-
-| Configuration | Behavior |
-| --- | --- |
-| Brave only | Use Brave's metered Search-plan LLM Context API. |
-| SearXNG only | Use the configured self-hosted SearXNG instance. |
-| Both | Use Brave first and fall back to SearXNG when Brave fails or has no usable result. |
-| Neither | Start normally without advertising `web.search` or `web.fetch` to the model. |
-
-Brave requires an activated Search plan and billing information. Its pricing, monthly credits, query retention, and terms can change; consult Brave's current API documentation before enabling it. Oswald sends concise search queries to Brave and retains bounded successful tool-call history with the active conversation. SearXNG remains the no-paid-API alternative, and its engine selection and weighting stay deployment-owned.
-
-When either search provider is enabled, `web.fetch` can retrieve readable HTML, plain text, JSON, and public X/Twitter posts from exact public URLs. Fetching is restricted to public HTTP(S) hosts on standard ports, revalidates DNS and redirects against private-address access, and does not retain URLs or page bodies in durable tool history. PDFs, binary media, authenticated pages, and JavaScript-only content are unsupported.
-
-## ComfyUI Image Generation
-
-Set `COMFYUI_URL` to enable `comfyui.text_to_image` and `comfyui.image_to_image` for Discord and iMessage. Image-to-image uses the first image attached to the current request. Home Assistant does not support generated attachments, so neither tool is advertised there.
-
-The model can provide only positive and negative prompt text. Checkpoint, dimensions, batch size, steps, CFG, denoise, sampler, scheduler, scaling, and graph topology remain operator-controlled in the configured API workflow files. Oswald validates those workflows at startup and generates a private random 32-bit seed for each request.
-
-ComfyUI generation is serialized process-wide. After downloading and validating every generated image, Oswald calls ComfyUI's global `/free` endpoint before returning the attachment. This integration therefore assumes a dedicated ComfyUI instance, or an instance whose use is serialized exclusively through Oswald; `/free` unloads models globally and can disrupt unrelated clients.
-
 ## Bootstrap
 
 When no administrator exists, Oswald prints a process-local, single-use bootstrap code to the terminal. From an authenticated Discord, iMessage, or Home Assistant conversation, run:
