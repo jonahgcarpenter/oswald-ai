@@ -912,30 +912,44 @@ func (g *Gateway) sendText(chatGUID, text, selectedMessageGUID string, partIndex
 	return result.Data.GUID, nil
 }
 
-// sendCommandAttachment uploads and sends one in-memory attachment through BlueBubbles.
+// sendCommandAttachment sends one in-memory attachment through BlueBubbles.
 func (g *Gateway) sendCommandAttachment(chatGUID string, attachment commands.Attachment) error {
-	attachmentGUID, err := g.uploadCommandAttachment(attachment)
-	if err != nil {
+	if err := attachment.Validate(); err != nil {
 		return err
 	}
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/attachment", g.BlueBubblesPassword)
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(sendAttachmentRequest{
-		ChatGUID:       chatGUID,
-		AttachmentGUID: attachmentGUID,
-		Name:           attachment.Filename,
-		TempGUID:       newTempGUID(),
-	})
-	if err != nil {
-		return fmt.Errorf("marshal BlueBubbles attachment send payload: %w", err)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for name, value := range map[string]string{
+		"chatGuid": chatGUID,
+		"name":     attachment.Filename,
+		"tempGuid": newTempGUID(),
+	} {
+		if err := writer.WriteField(name, value); err != nil {
+			return fmt.Errorf("write BlueBubbles attachment field: %w", err)
+		}
 	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "attachment", "filename": attachment.Filename}))
+	header.Set("Content-Type", attachment.MIMEType)
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return fmt.Errorf("create BlueBubbles attachment part: %w", err)
+	}
+	if _, err := part.Write(attachment.Data); err != nil {
+		return fmt.Errorf("write BlueBubbles attachment: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close BlueBubbles attachment payload: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
 	if err != nil {
 		return fmt.Errorf("build BlueBubbles attachment send request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("send BlueBubbles attachment request: %w", err)
@@ -945,49 +959,6 @@ func (g *Gateway) sendCommandAttachment(chatGUID string, attachment commands.Att
 		return fmt.Errorf("BlueBubbles attachment send failed with status %d", resp.StatusCode)
 	}
 	return nil
-}
-
-func (g *Gateway) uploadCommandAttachment(attachment commands.Attachment) (string, error) {
-	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/attachment/upload", g.BlueBubblesPassword)
-	if err != nil {
-		return "", err
-	}
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "attachment", "filename": attachment.Filename}))
-	header.Set("Content-Type", attachment.MIMEType)
-	part, err := writer.CreatePart(header)
-	if err != nil {
-		return "", fmt.Errorf("create BlueBubbles attachment upload part: %w", err)
-	}
-	if _, err := part.Write(attachment.Data); err != nil {
-		return "", fmt.Errorf("write BlueBubbles attachment upload: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("close BlueBubbles attachment upload: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
-	if err != nil {
-		return "", fmt.Errorf("build BlueBubbles attachment upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	resp, err := g.httpClient().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("upload BlueBubbles attachment: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("BlueBubbles attachment upload failed with status %d", resp.StatusCode)
-	}
-	var result uploadAttachmentResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode BlueBubbles attachment upload response: %w", err)
-	}
-	if strings.TrimSpace(result.Data.Path) == "" {
-		return "", fmt.Errorf("BlueBubbles attachment upload returned no path")
-	}
-	return result.Data.Path, nil
 }
 
 // buildBlueBubblesEndpoint constructs an authenticated BlueBubbles REST endpoint.
