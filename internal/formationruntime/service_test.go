@@ -3,6 +3,7 @@ package formationruntime
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -25,6 +26,23 @@ type fakeExtractor struct {
 	malformed  int
 	err        error
 	calls      int
+}
+
+type fakePatternExtractor struct {
+	fakeExtractor
+	patterns     usermemory.MemoryPatternBatch
+	patternErr   error
+	patternCalls int
+	turnIDs      []int64
+}
+
+func (f *fakePatternExtractor) ExtractPatterns(_ context.Context, turns []usermemory.StoredSessionTurn) (usermemory.MemoryPatternBatch, error) {
+	f.patternCalls++
+	f.turnIDs = f.turnIDs[:0]
+	for _, turn := range turns {
+		f.turnIDs = append(f.turnIDs, turn.ID)
+	}
+	return f.patterns, f.patternErr
 }
 
 type unavailableLowPriorityGate struct{}
@@ -112,7 +130,7 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil || job.ID != jobID {
+	if err != nil || job.ID != jobID || job.Purpose != usermemory.FormationPurposeBackgroundPattern {
 		t.Fatalf("claim=%+v err=%v", job, err)
 	}
 	if err := service.process(context.Background(), &job); err != nil {
@@ -135,6 +153,211 @@ func TestServiceProcessesAndReplaysTurnIdempotently(t *testing.T) {
 	}
 	if extractor.calls != 1 {
 		t.Fatalf("extractor calls=%d want=1 with persisted artifact", extractor.calls)
+	}
+}
+
+func TestServicePatternArtifactIsStableAndSpoofedSourceRejectsWholePattern(t *testing.T) {
+	store := formationTestStore(t)
+	first := formationTestTurn(t, store, "I keep making review notes concise.", "pattern-1")
+	second := formationTestTurn(t, store, "I repeatedly make review summaries concise.", "pattern-2")
+	extractor := &fakePatternExtractor{patterns: usermemory.MemoryPatternBatch{Patterns: []usermemory.MemoryPattern{{
+		Statement: "The user may favor concise review communication.", Category: "communication_preferences",
+		ClaimSlot: "communication.review_style", ClaimValue: "concise", Sensitivity: "low", Confidence: 0.65,
+		Observations: []usermemory.PatternObservation{
+			{SourceTurnID: first, Evidence: "I keep making review notes concise."},
+			{SourceTurnID: second, Evidence: "I repeatedly make review summaries concise."},
+			{SourceTurnID: second + 1000, Evidence: "spoofed"},
+		},
+	}}}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	jobID, created, err := store.EnqueuePatternFormationJob(context.Background(), usermemory.FormationSource{RequestID: "pattern-2", SessionID: "session", SessionGeneration: 1, TurnID: second, Model: "model"}, "user-1")
+	if err != nil || !created {
+		t.Fatalf("enqueue id=%d created=%v err=%v", jobID, created, err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.FormationJobArtifact(context.Background(), job)
+	if err != nil || artifact == "" {
+		t.Fatalf("artifact=%q err=%v", artifact, err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if extractor.patternCalls != 1 || len(extractor.turnIDs) != 2 || extractor.turnIDs[0] != first || extractor.turnIDs[1] != second {
+		t.Fatalf("calls=%d turn_ids=%v", extractor.patternCalls, extractor.turnIDs)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+	if candidate, err := store.LoadCandidate(context.Background(), "user-1", 1); err == nil {
+		t.Fatalf("spoofed pattern left candidate fragment: %+v", candidate)
+	}
+}
+
+func TestServicePatternRequiresNewAnchorEvidence(t *testing.T) {
+	store := formationTestStore(t)
+	first := formationTestTurn(t, store, "Pancakes sound good.", "pattern-1")
+	second := formationTestTurn(t, store, "I could eat pancakes today.", "pattern-2")
+	third := formationTestTurn(t, store, "What time is it?", "pattern-3")
+	extractor := &fakePatternExtractor{patterns: usermemory.MemoryPatternBatch{Patterns: []usermemory.MemoryPattern{{
+		Statement: "The user likely likes pancakes.", Category: "durable_preferences",
+		ClaimSlot: "preference.food.pancakes", ClaimValue: "likes", Sensitivity: "low", Confidence: 0.8,
+		Observations: []usermemory.PatternObservation{{SourceTurnID: first, Evidence: "Pancakes sound good."}, {SourceTurnID: second, Evidence: "I could eat pancakes today."}},
+	}}}}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	_, created, err := store.EnqueuePatternFormationJob(context.Background(), usermemory.FormationSource{RequestID: "pattern-3", SessionID: "session", SessionGeneration: 1, TurnID: third, Model: "model"}, "user-1")
+	if err != nil || !created {
+		t.Fatalf("enqueue created=%v err=%v", created, err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("stale pattern reassessment created memory: %+v err=%v", memories, err)
+	}
+	if candidate, err := store.LoadCandidate(context.Background(), "user-1", 1); err == nil {
+		t.Fatalf("stale pattern reassessment left evidence: %+v", candidate)
+	}
+}
+
+func TestServiceEnqueueCreatesIndependentAgentSaveAndBackgroundJobs(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestForegroundTurn(t, store, "I prefer concise replies.", "foreground")
+	extractor := &fakeExtractor{}
+	service := NewService(store, extractor, "model", config.NewLogger(config.LevelError))
+	source := usermemory.FormationSource{RequestID: "foreground", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model", ExtractorVersion: usermemory.FormationExtractorVersion}
+	if err := service.Enqueue(context.Background(), "user-1", source); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.Purpose != usermemory.FormationPurposeAgentSave || job.ExtractorVersion != usermemory.AgentSaveExtractorVersion {
+		t.Fatalf("agent-save job=%+v err=%v", job, err)
+	}
+	artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", turnID)
+	if err != nil || len(artifact.Candidates) != 1 {
+		t.Fatalf("artifact=%+v err=%v", artifact, err)
+	}
+	if output, evaluateErr := artifact.Candidates[0].Evaluate("I prefer concise replies."); evaluateErr != nil || output.Approval != memoryformation.ApprovalApproved {
+		t.Fatalf("reevaluated output=%+v err=%v", output, evaluateErr)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if extractor.calls != 0 {
+		t.Fatalf("agent-save processing made %d extractor calls", extractor.calls)
+	}
+	if err := store.CompleteFormationJob(context.Background(), job, false); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := store.ListMemories("user-1", "", "", 10)
+	if err != nil || len(memories) != 1 || memories[0].Statement != "The user prefers concise replies." {
+		t.Fatalf("memories=%+v err=%v", memories, err)
+	}
+
+	background, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || background.Purpose != usermemory.FormationPurposeBackgroundPattern || background.ExtractorVersion != usermemory.FormationExtractorVersion {
+		t.Fatalf("background job=%+v err=%v", background, err)
+	}
+}
+
+func TestServiceAgentSavePassesValidatedReinforcementTarget(t *testing.T) {
+	store := formationTestStore(t)
+	baseOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "I prefer concise replies.", Statement: "The user likes concise replies.", Evidence: "I prefer concise replies.",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAgentSave,
+		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryCommunicationPreferences,
+		Context: memoryformation.ContextDirectAssertion, Confidence: 0.6, Importance: 3,
+		ClaimSlot: "communication.reply_style", ClaimValue: "concise",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _, err := store.ProposeCandidate(context.Background(), "user-1", usermemory.CandidateProposal{Output: baseOutput, IdempotencyKey: "target-base"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID := formationTestForegroundTurn(t, store, "I prefer concise replies.", "target-save", base.PublishedMemoryID)
+	service := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError))
+	if err := service.Enqueue(context.Background(), "user-1", usermemory.FormationSource{RequestID: "target-save", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model"}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.Purpose != usermemory.FormationPurposeAgentSave {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(base.PublishedMemoryID)
+	if err != nil || memory.Statement != "The user prefers concise replies." || memory.Confidence != 1 || memory.EvidenceCount != 2 {
+		t.Fatalf("reinforced memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestServiceEnqueueOmitsAgentSaveJobForEmptyArtifact(t *testing.T) {
+	store := formationTestStore(t)
+	turnID := formationTestTurn(t, store, "Nothing durable here", "empty-foreground")
+	service := NewService(store, &fakeExtractor{}, "model", config.NewLogger(config.LevelError))
+	if err := service.Enqueue(context.Background(), "user-1", usermemory.FormationSource{RequestID: "empty-foreground", SessionID: "session", SessionGeneration: 1, TurnID: turnID, Model: "model"}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.Purpose != usermemory.FormationPurposeBackgroundPattern {
+		t.Fatalf("job=%+v err=%v", job, err)
+	}
+	if _, err := store.ClaimFormationJob(context.Background(), time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unexpected second job: %v", err)
+	}
+}
+
+func TestAgentSaveReconciliationIsIdempotentAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oswald.db")
+	log := config.NewLogger(config.LevelError)
+	db, err := database.Open(path, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('user-1')`); err != nil {
+		t.Fatal(err)
+	}
+	store := usermemory.NewStore(path, log)
+	turnID := formationTestForegroundTurn(t, store, "I prefer concise replies.", "restart-agent-save")
+	if err := store.MarkFormationEligible(context.Background(), "user-1", turnID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := usermemory.NewStore(path, log)
+	t.Cleanup(func() { reopened.Close() })
+	count, err := reopened.ReconcileAgentSaveFormationJobs(context.Background(), "model")
+	if err != nil || count != 1 {
+		t.Fatalf("first reconciliation count=%d err=%v", count, err)
+	}
+	count, err = reopened.ReconcileAgentSaveFormationJobs(context.Background(), "model")
+	if err != nil || count != 0 {
+		t.Fatalf("second reconciliation count=%d err=%v", count, err)
+	}
+	job, err := reopened.ClaimFormationJob(context.Background(), time.Minute)
+	if err != nil || job.TurnID != turnID || job.Purpose != usermemory.FormationPurposeAgentSave {
+		t.Fatalf("reconciled job=%+v err=%v", job, err)
 	}
 }
 
@@ -646,6 +869,39 @@ func formationTestTurn(t *testing.T, store *usermemory.Store, text, requestID st
 		t.Fatal(err)
 	}
 	if err := store.MarkFormationEligible(context.Background(), "user-1", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	return turn.ID
+}
+
+func formationTestForegroundTurn(t *testing.T, store *usermemory.Store, text, requestID string, targetMemoryID ...int64) int64 {
+	t.Helper()
+	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: text, Statement: "The user prefers concise replies.", Evidence: text,
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAgentSave,
+		Scope: memoryformation.ScopeLongTerm, Category: memoryformation.CategoryCommunicationPreferences,
+		Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 3,
+		ClaimSlot: "communication.reply_style", ClaimValue: "concise",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
+	var target int64
+	if len(targetMemoryID) > 0 {
+		target = targetMemoryID[0]
+	}
+	turn, err := store.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(
+		ctx, "session", "user-1", profile.Generation, text, "answer", nil, usermemory.EmptyToolHistory(),
+		[]requestctx.StagedMemoryCandidate{{CanonicalUserID: "user-1", Candidate: output, TargetMemoryID: target}}, time.Hour,
+		usermemory.SessionPromptPressure{Tokens: 10, Limit: 100, Version: "test"},
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return turn.ID

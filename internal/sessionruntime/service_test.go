@@ -53,7 +53,6 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 	if f.err != nil {
 		return usermemory.SummaryArtifact{}, f.err
 	}
-	first := turns[0]
 	commitments := []string{"Report progress"}
 	if previous != nil {
 		commitments = append(append([]string(nil), previous.Commitments...), "Finish review")
@@ -62,12 +61,6 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 		Narrative: "The user is progressing through Atlas work.",
 		OpenTasks: []string{"Continue Atlas"}, Commitments: commitments,
 		Entities: []string{"Atlas"}, Decisions: []string{"Work sequentially"}, TopicTags: []string{"project"},
-		Candidates: []usermemory.CompactionCandidateArtifact{{
-			SourceTurnID: first.ID, Statement: "The user is working on Atlas.", Evidence: first.UserText,
-			Scope: "long_term", Category: "projects", Context: "direct_assertion",
-			Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4,
-			ClaimSlot: "project.name", ClaimValue: "Atlas",
-		}},
 	}, nil
 }
 
@@ -145,38 +138,49 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 		t.Fatalf("incremental tail=%d err=%v", len(tail), err)
 	}
 	active, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(active) != 1 || active[0].ClaimSlot != "project.name" {
-		t.Fatalf("pre-compaction candidate was not unified and published: %+v err=%v", active, err)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("compaction created durable memory: %+v err=%v", active, err)
 	}
 }
 
-func TestEvaluateCompactionCandidateLifecycleThresholdAndSoundness(t *testing.T) {
-	turn := usermemory.SessionTurn{ID: 7, UserText: "I work on Atlas."}
-	base := usermemory.CompactionCandidateArtifact{
-		SourceTurnID: 7, Statement: "The user works on Atlas.", Evidence: "I work on Atlas.",
-		Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement",
-		Sensitivity: "low", Importance: 4, ClaimSlot: "project.name", ClaimValue: "Atlas",
+func TestServicePublishesLegacyArtifactWithoutStagingCandidates(t *testing.T) {
+	store, db := newSessionRuntimeStoreWithDB(t)
+	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
+	if err != nil {
+		t.Fatal(err)
 	}
-	below := base
-	below.Confidence = 0.349
-	evaluated, err := evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{below})
-	if err != nil || evaluated[0].output.Approval != "proposed" {
-		t.Fatalf("below-threshold evaluation=%+v err=%v", evaluated, err)
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
+		t.Fatal(err)
 	}
-	atThreshold := base
-	atThreshold.Confidence = 0.35
-	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{atThreshold})
-	if err != nil || evaluated[0].output.Approval != "approved" || evaluated[0].output.ClaimSlot != "project.name" || evaluated[0].output.ClaimValue != "atlas" {
-		t.Fatalf("at-threshold evaluation=%+v err=%v", evaluated, err)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute, "model", SummaryGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
 	}
-	unsound := base
-	unsound.Confidence = 0.99
-	unsound.Evidence = "My coworker works on Atlas."
-	unsound.Statement = "The user works on Atlas."
-	turn.UserText = unsound.Evidence
-	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{unsound})
-	if err != nil || evaluated[0].output.Approval == "approved" {
-		t.Fatalf("unsound high-confidence evaluation=%+v err=%v", evaluated, err)
+	legacy := usermemory.SummaryArtifact{
+		Narrative: "Legacy summary", GenerationModel: job.Model, GeneratorVersion: job.GeneratorVersion,
+		Candidates: []usermemory.CompactionCandidateArtifact{{
+			SourceTurnID: job.CoveredThroughTurnID + 1000, Statement: "Invalid legacy candidate", Evidence: "not in the source turn",
+			Scope: "invalid", Category: "invalid", Context: "invalid", Provenance: "invalid", Sensitivity: "invalid",
+			Confidence: 2, Importance: 99, ClaimSlot: "invalid", ClaimValue: "invalid",
+		}},
+	}
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatalf("publish legacy artifact: %v", err)
+	}
+	summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation)
+	if err != nil || summary.Narrative != legacy.Narrative {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	var candidateCount int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?`, "user-1").Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCount != 0 {
+		t.Fatalf("compaction staged %d memory candidates", candidateCount)
 	}
 }
 
@@ -361,28 +365,6 @@ func TestServiceCompactionProviderCallsHaveAbsoluteBound(t *testing.T) {
 		default:
 			t.Fatalf("unexpected state=%q", state)
 		}
-	}
-}
-
-func TestValidateCompactionCandidatesKeepsStoreFailuresTransient(t *testing.T) {
-	store := newSessionRuntimeStore(t)
-	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
-	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute, "model", SummaryGeneratorVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err = service.validateCandidates(ctx, job, usermemory.SummaryArtifact{})
-	if err == nil || errors.Is(err, errInvalidCompactionOutput) {
-		t.Fatalf("validation error=%v", err)
 	}
 }
 

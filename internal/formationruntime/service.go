@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/leaseruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
@@ -78,25 +79,25 @@ func (s *Service) Enqueue(ctx context.Context, userID string, source usermemory.
 	if err := s.store.MarkFormationEligible(ctx, userID, source.TurnID); err != nil {
 		return err
 	}
-	if _, err := s.store.EnqueueFormationJob(ctx, source, userID); err != nil {
-		return err
+	_, _, agentSaveErr := s.store.EnqueueAgentSaveFormationJob(ctx, source, userID)
+	var backgroundErr error
+	if _, ok := s.extractor.(PatternExtractor); ok {
+		_, _, backgroundErr = s.store.EnqueuePatternFormationJob(ctx, source, userID)
+	} else {
+		_, backgroundErr = s.store.EnqueueFormationJob(ctx, source, userID)
 	}
 	select {
 	case s.notify <- struct{}{}:
 	default:
 	}
-	return nil
+	return errors.Join(agentSaveErr, backgroundErr)
 }
 
 func (s *Service) run(ctx context.Context) {
 	defer s.wg.Done()
 	ticker := time.NewTicker(formationPollInterval)
 	defer ticker.Stop()
-	if count, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
-		s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
-	} else if count > 0 && s.log != nil {
-		s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
-	}
+	s.reconcile(ctx)
 	ticks := 0
 	for {
 		s.drain(ctx)
@@ -111,14 +112,30 @@ func (s *Service) run(ctx context.Context) {
 				} else if count > 0 && s.log != nil {
 					s.log.Server("user_memory.formation").Info("user_memory.formation.job.redriven", "redrove user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
 				}
-				if count, err := s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion); err != nil {
-					s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
-				} else if count > 0 && s.log != nil {
-					s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
-				}
+				s.reconcile(ctx)
 			}
 		case <-s.notify:
 		}
+	}
+}
+
+func (s *Service) reconcile(ctx context.Context) {
+	if count, err := s.store.ReconcileAgentSaveFormationJobs(ctx, s.model); err != nil {
+		s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile agent-save formation jobs", err, config.F("formation_purpose", usermemory.FormationPurposeAgentSave))
+	} else if count > 0 && s.log != nil {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled agent-save formation jobs", config.F("job_count", count), config.F("formation_purpose", usermemory.FormationPurposeAgentSave), config.F("status", "ok"))
+	}
+	var count int64
+	var err error
+	if _, ok := s.extractor.(PatternExtractor); ok {
+		count, err = s.store.ReconcilePatternFormationJobs(ctx, s.model)
+	} else {
+		count, err = s.store.ReconcileFormationJobs(ctx, s.model, usermemory.FormationExtractorVersion)
+	}
+	if err != nil {
+		s.warn("user_memory.formation.job.reconcile_failed", "failed to reconcile user-memory formation jobs", err)
+	} else if count > 0 && s.log != nil {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.job.reconciled", "reconciled user-memory formation jobs", config.F("job_count", count), config.F("formation_purpose", usermemory.FormationPurposeBackgroundPattern), config.F("status", "ok"))
 	}
 }
 
@@ -199,6 +216,12 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 	}
 	if err := s.store.ValidateFormationJobLease(ctx, *job); err != nil {
 		return err
+	}
+	if job.Purpose == usermemory.FormationPurposeAgentSave {
+		return s.processAgentSave(ctx, job, turn)
+	}
+	if job.ExtractorVersion == usermemory.PatternExtractorVersion {
+		return s.processPattern(ctx, job)
 	}
 	publishedCount := 0
 	proposedCount := 0
@@ -300,6 +323,144 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 			config.F("validation_failed_count", validationFailedCount), config.F("proposed_count", proposedCount), config.F("approved_count", approvedCount),
 			config.F("rejected_count", rejectedCount), config.F("published_count", publishedCount),
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+	}
+	return nil
+}
+
+func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJob) error {
+	window, err := s.store.FormationPatternContext(ctx, *job)
+	if err != nil {
+		return errors.Join(errPermanentExtraction, err)
+	}
+	extracted := usermemory.MemoryPatternBatch{}
+	artifact, err := s.store.FormationJobArtifact(ctx, *job)
+	if err != nil {
+		return err
+	}
+	if artifact != "" {
+		extracted, err = usermemory.DecodeMemoryPatternBatchJSON([]byte(artifact))
+		if err != nil {
+			return errors.Join(errPermanentExtraction, fmt.Errorf("decode persisted pattern artifact: %w", err))
+		}
+	} else {
+		patternExtractor, ok := s.extractor.(PatternExtractor)
+		if !ok {
+			return errors.Join(errPermanentExtraction, fmt.Errorf("pattern extractor is unavailable"))
+		}
+		extractParent := ctx
+		release := func() {}
+		if s.gate != nil {
+			var acquired bool
+			extractParent, release, acquired = s.gate.TryAcquireLowPriority(ctx)
+			if !acquired {
+				return errBackgroundPreempted
+			}
+		}
+		defer release()
+		renewedJob := *job
+		err = leaseruntime.Run(extractParent, s.jobLease, func(renewCtx context.Context) error {
+			leaseUntil, renewErr := s.store.RenewFormationJobLease(renewCtx, renewedJob, s.jobLease)
+			if renewErr == nil {
+				renewedJob.LeaseUntil = leaseUntil
+			}
+			return renewErr
+		}, func(workCtx context.Context) error {
+			extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:pattern:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model})
+			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
+			var extractErr error
+			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns)
+			return extractErr
+		})
+		*job = renewedJob
+		wasPreempted := extractParent.Err() != nil && ctx.Err() == nil
+		release()
+		release = func() {}
+		if wasPreempted {
+			if llm.WasAsyncJobSubmitted(err) {
+				return err
+			}
+			return errBackgroundPreempted
+		}
+		if err != nil {
+			return err
+		}
+		payload, err := usermemory.MarshalMemoryPatternBatchArtifact(extracted)
+		if err != nil {
+			return err
+		}
+		if err := s.store.SaveFormationJobArtifact(ctx, *job, string(payload)); err != nil {
+			return err
+		}
+	}
+	turns := make(map[int64]usermemory.StoredSessionTurn, len(window.Turns))
+	for _, turn := range window.Turns {
+		turns[turn.ID] = turn
+	}
+	for _, pattern := range extracted.Patterns {
+		type evaluatedObservation struct {
+			turn   usermemory.StoredSessionTurn
+			output memoryformation.CandidateOutput
+		}
+		evaluated := make([]evaluatedObservation, 0, len(pattern.Observations))
+		hasAnchorObservation := false
+		for _, observation := range pattern.Observations {
+			turn, ok := turns[observation.SourceTurnID]
+			if !ok {
+				evaluated = nil
+				break
+			}
+			output, evaluateErr := usermemory.EvaluatePatternObservation(turn, pattern, observation.Evidence)
+			if evaluateErr != nil || output.Approval == "rejected" {
+				evaluated = nil
+				break
+			}
+			evaluated = append(evaluated, evaluatedObservation{turn: turn, output: output})
+			hasAnchorObservation = hasAnchorObservation || observation.SourceTurnID == job.TurnID
+		}
+		if len(evaluated) < 2 || !hasAnchorObservation {
+			continue
+		}
+		for _, observation := range evaluated {
+			_, _, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
+				Output: observation.output, RequireCorroboration: true,
+				Source:         usermemory.FormationSource{SessionID: observation.turn.SessionID, SessionGeneration: observation.turn.Generation, TurnID: observation.turn.ID, Model: job.Model, ExtractorVersion: usermemory.PatternExtractorVersion},
+				IdempotencyKey: fmt.Sprintf("pattern:%d:%s:%s", observation.turn.ID, observation.output.ClaimSlot, observation.output.ClaimValue), FormationJob: job,
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if _, err := s.store.AggregatePatternCandidates(ctx, *job, pattern.ClaimSlot, pattern.ClaimValue); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) processAgentSave(ctx context.Context, job *usermemory.FormationJob, turn usermemory.StoredSessionTurn) error {
+	artifact, err := s.store.SessionTurnForegroundMemory(ctx, job.UserID, job.TurnID)
+	if err != nil {
+		return errors.Join(errPermanentExtraction, err)
+	}
+	for index, candidate := range artifact.Candidates {
+		output, evaluateErr := candidate.Evaluate(turn.UserText)
+		if evaluateErr != nil || output.Approval == memoryformation.ApprovalRejected {
+			continue
+		}
+		_, _, err = s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
+			Output:         output,
+			TargetMemoryID: candidate.TargetMemoryID,
+			Source: usermemory.FormationSource{
+				RequestID: job.RequestID, SessionID: turn.SessionID, SessionGeneration: turn.Generation,
+				TurnID: turn.ID, Model: job.Model, ExtractorVersion: usermemory.AgentSaveExtractorVersion,
+			},
+			IdempotencyKey:      fmt.Sprintf("agent-save:%d:%d:%s", turn.ID, index, usermemory.AgentSaveExtractorVersion),
+			SupersedesStatement: candidate.SupersedesStatement,
+			FormationJob:        job,
+		})
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

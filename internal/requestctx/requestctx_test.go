@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
 type testExposer struct{ names []string }
@@ -20,6 +21,41 @@ func TestPrincipalAndMetadataRoundTrip(t *testing.T) {
 	gotPrincipal, ok := PrincipalFromContext(ctx)
 	if !ok || gotPrincipal != principal || meta.RequestID != "req-1" || meta.SessionID != "session-1" || meta.SessionGeneration != 3 {
 		t.Fatalf("unexpected metadata: %+v", meta)
+	}
+}
+
+func TestMemoryStageCollectorBoundsAndCopiesCandidates(t *testing.T) {
+	collector := NewMemoryStageCollector()
+	ctx := WithMemoryStageCollector(context.Background(), collector)
+	gotCollector := MemoryStageCollectorFromContext(ctx)
+	approved := memoryformation.CandidateOutput{Approval: memoryformation.ApprovalApproved, Statement: "The user prefers tea."}
+	if err := gotCollector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: approved}}); err != nil {
+		t.Fatal(err)
+	}
+	got := collector.Candidates()
+	got[0].Candidate.Statement = "mutated"
+	if collector.Candidates()[0].Candidate.Statement != "The user prefers tea." {
+		t.Fatal("Candidates returned shared slice storage")
+	}
+	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: approved}, {CanonicalUserID: "usr_1", Candidate: approved}}); err == nil {
+		t.Fatal("expected request-local candidate limit")
+	}
+	if len(collector.Candidates()) != 1 {
+		t.Fatal("failed batch partially mutated collector")
+	}
+	proposed := approved
+	proposed.Approval = memoryformation.ApprovalProposed
+	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: proposed, TargetMemoryID: 9}}); err != nil {
+		t.Fatalf("proposed candidate was not accepted: %v", err)
+	}
+	rejected := approved
+	rejected.Approval = memoryformation.ApprovalRejected
+	if err := NewMemoryStageCollector().Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: rejected}}); err == nil {
+		t.Fatal("rejected candidate was accepted")
+	}
+	other := NewMemoryStageCollector()
+	if err := other.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: approved}, {CanonicalUserID: "usr_2", Candidate: approved}}); err == nil {
+		t.Fatal("expected mixed-tenant batch rejection")
 	}
 }
 

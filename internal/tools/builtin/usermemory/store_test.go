@@ -511,6 +511,36 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 	}
 }
 
+func TestMergeUsersTxUsesMaxConfidenceAndStrongestAssessmentForDuplicate(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "winner", "loser")
+	ctx := context.Background()
+	winnerOutput := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.6, "preference.drink", "tea")
+	loserOutput := evaluatedClaimCandidate(t, "My preferred beverage is tea", "The user's preferred beverage is tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityIdentityOrContact, 0.9, "preference.drink", "tea")
+	winnerCandidate, _, err := store.ProposeCandidate(ctx, "winner", CandidateProposal{Output: winnerOutput, IdempotencyKey: "winner-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ProposeCandidate(ctx, "loser", CandidateProposal{Output: loserOutput, IdempotencyKey: "loser-tea"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.sql.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeUsersTx(ctx, tx, "winner", "loser", "winner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(winnerCandidate.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.9 || memory.Statement != loserOutput.Statement || memory.Category != string(loserOutput.Category) || memory.Sensitivity != string(memoryformation.SensitivityIdentityOrContact) || memory.EvidenceCount != 2 {
+		t.Fatalf("merged memory=%+v err=%v", memory, err)
+	}
+}
+
 func TestMergeUsersTxMovesRunningFormationJobAfterSourceTurn(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck

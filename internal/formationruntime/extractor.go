@@ -16,3 +16,8 @@ var invalidOutputCode = memoryextractor.InvalidOutputCode
 type Extractor interface {
 	Extract(context.Context, usermemory.StoredSessionTurn) (usermemory.MemorySaveBatch, error)
 }
+
+// PatternExtractor proposes repeated signals from a frozen user-turn window.
+type PatternExtractor interface {
+	ExtractPatterns(context.Context, []usermemory.StoredSessionTurn) (usermemory.MemoryPatternBatch, error)
+}

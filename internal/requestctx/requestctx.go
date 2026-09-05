@@ -4,8 +4,11 @@ package requestctx
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
 type contextKey string
@@ -15,7 +18,71 @@ const (
 	principalKey   contextKey = "principal"
 	toolExposeKey  contextKey = "tool_exposer"
 	inputImagesKey contextKey = "input_images"
+	memoryStageKey contextKey = "memory_stage"
 )
+
+// MaxStagedMemoryCandidates is the foreground per-request staging limit.
+const MaxStagedMemoryCandidates = 2
+
+// StagedMemoryCandidate is a prevalidated candidate awaiting successful delivery.
+type StagedMemoryCandidate struct {
+	CanonicalUserID     string
+	Candidate           memoryformation.CandidateOutput
+	TargetMemoryID      int64
+	SupersedesStatement string
+}
+
+// MemoryStageCollector holds foreground candidates for one request. It does not
+// publish them; the delivery path owns any later durable write.
+type MemoryStageCollector struct {
+	mu         sync.Mutex
+	candidates []StagedMemoryCandidate
+}
+
+// NewMemoryStageCollector creates an empty request-local collector.
+func NewMemoryStageCollector() *MemoryStageCollector { return &MemoryStageCollector{} }
+
+// Stage atomically appends a bounded batch of prevalidated candidates.
+func (c *MemoryStageCollector) Stage(candidates []StagedMemoryCandidate) error {
+	if c == nil {
+		return fmt.Errorf("memory stage collector is unavailable")
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("memory stage batch must not be empty")
+	}
+	for _, candidate := range candidates {
+		if candidate.CanonicalUserID == "" || candidate.TargetMemoryID < 0 || (candidate.Candidate.Approval != memoryformation.ApprovalApproved && candidate.Candidate.Approval != memoryformation.ApprovalProposed) {
+			return fmt.Errorf("memory stage candidate is not publishable")
+		}
+		if candidate.CanonicalUserID != candidates[0].CanonicalUserID {
+			return fmt.Errorf("memory stage candidates belong to different canonical users")
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.candidates)+len(candidates) > MaxStagedMemoryCandidates {
+		return fmt.Errorf("memory stage contains more than %d candidates", MaxStagedMemoryCandidates)
+	}
+	if len(c.candidates) > 0 {
+		for _, candidate := range candidates {
+			if candidate.CanonicalUserID != c.candidates[0].CanonicalUserID {
+				return fmt.Errorf("memory stage candidate belongs to a different canonical user")
+			}
+		}
+	}
+	c.candidates = append(c.candidates, candidates...)
+	return nil
+}
+
+// Candidates returns a defensive copy of the currently staged candidates.
+func (c *MemoryStageCollector) Candidates() []StagedMemoryCandidate {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]StagedMemoryCandidate(nil), c.candidates...)
+}
 
 // ToolExposer records tools that should become visible for the active request.
 type ToolExposer interface {
@@ -80,4 +147,15 @@ func WithInputImages(ctx context.Context, images []InputImage) context.Context {
 func InputImagesFromContext(ctx context.Context) []InputImage {
 	images, _ := ctx.Value(inputImagesKey).([]InputImage)
 	return append([]InputImage(nil), images...)
+}
+
+// WithMemoryStageCollector attaches the request's foreground memory collector.
+func WithMemoryStageCollector(ctx context.Context, collector *MemoryStageCollector) context.Context {
+	return context.WithValue(ctx, memoryStageKey, collector)
+}
+
+// MemoryStageCollectorFromContext returns the request's foreground memory collector.
+func MemoryStageCollectorFromContext(ctx context.Context) *MemoryStageCollector {
+	collector, _ := ctx.Value(memoryStageKey).(*MemoryStageCollector)
+	return collector
 }

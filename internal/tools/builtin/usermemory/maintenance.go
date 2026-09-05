@@ -74,7 +74,7 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	if counts.PendingDeliveriesFailed, err = execAffected(ctx, tx, `WITH due AS (SELECT id FROM session_turns WHERE delivered_at IS NULL AND delivery_failed_at IS NULL AND julianday(created_at) <= julianday(?) ORDER BY julianday(created_at), id LIMIT ?) UPDATE session_turns SET delivery_failed_at = ? WHERE id IN (SELECT id FROM due)`, pendingCutoff, batch, nowText); err != nil {
 		return counts, err
 	}
-	if counts.CandidatesDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_candidates WHERE id IN (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries published ON published.id = candidate.published_memory_id WHERE candidate.published_memory_id IS NULL OR published.status IN ('expired','superseded') ORDER BY candidate.id LIMIT ?)`, batch); err != nil {
+	if counts.CandidatesDeleted, err = execAffected(ctx, tx, `DELETE FROM memory_candidates WHERE id IN (SELECT candidate.id FROM memory_candidates candidate LEFT JOIN memory_entries published ON published.id = candidate.published_memory_id WHERE (candidate.published_memory_id IS NULL AND julianday(candidate.created_at) <= julianday(?)) OR published.status IN ('expired','superseded') ORDER BY candidate.id LIMIT ?)`, deadCutoff, batch); err != nil {
 		return counts, err
 	}
 	if counts.FormationJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE id IN (SELECT id FROM durable_jobs WHERE job_kind = 'memory_formation' AND ((state IN ('succeeded','skipped') AND julianday(completed_at) <= julianday(?)) OR (state = 'dead' AND julianday(completed_at) <= julianday(?))) ORDER BY id LIMIT ?)`, successCutoff, deadCutoff, batch); err != nil {

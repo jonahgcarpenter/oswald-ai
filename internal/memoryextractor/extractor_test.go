@@ -3,6 +3,7 @@ package memoryextractor
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -140,6 +141,50 @@ func TestLLMExtractorClassifiesProviderErrors(t *testing.T) {
 	_, err = newTestExtractor(t, transient).Extract(context.Background(), usermemory.StoredSessionTurn{UserText: "I use Go"})
 	if err == nil || errors.Is(err, ErrPermanentExtraction) {
 		t.Fatalf("transient error=%v", err)
+	}
+}
+
+func TestLLMExtractorUsesSeparateStrictPatternToolAndUserTurnsOnly(t *testing.T) {
+	arguments := map[string]interface{}{"patterns": []interface{}{map[string]interface{}{
+		"statement": "The user may favor concise review communication.", "category": "communication_preferences",
+		"claim_slot": "communication.review_style", "claim_value": "concise", "sensitivity": "low", "confidence": 0.72,
+		"observations": []interface{}{
+			map[string]interface{}{"source_turn_id": 1, "evidence": "I keep review notes concise."},
+			map[string]interface{}{"source_turn_id": 2, "evidence": "I repeatedly write concise reviews."},
+		},
+	}}}
+	client := &fakeChatter{response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemoryPatternToolName, Arguments: arguments}}}}}}
+	extractor := newTestExtractor(t, client)
+	batch, err := extractor.ExtractPatterns(context.Background(), []usermemory.StoredSessionTurn{{ID: 1, UserText: "I keep review notes concise."}, {ID: 2, UserText: "I repeatedly write concise reviews."}})
+	if err != nil || len(batch.Patterns) != 1 || len(batch.Patterns[0].Observations) != 2 {
+		t.Fatalf("batch=%+v err=%v", batch, err)
+	}
+	if len(client.request.Tools) != 1 || client.request.Tools[0].Function.Name != userMemoryPatternToolName || client.request.ToolChoice != llm.ToolChoiceRequired {
+		t.Fatalf("pattern request=%+v", client.request)
+	}
+	patternSchema := client.request.Tools[0].Function.Parameters.Properties["patterns"].Items
+	if patternSchema == nil || patternSchema.Properties["confidence"].Minimum == nil || patternSchema.Properties["confidence"].Maximum == nil || !slices.Contains(patternSchema.Required, "confidence") {
+		t.Fatalf("pattern confidence schema=%+v", patternSchema)
+	}
+	if !strings.Contains(client.request.Messages[0].Content, "holistic assessment") || !strings.Contains(client.request.Messages[0].Content, "not confidence per observation") {
+		t.Fatalf("pattern confidence prompt=%q", client.request.Messages[0].Content)
+	}
+	userPayload := client.request.Messages[1].Content
+	if !strings.Contains(userPayload, `"source_turn_id":1`) || strings.Contains(userPayload, "assistant") || strings.Contains(userPayload, "tool") {
+		t.Fatalf("unexpected private pattern input %q", userPayload)
+	}
+}
+
+func TestLLMExtractorRejectsMalformedAndSpoofablePatternShapes(t *testing.T) {
+	for _, arguments := range []map[string]interface{}{
+		{"patterns": []interface{}{map[string]interface{}{"statement": "The user may prefer concise replies."}}},
+		{"patterns": []interface{}{map[string]interface{}{"statement": "The user may prefer concise replies.", "category": "communication_preferences", "claim_slot": "communication.reply_style", "claim_value": "concise", "sensitivity": "low", "confidence": 0.6, "observations": []interface{}{map[string]interface{}{"source_turn_id": 1, "evidence": "one"}, map[string]interface{}{"source_turn_id": 1, "evidence": "one"}}}}},
+	} {
+		client := &fakeChatter{response: &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: userMemoryPatternToolName, Arguments: arguments}}}}}}
+		_, err := newTestExtractor(t, client).ExtractPatterns(context.Background(), []usermemory.StoredSessionTurn{{ID: 1, UserText: "one"}, {ID: 2, UserText: "two"}})
+		if code, ok := InvalidOutputCode(err); !ok || code != invalidOutputBatchShape {
+			t.Fatalf("arguments=%#v error=%v", arguments, err)
+		}
 	}
 }
 

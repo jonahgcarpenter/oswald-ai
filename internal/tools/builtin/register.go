@@ -121,6 +121,15 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemo
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", "time.current"))
 
+	savePolicy := governance.ToolPolicy{
+		MaxExecutions: 2, BlockDuplicates: true, NormalizeArgs: normalizeMemorySaveArgs,
+		History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+	}
+	if err := reg.RegisterHandler(toolnames.UserMemorySave, savePolicy, registry.Handler(usermemory.NewSaveHandler(log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySave, err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySave))
+
 	if err := reg.RegisterHandler(toolnames.UserMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(8)), registry.Handler(usermemory.NewSearchHandler(userMemStore, log))); err != nil {
 		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySearch, err)
 	}
@@ -190,6 +199,30 @@ func normalizeMemorySearchArgs(defaultLimit int) governance.ArgumentNormalizer {
 			"limit":    limit,
 		}
 	}
+}
+
+func normalizeMemorySaveArgs(args map[string]interface{}) interface{} {
+	rawMemories, _ := args["memories"].([]interface{})
+	memories := make([]map[string]interface{}, 0, len(rawMemories))
+	for _, raw := range rawMemories {
+		item, _ := raw.(map[string]interface{})
+		reinforcesID := item["reinforces_memory_id"]
+		if reinforcesID == nil {
+			reinforcesID = float64(0)
+		}
+		memories = append(memories, map[string]interface{}{
+			"statement":            normalizedString(item, "statement", false),
+			"evidence":             normalizedString(item, "evidence", false),
+			"category":             normalizedString(item, "category", true),
+			"claim_slot":           normalizedString(item, "claim_slot", true),
+			"claim_value":          normalizedString(item, "claim_value", true),
+			"supersedes":           normalizedString(item, "supersedes", false),
+			"evidence_type":        normalizedString(item, "evidence_type", true),
+			"confidence":           item["confidence"],
+			"reinforces_memory_id": reinforcesID,
+		})
+	}
+	return map[string]interface{}{"memories": memories}
 }
 
 func normalizedString(args map[string]interface{}, key string, lower bool) string {

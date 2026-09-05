@@ -67,6 +67,20 @@ func TestDiscordWebFetchStatusDoesNotExposeURLOrContent(t *testing.T) {
 	}
 }
 
+func TestDiscordUserMemorySaveStatusDoesNotExposeCandidateContent(t *testing.T) {
+	status := discordToolStatusFor(&agent.ToolStreamPayload{
+		Name:       "user_memory_save",
+		Arguments:  map[string]interface{}{"evidence": "private evidence"},
+		ResultText: "private result",
+	})
+	combined := status.running + status.completed + status.failed
+	for _, private := range []string{"private evidence", "private result"} {
+		if strings.Contains(combined, private) {
+			t.Fatalf("memory save status exposed %q: %s", private, combined)
+		}
+	}
+}
+
 func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	rest := newFakeDiscordREST(t)
 	dg, b, chat := newDiscordTestGateway(t, rest.server.URL)

@@ -2,10 +2,7 @@ package sessionruntime
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,7 +13,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/leaseruntime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
@@ -326,17 +322,11 @@ func (s *Service) process(ctx context.Context, job *usermemory.SessionCompaction
 		if err != nil {
 			return err
 		}
-		if err := s.validateCandidates(ctx, *job, artifact); err != nil {
-			return err
-		}
 		if err := s.store.SaveSessionCompactionArtifact(ctx, *job, artifact); err != nil {
 			return err
 		}
 	} else if err != nil {
 		return terminalCompaction("persisted_artifact_invalid")
-	}
-	if err := s.stageCandidates(ctx, *job, artifact); err != nil {
-		return err
 	}
 	summary, err := s.store.PublishSessionSummary(ctx, *job)
 	if err != nil {
@@ -346,7 +336,7 @@ func (s *Service) process(ctx context.Context, job *usermemory.SessionCompaction
 		return err
 	}
 	if s.log != nil {
-		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("candidate_count", len(artifact.Candidates)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("redrive_count", job.RedriveCount), config.F("status", "ok"))
+		s.log.Server("session.compaction").Info("session.compaction.complete", "completed session compaction", config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("covered_turn_count", len(summary.SourceTurnIDs)), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("redrive_count", job.RedriveCount), config.F("status", "ok"))
 	}
 	return nil
 }
@@ -420,72 +410,6 @@ func (s *Service) newTurnsForJob(ctx context.Context, job usermemory.SessionComp
 		return nil, nil, terminalCompaction("empty_delivered_range")
 	}
 	return previous, turns, nil
-}
-
-func (s *Service) validateCandidates(ctx context.Context, job usermemory.SessionCompactionJob, artifact usermemory.SummaryArtifact) error {
-	_, turns, err := s.newTurnsForJob(ctx, job)
-	if err != nil {
-		return err
-	}
-	_, err = evaluateCompactionCandidates(turns, artifact.Candidates)
-	if err != nil {
-		return invalidCompactionOutput("candidate_invalid")
-	}
-	return nil
-}
-
-func (s *Service) stageCandidates(ctx context.Context, job usermemory.SessionCompactionJob, artifact usermemory.SummaryArtifact) error {
-	if len(artifact.Candidates) == 0 {
-		return nil
-	}
-	_, turns, err := s.newTurnsForJob(ctx, job)
-	if err != nil {
-		return err
-	}
-	evaluated, err := evaluateCompactionCandidates(turns, artifact.Candidates)
-	if err != nil {
-		return err
-	}
-	for i, item := range evaluated {
-		raw, turn, output := artifact.Candidates[i], item.turn, item.output
-		encoded, _ := json.Marshal(raw)
-		sum := sha256.Sum256(append([]byte(fmt.Sprintf("%d:%d:%d:", job.ID, job.CoveredFromTurnID, job.CoveredThroughTurnID)), encoded...))
-		_, _, err := s.store.ProposeCandidate(ctx, job.UserID, usermemory.CandidateProposal{
-			Output: output, IdempotencyKey: "compact:" + hex.EncodeToString(sum[:]),
-			Source:              usermemory.FormationSource{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, TurnID: turn.ID, Model: job.Model, ExtractorVersion: job.GeneratorVersion},
-			SupersedesStatement: raw.Supersedes,
-			CompactionJob:       &job,
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-type evaluatedCompactionCandidate struct {
-	turn   usermemory.SessionTurn
-	output memoryformation.CandidateOutput
-}
-
-func evaluateCompactionCandidates(turns []usermemory.SessionTurn, candidates []usermemory.CompactionCandidateArtifact) ([]evaluatedCompactionCandidate, error) {
-	byID := make(map[int64]usermemory.SessionTurn, len(turns))
-	for _, turn := range turns {
-		byID[turn.ID] = turn
-	}
-	result := make([]evaluatedCompactionCandidate, 0, len(candidates))
-	for _, raw := range candidates {
-		turn, ok := byID[raw.SourceTurnID]
-		if !ok {
-			return nil, fmt.Errorf("compaction candidate source turn %d is outside newly covered range", raw.SourceTurnID)
-		}
-		output, err := memoryformation.Evaluate(memoryformation.CandidateInput{SourceUserText: turn.UserText, Statement: raw.Statement, Evidence: raw.Evidence, Provenance: memoryformation.Provenance(raw.Provenance), ClaimedAuthority: memoryformation.AuthorityModel, Sensitivity: memoryformation.Sensitivity(raw.Sensitivity), Mode: memoryformation.ModePreCompactionExtraction, Scope: memoryformation.Scope(raw.Scope), Category: memoryformation.Category(raw.Category), Context: memoryformation.ContentContext(raw.Context), Confidence: raw.Confidence, Importance: raw.Importance, TTL: time.Duration(raw.TTLDays) * 24 * time.Hour, ClaimSlot: raw.ClaimSlot, ClaimValue: raw.ClaimValue})
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, evaluatedCompactionCandidate{turn: turn, output: output})
-	}
-	return result, nil
 }
 
 func (s *Service) warn(event, message string, err error, fields ...config.Field) {

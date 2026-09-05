@@ -29,6 +29,24 @@ func TestCompileProfilePermutationDeterminism(t *testing.T) {
 	}
 }
 
+func TestResetSessionDeletesNonterminalFormationJobs(t *testing.T) {
+	store := newFormationTestStore(t)
+	first := seedFormationTurn(t, store, "user", "session", "I keep review notes concise.", "request-1")
+	second := seedFormationTurn(t, store, "user", "session", "I repeatedly shorten review notes.", "request-2")
+	jobID, created, err := store.EnqueuePatternFormationJob(context.Background(), FormationSource{RequestID: "request-2", SessionID: "session", SessionGeneration: 1, TurnID: second, Model: "model"}, "user")
+	if err != nil || !created {
+		t.Fatalf("enqueue pattern job id=%d created=%v err=%v", jobID, created, err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET extraction_payload = ? WHERE id = ?`, `{"patterns":[{"evidence":"private"}]}`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResetSession(context.Background(), "user", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE id = ?`, 0, jobID)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE id IN (?, ?)`, 0, first, second)
+}
+
 func TestCompileProfileEligibilityThresholdsAndExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	candidates := []ProfileCandidate{
@@ -37,7 +55,7 @@ func TestCompileProfileEligibilityThresholdsAndExpiry(t *testing.T) {
 		profileTestCandidate(3, "durable_preferences", "durable pass", 0.9, 4),
 		profileTestCandidate(4, "environment", "environment pass", 0.9, 4),
 		profileTestCandidate(5, "identity", "low confidence", 0.799, 5),
-		profileTestCandidate(6, "durable_preferences", "low importance", 1, 3),
+		profileTestCandidate(6, "durable_preferences", "low importance pass", 1, 0),
 		profileTestCandidate(7, "projects", "wrong category", 1, 5),
 		profileTestCandidate(8, "identity", "expired", 1, 5),
 		profileTestCandidate(9, "identity", "expires now", 1, 5),
@@ -52,10 +70,10 @@ func TestCompileProfileEligibilityThresholdsAndExpiry(t *testing.T) {
 	candidates[11].Status = StatusSuperseded
 
 	compiled := CompileProfile("speaker", candidates, now)
-	if compiled.SelectedCount != 4 || compiled.ExcludedCount != 8 {
+	if compiled.SelectedCount != 5 || compiled.ExcludedCount != 7 {
 		t.Fatalf("unexpected counts: selected=%d excluded=%d", compiled.SelectedCount, compiled.ExcludedCount)
 	}
-	for _, want := range []string{"identity pass", "communication pass", "durable pass", "environment pass"} {
+	for _, want := range []string{"identity pass", "communication pass", "durable pass", "environment pass", "low importance pass"} {
 		if !strings.Contains(compiled.Content, want) {
 			t.Errorf("missing eligible fact %q", want)
 		}
@@ -80,19 +98,66 @@ func TestCompileProfileStrictBoundsAndWholeFacts(t *testing.T) {
 	}
 }
 
-func TestCompileProfileExcludesModelInferenceRegardlessOfApprovalAndConfidence(t *testing.T) {
+func TestCompileProfileInferenceEligibilityUsesCategoryConfidenceThresholds(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	byProvenance := profileTestCandidate(1, "identity", "inferred by provenance", 1, 5)
-	byProvenance.FormationProvenance = "model_inference"
-	byAuthority := profileTestCandidate(2, "identity", "inferred by authority", 1, 5)
-	byAuthority.SourceAuthority = "model"
-	direct := profileTestCandidate(3, "identity", "direct fact", 1, 5)
-	direct.FormationProvenance = "user_statement"
-	direct.SourceAuthority = "user_direct"
+	candidates := []ProfileCandidate{
+		profileTestCandidate(1, "identity", "identity below", 0.79, 5),
+		profileTestCandidate(2, "identity", "identity boundary", 0.8, 0),
+		profileTestCandidate(3, "durable_preferences", "durable below", 0.89, 5),
+		profileTestCandidate(4, "durable_preferences", "durable boundary", 0.9, 0),
+	}
+	for i := range candidates {
+		candidates[i].FormationProvenance = "model_inference"
+		candidates[i].SourceAuthority = "model"
+	}
 
-	compiled := CompileProfile("speaker", []ProfileCandidate{byProvenance, byAuthority, direct}, now)
-	if compiled.SelectedCount != 1 || !strings.Contains(compiled.Content, "direct fact") || strings.Contains(compiled.Content, "inferred by") {
-		t.Fatalf("model inference entered profile: %+v", compiled)
+	compiled := CompileProfile("speaker", candidates, now)
+	if compiled.SelectedCount != 2 || !strings.Contains(compiled.Content, "identity boundary") || !strings.Contains(compiled.Content, "durable boundary") || strings.Contains(compiled.Content, "identity below") || strings.Contains(compiled.Content, "durable below") {
+		t.Fatalf("unexpected confidence-based inference eligibility: %+v", compiled)
+	}
+	for _, metadata := range []string{`confidence=0.8000`, `formation_provenance="model_inference"`, `epistemic_status="high_confidence"`} {
+		if !strings.Contains(compiled.Content, metadata) {
+			t.Fatalf("inferred profile omitted %s: %s", metadata, compiled.Content)
+		}
+	}
+}
+
+func TestProfileRendererVersionV3(t *testing.T) {
+	if ProfileRendererVersion != "tenant-profile-v3" || TenantProfileRendererVersion != ProfileRendererVersion {
+		t.Fatalf("unexpected renderer version: %q", ProfileRendererVersion)
+	}
+	compiled := CompileProfile("speaker", nil, time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
+	if !strings.Contains(compiled.Content, `renderer="tenant-profile-v3"`) || !strings.Contains(compiled.Content, "lower") {
+		t.Fatalf("unexpected v3 profile header: %q", compiled.Content)
+	}
+}
+
+func TestActiveSessionKeepsOldRendererUntilReset(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 0.8, Importance: 0}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const frozenContent = `<tenant_profile renderer="tenant-profile-v2" authority="lower">frozen</tenant_profile>`
+	if _, err := store.sql.Exec(`UPDATE sessions SET renderer_version = 'tenant-profile-v2', rendered_content = ? WHERE canonical_user_id = 'user' AND session_id = 'session'`, frozenContent); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
+	if err != nil || frozen.Version != initial.Version || frozen.Content != frozenContent {
+		t.Fatalf("active session adopted v3: initial=%+v frozen=%+v err=%v", initial, frozen, err)
+	}
+	reset, err := store.ResetSession(context.Background(), "user", "session", time.Hour)
+	if err != nil || reset.Version <= frozen.Version || !strings.Contains(reset.Content, `renderer="tenant-profile-v3"`) {
+		t.Fatalf("reset session did not adopt v3: frozen=%+v reset=%+v err=%v", frozen, reset, err)
+	}
+	var renderer string
+	if err := store.sql.QueryRow(`SELECT renderer_version FROM sessions WHERE canonical_user_id = 'user' AND session_id = 'session'`).Scan(&renderer); err != nil || renderer != ProfileRendererVersion {
+		t.Fatalf("stored renderer=%q err=%v", renderer, err)
 	}
 }
 
@@ -116,7 +181,7 @@ func TestCompileProfileEscapesMaliciousContent(t *testing.T) {
 
 func TestCompileProfileDigestIncludesEligibleBudgetExcludedFacts(t *testing.T) {
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
-	selected := profileTestCandidate(1, "identity", strings.Repeat("a", 1700), 1, 5)
+	selected := profileTestCandidate(1, "identity", strings.Repeat("a", 1500), 1, 5)
 	excludedA := profileTestCandidate(2, "environment", strings.Repeat("x", 500), 0.9, 4)
 	excludedB := excludedA
 	excludedB.Statement = strings.Repeat("y", 500)
@@ -253,7 +318,7 @@ func TestProfilePruningPreservesSubsecondFutureExpiry(t *testing.T) {
 	}
 }
 
-func TestCanonicalSaveApprovesPreviouslyUnapprovedMemory(t *testing.T) {
+func TestStoredHighConfidenceInferenceEntersNewProfile(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck
 	seedAccountUsers(t, store, "user")
@@ -261,19 +326,9 @@ func TestCanonicalSaveApprovesPreviouslyUnapprovedMemory(t *testing.T) {
 	if _, err := store.sql.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, confidence, importance, status, created_at, updated_at, provenance_type, claim_slot, claim_value) VALUES ('user', 'long_term', 'identity', 'The user is Ada.', 1, 5, 'active', ?, ?, 'model_inference', 'identity.name', 'ada')`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	before, err := store.ResolveSessionProfile(context.Background(), "user", "before", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(before.Content, "Ada") {
-		t.Fatalf("unapproved fact entered profile: %q", before.Content)
-	}
-	if _, err := store.SaveMemory(context.Background(), "user", SaveRequest{Scope: ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
-		t.Fatal(err)
-	}
-	after, err := store.ResolveSessionProfile(context.Background(), "user", "after", time.Hour)
-	if err != nil || !strings.Contains(after.Content, "Ada") {
-		t.Fatalf("canonical save did not approve fact: profile=%q err=%v", after.Content, err)
+	profile, err := store.ResolveSessionProfile(context.Background(), "user", "session", time.Hour)
+	if err != nil || !strings.Contains(profile.Content, "Ada") {
+		t.Fatalf("high-confidence inference missing from profile: profile=%q err=%v", profile.Content, err)
 	}
 }
 

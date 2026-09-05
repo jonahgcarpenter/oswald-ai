@@ -26,7 +26,7 @@ Oswald uses four memory layers:
 - **Personal memory:** Private preferences, projects, relationships, and other durable facts shared across your linked accounts.
 - **Conversation memory:** Recent exchanges and summaries that preserve continuity within the current conversation.
 
-Personal memories are formed in the background after a response is delivered. Oswald prioritizes clear first-person facts, tracks confidence and provenance, and labels uncertain inferences accordingly.
+Personal memories use two write paths after a response is delivered. The primary agent can stage a small number of model-assessed observations from the current user message, while a private background extractor looks for repeated implicit patterns across delivered turns. Structurally grounded observations are retained, confidence controls activation and later reinforcement, and all recalled or profile memory remains lower-authority user context.
 
 Use `/reset` to start a new conversation without deleting personal memory. Use `/memories` to list or forget personal memories. Administrators manage shared facts with the `/global-memory` commands.
 

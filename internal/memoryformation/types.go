@@ -35,13 +35,17 @@ const (
 	SensitivityHighImpactInteraction Sensitivity = "high_impact_interaction"
 )
 
-// FormationMode distinguishes background extraction from an exact user request.
+// FormationMode identifies the candidate-producing workflow. Agent-save and
+// background-pattern candidates are model-assessed and receive structural,
+// linkage, metadata, and threshold checks without legacy semantic heuristics.
 type FormationMode string
 
 const (
 	ModeAutomaticExtraction     FormationMode = "automatic_extraction"
 	ModePreCompactionExtraction FormationMode = "pre_compaction_extraction"
 	ModeExplicitRemember        FormationMode = "explicit_remember"
+	ModeAgentSave               FormationMode = "agent_save"
+	ModeBackgroundPattern       FormationMode = "background_pattern"
 )
 
 // Approval is the candidate's resulting approval state.

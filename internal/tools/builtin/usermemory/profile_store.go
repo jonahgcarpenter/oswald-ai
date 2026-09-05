@@ -133,6 +133,9 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 	if generation <= 0 {
 		generation = 1
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND source_session_id = ?`, userID, sessionID); err != nil {
+		return SessionProfile{}, fmt.Errorf("clear reset session formation jobs: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'session_compaction' AND canonical_user_id = ? AND session_id = ?`, userID, sessionID); err != nil {
 		return SessionProfile{}, fmt.Errorf("clear reset session compaction jobs: %w", err)
 	}
@@ -203,7 +206,7 @@ func refreshProfileTx(ctx context.Context, tx *sql.Tx, userID string, now time.T
 		return SessionProfile{}, nil, fmt.Errorf("read tenant profile intro: %w", err)
 	}
 	rows, err := tx.QueryContext(ctx, `
-SELECT id, category, statement, scope, status, provenance_type != 'model_inference', confidence, importance, expires_at, provenance_type,
+SELECT id, category, statement, scope, status, 1, confidence, importance, expires_at, provenance_type,
 	CASE provenance_type WHEN 'user_statement' THEN 'user_direct' WHEN 'model_inference' THEN 'model' ELSE 'unknown' END
 FROM memory_entries WHERE canonical_user_id = ?`, userID)
 	if err != nil {

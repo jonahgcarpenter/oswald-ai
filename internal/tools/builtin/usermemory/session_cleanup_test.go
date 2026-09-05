@@ -76,6 +76,33 @@ func TestCleanupExpiredSessionsIndependentSweep(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredSessionsDeletesPatternJobsBeforeSourceTurns(t *testing.T) {
+	store := newFormationTestStore(t)
+	ctx := context.Background()
+	first := seedFormationTurn(t, store, "user", "expired-pattern", "I keep review notes concise.", "request-1")
+	second := seedFormationTurn(t, store, "user", "expired-pattern", "I repeatedly shorten review notes.", "request-2")
+	jobID, created, err := store.EnqueuePatternFormationJob(ctx, FormationSource{RequestID: "request-2", SessionID: "expired-pattern", SessionGeneration: 1, TurnID: second, Model: "model"}, "user")
+	if err != nil || !created {
+		t.Fatalf("enqueue pattern job id=%d created=%v err=%v", jobID, created, err)
+	}
+	if _, err := store.sql.Exec(`UPDATE durable_jobs SET extraction_payload = ? WHERE id = ?`, `{"patterns":[{"evidence":"private"}]}`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.sql.Exec(`UPDATE sessions SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-pattern'; UPDATE session_turns SET expires_at = ? WHERE canonical_user_id = 'user' AND session_id = 'expired-pattern'`, formatTime(now.Add(-time.Second)), formatTime(now.Add(-time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.CleanupExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.FormationJobsDeleted != 1 || counts.SessionTurnsDeleted != 2 {
+		t.Fatalf("cleanup counts=%+v", counts)
+	}
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM durable_jobs WHERE id = ?`, 0, jobID)
+	assertCleanupRowCount(t, store, `SELECT COUNT(*) FROM session_turns WHERE id IN (?, ?)`, 0, first, second)
+}
+
 func TestCleanupExpiresDurableMemoryAndErasesFormationRetention(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
 	defer store.Close() // nolint:errcheck

@@ -4,6 +4,7 @@ package toolnames
 const (
 	UserMemorySearch = "user_memory_search"
 	UserMemoryList   = "user_memory_list"
+	UserMemorySave   = "user_memory_save"
 
 	GlobalMemorySearch = "global_memory_search"
 
