@@ -214,7 +214,7 @@ func TestRegisterUserMemorySavePolicyAndStrictSchema(t *testing.T) {
 		t.Fatal("user memory save schema is unavailable")
 	}
 	memories := tool.Function.Parameters.Properties["memories"]
-	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || memories.MinItems == nil || *memories.MinItems != 1 || memories.MaxItems == nil || *memories.MaxItems != 2 || memories.Items == nil || memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
+	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || memories.MinItems == nil || *memories.MinItems != 1 || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.Items == nil || memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
 		t.Fatalf("user memory save schema is not strict: %+v", tool.Function.Parameters)
 	}
 	for _, name := range []string{"supersedes", "evidence_type", "confidence", "reinforces_memory_id"} {

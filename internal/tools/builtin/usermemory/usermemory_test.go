@@ -2,6 +2,7 @@ package usermemory
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -179,7 +180,27 @@ func TestSaveHandlerKeepsHighInferenceConfidence(t *testing.T) {
 	}
 }
 
-func TestSaveHandlerRequiresStrictOneOrTwoItemBatch(t *testing.T) {
+func TestSaveHandlerAcceptsFiveItemBatch(t *testing.T) {
+	collector := requestctx.NewMemoryStageCollector()
+	ctx := principalContext("canonical-user", "external-user")
+	meta := requestctx.MetadataFromContext(ctx)
+	meta.CurrentUserText = "I use tea, coffee, water, juice, and milk."
+	ctx = requestctx.WithMetadata(ctx, meta)
+	ctx = requestctx.WithMemoryStageCollector(ctx, collector)
+	items := make([]interface{}, 0, requestctx.MaxStagedMemoryCandidates)
+	for index, value := range []string{"tea", "coffee", "water", "juice", "milk"} {
+		items = append(items, map[string]interface{}{
+			"statement": "The user uses " + value + ".", "evidence": meta.CurrentUserText, "category": "notes",
+			"claim_slot": fmt.Sprintf("notes.drink_%d", index), "claim_value": value, "supersedes": "", "evidence_type": "direct_statement", "confidence": 0.9,
+		})
+	}
+	result, err := NewSaveHandler(config.NewLogger(config.LevelError))(ctx, map[string]interface{}{"memories": items})
+	if err != nil || result.Outcome != governance.OutcomeProductive || len(collector.Candidates()) != requestctx.MaxStagedMemoryCandidates {
+		t.Fatalf("five-item batch result=%+v staged=%d err=%v", result, len(collector.Candidates()), err)
+	}
+}
+
+func TestSaveHandlerRequiresStrictOneToFiveItemBatch(t *testing.T) {
 	ctx := requestctx.WithMemoryStageCollector(principalContext("user", "external"), requestctx.NewMemoryStageCollector())
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.CurrentUserText = "I prefer tea."
@@ -187,7 +208,7 @@ func TestSaveHandlerRequiresStrictOneOrTwoItemBatch(t *testing.T) {
 	handler := NewSaveHandler(config.NewLogger(config.LevelError))
 	for _, args := range []map[string]interface{}{
 		{"memories": []interface{}{}},
-		{"memories": []interface{}{map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}}},
+		{"memories": []interface{}{map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}}},
 		{"memories": []interface{}{map[string]interface{}{"statement": "x"}}, "extra": true},
 	} {
 		if _, err := handler(ctx, args); err == nil {

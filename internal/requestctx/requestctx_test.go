@@ -37,16 +37,16 @@ func TestMemoryStageCollectorBoundsAndCopiesCandidates(t *testing.T) {
 	if collector.Candidates()[0].Candidate.Statement != "The user prefers tea." {
 		t.Fatal("Candidates returned shared slice storage")
 	}
-	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: approved}, {CanonicalUserID: "usr_1", Candidate: approved}}); err == nil {
-		t.Fatal("expected request-local candidate limit")
-	}
-	if len(collector.Candidates()) != 1 {
-		t.Fatal("failed batch partially mutated collector")
-	}
 	proposed := approved
 	proposed.Approval = memoryformation.ApprovalProposed
-	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: proposed, TargetMemoryID: 9}}); err != nil {
-		t.Fatalf("proposed candidate was not accepted: %v", err)
+	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: proposed, TargetMemoryID: 9}, {CanonicalUserID: "usr_1", Candidate: approved}, {CanonicalUserID: "usr_1", Candidate: approved}, {CanonicalUserID: "usr_1", Candidate: approved}}); err != nil {
+		t.Fatalf("five-candidate request limit was not accepted: %v", err)
+	}
+	if err := collector.Stage([]StagedMemoryCandidate{{CanonicalUserID: "usr_1", Candidate: approved}}); err == nil {
+		t.Fatal("expected request-local candidate limit")
+	}
+	if len(collector.Candidates()) != MaxStagedMemoryCandidates {
+		t.Fatal("failed batch partially mutated collector")
 	}
 	rejected := approved
 	rejected.Approval = memoryformation.ApprovalRejected

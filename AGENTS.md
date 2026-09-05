@@ -226,7 +226,7 @@ Oswald keeps four distinct memory layers.
 - Organized into categories like `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`
 - `<id>` is now Oswald's canonical internal user ID, not a raw gateway account ID
 - Eligible high-confidence long-term identity, communication preference, durable preference, and environment observations, including model inferences, are compiled into a deterministic profile capped at 2000 bytes. Profile records retain confidence, provenance, and epistemic status
-- Canonical memory publication occurs only after successful response delivery. The primary agent's `user_memory_save` stages at most two model-assessed current-turn observations in an immutable turn artifact; it never writes canonical memory inline. A separate private extractor forms repeated implicit patterns from a frozen window of two to eight delivered user turns. Session compaction produces continuity summaries only and is not a memory-write path
+- Canonical memory publication occurs only after successful response delivery. The primary agent's `user_memory_save` stages at most five model-assessed current-turn observations in an immutable turn artifact; it never writes canonical memory inline. A separate private extractor forms repeated implicit patterns from a frozen window of two to eight delivered user turns. Session compaction produces continuity summaries only and is not a memory-write path
 - Tenant profiles are explicitly subordinate to deployment policy, are sent at user authority, and cannot grant capabilities, authorization, or tool access
 - A profile version is frozen per canonical user and gateway session; new eligible facts appear automatically only in new, expired, or `/reset` sessions
 - Legacy `system_rules` rows and filters are migrated or aliased to lower-authority `communication_preferences`
@@ -542,7 +542,7 @@ Runtime governance lives in `internal/tools/governance/`. Builtin policies are d
 ### Tool Governance
 
 - Tool execution errors are converted into tool-response messages so the model can recover
-- Successful handlers return a typed productive or unproductive outcome. `user_memory_save` permits one initial call and one distinct corrective retry while retaining a two-candidate request-wide staging cap; `web.search` retires after two unproductive results or two execution failures in one request; `web.fetch` permits four executions and retires after two unproductive results or two execution failures; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
+- Successful handlers return a typed productive or unproductive outcome. `user_memory_save` permits one initial call and one distinct corrective retry while retaining a five-candidate request-wide staging cap; `web.search` retires after two unproductive results or two execution failures in one request; `web.fetch` permits four executions and retires after two unproductive results or two execution failures; other builtin and MCP tools have no per-tool execution, failure, or unproductive-result limit
 - Exact duplicate successful or unproductive calls are blocked before handler execution, but failed executions release their fingerprint so the exact call can be retried
 - Per-tool execution, failure, and unproductive limits are code-owned policy; zero disables a guard, and exhaustion of an enabled guard removes only that exact tool
 - `MAX_TOOL_CALLS_PER_REQUEST` defaults to `50` actual handler executions as an emergency request-wide ceiling

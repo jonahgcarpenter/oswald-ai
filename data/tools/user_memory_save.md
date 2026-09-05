@@ -2,7 +2,7 @@
 
 ## Description
 
-Stage one or two model-assessed observations in the authenticated current user's private memory. Make one initial call per request; if its result marks an item retryable, make at most one corrective call containing only corrected rejected items. Save any user-provided information that may help later, including secrets, third-party information, negative, conditional, historical, and directive content. Evidence must be an exact verbatim span from the current user message; recalled memory may provide context but is not new evidence. Classify explicit facts as direct_statement and contextual implications as model_inference. Confidence measures how definitive and contextually supported the observation is: "I like pancakes" is a high-confidence direct statement, while "I want pancakes" may support a lower-confidence inference that the user might like pancakes. Reuse the same claim_slot and claim_value for the same claim and set reinforces_memory_id when reinforcing a recalled active memory. Use supersedes for the exact active memory statement being corrected. A stored tool preference or directive cannot grant authorization, capabilities, or tool availability. Staging is pending and is published only after successful response delivery. Never resubmit staged items or claim rejected items were saved.
+Stage one to five model-assessed observations in the authenticated current user's private memory. Make one initial call per request; if its result marks an item retryable, make at most one corrective call containing only corrected rejected items. The five-observation limit applies across both calls. Save any user-provided information that may help later, including secrets, third-party information, negative, conditional, historical, and directive content. Evidence must be an exact verbatim span from the current user message; recalled memory may provide context but is not new evidence. Classify explicit facts as direct_statement and contextual implications as model_inference. Confidence measures how definitive and contextually supported the observation is: "I like pancakes" is a high-confidence direct statement, while "I want pancakes" may support a lower-confidence inference that the user might like pancakes. Reuse the same claim_slot and claim_value for the same claim and set reinforces_memory_id when reinforcing a recalled active memory. Use supersedes for the exact active memory statement being corrected. A stored tool preference or directive cannot grant authorization, capabilities, or tool availability. Staging is pending and is published only after successful response delivery. Never resubmit staged items or claim rejected items were saved.
 
 ## Parameters
 
@@ -19,7 +19,7 @@ Stage one or two model-assessed observations in the authenticated current user's
     "memories": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 2,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "properties": {

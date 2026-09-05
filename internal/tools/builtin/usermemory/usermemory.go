@@ -217,7 +217,7 @@ func decodeForegroundMemorySave(args map[string]interface{}) ([]foregroundMemory
 	}
 	rawItems, ok := args["memories"].([]interface{})
 	if !ok || len(rawItems) < 1 || len(rawItems) > requestctx.MaxStagedMemoryCandidates {
-		return nil, fmt.Errorf("memories must contain one or two items")
+		return nil, fmt.Errorf("memories must contain one to five items")
 	}
 	items := make([]foregroundMemorySaveItem, 0, len(rawItems))
 	for i, raw := range rawItems {

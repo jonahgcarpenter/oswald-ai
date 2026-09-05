@@ -22,7 +22,7 @@ const (
 )
 
 // MaxStagedMemoryCandidates is the foreground per-request staging limit.
-const MaxStagedMemoryCandidates = 2
+const MaxStagedMemoryCandidates = 5
 
 // StagedMemoryCandidate is a prevalidated candidate awaiting successful delivery.
 type StagedMemoryCandidate struct {
