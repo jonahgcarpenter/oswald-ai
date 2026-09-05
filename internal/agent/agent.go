@@ -132,6 +132,12 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
 	}
+	if toolName == toolnames.UserMemorySave {
+		payload.Arguments = nil
+		payload.ResultText = ""
+		payload.UserMemory = &ToolStreamUserMemoryPayload{Action: "save"}
+		return payload
+	}
 	if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
 		payload.Arguments = nil
 		payload.ResultText = ""
@@ -210,6 +216,8 @@ func userMemoryStreamPayload(toolName string, args map[string]interface{}, resul
 
 func userMemoryToolAction(toolName string) string {
 	switch toolName {
+	case toolnames.UserMemorySave:
+		return "save"
 	case toolnames.UserMemorySearch:
 		return "search"
 	case toolnames.UserMemoryList:
@@ -625,6 +633,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
+	memoryStage := requestctx.NewMemoryStageCollector()
+	ctx = requestctx.WithMemoryStageCollector(ctx, memoryStage)
 	formationSourceText, _ := stripReplyContext(userPrompt)
 	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{
 		RequestID:       requestID,
@@ -946,6 +956,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		historyBatch := usermemory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
+			if toolName == toolnames.UserMemorySave {
+				historyBatch.AssistantContent = ""
+			}
 			toolCallID := tc.ID
 			toolStartedAt := time.Now()
 
@@ -1177,14 +1190,23 @@ func (a *Agent) Process(ctx context.Context, request Request) (*AgentResponse, e
 		messages = append(messages, lastResp.Message)
 	}
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
+	stagedMemory := memoryStage.Candidates()
+	if len(stagedMemory) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
+		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
+	}
 	var storedTurn usermemory.StoredSessionTurn
 	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
 		storedReplay := usermemory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := completedPromptPressure(promptContext, storedReplay)
 		var err error
-		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressureAndHistory(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, toolHistory, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
+		storedTurn, err = a.userMemory.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx, sessionKey, senderID, sessionGeneration, userMemoryContent, finalContent, toolAnnotations, toolHistory, stagedMemory, sessionTurnTTL, usermemory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
+			if len(stagedMemory) > 0 {
+				return nil, fmt.Errorf("persist staged foreground memory: %w", err)
+			}
+		} else if len(stagedMemory) > 0 && storedTurn.ID == 0 {
+			return nil, fmt.Errorf("persist staged foreground memory: session turn was not stored")
 		}
 	}
 

@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -95,7 +96,7 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	t.Fatalf("%s schema was not loaded", toolnames.SessionTranscriptSearch)
 }
 
-func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
+func TestRegisterExposesUserMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -104,9 +105,9 @@ func TestRegisterExposesRetrievalOnlyUserMemoryTools(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
+	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
 		if _, ok := reg.LLMTool(name); !ok || !reg.HasHandler(name) {
-			t.Fatalf("retrieval tool is unavailable: %s", name)
+			t.Fatalf("user memory tool is unavailable: %s", name)
 		}
 	}
 }
@@ -180,6 +181,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		"time.current":                    true,
 		toolnames.UserMemorySearch:        true,
 		toolnames.UserMemoryList:          true,
+		toolnames.UserMemorySave:          true,
 		toolnames.GlobalMemorySearch:      true,
 		toolnames.SessionTranscriptSearch: true,
 	}
@@ -194,6 +196,68 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		if !got[name] || !reg.HasHandler(name) {
 			t.Fatalf("final builtin tool is unavailable: %s", name)
 		}
+	}
+}
+
+func TestRegisterUserMemorySavePolicyAndStrictSchema(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg := newTestRegistry(t, log)
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := reg.Policy(toolnames.UserMemorySave)
+	if !ok || policy.MaxExecutions != 2 || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
+		t.Fatalf("unexpected user memory save policy: %+v", policy)
+	}
+	tool, ok := reg.LLMTool(toolnames.UserMemorySave)
+	if !ok {
+		t.Fatal("user memory save schema is unavailable")
+	}
+	memories := tool.Function.Parameters.Properties["memories"]
+	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || memories.MinItems == nil || *memories.MinItems != 1 || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.Items == nil || memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
+		t.Fatalf("user memory save schema is not strict: %+v", tool.Function.Parameters)
+	}
+	for _, name := range []string{"supersedes", "evidence_type", "confidence", "reinforces_memory_id"} {
+		if _, ok := memories.Items.Properties[name]; !ok {
+			t.Fatalf("user memory save schema is missing %s", name)
+		}
+	}
+	confidence := memories.Items.Properties["confidence"]
+	reinforces := memories.Items.Properties["reinforces_memory_id"]
+	if confidence.Minimum == nil || *confidence.Minimum != 0 || confidence.Maximum == nil || *confidence.Maximum != 1 || reinforces.Minimum == nil || *reinforces.Minimum != 0 {
+		t.Fatalf("user memory assessment bounds are incomplete: confidence=%+v reinforces=%+v", confidence, reinforces)
+	}
+}
+
+func TestNormalizeMemorySaveArgsAllowsCorrectiveRetryButBlocksExactDuplicate(t *testing.T) {
+	base := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
+		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
+		"claim_slot": "preference.drink", "claim_value": "tea", "supersedes": "", "evidence_type": "direct_statement", "confidence": 0.9,
+	}}}
+	duplicate := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
+		"statement": " The user prefers tea. ", "evidence": "I prefer tea.", "category": "DURABLE_PREFERENCES",
+		"claim_slot": "PREFERENCE.DRINK", "claim_value": "TEA", "supersedes": "", "evidence_type": "DIRECT_STATEMENT", "confidence": 0.9, "reinforces_memory_id": 0,
+	}}}
+	corrected := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
+		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
+		"claim_slot": "preference.favorite_drink", "claim_value": "tea", "supersedes": "", "evidence_type": "direct_statement", "confidence": 0.9,
+	}}}
+	baseJSON, _ := json.Marshal(normalizeMemorySaveArgs(base))
+	duplicateJSON, _ := json.Marshal(normalizeMemorySaveArgs(duplicate))
+	correctedJSON, _ := json.Marshal(normalizeMemorySaveArgs(corrected))
+	if string(baseJSON) != string(duplicateJSON) {
+		t.Fatalf("semantic duplicate normalized differently: %s != %s", baseJSON, duplicateJSON)
+	}
+	if string(baseJSON) == string(correctedJSON) {
+		t.Fatalf("corrective retry normalized as duplicate: %s", correctedJSON)
+	}
+	changedAssessment := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
+		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
+		"claim_slot": "preference.drink", "claim_value": "tea", "supersedes": "", "evidence_type": "model_inference", "confidence": 0.4, "reinforces_memory_id": 7,
+	}}}
+	changedJSON, _ := json.Marshal(normalizeMemorySaveArgs(changedAssessment))
+	if string(baseJSON) == string(changedJSON) {
+		t.Fatalf("different assessment normalized as duplicate: %s", changedJSON)
 	}
 }
 
@@ -307,6 +371,8 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 			wantExecutions = 4
 			wantUnproductive = 2
 			wantFailures = 2
+		} else if name == toolnames.UserMemorySave {
+			wantExecutions = 2
 		}
 		if policy.MaxExecutions != wantExecutions {
 			t.Fatalf("%s max executions = %d, want %d", name, policy.MaxExecutions, wantExecutions)

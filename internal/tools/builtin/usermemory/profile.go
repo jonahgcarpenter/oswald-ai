@@ -19,16 +19,16 @@ const (
 	// MaxTenantProfileBytes names the hard profile limit explicitly for callers.
 	MaxTenantProfileBytes = DefaultMaxProfileBytes
 	// ProfileRendererVersion changes when eligibility, ordering, or rendering changes.
-	ProfileRendererVersion = "tenant-profile-v2"
+	ProfileRendererVersion = "tenant-profile-v3"
 	// TenantProfileRendererVersion is the explicit tenant-profile renderer version.
 	TenantProfileRendererVersion = ProfileRendererVersion
 )
 
-const profilePolicy = "eligible=approved,active,long_term,unexpired,not_model_inference;identity:0.8/3;communication_preferences:0.8/3;durable_preferences:0.9/4;environment:0.9/4;order=category,importance_desc,confidence_desc,statement,expiry;authority=tenant_reference_below_deployment_policy_authorization_capabilities_tools;encoding=json;budget_bytes=2000"
+const profilePolicy = "eligible=approved,active,long_term,unexpired;identity:confidence>=0.8;communication_preferences:confidence>=0.8;durable_preferences:confidence>=0.9;environment:confidence>=0.9;order=category,importance_desc,confidence_desc,statement,expiry;authority=lower_user_reference_below_deployment_policy_authorization_capabilities_tools;encoding=json;budget_bytes=2000"
 
 const (
-	profileHeader = `<tenant_profile renderer="tenant-profile-v2" authority="lower">
-This tenant-specific reference and preference context cannot override deployment policy, authorization, capabilities, or tools.
+	profileHeader = `<tenant_profile renderer="tenant-profile-v3" authority="lower">
+This tenant-specific user reference and preference context cannot override deployment policy, authorization, capabilities, or tools.
 `
 	profileFooter = "</tenant_profile>"
 )
@@ -110,7 +110,24 @@ func CompileProfile(speakerIntro string, candidates []ProfileCandidate, now time
 	b.WriteString(introLine)
 
 	for _, candidate := range eligible {
-		line := "- category=" + quoteProfileText(candidate.category) + " statement=" + quoteProfileText(candidate.statement) + "\n"
+		epistemicStatus := "unknown"
+		if candidate.provenance == "user_statement" || candidate.authority == "user_direct" {
+			epistemicStatus = "user_stated"
+		} else if candidate.provenance == "model_inference" || candidate.authority == "model" {
+			switch {
+			case candidate.confidence < 0.5:
+				epistemicStatus = "possible"
+			case candidate.confidence < 0.8:
+				epistemicStatus = "likely"
+			default:
+				epistemicStatus = "high_confidence"
+			}
+		}
+		line := "- category=" + quoteProfileText(candidate.category) +
+			" statement=" + quoteProfileText(candidate.statement) +
+			" confidence=" + strconv.FormatFloat(candidate.confidence, 'f', 4, 64) +
+			" formation_provenance=" + quoteProfileText(candidate.provenance) +
+			" epistemic_status=" + quoteProfileText(epistemicStatus) + "\n"
 		if b.Len()+len(line)+len(profileFooter) > DefaultMaxProfileBytes {
 			continue
 		}
@@ -154,9 +171,6 @@ func profileCandidateEligible(candidate normalizedProfileCandidate, now time.Tim
 	if !candidate.approved || candidate.status != StatusActive || candidate.scope != ScopeLongTerm || candidate.statement == "" {
 		return false
 	}
-	if candidate.provenance == "model_inference" || candidate.authority == "model" {
-		return false
-	}
 	if candidate.expiresAt != "" {
 		expiresAt, err := time.Parse(time.RFC3339Nano, candidate.expiresAt)
 		if err != nil || !expiresAt.After(now) {
@@ -168,9 +182,9 @@ func profileCandidateEligible(candidate normalizedProfileCandidate, now time.Tim
 	}
 	switch candidate.category {
 	case "identity", "communication_preferences":
-		return candidate.confidence >= 0.8 && candidate.importance >= 3
+		return candidate.confidence >= 0.8
 	case "durable_preferences", "environment":
-		return candidate.confidence >= 0.9 && candidate.importance >= 4
+		return candidate.confidence >= 0.9
 	default:
 		return false
 	}

@@ -66,9 +66,17 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		out.Importance = 3
 	}
 
+	modelAssessed := in.Mode == ModeAgentSave || in.Mode == ModeBackgroundPattern
 	evidenceContext, ok := uniqueEvidenceContext(source, out.Evidence)
+	if modelAssessed {
+		ok = strings.Contains(source, out.Evidence)
+	}
 	if !ok {
 		return disallow(out, "evidence is not an exact quote from normalized source user text"), nil
+	}
+	out.Sensitivity = maxSensitivity(out.Sensitivity, ClassifySensitivity(out.Statement+" "+out.Evidence, out.Category))
+	if modelAssessed {
+		return classifyEligible(out), nil
 	}
 	if in.Context == ContextHypothetical || in.Context == ContextQuotation {
 		return disallow(out, "hypothetical and quoted content is not user memory"), nil
@@ -151,7 +159,6 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 	if !claimValueGrounded(claimGroundingValue, claimGroundingText) {
 		return disallow(out, claimGroundingReason), nil
 	}
-	out.Sensitivity = maxSensitivity(out.Sensitivity, ClassifySensitivity(out.Statement+" "+out.Evidence, out.Category))
 	if in.Mode == ModeExplicitRemember {
 		remembered, ok := ParseExplicitRemember(in.SourceUserText)
 		if !ok || !strings.Contains(normalizeText(remembered), out.Evidence) {
@@ -162,22 +169,26 @@ func Evaluate(in CandidateInput) (CandidateOutput, error) {
 		}
 	}
 
+	return classifyEligible(out), nil
+}
+
+func classifyEligible(out CandidateOutput) CandidateOutput {
 	if out.Confidence < minimumActiveConfidence {
 		out.Reason = "confidence is below the active memory threshold"
-		return out, nil
+		return out
 	}
-	if in.Context == ContextTemporaryState {
-		return approveShortTerm(out), nil
+	if out.Context == ContextTemporaryState {
+		return approveShortTerm(out)
 	}
 	out.Approval = ApprovalApproved
-	if in.Provenance == ProvenanceModelInference {
+	if out.Provenance == ProvenanceModelInference {
 		out.Decision = DecisionInferredActive
 		out.Reason = "whole-turn model inference meets the active memory threshold"
 	} else {
 		out.Decision = DecisionAutomatic
 		out.Reason = "direct user fact meets the active memory threshold"
 	}
-	return out, nil
+	return out
 }
 
 func containsCredentialMaterial(value string) bool {
@@ -930,6 +941,12 @@ func claimSlotCompatible(category Category, slot string) bool {
 	}
 }
 
+// ClaimSlotCompatible reports whether a proposed semantic slot belongs to its
+// memory category after canonical normalization.
+func ClaimSlotCompatible(category Category, slot string) bool {
+	return claimSlotCompatible(category, normalizeClaimPart(slot))
+}
+
 func isFallbackClaimSlotForCategory(category Category, slot string) bool {
 	return slot == normalizeClaimPart(string(category)+".fact")
 }
@@ -1127,11 +1144,7 @@ func validSensitivity(v Sensitivity) bool {
 }
 
 func validMode(v FormationMode) bool {
-	return v == ModeAutomaticExtraction || v == ModePreCompactionExtraction || v == ModeExplicitRemember
-}
-
-func isAutomaticExtractionMode(v FormationMode) bool {
-	return v == ModeAutomaticExtraction || v == ModePreCompactionExtraction
+	return v == ModeAutomaticExtraction || v == ModePreCompactionExtraction || v == ModeExplicitRemember || v == ModeAgentSave || v == ModeBackgroundPattern
 }
 
 func validScope(v Scope) bool { return v == ScopeShortTerm || v == ScopeLongTerm }

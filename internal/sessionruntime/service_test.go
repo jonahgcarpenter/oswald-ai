@@ -11,17 +11,19 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 type fakeSummaryExtractor struct {
-	calls    int
-	previous *usermemory.SessionSummary
-	turns    []usermemory.SessionTurn
-	preempt  func()
-	err      error
-	results  []error
+	calls         int
+	previous      *usermemory.SessionSummary
+	turns         []usermemory.SessionTurn
+	preempt       func()
+	err           error
+	results       []error
+	lastErrorCode string
 }
 
 type unavailableLowPriorityGate struct{}
@@ -40,8 +42,9 @@ func (g *canceledLowPriorityGate) TryAcquireLowPriority(parent context.Context) 
 	return ctx, func() {}, true
 }
 
-func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn) (usermemory.SummaryArtifact, error) {
+func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.SessionSummary, turns []usermemory.SessionTurn, lastErrorCode string) (usermemory.SummaryArtifact, error) {
 	f.calls++
+	f.lastErrorCode = lastErrorCode
 	f.previous = previous
 	f.turns = append([]usermemory.SessionTurn(nil), turns...)
 	if f.preempt != nil {
@@ -53,7 +56,6 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 	if f.err != nil {
 		return usermemory.SummaryArtifact{}, f.err
 	}
-	first := turns[0]
 	commitments := []string{"Report progress"}
 	if previous != nil {
 		commitments = append(append([]string(nil), previous.Commitments...), "Finish review")
@@ -62,12 +64,6 @@ func (f *fakeSummaryExtractor) Compact(_ context.Context, previous *usermemory.S
 		Narrative: "The user is progressing through Atlas work.",
 		OpenTasks: []string{"Continue Atlas"}, Commitments: commitments,
 		Entities: []string{"Atlas"}, Decisions: []string{"Work sequentially"}, TopicTags: []string{"project"},
-		Candidates: []usermemory.CompactionCandidateArtifact{{
-			SourceTurnID: first.ID, Statement: "The user is working on Atlas.", Evidence: first.UserText,
-			Scope: "long_term", Category: "projects", Context: "direct_assertion",
-			Provenance: "user_statement", Sensitivity: "low", Confidence: 0.9, Importance: 4,
-			ClaimSlot: "project.name", ClaimValue: "Atlas",
-		}},
 	}, nil
 }
 
@@ -145,43 +141,54 @@ func TestServicePlansCompactsAndPreservesRecentTail(t *testing.T) {
 		t.Fatalf("incremental tail=%d err=%v", len(tail), err)
 	}
 	active, err := store.ListMemories("user-1", "", "", 10)
-	if err != nil || len(active) != 1 || active[0].ClaimSlot != "project.name" {
-		t.Fatalf("pre-compaction candidate was not unified and published: %+v err=%v", active, err)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("compaction created durable memory: %+v err=%v", active, err)
 	}
 }
 
-func TestEvaluateCompactionCandidateLifecycleThresholdAndSoundness(t *testing.T) {
-	turn := usermemory.SessionTurn{ID: 7, UserText: "I work on Atlas."}
-	base := usermemory.CompactionCandidateArtifact{
-		SourceTurnID: 7, Statement: "The user works on Atlas.", Evidence: "I work on Atlas.",
-		Scope: "long_term", Category: "projects", Context: "direct_assertion", Provenance: "user_statement",
-		Sensitivity: "low", Importance: 4, ClaimSlot: "project.name", ClaimValue: "Atlas",
+func TestServicePublishesLegacyArtifactWithoutStagingCandidates(t *testing.T) {
+	store, db := newSessionRuntimeStoreWithDB(t)
+	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
+	if err != nil {
+		t.Fatal(err)
 	}
-	below := base
-	below.Confidence = 0.349
-	evaluated, err := evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{below})
-	if err != nil || evaluated[0].output.Approval != "proposed" {
-		t.Fatalf("below-threshold evaluation=%+v err=%v", evaluated, err)
+	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
+		t.Fatal(err)
 	}
-	atThreshold := base
-	atThreshold.Confidence = 0.35
-	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{atThreshold})
-	if err != nil || evaluated[0].output.Approval != "approved" || evaluated[0].output.ClaimSlot != "project.name" || evaluated[0].output.ClaimValue != "atlas" {
-		t.Fatalf("at-threshold evaluation=%+v err=%v", evaluated, err)
+	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute, "model", SummaryGeneratorVersion)
+	if err != nil {
+		t.Fatal(err)
 	}
-	unsound := base
-	unsound.Confidence = 0.99
-	unsound.Evidence = "My coworker works on Atlas."
-	unsound.Statement = "The user works on Atlas."
-	turn.UserText = unsound.Evidence
-	evaluated, err = evaluateCompactionCandidates([]usermemory.SessionTurn{turn}, []usermemory.CompactionCandidateArtifact{unsound})
-	if err != nil || evaluated[0].output.Approval == "approved" {
-		t.Fatalf("unsound high-confidence evaluation=%+v err=%v", evaluated, err)
+	legacy := usermemory.SummaryArtifact{
+		Narrative: "Legacy summary", GenerationModel: job.Model, GeneratorVersion: job.GeneratorVersion,
+		Candidates: []usermemory.CompactionCandidateArtifact{{
+			SourceTurnID: job.CoveredThroughTurnID + 1000, Statement: "Invalid legacy candidate", Evidence: "not in the source turn",
+			Scope: "invalid", Category: "invalid", Context: "invalid", Provenance: "invalid", Sensitivity: "invalid",
+			Confidence: 2, Importance: 99, ClaimSlot: "invalid", ClaimValue: "invalid",
+		}},
+	}
+	if err := store.SaveSessionCompactionArtifact(context.Background(), job, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.process(context.Background(), &job); err != nil {
+		t.Fatalf("publish legacy artifact: %v", err)
+	}
+	summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session-1", profile.Generation)
+	if err != nil || summary.Narrative != legacy.Narrative {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	var candidateCount int
+	if err := db.SQL().QueryRow(`SELECT COUNT(*) FROM memory_candidates WHERE canonical_user_id = ?`, "user-1").Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCount != 0 {
+		t.Fatalf("compaction staged %d memory candidates", candidateCount)
 	}
 }
 
 func TestServiceCompactionYieldsWhenForegroundWorkIsBusy(t *testing.T) {
-	store := newSessionRuntimeStore(t)
+	store, db := newSessionRuntimeStoreWithDB(t)
 	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +213,10 @@ func TestServiceCompactionYieldsWhenForegroundWorkIsBusy(t *testing.T) {
 	}
 	if err := store.DeferSessionCompactionJob(context.Background(), job, time.Second); err != nil {
 		t.Fatal(err)
+	}
+	var submissions int
+	if err := db.SQL().QueryRow(`SELECT model_submission_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&submissions); err != nil || submissions != 0 {
+		t.Fatalf("deferred submissions=%d err=%v", submissions, err)
 	}
 }
 
@@ -239,6 +250,31 @@ func TestServiceDiscardsSuccessfulCompactionAfterForegroundPreemption(t *testing
 	}
 }
 
+func TestServiceRefundsCompactionSubmissionBeforeProviderAcceptance(t *testing.T) {
+	store, db := newSessionRuntimeStoreWithDB(t)
+	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := &canceledLowPriorityGate{}
+	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: context.Canceled}
+	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
+	service.SetLowPriorityGate(gate)
+	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.drain(context.Background())
+	var state string
+	var submissions int
+	if err := db.SQL().QueryRow(`SELECT state, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &submissions); err != nil {
+		t.Fatal(err)
+	}
+	if state != "retry" || submissions != 0 || extractor.calls != 1 {
+		t.Fatalf("state=%q submissions=%d calls=%d", state, submissions, extractor.calls)
+	}
+}
+
 func TestServiceBoundsInvalidCompactionOutput(t *testing.T) {
 	store, db := newSessionRuntimeStoreWithDB(t)
 	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
@@ -253,20 +289,20 @@ func TestServiceBoundsInvalidCompactionOutput(t *testing.T) {
 	}
 	service.drain(context.Background())
 	var state string
-	var attempts, invalidRetries int
-	if err := db.SQL().QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &invalidRetries); err != nil {
+	var attempts, invalidRetries, submissions int
+	if err := db.SQL().QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &invalidRetries, &submissions); err != nil {
 		t.Fatal(err)
 	}
-	if state != "retry" || attempts != 0 || invalidRetries != 1 || extractor.calls != 1 {
-		t.Fatalf("first state=%q attempts=%d invalid_retries=%d calls=%d", state, attempts, invalidRetries, extractor.calls)
+	if state != "retry" || attempts != 1 || invalidRetries != 1 || submissions != 1 || extractor.calls != 1 {
+		t.Fatalf("first state=%q attempts=%d invalid_retries=%d submissions=%d calls=%d", state, attempts, invalidRetries, submissions, extractor.calls)
 	}
 	makeCompactionJobReady(t, db, jobID)
 	service.drain(context.Background())
-	if err := db.SQL().QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &invalidRetries); err != nil {
+	if err := db.SQL().QueryRow(`SELECT state, attempt_count, compaction_invalid_output_retry_count, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &invalidRetries, &submissions); err != nil {
 		t.Fatal(err)
 	}
-	if state != "skipped" || attempts != 1 || invalidRetries != 1 || extractor.calls != 2 {
-		t.Fatalf("terminal state=%q attempts=%d invalid_retries=%d calls=%d", state, attempts, invalidRetries, extractor.calls)
+	if state != "skipped" || attempts != 2 || invalidRetries != 1 || submissions != 2 || extractor.calls != 2 || extractor.lastErrorCode != "missing_tool_call" {
+		t.Fatalf("terminal state=%q attempts=%d invalid_retries=%d submissions=%d calls=%d", state, attempts, invalidRetries, submissions, extractor.calls)
 	}
 }
 
@@ -299,7 +335,7 @@ func TestServiceChargesProviderStartedPreemption(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := &canceledLowPriorityGate{}
-	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }}
+	extractor := &fakeSummaryExtractor{preempt: func() { gate.cancel() }, err: &llm.AsyncJobWaitError{Cause: context.Canceled}}
 	service := NewService(store, extractor, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
 	service.SetLowPriorityGate(gate)
 	jobID, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation)
@@ -308,12 +344,12 @@ func TestServiceChargesProviderStartedPreemption(t *testing.T) {
 	}
 	service.drain(context.Background())
 	var state, code string
-	var attempts int
-	if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code); err != nil {
+	var attempts, submissions int
+	if err := db.SQL().QueryRow(`SELECT state, attempt_count, last_error_code, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &attempts, &code, &submissions); err != nil {
 		t.Fatal(err)
 	}
-	if state != "retry" || attempts != 1 || code != "transient_preempted_after_start" || extractor.calls != 1 {
-		t.Fatalf("state=%q attempts=%d code=%q calls=%d", state, attempts, code, extractor.calls)
+	if state != "retry" || attempts != 1 || submissions != 1 || code != "transient_preempted_after_start" || extractor.calls != 1 {
+		t.Fatalf("state=%q attempts=%d submissions=%d code=%q calls=%d", state, attempts, submissions, code, extractor.calls)
 	}
 }
 
@@ -332,57 +368,25 @@ func TestServiceCompactionProviderCallsHaveAbsoluteBound(t *testing.T) {
 	for {
 		service.drain(context.Background())
 		var state string
-		var redrives int
-		if err := db.SQL().QueryRow(`SELECT state, redrive_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &redrives); err != nil {
+		var submissions int
+		if err := db.SQL().QueryRow(`SELECT state, model_submission_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&state, &submissions); err != nil {
 			t.Fatal(err)
 		}
 		switch state {
 		case "retry":
 			makeCompactionJobReady(t, db, jobID)
 		case "dead":
-			if redrives == 3 {
-				var attempts, invalidRetries int
-				if err := db.SQL().QueryRow(`SELECT attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&attempts, &invalidRetries); err != nil {
-					t.Fatal(err)
-				}
-				if extractor.calls != 13 || attempts != 3 || invalidRetries != 1 {
-					t.Fatalf("calls=%d attempts=%d invalid_retries=%d", extractor.calls, attempts, invalidRetries)
-				}
-				return
-			}
-			if _, err := db.SQL().Exec(`UPDATE durable_jobs SET updated_at = ? WHERE id = ?`, time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano), jobID); err != nil {
+			var attempts, invalidRetries int
+			if err := db.SQL().QueryRow(`SELECT attempt_count, compaction_invalid_output_retry_count FROM durable_jobs WHERE id = ?`, jobID).Scan(&attempts, &invalidRetries); err != nil {
 				t.Fatal(err)
 			}
-			count, err := store.RedriveDeadSessionCompactionJobs(context.Background(), time.Second)
-			if err != nil || count != 1 {
-				t.Fatalf("redrive count=%d err=%v", count, err)
+			if extractor.calls != usermemory.DurableModelSubmissionLimit || submissions != usermemory.DurableModelSubmissionLimit || attempts != usermemory.DurableModelSubmissionLimit || invalidRetries != 1 || extractor.lastErrorCode != "missing_tool_call" {
+				t.Fatalf("calls=%d submissions=%d attempts=%d invalid_retries=%d corrective_code=%q", extractor.calls, submissions, attempts, invalidRetries, extractor.lastErrorCode)
 			}
-			makeCompactionJobReady(t, db, jobID)
+			return
 		default:
 			t.Fatalf("unexpected state=%q", state)
 		}
-	}
-}
-
-func TestValidateCompactionCandidatesKeepsStoreFailuresTransient(t *testing.T) {
-	store := newSessionRuntimeStore(t)
-	profile, err := seedCompactionRuntimeTurns(t, store, "session-1", 25)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := NewService(store, &fakeSummaryExtractor{}, "model", promptbudget.ContextBudget{PromptLimit: 100000}, config.NewLogger(config.LevelError))
-	if _, err := service.plan(context.Background(), "user-1", "session-1", profile.Generation); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), service.owner, time.Minute, "model", SummaryGeneratorVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err = service.validateCandidates(ctx, job, usermemory.SummaryArtifact{})
-	if err == nil || errors.Is(err, errInvalidCompactionOutput) {
-		t.Fatalf("validation error=%v", err)
 	}
 }
 

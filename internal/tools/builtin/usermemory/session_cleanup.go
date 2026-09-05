@@ -170,11 +170,17 @@ WHERE NOT EXISTS (
 		return counts, err
 	}
 	for _, turn := range deletedTurns {
+		result, err = tx.ExecContext(ctx, `DELETE FROM durable_jobs WHERE job_kind = 'memory_formation' AND canonical_user_id = ? AND (source_turn_id = ? OR (extractor_version = ? AND EXISTS (SELECT 1 FROM json_each(durable_jobs.artifact_payload, '$.turn_ids') source WHERE source.type = 'integer' AND source.value = ?)))`, turn.userID, turn.id, PatternExtractorVersion, turn.id)
+		if err != nil {
+			return SessionCleanupCounts{}, fmt.Errorf("delete expired session formation jobs: %w", err)
+		}
+		changed, _ := result.RowsAffected()
+		counts.FormationJobsDeleted += changed
 		result, err = tx.ExecContext(ctx, `DELETE FROM session_turns WHERE id = ? AND canonical_user_id = ?`, turn.id, turn.userID)
 		if err != nil {
 			return SessionCleanupCounts{}, fmt.Errorf("delete expired session turn: %w", err)
 		}
-		changed, _ := result.RowsAffected()
+		changed, _ = result.RowsAffected()
 		counts.SessionTurnsDeleted += changed
 	}
 	for _, turn := range deletedTurns {

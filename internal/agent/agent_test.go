@@ -138,6 +138,49 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	}
 }
 
+func TestProcessPersistsStagedForegroundMemoryWithFinalTurn(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "private dark mode candidate", ToolCalls: []llm.ToolCall{{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}}}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I will remember that."}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	agent, store := newTestAgent(t, chat, nil, reg)
+	registerStagingTool(t, reg, store, false)
+	response, err := processAgent(agent, "staged", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Candidates) != 1 || artifact.Candidates[0].ClaimValue != "dark mode" {
+		t.Fatalf("artifact=%+v", artifact)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
+	if err != nil || len(turns) != 1 || len(turns[0].ToolHistory.Batches) != 1 {
+		t.Fatalf("turns=%+v err=%v", turns, err)
+	}
+	encodedHistory, _ := json.Marshal(turns[0].ToolHistory)
+	if bytes.Contains(encodedHistory, []byte("dark mode")) || bytes.Contains(encodedHistory, []byte("private dark mode candidate")) {
+		t.Fatalf("metadata-only tool history retained staged candidate: %s", encodedHistory)
+	}
+}
+
+func TestProcessDoesNotSilentlySucceedWhenStagedTurnIsNotPersisted(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}}}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I will remember that."}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	agent, store := newTestAgent(t, chat, nil, reg)
+	registerStagingTool(t, reg, store, true)
+	response, err := processAgent(agent, "staged-failure", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
+	if err == nil || response != nil || !strings.Contains(err.Error(), "session turn was not stored") {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+}
+
 func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
 	userPayload := toolStreamPayload(toolnames.UserMemorySearch, map[string]interface{}{"query": "reply style"}, "No memories found.", time.Millisecond, false)
 	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "search" || userPayload.GlobalMemory != nil {
@@ -155,6 +198,24 @@ func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
 		}
 		if strings.Contains(string(encoded), `"memory":`) {
 			t.Fatalf("legacy memory stream key was emitted: %s", encoded)
+		}
+	}
+}
+
+func TestUserMemorySaveStreamPayloadOmitsCandidateContent(t *testing.T) {
+	payload := toolStreamPayload(toolnames.UserMemorySave, map[string]interface{}{
+		"memories": []interface{}{map[string]interface{}{"statement": "private statement", "evidence": "private evidence"}},
+	}, `{"status":"staged","message":"private result"}`, time.Millisecond, false)
+	if payload.Arguments != nil || payload.ResultText != "" || payload.UserMemory == nil || payload.UserMemory.Action != "save" {
+		t.Fatalf("unexpected save stream payload: %+v", payload)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"private statement", "private evidence", "private result"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("save stream exposed %q: %s", private, encoded)
 		}
 	}
 }
@@ -1410,6 +1471,36 @@ func testGlobalPolicy() governance.GlobalPolicy {
 
 func productiveResult(content string) governance.Result {
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}
+}
+
+func registerStagingTool(t *testing.T, reg *registry.Registry, store *usermemory.Store, resetSession bool) {
+	t.Helper()
+	policy := testToolPolicy()
+	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
+	err := reg.RegisterTool(registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+		collector := requestctx.MemoryStageCollectorFromContext(ctx)
+		if collector == nil {
+			return governance.Result{}, errors.New("memory collector is missing")
+		}
+		candidate := memoryformation.CandidateOutput{
+			Statement: "The user prefers dark mode.", Evidence: "I prefer dark mode.",
+			Category: memoryformation.CategoryDurablePreferences, ClaimSlot: "durable_preferences.fact", ClaimValue: "dark mode",
+			Mode: memoryformation.ModeAgentSave, Approval: memoryformation.ApprovalApproved,
+		}
+		if err := collector.Stage([]requestctx.StagedMemoryCandidate{{CanonicalUserID: "user-1", Candidate: candidate}}); err != nil {
+			return governance.Result{}, err
+		}
+		if resetSession {
+			meta := requestctx.MetadataFromContext(ctx)
+			if _, err := store.ResetSession(ctx, "user-1", meta.SessionID, time.Hour); err != nil {
+				return governance.Result{}, err
+			}
+		}
+		return productiveResult(`{"status":"staged"}`), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func toolResultByID(messages []llm.ChatMessage, id string) *llm.ChatMessage {

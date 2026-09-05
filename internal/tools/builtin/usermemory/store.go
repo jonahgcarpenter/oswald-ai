@@ -452,20 +452,21 @@ WHERE loser.canonical_user_id = ?`
 	type mergedMemoryDuplicate struct {
 		loserID, winnerID                   int64
 		loserConfidence, winnerConfidence   float64
+		loserImportance, winnerImportance   int
 		loserProvenance, winnerProvenance   string
 		loserSensitivity, winnerSensitivity string
 		loserClaimSlot, winnerClaimSlot     string
 		loserClaimValue, winnerClaimValue   string
 		loserStatement, loserCategory       string
 	}
-	duplicateRows, err := tx.QueryContext(ctx, `SELECT loser.id, winner.id, loser.confidence, winner.confidence, loser.provenance_type, winner.provenance_type, loser.sensitivity, winner.sensitivity, loser.claim_slot, winner.claim_slot, loser.claim_value, winner.claim_value, loser.statement, loser.category `+duplicateJoin, winnerID, loserID)
+	duplicateRows, err := tx.QueryContext(ctx, `SELECT loser.id, winner.id, loser.confidence, winner.confidence, loser.importance, winner.importance, loser.provenance_type, winner.provenance_type, loser.sensitivity, winner.sensitivity, loser.claim_slot, winner.claim_slot, loser.claim_value, winner.claim_value, loser.statement, loser.category `+duplicateJoin, winnerID, loserID)
 	if err != nil {
 		return fmt.Errorf("read merged confidence duplicates: %w", err)
 	}
 	var mergedDuplicates []mergedMemoryDuplicate
 	for duplicateRows.Next() {
 		var duplicate mergedMemoryDuplicate
-		if err := duplicateRows.Scan(&duplicate.loserID, &duplicate.winnerID, &duplicate.loserConfidence, &duplicate.winnerConfidence, &duplicate.loserProvenance, &duplicate.winnerProvenance, &duplicate.loserSensitivity, &duplicate.winnerSensitivity, &duplicate.loserClaimSlot, &duplicate.winnerClaimSlot, &duplicate.loserClaimValue, &duplicate.winnerClaimValue, &duplicate.loserStatement, &duplicate.loserCategory); err != nil {
+		if err := duplicateRows.Scan(&duplicate.loserID, &duplicate.winnerID, &duplicate.loserConfidence, &duplicate.winnerConfidence, &duplicate.loserImportance, &duplicate.winnerImportance, &duplicate.loserProvenance, &duplicate.winnerProvenance, &duplicate.loserSensitivity, &duplicate.winnerSensitivity, &duplicate.loserClaimSlot, &duplicate.winnerClaimSlot, &duplicate.loserClaimValue, &duplicate.winnerClaimValue, &duplicate.loserStatement, &duplicate.loserCategory); err != nil {
 			duplicateRows.Close()
 			return fmt.Errorf("scan merged confidence duplicate: %w", err)
 		}
@@ -476,12 +477,13 @@ WHERE loser.canonical_user_id = ?`
 	}
 	for _, duplicate := range mergedDuplicates {
 		provenance := strongestMemoryProvenance(duplicate.winnerProvenance, duplicate.loserProvenance)
-		useLoser := provenanceAuthorityRank(duplicate.loserProvenance) > provenanceAuthorityRank(duplicate.winnerProvenance)
+		useLoser := provenanceAuthorityRank(duplicate.loserProvenance) > provenanceAuthorityRank(duplicate.winnerProvenance) ||
+			(provenanceAuthorityRank(duplicate.loserProvenance) == provenanceAuthorityRank(duplicate.winnerProvenance) && duplicate.loserConfidence > duplicate.winnerConfidence)
 		statement, category := "", ""
 		if useLoser {
 			statement, category = duplicate.loserStatement, duplicate.loserCategory
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, provenance_type = ?, sensitivity = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END WHERE id = ? AND canonical_user_id = ?`, aggregateConfidence(duplicate.winnerConfidence, duplicate.loserConfidence), provenance, strongestSensitivity(duplicate.winnerSensitivity, duplicate.loserSensitivity), statement, statement, category, category, duplicate.winnerID, winnerID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE memory_entries SET confidence = ?, importance = ?, provenance_type = ?, sensitivity = ?, statement = CASE WHEN ? = '' THEN statement ELSE ? END, category = CASE WHEN ? = '' THEN category ELSE ? END WHERE id = ? AND canonical_user_id = ?`, max(duplicate.winnerConfidence, duplicate.loserConfidence), max(duplicate.winnerImportance, duplicate.loserImportance), provenance, strongestSensitivity(duplicate.winnerSensitivity, duplicate.loserSensitivity), statement, statement, category, category, duplicate.winnerID, winnerID); err != nil {
 			return fmt.Errorf("merge confidence evidence metadata: %w", err)
 		}
 		if err := enqueueDerivedChangeTx(ctx, tx, winnerID, "memory", duplicate.winnerID, "upsert", "account-merge-confidence:"+mergeTurnNow); err != nil {
@@ -792,9 +794,6 @@ func (s *Store) listActiveMemories(userID, scope, category string, limit int) ([
 	if limit > 25 {
 		limit = 25
 	}
-	if err := s.expireOldMemories(); err != nil {
-		return nil, err
-	}
 	normalizedScope := normalizeOptionalScope(scope)
 	normalizedCategory := normalizeOptionalCategory(category)
 	entries, err := s.activeEntries(userID, normalizedScope, normalizedCategory)
@@ -894,14 +893,24 @@ func (s *Store) AppendSessionTurnForGenerationResultWithPressure(ctx context.Con
 // AppendSessionTurnForGenerationResultWithPressureAndHistory atomically stores
 // one pending exchange and its immutable native tool history.
 func (s *Store) AppendSessionTurnForGenerationResultWithPressureAndHistory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
+	return s.AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, nil, ttl, pressure)
+}
+
+// AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory
+// atomically stores one pending exchange, native tool history, and staged memory inputs.
+func (s *Store) AppendSessionTurnForGenerationResultWithPressureHistoryAndForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, pressure SessionPromptPressure) (StoredSessionTurn, error) {
 	if pressure.Tokens < 0 || pressure.Limit <= 0 || strings.TrimSpace(pressure.Version) == "" {
 		return StoredSessionTurn{}, fmt.Errorf("append session turn: invalid compaction pressure")
 	}
 	pressure.Version = strings.TrimSpace(pressure.Version)
-	return s.appendSessionTurn(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, ttl, true, false, &pressure)
+	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, staged, ttl, true, false, &pressure)
 }
 
 func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, ttl time.Duration, validateGeneration, markDelivered bool, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
+	return s.appendSessionTurnWithForegroundMemory(ctx, sessionID, userID, generation, userText, assistantText, toolNames, history, nil, ttl, validateGeneration, markDelivered, pressure)
+}
+
+func (s *Store) appendSessionTurnWithForegroundMemory(ctx context.Context, sessionID, userID string, generation int, userText, assistantText string, toolNames []string, history ToolHistory, staged []requestctx.StagedMemoryCandidate, ttl time.Duration, validateGeneration, markDelivered bool, pressure *SessionPromptPressure) (StoredSessionTurn, error) {
 	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(assistantText) == "" {
 		return StoredSessionTurn{}, nil
 	}
@@ -931,18 +940,22 @@ func (s *Store) appendSessionTurn(ctx context.Context, sessionID, userID string,
 	if err != nil {
 		return StoredSessionTurn{}, fmt.Errorf("append session turn: %w", err)
 	}
+	foregroundMemory, err := EncodeForegroundMemory(userID, staged)
+	if err != nil {
+		return StoredSessionTurn{}, fmt.Errorf("append session turn: %w", err)
+	}
 	if len(history.Batches) > 0 {
 		toolNames = successfulToolHistoryNames(history)
 	}
 	query := `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	RETURNING id`
-	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, formatTime(now), nullableTime(expires), requestID, deliveredAt, pressureTokens, pressureLimit, pressureVersion}
+	args := []any{sessionID, userID, generation, strings.TrimSpace(userText), strings.TrimSpace(assistantText), strings.Join(uniqueStrings(toolNames), ","), toolTrace, toolSearchText, foregroundMemory, formatTime(now), nullableTime(expires), requestID, deliveredAt, pressureTokens, pressureLimit, pressureVersion}
 	if validateGeneration {
 		query = `
-INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+INSERT INTO session_turns (session_id, canonical_user_id, session_generation, user_text, assistant_text, tool_names, tool_trace, tool_search_text, foreground_memory, created_at, expires_at, source_request_id, delivered_at, compaction_pressure_tokens, compaction_pressure_limit, compaction_pressure_version)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE EXISTS (
 	SELECT 1 FROM sessions WHERE canonical_user_id = ? AND session_id = ? AND generation = ? AND is_active = 1
 	)
@@ -1229,11 +1242,6 @@ func distanceToSimilarity(distance float64) float64 {
 	return 1 / (1 + distance)
 }
 
-func (s *Store) expireOldMemories() error {
-	_, err := s.CleanupExpiredSessions(context.Background(), time.Now().UTC())
-	return err
-}
-
 func (s *Store) ensureAccountUser(userID string) error {
 	if strings.TrimSpace(userID) == "" {
 		return fmt.Errorf("user memory: user id is required")
@@ -1452,7 +1460,7 @@ func RenderMemory(intro string, entries []MemoryEntry) string {
 			b.WriteString("\n\n- Source authority: ")
 			b.WriteString(quoteProfileText(normalizeProfileToken(entry.SourceAuthority)))
 			b.WriteString("\n\n- Epistemic status: ")
-			b.WriteString(quoteProfileText(recallEpistemicStatus(recallAuthorityForEntry(entry))))
+			b.WriteString(quoteProfileText(recallEpistemicStatus(recallAuthorityForEntry(entry), entry.Confidence)))
 			b.WriteString("\n\n- Sensitivity: ")
 			b.WriteString(quoteProfileText(normalizeProfileToken(entry.Sensitivity)))
 			b.WriteString("\n\n")

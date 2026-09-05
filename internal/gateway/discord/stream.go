@@ -444,6 +444,8 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 	}
 
 	switch tool.Name {
+	case "user_memory_save":
+		return actionToolStatus(tool.Name, "Staging a memory for delivery", "Staged a memory for post-delivery validation", "Memory staging failed")
 	case "web.fetch":
 		completed := "Fetched the requested public page"
 		if tool.WebFetch != nil && tool.WebFetch.IsDegraded {

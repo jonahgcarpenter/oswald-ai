@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,6 +28,41 @@ func TestProposeCandidateAtomicallyPublishesApprovedPolicy(t *testing.T) {
 	replayed, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, IdempotencyKey: "atomic"})
 	if err != nil || created || replayed.PublishedMemoryID != candidate.PublishedMemoryID {
 		t.Fatalf("replay=%+v created=%v err=%v", replayed, created, err)
+	}
+}
+
+func TestExplicitRememberCanReplaceEqualStrengthClaim(t *testing.T) {
+	store := newFormationTestStore(t)
+	oldOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "I live in Boston.", Statement: "The user lives in Boston.", Evidence: "I live in Boston.",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAgentSave, Scope: memoryformation.ScopeLongTerm,
+		Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 3,
+		ClaimSlot: "environment.home_city", ClaimValue: "Boston",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: oldOutput, IdempotencyKey: "old-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOutput, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "Remember that I live in Porto.", Statement: "The user lives in Porto.", Evidence: "I live in Porto.",
+		Provenance: memoryformation.ProvenanceUserStatement, ClaimedAuthority: memoryformation.AuthorityUserDirect,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeExplicitRemember, Scope: memoryformation.ScopeLongTerm,
+		Category: memoryformation.CategoryEnvironment, Context: memoryformation.ContextDirectAssertion, Confidence: 1, Importance: 3,
+		ClaimSlot: "environment.home_city", ClaimValue: "Porto",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: newOutput, IdempotencyKey: "new-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCandidate.PublishedMemoryID == 0 || newCandidate.SupersedesMemoryID != oldCandidate.PublishedMemoryID {
+		t.Fatalf("old=%+v new=%+v", oldCandidate, newCandidate)
 	}
 }
 
@@ -70,7 +106,7 @@ func TestProposeCandidateDuplicateReinforcementIsIdempotent(t *testing.T) {
 		t.Fatalf("second=%+v first=%+v err=%v", second, first, err)
 	}
 	memory, err := store.EntryByID(first.PublishedMemoryID)
-	if err != nil || memory.Confidence < 0.799999 || memory.Confidence > 0.800001 || memory.EvidenceCount != 2 {
+	if err != nil || memory.Confidence != 0.6 || memory.EvidenceCount != 2 || memory.Statement != firstOutput.Statement {
 		t.Fatalf("reinforced memory=%+v err=%v", memory, err)
 	}
 	if _, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: secondOutput, IdempotencyKey: "second"}); err != nil {
@@ -79,6 +115,207 @@ func TestProposeCandidateDuplicateReinforcementIsIdempotent(t *testing.T) {
 	again, _ := store.EntryByID(first.PublishedMemoryID)
 	if again.Confidence != memory.Confidence || again.EvidenceCount != 2 {
 		t.Fatalf("idempotent replay changed memory: before=%+v after=%+v", memory, again)
+	}
+}
+
+func TestProposeCandidateConsolidatesLowThenHighEvidence(t *testing.T) {
+	store := newFormationTestStore(t)
+	low := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "preference.drink", "tea")
+	lowTurn := seedFormationTurn(t, store, "user", "consolidation", low.Evidence)
+	first, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: low, IdempotencyKey: "low-then-high-low", Source: FormationSource{TurnID: lowTurn}})
+	if err != nil || first.State != "proposed" || first.PublishedMemoryID != 0 {
+		t.Fatalf("low candidate=%+v err=%v", first, err)
+	}
+	high := evaluatedClaimCandidate(t, "My preferred drink is tea", "The user's preferred drink is tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.8, "preference.drink", "tea")
+	highTurn := seedFormationTurn(t, store, "user", "consolidation", high.Evidence)
+	second, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: high, IdempotencyKey: "low-then-high-high", Source: FormationSource{TurnID: highTurn}})
+	if err != nil || second.PublishedMemoryID == 0 {
+		t.Fatalf("high candidate=%+v err=%v", second, err)
+	}
+	first, err = store.LoadCandidate(context.Background(), "user", first.ID)
+	memory, memoryErr := store.EntryByID(second.PublishedMemoryID)
+	if err != nil || memoryErr != nil || first.State != "approved" || first.PublishedMemoryID != second.PublishedMemoryID || first.Confidence != 0.2 || memory.Confidence != 0.8 || memory.EvidenceCount != 2 {
+		t.Fatalf("low=%+v memory=%+v load_err=%v memory_err=%v", first, memory, err, memoryErr)
+	}
+}
+
+func TestProposeCandidateConsolidatesHighThenLowWithoutCanonicalDecrease(t *testing.T) {
+	store := newFormationTestStore(t)
+	high := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.8, "preference.drink", "tea")
+	highTurn := seedFormationTurn(t, store, "user", "consolidation", high.Evidence)
+	first, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: high, IdempotencyKey: "high-then-low-high", Source: FormationSource{TurnID: highTurn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	low := evaluatedClaimCandidate(t, "I like tea", "The user likes tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "preference.drink", "tea")
+	lowTurn := seedFormationTurn(t, store, "user", "consolidation", low.Evidence)
+	second, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: low, IdempotencyKey: "high-then-low-low", Source: FormationSource{TurnID: lowTurn}})
+	if err != nil || second.State != "approved" || second.PublishedMemoryID != first.PublishedMemoryID || second.Confidence != 0.2 || second.DecisionReason != "observation supports an already-active claim" {
+		t.Fatalf("low candidate=%+v err=%v", second, err)
+	}
+	memory, err := store.EntryByID(first.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.8 || memory.Statement != high.Statement || memory.EvidenceCount != 2 {
+		t.Fatalf("memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestProposeCandidateCanonicalMetadataUsesStrongestEvidenceAuthority(t *testing.T) {
+	store := newFormationTestStore(t)
+	direct := evaluatedClaimCandidate(t, "I use Arch Linux", "The user uses Arch Linux.", memoryformation.CategoryEnvironment, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "environment.linux_distribution", "arch_linux")
+	direct.ClaimValue = "arch_family"
+	directTurn := seedFormationTurn(t, store, "user", "metadata", direct.Evidence)
+	directCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: direct, IdempotencyKey: "metadata-direct", Source: FormationSource{TurnID: directTurn}})
+	if err != nil || directCandidate.State != "proposed" {
+		t.Fatalf("direct candidate=%+v err=%v", directCandidate, err)
+	}
+	inferred := evaluatedClaimCandidate(t, "Considering pacman packages for file management.", "The user may use or be evaluating a pacman-based Arch-family Linux environment.", memoryformation.CategoryEnvironment, memoryformation.ProvenanceModelInference, memoryformation.SensitivityLow, 0.8, "environment.linux_distribution", "arch_family")
+	inferredTurn := seedFormationTurn(t, store, "user", "metadata", inferred.Evidence)
+	candidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: inferred, IdempotencyKey: "metadata-inferred", Source: FormationSource{TurnID: inferredTurn}})
+	if err != nil || candidate.PublishedMemoryID == 0 {
+		t.Fatalf("inferred candidate=%+v err=%v", candidate, err)
+	}
+	memory, err := store.EntryByID(candidate.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.8 || memory.ProvenanceType != "user_statement" || memory.Statement != direct.Statement || memory.EvidenceCount != 2 {
+		t.Fatalf("memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestProposeCandidateOnlyConsolidatesEligibleExactClaimEvidence(t *testing.T) {
+	store := newFormationTestStore(t)
+	seedAccountUsers(t, store, "other")
+	base := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "preference.drink", "tea")
+	type staged struct {
+		userID string
+		key    string
+		output memoryformation.CandidateOutput
+		turnID int64
+	}
+	undeliveredTurn := seedFormationTurn(t, store, "user", "filters", base.Evidence)
+	failedTurn := seedFormationTurn(t, store, "user", "filters", base.Evidence)
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = NULL WHERE id = ?; UPDATE session_turns SET delivery_failed_at = ? WHERE id = ?`, undeliveredTurn, formatTime(time.Now().UTC()), failedTurn); err != nil {
+		t.Fatal(err)
+	}
+	differentValue := base
+	differentValue.ClaimValue = "coffee"
+	differentScope := base
+	differentScope.Scope = memoryformation.ScopeShortTerm
+	cases := []staged{
+		{userID: "user", key: "filter-undelivered", output: base, turnID: undeliveredTurn},
+		{userID: "user", key: "filter-failed", output: base, turnID: failedTurn},
+		{userID: "user", key: "filter-value", output: differentValue, turnID: seedFormationTurn(t, store, "user", "filters", differentValue.Evidence)},
+		{userID: "user", key: "filter-scope", output: differentScope, turnID: seedFormationTurn(t, store, "user", "filters", differentScope.Evidence)},
+		{userID: "other", key: "filter-tenant", output: base, turnID: seedFormationTurn(t, store, "other", "filters", base.Evidence)},
+	}
+	var candidates []FormationCandidate
+	for _, item := range cases {
+		candidate, _, err := store.ProposeCandidate(context.Background(), item.userID, CandidateProposal{Output: item.output, IdempotencyKey: item.key, Source: FormationSource{TurnID: item.turnID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	high := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.8, "preference.drink", "tea")
+	highTurn := seedFormationTurn(t, store, "user", "filters", high.Evidence)
+	active, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: high, IdempotencyKey: "filter-active", Source: FormationSource{TurnID: highTurn}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(active.PublishedMemoryID)
+	if err != nil || memory.EvidenceCount != 1 {
+		t.Fatalf("memory=%+v err=%v", memory, err)
+	}
+	for index, candidate := range candidates {
+		loaded, err := store.LoadCandidate(context.Background(), cases[index].userID, candidate.ID)
+		if err != nil || loaded.PublishedMemoryID != 0 || loaded.State != "proposed" {
+			t.Fatalf("case=%s candidate=%+v err=%v", cases[index].key, loaded, err)
+		}
+	}
+}
+
+func TestProposeCandidateConsolidationReplayKeepsEvidenceCountStable(t *testing.T) {
+	store := newFormationTestStore(t)
+	low := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.2, "preference.drink", "tea")
+	lowTurn := seedFormationTurn(t, store, "user", "replay", low.Evidence)
+	if _, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: low, IdempotencyKey: "replay-low", Source: FormationSource{TurnID: lowTurn}}); err != nil {
+		t.Fatal(err)
+	}
+	high := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.8, "preference.drink", "tea")
+	highTurn := seedFormationTurn(t, store, "user", "replay", high.Evidence)
+	proposal := CandidateProposal{Output: high, IdempotencyKey: "replay-high", Source: FormationSource{TurnID: highTurn}}
+	active, _, err := store.ProposeCandidate(context.Background(), "user", proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := store.ProposeCandidate(context.Background(), "user", proposal); err != nil || created {
+		t.Fatalf("replay created=%v err=%v", created, err)
+	}
+	memory, err := store.EntryByID(active.PublishedMemoryID)
+	if err != nil || memory.EvidenceCount != 2 || memory.Confidence != 0.8 {
+		t.Fatalf("memory=%+v err=%v", memory, err)
+	}
+}
+
+func TestProposeCandidateTreatsReinforcementTargetAsValidatedHint(t *testing.T) {
+	store := newFormationTestStore(t)
+	seedAccountUsers(t, store, "other")
+	base := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.6, "preference.drink", "tea")
+	baseCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: base, IdempotencyKey: "target-base", Source: FormationSource{TurnID: seedFormationTurn(t, store, "user", "target", "I prefer tea")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := evaluatedClaimCandidate(t, "I use Go", "The user uses Go.", memoryformation.CategoryProjects, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.9, "project.language", "go")
+	wrongCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: wrong, IdempotencyKey: "wrong-target-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignCandidate, _, err := store.ProposeCandidate(context.Background(), "other", CandidateProposal{Output: base, IdempotencyKey: "foreign-target-memory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		targetID   int64
+		confidence float64
+	}{
+		{name: "valid", targetID: baseCandidate.PublishedMemoryID, confidence: 0.7},
+		{name: "wrong identity", targetID: wrongCandidate.PublishedMemoryID, confidence: 0.8},
+		{name: "cross tenant", targetID: foreignCandidate.PublishedMemoryID, confidence: 0.9},
+		{name: "missing", targetID: foreignCandidate.PublishedMemoryID + 1000, confidence: 0.95},
+	}
+	var lastTurn int64
+	for index, test := range tests {
+		incoming := base
+		incoming.Confidence = test.confidence
+		incoming.Statement = "The user's preferred beverage is tea."
+		incoming.Evidence = "My preferred beverage is tea"
+		turnID := seedFormationTurn(t, store, "user", "target", incoming.Evidence)
+		lastTurn = turnID
+		candidate, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: incoming, IdempotencyKey: fmt.Sprintf("target-%d", index), TargetMemoryID: test.targetID, Source: FormationSource{TurnID: turnID}})
+		if err != nil || !created || candidate.PublishedMemoryID != baseCandidate.PublishedMemoryID {
+			t.Fatalf("%s candidate=%+v created=%v err=%v", test.name, candidate, created, err)
+		}
+	}
+	memory, err := store.EntryByID(baseCandidate.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.95 || memory.Statement != "The user's preferred beverage is tea." || memory.EvidenceCount != 5 {
+		t.Fatalf("reinforced memory=%+v err=%v", memory, err)
+	}
+	wrongMemory, _ := store.EntryByID(wrongCandidate.PublishedMemoryID)
+	foreignMemory, _ := store.EntryByID(foreignCandidate.PublishedMemoryID)
+	if wrongMemory.EvidenceCount != 1 || foreignMemory.EvidenceCount != 1 {
+		t.Fatalf("target redirected evidence: wrong=%+v foreign=%+v", wrongMemory, foreignMemory)
+	}
+	before := memory
+	replayedOutput := base
+	replayedOutput.Confidence = 0.95
+	replayedOutput.Statement = "The user's preferred beverage is tea."
+	replayedOutput.Evidence = "My preferred beverage is tea"
+	if _, created, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: replayedOutput, IdempotencyKey: "target-3", TargetMemoryID: wrongCandidate.PublishedMemoryID, Source: FormationSource{TurnID: lastTurn}}); err != nil || created {
+		t.Fatalf("replay created=%v err=%v", created, err)
+	}
+	after, _ := store.EntryByID(baseCandidate.PublishedMemoryID)
+	if after.Confidence != before.Confidence || after.EvidenceCount != before.EvidenceCount || after.Statement != before.Statement {
+		t.Fatalf("replay changed canonical memory: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -345,6 +582,8 @@ func TestFormationLeaseMutationsFailAfterSourceBecomesUnsuccessful(t *testing.T)
 	_, err = store.FormationJobArtifact(context.Background(), job)
 	assertStale("artifact", err)
 	assertStale("validate", store.ValidateFormationJobLease(context.Background(), job))
+	_, err = store.ReserveFormationModelSubmission(context.Background(), job)
+	assertStale("reserve model submission", err)
 	assertStale("save", store.SaveFormationJobArtifact(context.Background(), job, `{"memories":[]}`))
 	output := evaluatedFormationCandidate(t, "I use Go", "I use Go", "The user uses Go.", memoryformation.CategoryProjects)
 	_, _, err = store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: output, Source: FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, FormationJob: &job})
@@ -369,17 +608,22 @@ func TestRetryInvalidFormationJobUsesDedicatedBudget(t *testing.T) {
 	if job.AttemptCount != 1 || job.InvalidOutputRetryCount != 0 {
 		t.Fatalf("initial job=%+v", job)
 	}
+	if count, err := store.ReserveFormationModelSubmission(context.Background(), job); err != nil || count != 1 {
+		t.Fatalf("reserve count=%d err=%v", count, err)
+	} else {
+		job.ModelSubmissionCount = count
+	}
 	if err := store.RetryInvalidFormationJob(context.Background(), job, "invalid_batch_shape"); err != nil {
 		t.Fatal(err)
 	}
 	var state, leaseOwner, code string
-	var attemptCount, invalidRetryCount int
+	var attemptCount, invalidRetryCount, submissionCount int
 	var leaseUntil sql.NullString
-	if err := store.sql.QueryRow(`SELECT state, attempt_count, invalid_output_retry_count, lease_owner, lease_until, last_error_code FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attemptCount, &invalidRetryCount, &leaseOwner, &leaseUntil, &code); err != nil {
+	if err := store.sql.QueryRow(`SELECT state, attempt_count, invalid_output_retry_count, model_submission_count, lease_owner, lease_until, corrective_error_code FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attemptCount, &invalidRetryCount, &submissionCount, &leaseOwner, &leaseUntil, &code); err != nil {
 		t.Fatal(err)
 	}
-	if state != "retry" || attemptCount != 0 || invalidRetryCount != 1 || leaseOwner != "" || leaseUntil.Valid || code != "invalid_batch_shape" {
-		t.Fatalf("retried state=%q attempts=%d invalid_retries=%d lease_owner=%q lease_until=%v code=%q", state, attemptCount, invalidRetryCount, leaseOwner, leaseUntil, code)
+	if state != "retry" || attemptCount != 1 || invalidRetryCount != 1 || submissionCount != 1 || leaseOwner != "" || leaseUntil.Valid || code != "invalid_batch_shape" {
+		t.Fatalf("retried state=%q attempts=%d invalid_retries=%d submissions=%d lease_owner=%q lease_until=%v code=%q", state, attemptCount, invalidRetryCount, submissionCount, leaseOwner, leaseUntil, code)
 	}
 	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
 		t.Fatal(err)
@@ -388,7 +632,7 @@ func TestRetryInvalidFormationJobUsesDedicatedBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed.AttemptCount != 1 || reclaimed.InvalidOutputRetryCount != 1 {
+	if reclaimed.AttemptCount != 2 || reclaimed.InvalidOutputRetryCount != 1 || reclaimed.ModelSubmissionCount != 1 || reclaimed.CorrectiveErrorCode != "invalid_batch_shape" {
 		t.Fatalf("reclaimed job=%+v", reclaimed)
 	}
 	if err := store.RetryInvalidFormationJob(context.Background(), reclaimed, "all_items_malformed"); !errors.Is(err, ErrStaleFormationJobLease) {
@@ -397,15 +641,18 @@ func TestRetryInvalidFormationJobUsesDedicatedBudget(t *testing.T) {
 	if err := store.DeferFormationJob(context.Background(), reclaimed, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.sql.QueryRow(`SELECT attempt_count, invalid_output_retry_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&attemptCount, &invalidRetryCount); err != nil {
+	if err := store.sql.QueryRow(`SELECT attempt_count, invalid_output_retry_count, model_submission_count, corrective_error_code FROM durable_jobs WHERE id = ?`, job.ID).Scan(&attemptCount, &invalidRetryCount, &submissionCount, &code); err != nil {
 		t.Fatal(err)
 	}
-	if attemptCount != 0 || invalidRetryCount != 1 {
-		t.Fatalf("preempted attempts=%d invalid_retries=%d", attemptCount, invalidRetryCount)
+	if code != "invalid_batch_shape" {
+		t.Fatalf("deferred structured retry lost corrective reason: %q", code)
+	}
+	if attemptCount != 1 || invalidRetryCount != 1 || submissionCount != 1 {
+		t.Fatalf("preempted attempts=%d invalid_retries=%d submissions=%d", attemptCount, invalidRetryCount, submissionCount)
 	}
 }
 
-func TestOperationalRedrivePreservesInvalidOutputBudget(t *testing.T) {
+func TestFormationModelSubmissionBudgetCannotBeResetByClaims(t *testing.T) {
 	store := newFormationTestStore(t)
 	turnID := seedFormationTurn(t, store, "user", "session", "I use Go", "request")
 	if _, err := store.EnqueueFormationJob(context.Background(), FormationSource{RequestID: "request", SessionID: "session", SessionGeneration: 1, TurnID: turnID}, "user"); err != nil {
@@ -415,33 +662,28 @@ func TestOperationalRedrivePreservesInvalidOutputBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.RetryInvalidFormationJob(context.Background(), job, "missing_tool_call"); err != nil {
-		t.Fatal(err)
+	for submission := 1; submission <= DurableModelSubmissionLimit; submission++ {
+		count, reserveErr := store.ReserveFormationModelSubmission(context.Background(), job)
+		if reserveErr != nil || count != submission {
+			t.Fatalf("submission=%d count=%d err=%v", submission, count, reserveErr)
+		}
+		job.ModelSubmissionCount = count
+		if submission == DurableModelSubmissionLimit {
+			break
+		}
+		if err := store.RetryFormationJob(context.Background(), job, "transient_provider", DurableModelSubmissionLimit); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
+			t.Fatal(err)
+		}
+		job, err = store.ClaimFormationJob(context.Background(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := store.sql.Exec(`UPDATE durable_jobs SET available_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Second)), job.ID); err != nil {
-		t.Fatal(err)
-	}
-	job, err = store.ClaimFormationJob(context.Background(), time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.RetryFormationJob(context.Background(), job, "transient_provider", 1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.sql.Exec(`UPDATE durable_jobs SET updated_at = ? WHERE id = ?`, formatTime(time.Now().UTC().Add(-time.Minute)), job.ID); err != nil {
-		t.Fatal(err)
-	}
-	redriven, err := store.RedriveDeadFormationJobs(context.Background(), time.Second)
-	if err != nil || redriven != 1 {
-		t.Fatalf("redriven=%d err=%v", redriven, err)
-	}
-	var state string
-	var attemptCount, invalidRetryCount, redriveCount int
-	if err := store.sql.QueryRow(`SELECT state, attempt_count, invalid_output_retry_count, redrive_count FROM durable_jobs WHERE id = ?`, job.ID).Scan(&state, &attemptCount, &invalidRetryCount, &redriveCount); err != nil {
-		t.Fatal(err)
-	}
-	if state != "retry" || attemptCount != 0 || invalidRetryCount != 1 || redriveCount != 1 {
-		t.Fatalf("state=%q attempts=%d invalid_retries=%d redrives=%d", state, attemptCount, invalidRetryCount, redriveCount)
+	if _, err := store.ReserveFormationModelSubmission(context.Background(), job); !errors.Is(err, ErrModelSubmissionBudgetExhausted) {
+		t.Fatalf("fourth reservation error=%v", err)
 	}
 }
 
@@ -457,6 +699,11 @@ func TestInvalidOutputRetrySurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	count, err := store.ReserveFormationModelSubmission(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.ModelSubmissionCount = count
 	if err := store.RetryInvalidFormationJob(context.Background(), job, "missing_tool_call"); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +719,7 @@ func TestInvalidOutputRetrySurvivesStoreReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed.InvalidOutputRetryCount != 1 || reclaimed.AttemptCount != 1 {
+	if reclaimed.InvalidOutputRetryCount != 1 || reclaimed.AttemptCount != 2 || reclaimed.ModelSubmissionCount != 1 || reclaimed.CorrectiveErrorCode != "missing_tool_call" {
 		t.Fatalf("reopened job=%+v", reclaimed)
 	}
 }

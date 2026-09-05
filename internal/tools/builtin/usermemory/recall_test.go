@@ -155,11 +155,33 @@ func TestRenderDurableMemoryRecallQuotesPromptInjection(t *testing.T) {
 	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
 		t.Fatalf("rendered record is invalid JSON: %v", err)
 	}
-	if decoded["confidence"] != 0.8 || decoded["provenance"] == nil || decoded["formation_provenance"] != "model_inference" || decoded["source_authority"] != "model" || decoded["epistemic_status"] != "uncertain_inference" || decoded["sensitivity"] != "sensitive" {
+	if decoded["confidence"] != 0.8 || decoded["provenance"] == nil || decoded["formation_provenance"] != "model_inference" || decoded["source_authority"] != "model" || decoded["epistemic_status"] != "high_confidence" || decoded["sensitivity"] != "sensitive" {
 		t.Fatalf("missing confidence/provenance: %#v", decoded)
 	}
-	if !strings.Contains(rendered, "is a hypothesis, not an established fact") {
-		t.Fatalf("missing uncertain-inference guidance: %q", rendered)
+	if !strings.Contains(rendered, "high_confidence is still not verified") {
+		t.Fatalf("missing inference guidance: %q", rendered)
+	}
+}
+
+func TestRecallEpistemicStatusConfidenceBoundaries(t *testing.T) {
+	tests := []struct {
+		authority  RecallAuthority
+		confidence float64
+		want       string
+	}{
+		{RecallAuthorityInferred, 0.49, "possible"},
+		{RecallAuthorityInferred, 0.5, "likely"},
+		{RecallAuthorityInferred, 0.79, "likely"},
+		{RecallAuthorityInferred, 0.8, "high_confidence"},
+		{RecallAuthorityUserStated, 0.1, "user_stated"},
+		{RecallAuthorityUserStated, 1, "user_stated"},
+		{RecallAuthorityVerified, 0.1, "verified"},
+		{RecallAuthorityVerified, 1, "verified"},
+	}
+	for _, test := range tests {
+		if got := recallEpistemicStatus(test.authority, test.confidence); got != test.want {
+			t.Errorf("authority=%q confidence=%v: got %q, want %q", test.authority, test.confidence, got, test.want)
+		}
 	}
 }
 

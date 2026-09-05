@@ -122,12 +122,16 @@ func main() {
 		log.Fatal("app.tools.init_failed", "failed to initialize tools", config.ErrorField(err))
 	}
 	mcpProvider := mcp.NewProvider(mcpManager, toolRegistry.Names()...)
-	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel)
+	formationExtractor, err := memoryextractor.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
 	if err != nil {
 		log.Fatal("app.memory_extractor.init_failed", "failed to initialize background user-memory extractor", config.ErrorField(err))
 	}
 	formationService := formationruntime.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
-	compactionService := sessionruntime.NewService(userMemStore, sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve), cfg.LLMGatewayModel, budget, rootLog)
+	compactionExtractor, err := sessionruntime.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
+	if err != nil {
+		log.Fatal("app.session_compactor.init_failed", "failed to initialize background session compactor", config.ErrorField(err))
+	}
+	compactionService := sessionruntime.NewService(userMemStore, compactionExtractor, cfg.LLMGatewayModel, budget, rootLog)
 
 	if cfg.LLMGatewayEmbeddingModel != "" {
 		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",

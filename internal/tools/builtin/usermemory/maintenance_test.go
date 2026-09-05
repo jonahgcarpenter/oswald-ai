@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memoryformation"
 )
 
 func TestMaintenanceDirectlyDeletesStaleCandidateRows(t *testing.T) {
@@ -28,6 +29,49 @@ func TestMaintenanceDirectlyDeletesStaleCandidateRows(t *testing.T) {
 		t.Fatalf("maintenance counts=%+v", counts)
 	}
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE id = ?`, 0, candidateID)
+}
+
+func TestMaintenanceRetainsRecentSubthresholdCandidateForReinforcement(t *testing.T) {
+	store := newFormationTestStore(t)
+	lowTurn := seedFormationTurn(t, store, "user", "session", "I want pancakes.", "low-pancakes")
+	low, err := memoryformation.Evaluate(memoryformation.CandidateInput{
+		SourceUserText: "I want pancakes.", Statement: "The user might like pancakes.", Evidence: "I want pancakes.",
+		Provenance: memoryformation.ProvenanceModelInference, ClaimedAuthority: memoryformation.AuthorityModel,
+		Sensitivity: memoryformation.SensitivityLow, Mode: memoryformation.ModeAgentSave, Scope: memoryformation.ScopeLongTerm,
+		Category: memoryformation.CategoryDurablePreferences, Context: memoryformation.ContextDirectAssertion, Confidence: 0.2, Importance: 3,
+		ClaimSlot: "preference.food.pancakes", ClaimValue: "likes",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowCandidate, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: low, Source: FormationSource{SessionID: "session", SessionGeneration: 1, TurnID: lowTurn}, IdempotencyKey: "low-pancakes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := config.RetentionPolicy{RetiredIndexRetention: time.Hour, SessionInactivity: time.Hour, PendingDeliveryTimeout: time.Minute, SuccessfulJobRetention: time.Hour, DeadJobRetention: 24 * time.Hour, AccountChallengeGrace: time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: time.Hour, BatchSize: 100}
+	if _, err := store.MaintenanceSweep(context.Background(), time.Now().UTC(), policy); err != nil {
+		t.Fatal(err)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE id = ? AND state = 'proposed'`, 1, lowCandidate.ID)
+
+	highTurn := seedFormationTurn(t, store, "user", "session", "I like pancakes.", "high-pancakes")
+	high := low
+	high.Statement = "The user likes pancakes."
+	high.Evidence = "I like pancakes."
+	high.Provenance = memoryformation.ProvenanceUserStatement
+	high.SourceAuthority = memoryformation.AuthorityUserDirect
+	high.Confidence = 0.95
+	high.Approval = memoryformation.ApprovalApproved
+	high.Decision = memoryformation.DecisionAutomatic
+	high.Reason = "direct user fact meets the active memory threshold"
+	created, _, err := store.ProposeCandidate(context.Background(), "user", CandidateProposal{Output: high, Source: FormationSource{SessionID: "session", SessionGeneration: 1, TurnID: highTurn}, IdempotencyKey: "high-pancakes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(created.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.95 || memory.EvidenceCount != 2 {
+		t.Fatalf("reinforced memory=%+v err=%v", memory, err)
+	}
 }
 
 func TestMaintenanceRetainsFailedCompactionContractForActiveSession(t *testing.T) {

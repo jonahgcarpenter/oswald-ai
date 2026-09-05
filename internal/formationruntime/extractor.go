@@ -14,5 +14,10 @@ var invalidOutputCode = memoryextractor.InvalidOutputCode
 
 // Extractor proposes a shared memory-save batch from one completed turn.
 type Extractor interface {
-	Extract(context.Context, usermemory.StoredSessionTurn) (usermemory.MemorySaveBatch, error)
+	Extract(context.Context, usermemory.StoredSessionTurn, string) (usermemory.MemorySaveBatch, error)
+}
+
+// PatternExtractor proposes repeated signals from a frozen user-turn window.
+type PatternExtractor interface {
+	ExtractPatterns(context.Context, []usermemory.StoredSessionTurn, string) (usermemory.MemoryPatternBatch, error)
 }

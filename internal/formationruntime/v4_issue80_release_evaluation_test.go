@@ -58,7 +58,7 @@ type issue80Extractor struct {
 	calls    int
 }
 
-func (f *issue80Extractor) Extract(context.Context, usermemory.StoredSessionTurn) (usermemory.MemorySaveBatch, error) {
+func (f *issue80Extractor) Extract(context.Context, usermemory.StoredSessionTurn, string) (usermemory.MemorySaveBatch, error) {
 	f.calls++
 	return usermemory.MemorySaveBatch{Memories: append([]usermemory.MemorySaveItem(nil), f.memories...), SubmittedCount: len(f.memories)}, nil
 }

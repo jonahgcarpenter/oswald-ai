@@ -246,6 +246,38 @@ func TestStoreShortTermExpiry(t *testing.T) {
 	}
 }
 
+func TestRecallAndListFilterExpiryWithoutMutatingRetentionState(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "usr_test")
+	ctx := context.Background()
+	memory, err := store.SaveMemory(ctx, "usr_test", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary marker is ORBITAL.", Evidence: "retained evidence", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuildTestIndexes(t, store)
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), memory.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _ := store.Recall(ctx, "usr_test", "ORBITAL", RecallRequest{TopK: 2})
+	entries, err := store.ListMemories("usr_test", ScopeShortTerm, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 || len(entries) != 0 {
+		t.Fatalf("expired memory served: recall=%+v list=%+v", results, entries)
+	}
+	var status, statement string
+	if err := store.sql.QueryRow(`SELECT status, statement FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status, &statement); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusActive || statement != "Temporary marker is ORBITAL." {
+		t.Fatalf("read path mutated expired memory: status=%q statement=%q", status, statement)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 1, memory.ID)
+}
+
 func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fakeMemoryEmbedder{}, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {
@@ -508,6 +540,36 @@ func TestMergeUsersTxPreservesFormationRowsAcrossDuplicatePublication(t *testing
 		if got != want {
 			t.Fatalf("merged %s count=%d want=%d", table, got, want)
 		}
+	}
+}
+
+func TestMergeUsersTxUsesMaxConfidenceAndStrongestAssessmentForDuplicate(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "winner", "loser")
+	ctx := context.Background()
+	winnerOutput := evaluatedClaimCandidate(t, "I prefer tea", "The user prefers tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityLow, 0.6, "preference.drink", "tea")
+	loserOutput := evaluatedClaimCandidate(t, "My preferred beverage is tea", "The user's preferred beverage is tea.", memoryformation.CategoryDurablePreferences, memoryformation.ProvenanceUserStatement, memoryformation.SensitivityIdentityOrContact, 0.9, "preference.drink", "tea")
+	winnerCandidate, _, err := store.ProposeCandidate(ctx, "winner", CandidateProposal{Output: winnerOutput, IdempotencyKey: "winner-tea"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ProposeCandidate(ctx, "loser", CandidateProposal{Output: loserOutput, IdempotencyKey: "loser-tea"}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.sql.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeUsersTx(ctx, tx, "winner", "loser", "winner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	memory, err := store.EntryByID(winnerCandidate.PublishedMemoryID)
+	if err != nil || memory.Confidence != 0.9 || memory.Statement != loserOutput.Statement || memory.Category != string(loserOutput.Category) || memory.Sensitivity != string(memoryformation.SensitivityIdentityOrContact) || memory.EvidenceCount != 2 {
+		t.Fatalf("merged memory=%+v err=%v", memory, err)
 	}
 }
 
