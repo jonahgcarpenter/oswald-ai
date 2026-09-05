@@ -8,7 +8,7 @@ Stage one to five model-assessed observations in the authenticated current user'
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| memories | array | yes | One or two independently grounded durable memory candidates from the current user message. |
+| memories | array | yes | One to five independently grounded durable memory candidates from the current user message. |
 
 ## Schema
 

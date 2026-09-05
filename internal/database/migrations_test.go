@@ -132,7 +132,7 @@ INSERT INTO memory_candidates(
 	}
 }
 
-func TestPermanentV406ForegroundMemoryChecks(t *testing.T) {
+func TestPermanentV407ForegroundMemoryChecks(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "oswald.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -142,10 +142,13 @@ func TestPermanentV406ForegroundMemoryChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := `INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, foreground_memory) VALUES ('session', 'user', 'question', 'answer', datetime('now'), ?)`
-	for _, invalid := range []string{`not-json`, `[]`, `{"version":1,"candidates":[]}`, `{"version":2,"candidates":[{},{},{}]}`, `{"version":2,"candidates":["` + strings.Repeat("x", 32768) + `"]}`} {
+	for _, invalid := range []string{`not-json`, `[]`, `{"version":1,"candidates":[]}`, `{"version":2,"candidates":[{},{},{},{},{},{}]}`, `{"version":2,"candidates":["` + strings.Repeat("x", 32768) + `"]}`} {
 		if _, err := db.SQL().Exec(base, invalid); err == nil {
 			t.Fatalf("invalid foreground memory was accepted: %.80q", invalid)
 		}
+	}
+	if _, err := db.SQL().Exec(base, `{"version":2,"candidates":[{},{},{},{},{}]}`); err != nil {
+		t.Fatalf("five foreground candidates were rejected: %v", err)
 	}
 	if _, err := db.SQL().Exec(`INSERT INTO durable_jobs(job_kind, canonical_user_id, idempotency_key, source_session_generation, extractor_version, available_at, updated_at) VALUES ('memory_formation', 'user', 'missing-purpose', 1, 'formation-v4', datetime('now'), datetime('now'))`); err == nil {
 		t.Fatal("memory formation job without purpose was accepted")
@@ -162,7 +165,10 @@ func TestPermanentV406UpgradesPrefixWithEmptyForegroundMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	migrations := orderedMigrations()
-	for _, migration := range migrations[:len(migrations)-1] {
+	if len(migrations) < 8 {
+		t.Fatalf("permanent migration count=%d, want at least 8", len(migrations))
+	}
+	for _, migration := range migrations[:6] {
 		if _, err := raw.Exec(migration.sql); err != nil {
 			raw.Close() // nolint:errcheck
 			t.Fatalf("apply prefix migration %s: %v", migration.name, err)
@@ -172,7 +178,7 @@ func TestPermanentV406UpgradesPrefixWithEmptyForegroundMemory(t *testing.T) {
 		raw.Close() // nolint:errcheck
 		t.Fatal(err)
 	}
-	for _, migration := range migrations[:len(migrations)-1] {
+	for _, migration := range migrations[:6] {
 		if _, err := raw.Exec(`INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (?, ?, ?, datetime('now'))`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
 			raw.Close() // nolint:errcheck
 			t.Fatal(err)
@@ -208,6 +214,126 @@ VALUES ('memory_formation', 'user', 'turn:1:formation-v4', 'legacy-request', 'se
 	}
 	if err := db.SQL().QueryRow(`SELECT formation_purpose FROM durable_jobs WHERE job_kind = 'memory_formation'`).Scan(&purpose); err != nil || purpose != "background_pattern" {
 		t.Fatalf("legacy formation purpose=%q err=%v", purpose, err)
+	}
+}
+
+func TestPermanentV407WidensForegroundMemoryAndNormalizesSubmissionBudgets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations := orderedMigrations()
+	if len(migrations) < 8 {
+		t.Fatalf("permanent migration count=%d, want at least 8", len(migrations))
+	}
+	for _, migration := range migrations[:7] {
+		if _, err := raw.Exec(migration.sql); err != nil {
+			raw.Close() // nolint:errcheck
+			t.Fatalf("apply prefix migration %s: %v", migration.name, err)
+		}
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migration_versions (version INTEGER PRIMARY KEY CHECK (version > 0), name TEXT NOT NULL UNIQUE, checksum TEXT NOT NULL CHECK (length(checksum) = 64), applied_at TEXT NOT NULL)`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	for _, migration := range migrations[:7] {
+		if _, err := raw.Exec(`INSERT INTO schema_migration_versions(version, name, checksum, applied_at) VALUES (?, ?, ?, datetime('now'))`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
+			raw.Close() // nolint:errcheck
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(`
+INSERT INTO account_users(canonical_user_id) VALUES ('user');
+INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, session_generation, delivered_at, source_request_id, foreground_memory)
+VALUES ('session', 'user', 'one', 'answer', '2026-09-05T00:00:00Z', 1, '2026-09-05T00:00:01Z', 'request-1', '{"version":2,"candidates":[{},{}]}');
+INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, session_generation, delivered_at, source_request_id)
+VALUES ('session', 'user', 'two', 'answer', '2026-09-05T00:00:02Z', 1, '2026-09-05T00:00:03Z', 'request-2');
+INSERT INTO durable_jobs(
+	job_kind, idempotency_key, canonical_user_id, state, source_request_id, source_session_id,
+	source_session_generation, source_turn_id, extractor_version, formation_purpose, artifact_payload,
+	attempt_count, invalid_output_retry_count, available_at, last_error_code, updated_at
+) VALUES (
+	'memory_formation', 'formation-capped', 'user', 'retry', 'request-2', 'session',
+	1, 2, 'pattern-v1', 'background_pattern', '{"version":1,"turn_ids":[1,2]}',
+	2, 1, '2026-09-05T00:00:00Z', 'invalid_pattern_evidence', '2026-09-05T00:00:00Z'
+);
+INSERT INTO durable_jobs(
+	job_kind, idempotency_key, canonical_user_id, state, source_request_id, source_session_id,
+	source_session_generation, source_turn_id, extractor_version, formation_purpose, artifact_payload,
+	attempt_count, invalid_output_retry_count, available_at, last_error_code, updated_at
+) VALUES (
+	'memory_formation', 'formation-corrective', 'user', 'retry', 'request-2', 'session',
+	1, 2, 'pattern-v1', 'background_pattern', '{"version":1,"turn_ids":[1,2]}',
+	1, 1, '2026-09-05T00:00:00Z', 'invalid_pattern_source', '2026-09-05T00:00:00Z'
+);
+INSERT INTO durable_jobs(
+	job_kind, idempotency_key, canonical_user_id, state, source_request_id, source_session_id,
+	source_session_generation, source_turn_id, extractor_version, formation_purpose,
+	attempt_count, available_at, updated_at
+) VALUES (
+	'memory_formation', 'agent-save', 'user', 'retry', 'request-2', 'session',
+	1, 2, 'agent-save-v1', 'agent_save', 5, '2026-09-05T00:00:00Z', '2026-09-05T00:00:00Z'
+);
+INSERT INTO durable_jobs(
+	job_kind, idempotency_key, canonical_user_id, state, session_id, session_generation,
+	covered_from_turn_id, covered_through_turn_id, compaction_target_turn_id,
+	compaction_model, compaction_generator_version, attempt_count, redrive_count,
+	compaction_invalid_output_retry_count, available_at, last_error_code, updated_at
+) VALUES (
+	'session_compaction', 'compaction-capped', 'user', 'retry', 'session', 1,
+	1, 2, 2, 'model', 'session-summary-v2', 0, 1, 0,
+	'2026-09-05T00:00:00Z', 'invalid_summary_shape', '2026-09-05T00:00:00Z'
+);`); err != nil {
+		raw.Close() // nolint:errcheck
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("apply v4.0.7: %v", err)
+	}
+	defer db.Close()
+
+	var foreground string
+	if err := db.SQL().QueryRow(`SELECT foreground_memory FROM session_turns WHERE id = 1`).Scan(&foreground); err != nil || foreground != `{"version":2,"candidates":[{},{}]}` {
+		t.Fatalf("preserved foreground memory=%q err=%v", foreground, err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, foreground_memory) VALUES ('new', 'user', 'question', 'answer', datetime('now'), '{"version":2,"candidates":[{},{},{},{},{}]}')`); err != nil {
+		t.Fatalf("five foreground candidates rejected after migration: %v", err)
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO session_turns(session_id, canonical_user_id, user_text, assistant_text, created_at, foreground_memory) VALUES ('invalid', 'user', 'question', 'answer', datetime('now'), '{"version":2,"candidates":[{},{},{},{},{},{}]}')`); err == nil {
+		t.Fatal("six foreground candidates were accepted after migration")
+	}
+
+	for key, wantState := range map[string]string{"formation-capped": "dead", "compaction-capped": "dead", "formation-corrective": "retry", "agent-save": "retry"} {
+		var state string
+		var submissions int
+		if err := db.SQL().QueryRow(`SELECT state, model_submission_count FROM durable_jobs WHERE idempotency_key = ?`, key).Scan(&state, &submissions); err != nil {
+			t.Fatal(err)
+		}
+		wantSubmissions := 3
+		if key == "formation-corrective" {
+			wantSubmissions = 2
+		} else if key == "agent-save" {
+			wantSubmissions = 0
+		}
+		if state != wantState || submissions != wantSubmissions {
+			t.Fatalf("job %s state=%q submissions=%d, want %q/%d", key, state, submissions, wantState, wantSubmissions)
+		}
+	}
+	var correctiveCode string
+	if err := db.SQL().QueryRow(`SELECT corrective_error_code FROM durable_jobs WHERE idempotency_key = 'formation-corrective'`).Scan(&correctiveCode); err != nil || correctiveCode != "invalid_pattern_source" {
+		t.Fatalf("corrective code=%q err=%v", correctiveCode, err)
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET model_submission_count = 1 WHERE idempotency_key = 'agent-save'`); err == nil {
+		t.Fatal("agent-save job accepted model submission credit")
+	}
+	if _, err := db.SQL().Exec(`UPDATE durable_jobs SET model_submission_count = 3 WHERE idempotency_key = 'formation-corrective'`); err == nil {
+		t.Fatal("retry job accepted an exhausted model submission budget")
 	}
 }
 

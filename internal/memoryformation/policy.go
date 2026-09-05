@@ -941,6 +941,12 @@ func claimSlotCompatible(category Category, slot string) bool {
 	}
 }
 
+// ClaimSlotCompatible reports whether a proposed semantic slot belongs to its
+// memory category after canonical normalization.
+func ClaimSlotCompatible(category Category, slot string) bool {
+	return claimSlotCompatible(category, normalizeClaimPart(slot))
+}
+
 func isFallbackClaimSlotForCategory(category Category, slot string) bool {
 	return slot == normalizeClaimPart(string(category)+".fact")
 }

@@ -794,9 +794,6 @@ func (s *Store) listActiveMemories(userID, scope, category string, limit int) ([
 	if limit > 25 {
 		limit = 25
 	}
-	if err := s.expireOldMemories(); err != nil {
-		return nil, err
-	}
 	normalizedScope := normalizeOptionalScope(scope)
 	normalizedCategory := normalizeOptionalCategory(category)
 	entries, err := s.activeEntries(userID, normalizedScope, normalizedCategory)
@@ -1243,11 +1240,6 @@ func distanceToSimilarity(distance float64) float64 {
 		distance = 0
 	}
 	return 1 / (1 + distance)
-}
-
-func (s *Store) expireOldMemories() error {
-	_, err := s.CleanupExpiredSessions(context.Background(), time.Now().UTC())
-	return err
 }
 
 func (s *Store) ensureAccountUser(userID string) error {

@@ -123,6 +123,31 @@ func TestSearchTranscriptRequiresCurrentActiveSessionAndGeneration(t *testing.T)
 	}
 }
 
+func TestSearchTranscriptExcludesDeliveryFailedTurnFromStaleIndex(t *testing.T) {
+	store := newTranscriptTestStore(t)
+	seedAccountUsers(t, store, "user-1")
+	generation := bindTranscriptTestSession(t, store, "user-1", "session-1")
+	insertTranscriptTestTurn(t, store, "user-1", "session-1", generation, "failed delivery marker", "must not be returned", true, time.Hour)
+	rebuildTestIndexes(t, store)
+	live, err := store.LiveIndexRevision(context.Background(), IndexKindTranscriptFTS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = ? WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`, formatTime(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := store.SearchTranscript(context.Background(), "user-1", "session-1", generation, "marker", 5)
+	if err != nil || len(results) != 0 {
+		t.Fatalf("delivery-failed transcript results=%+v err=%v", results, err)
+	}
+	counts, err := store.MaintainDerivedIndexes(context.Background(), time.Now().UTC(), time.Hour, 100)
+	if err != nil || counts.RowsDeleted != 1 {
+		t.Fatalf("delivery-failed index cleanup counts=%+v err=%v", counts, err)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+live.TableName, 0)
+}
+
 func TestSearchTranscriptReturnsStableUnavailableError(t *testing.T) {
 	store := newTranscriptTestStore(t)
 	rebuildTestIndexes(t, store)

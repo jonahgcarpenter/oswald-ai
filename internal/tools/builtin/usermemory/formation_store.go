@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	FormationExtractorVersion = "formation-v4"
-	AgentSaveExtractorVersion = "agent-save-v1"
+	FormationExtractorVersion   = "formation-v4"
+	AgentSaveExtractorVersion   = "agent-save-v1"
+	DurableModelSubmissionLimit = 3
 
 	FormationPurposeBackgroundPattern = "background_pattern"
 	FormationPurposeAgentSave         = "agent_save"
@@ -23,6 +24,10 @@ const (
 
 // ErrStaleFormationJobLease indicates that the exact claimed lease is no longer live.
 var ErrStaleFormationJobLease = errors.New("stale memory formation job lease")
+
+// ErrModelSubmissionBudgetExhausted indicates that a durable model-backed job
+// has already reserved every allowed provider submission.
+var ErrModelSubmissionBudgetExhausted = errors.New("durable model submission budget exhausted")
 
 // ErrStaleSessionCompactionJobLease indicates that the exact compaction lease is no longer live.
 var ErrStaleSessionCompactionJobLease = errors.New("stale session compaction job lease")
@@ -93,6 +98,9 @@ type FormationJob struct {
 	Purpose                 string
 	AttemptCount            int
 	InvalidOutputRetryCount int
+	LastErrorCode           string
+	ModelSubmissionCount    int
+	CorrectiveErrorCode     string
 	LeaseOwner              string
 	LeaseUntil              time.Time
 }
@@ -1123,28 +1131,6 @@ WHERE turns.created_at >= ? AND turns.delivered_at IS NOT NULL AND turns.deliver
 	return result.RowsAffected()
 }
 
-// RedriveDeadFormationJobs periodically retries jobs after prolonged outages.
-func (s *Store) RedriveDeadFormationJobs(ctx context.Context, delay time.Duration) (int64, error) {
-	if delay <= 0 {
-		delay = 5 * time.Minute
-	}
-	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `
-UPDATE durable_jobs
-SET state = 'retry', attempt_count = 0, available_at = ?, completed_at = NULL,
-	redrive_count = redrive_count + 1, updated_at = ?
-WHERE job_kind = 'memory_formation' AND state = 'dead' AND redrive_count < 3 AND last_error_code LIKE 'transient_%'
-	`+formationSourceFenceSQL+`
-	AND ((redrive_count = 0 AND updated_at <= ?)
-		OR (redrive_count = 1 AND updated_at <= ?)
-		OR (redrive_count = 2 AND updated_at <= ?))
-`, formatTime(now), formatTime(now), formatTime(now.Add(-delay)), formatTime(now.Add(-2*delay)), formatTime(now.Add(-4*delay)))
-	if err != nil {
-		return 0, fmt.Errorf("redrive dead memory formation jobs: %w", err)
-	}
-	return result.RowsAffected()
-}
-
 // ClaimFormationJob leases the oldest ready job.
 func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (FormationJob, error) {
 	if lease <= 0 {
@@ -1165,14 +1151,16 @@ func (s *Store) ClaimFormationJob(ctx context.Context, lease time.Duration) (For
 	err = tx.QueryRowContext(ctx, `
 SELECT id, canonical_user_id, source_request_id, source_session_id,
 	source_session_generation, COALESCE(source_turn_id, 0), extraction_model,
-	extractor_version, formation_purpose, attempt_count, invalid_output_retry_count
+	extractor_version, formation_purpose, attempt_count, invalid_output_retry_count, last_error_code,
+	model_submission_count, corrective_error_code
 FROM durable_jobs
 WHERE job_kind = 'memory_formation' AND ((state IN ('queued', 'retry') AND available_at <= ?)
 	OR (state = 'running' AND lease_until <= ?))
 	`+formationSourceFenceSQL+`
 ORDER BY available_at, id LIMIT 1
 	`, formatTime(now), formatTime(now)).Scan(&job.ID, &job.UserID, &job.RequestID, &job.SessionID,
-		&job.SessionGeneration, &job.TurnID, &job.Model, &job.ExtractorVersion, &job.Purpose, &job.AttemptCount, &job.InvalidOutputRetryCount)
+		&job.SessionGeneration, &job.TurnID, &job.Model, &job.ExtractorVersion, &job.Purpose, &job.AttemptCount, &job.InvalidOutputRetryCount, &job.LastErrorCode,
+		&job.ModelSubmissionCount, &job.CorrectiveErrorCode)
 	if err != nil {
 		return FormationJob{}, err
 	}
@@ -1205,6 +1193,53 @@ func (s *Store) RenewFormationJobLease(ctx context.Context, job FormationJob, le
 		return time.Time{}, err
 	}
 	return leaseUntil, nil
+}
+
+// ReserveFormationModelSubmission transactionally consumes one provider
+// submission immediately before invocation under the exact live lease.
+func (s *Store) ReserveFormationModelSubmission(ctx context.Context, job FormationJob) (int, error) {
+	if job.Purpose == FormationPurposeAgentSave {
+		return job.ModelSubmissionCount, fmt.Errorf("agent-save formation jobs do not use model submissions")
+	}
+	now := time.Now().UTC()
+	var count int
+	err := s.sql.QueryRowContext(ctx, `UPDATE durable_jobs
+SET model_submission_count = model_submission_count + 1, updated_at = ?
+WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?
+	AND formation_purpose != 'agent_save' AND state = 'running' AND lease_owner = ? AND lease_until = ?
+	AND julianday(lease_until) > julianday(?) AND model_submission_count < ? `+formationSourceFenceSQL+`
+RETURNING model_submission_count`, formatTime(now), job.ID, job.UserID, job.LeaseOwner,
+		formatTime(job.LeaseUntil), formatTime(now), DurableModelSubmissionLimit).Scan(&count)
+	if err == nil {
+		return count, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("reserve memory formation model submission: %w", err)
+	}
+	var storedCount int
+	if readErr := s.sql.QueryRowContext(ctx, `SELECT model_submission_count FROM durable_jobs
+WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, job.ID, job.UserID).Scan(&storedCount); readErr == nil && storedCount >= DurableModelSubmissionLimit {
+		return storedCount, ErrModelSubmissionBudgetExhausted
+	}
+	return 0, ErrStaleFormationJobLease
+}
+
+// RefundFormationModelSubmission restores only the reservation owned by the
+// exact live lease when provider submission was never accepted.
+func (s *Store) RefundFormationModelSubmission(ctx context.Context, job FormationJob) error {
+	if job.Purpose == FormationPurposeAgentSave || job.ModelSubmissionCount <= 0 {
+		return fmt.Errorf("refund memory formation model submission: invalid reservation")
+	}
+	now := time.Now().UTC()
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs
+SET model_submission_count = model_submission_count - 1, updated_at = ?
+WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?
+	AND formation_purpose = 'background_pattern' AND state = 'running'
+	AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)
+	AND model_submission_count = ? `+formationSourceFenceSQL,
+		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil),
+		formatTime(now), job.ModelSubmissionCount)
+	return requireFormationLeaseMutation(result, err)
 }
 
 // FormationJobArtifact returns the first persisted extractor result for replay.
@@ -1246,7 +1281,7 @@ func (s *Store) CompleteFormationJob(ctx context.Context, job FormationJob, skip
 		state = "skipped"
 	}
 	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, updated_at = ?, last_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = ?, completed_at = ?, lease_owner = '', lease_until = NULL, updated_at = ?, last_error_code = '', corrective_error_code = '' WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?) `+formationSourceFenceSQL, state, formatTime(now), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), formatTime(now))
 	return requireFormationLeaseMutation(result, err)
 }
 
@@ -1261,7 +1296,7 @@ func (s *Store) SkipFormationJob(ctx context.Context, job FormationJob, code str
 func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code string, maxAttempts int) error {
 	now := time.Now().UTC()
 	state := "retry"
-	if maxAttempts > 0 && job.AttemptCount >= maxAttempts {
+	if job.ModelSubmissionCount >= DurableModelSubmissionLimit || (job.Purpose == FormationPurposeAgentSave && maxAttempts > 0 && job.AttemptCount >= maxAttempts) {
 		state = "dead"
 	}
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
@@ -1269,12 +1304,12 @@ func (s *Store) RetryFormationJob(ctx context.Context, job FormationJob, code st
 	return requireFormationLeaseMutation(result, err)
 }
 
-// RetryInvalidFormationJob consumes the one dedicated structured-output retry
-// without charging the operational provider retry budget.
+// RetryInvalidFormationJob records the one reason-aware structured-output retry.
+// Its model submission has already consumed the shared durable budget.
 func (s *Store) RetryInvalidFormationJob(ctx context.Context, job FormationJob, code string) error {
 	now := time.Now().UTC()
 	delay := time.Duration(1<<min(job.AttemptCount, 6)) * time.Second
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', attempt_count = MAX(attempt_count - 1, 0), invalid_output_retry_count = invalid_output_retry_count + 1, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = NULL, last_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND invalid_output_retry_count = 0 AND extraction_payload = '' `+formationSourceFenceSQL, formatTime(now.Add(delay)), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil))
+	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs SET state = 'retry', invalid_output_retry_count = invalid_output_retry_count + 1, available_at = ?, lease_owner = '', lease_until = NULL, completed_at = NULL, last_error_code = ?, corrective_error_code = ?, updated_at = ? WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ? AND state = 'running' AND lease_owner = ? AND lease_until = ? AND invalid_output_retry_count = 0 AND model_submission_count < ? AND extraction_payload = '' `+formationSourceFenceSQL, formatTime(now.Add(delay)), safeErrorCode(code), safeErrorCode(code), formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil), DurableModelSubmissionLimit)
 	return requireFormationLeaseMutation(result, err)
 }
 

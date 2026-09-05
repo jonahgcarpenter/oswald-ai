@@ -107,11 +107,6 @@ func (s *Service) run(ctx context.Context) {
 		case <-ticker.C:
 			ticks++
 			if ticks%60 == 0 {
-				if count, err := s.store.RedriveDeadFormationJobs(ctx, 5*time.Minute); err != nil {
-					s.warn("user_memory.formation.job.redrive_failed", "failed to redrive user-memory formation jobs", err)
-				} else if count > 0 && s.log != nil {
-					s.log.Server("user_memory.formation").Info("user_memory.formation.job.redriven", "redrove user-memory formation jobs", config.F("job_count", count), config.F("status", "ok"))
-				}
 				s.reconcile(ctx)
 			}
 		case <-s.notify:
@@ -157,10 +152,16 @@ func (s *Service) drain(ctx context.Context) {
 				}
 				return
 			}
+			if errors.Is(err, usermemory.ErrModelSubmissionBudgetExhausted) {
+				if retryErr := s.store.RetryFormationJob(context.Background(), job, "model_submission_budget_exhausted", formationMaxAttempts); retryErr != nil {
+					s.warn("user_memory.formation.job.complete_failed", "failed to terminally close exhausted user-memory formation job", retryErr, config.F("job_id", job.ID), config.F("user_id", job.UserID))
+				}
+				continue
+			}
 			if errors.Is(err, errInvalidOutput) {
 				code := errorCode(err)
-				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("error_code", code)}
-				if job.InvalidOutputRetryCount < invalidOutputMaxRetries {
+				fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID), config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("error_code", code)}
+				if job.InvalidOutputRetryCount < invalidOutputMaxRetries && job.ModelSubmissionCount < usermemory.DurableModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidFormationJob(context.Background(), job, code); retryErr != nil {
 						s.warn("user_memory.formation.job.retry_failed", "failed to retry invalid user-memory formation output", retryErr, fields...)
 					} else {
@@ -266,7 +267,12 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 				extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:formation:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model, CurrentUserText: turn.UserText})
 				extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
 				var extractErr error
-				extracted, extractErr = s.extractor.Extract(extractCtx, turn)
+				count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
+				if reserveErr != nil {
+					return reserveErr
+				}
+				renewedJob.ModelSubmissionCount = count
+				extracted, extractErr = s.extractor.Extract(extractCtx, turn, renewedJob.CorrectiveErrorCode)
 				return extractErr
 			},
 		)
@@ -277,6 +283,12 @@ func (s *Service) process(ctx context.Context, job *usermemory.FormationJob) err
 		if wasPreempted {
 			if llm.WasAsyncJobSubmitted(err) {
 				return err
+			}
+			if err != nil && renewedJob.ModelSubmissionCount > 0 {
+				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
+					return refundErr
+				}
+				job.ModelSubmissionCount--
 			}
 			return errBackgroundPreempted
 		}
@@ -368,7 +380,12 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 			extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("%s:pattern:%d", job.RequestID, job.ID), SessionID: job.SessionID, Model: job.Model})
 			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "formation", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
 			var extractErr error
-			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns)
+			count, reserveErr := s.store.ReserveFormationModelSubmission(workCtx, renewedJob)
+			if reserveErr != nil {
+				return reserveErr
+			}
+			renewedJob.ModelSubmissionCount = count
+			extracted, extractErr = patternExtractor.ExtractPatterns(extractCtx, window.Turns, renewedJob.CorrectiveErrorCode)
 			return extractErr
 		})
 		*job = renewedJob
@@ -378,6 +395,12 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 		if wasPreempted {
 			if llm.WasAsyncJobSubmitted(err) {
 				return err
+			}
+			if err != nil && renewedJob.ModelSubmissionCount > 0 {
+				if refundErr := s.store.RefundFormationModelSubmission(context.Background(), renewedJob); refundErr != nil {
+					return refundErr
+				}
+				job.ModelSubmissionCount--
 			}
 			return errBackgroundPreempted
 		}
@@ -396,28 +419,47 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 	for _, turn := range window.Turns {
 		turns[turn.ID] = turn
 	}
-	for _, pattern := range extracted.Patterns {
+	acceptedPatternCount := 0
+	rejectedPatternCount := 0
+	candidateCount := 0
+	for patternIndex, pattern := range extracted.Patterns {
 		type evaluatedObservation struct {
 			turn   usermemory.StoredSessionTurn
 			output memoryformation.CandidateOutput
 		}
 		evaluated := make([]evaluatedObservation, 0, len(pattern.Observations))
 		hasAnchorObservation := false
+		rejectionCode := ""
 		for _, observation := range pattern.Observations {
 			turn, ok := turns[observation.SourceTurnID]
 			if !ok {
 				evaluated = nil
+				rejectionCode = "invalid_source_turn"
 				break
 			}
 			output, evaluateErr := usermemory.EvaluatePatternObservation(turn, pattern, observation.Evidence)
-			if evaluateErr != nil || output.Approval == "rejected" {
+			if evaluateErr != nil {
 				evaluated = nil
+				rejectionCode = "invalid_observation"
+				break
+			}
+			if output.Approval == memoryformation.ApprovalRejected {
+				evaluated = nil
+				rejectionCode = patternPolicyRejectionCode(output.Reason)
 				break
 			}
 			evaluated = append(evaluated, evaluatedObservation{turn: turn, output: output})
 			hasAnchorObservation = hasAnchorObservation || observation.SourceTurnID == job.TurnID
 		}
-		if len(evaluated) < 2 || !hasAnchorObservation {
+		if rejectionCode == "" && len(evaluated) < 2 {
+			rejectionCode = "insufficient_observations"
+		}
+		if rejectionCode == "" && !hasAnchorObservation {
+			rejectionCode = "missing_anchor_observation"
+		}
+		if rejectionCode != "" {
+			rejectedPatternCount++
+			s.logPatternRejection(*job, patternIndex, rejectionCode)
 			continue
 		}
 		for _, observation := range evaluated {
@@ -429,12 +471,40 @@ func (s *Service) processPattern(ctx context.Context, job *usermemory.FormationJ
 			if err != nil {
 				return err
 			}
+			candidateCount++
 		}
-		if _, err := s.store.AggregatePatternCandidates(ctx, *job, pattern.ClaimSlot, pattern.ClaimValue); err != nil {
+		if _, err := s.store.AggregatePatternCandidates(ctx, *job, evaluated[0].output.ClaimSlot, evaluated[0].output.ClaimValue); err != nil {
 			return err
 		}
+		acceptedPatternCount++
+	}
+	if s.log != nil {
+		s.log.Server("user_memory.formation").Info("user_memory.formation.pattern.complete", "completed user-memory pattern formation",
+			config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+			config.F("model", job.Model), config.F("extractor_version", job.ExtractorVersion), config.F("pattern_count", len(extracted.Patterns)),
+			config.F("accepted_pattern_count", acceptedPatternCount), config.F("rejected_pattern_count", rejectedPatternCount), config.F("candidate_count", candidateCount), config.F("status", "ok"))
 	}
 	return nil
+}
+
+func (s *Service) logPatternRejection(job usermemory.FormationJob, patternIndex int, reasonCode string) {
+	if s.log == nil {
+		return
+	}
+	s.log.Server("user_memory.formation").Debug("user_memory.formation.pattern.rejected", "rejected user-memory pattern before candidate insertion",
+		config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("request_id", job.RequestID), config.F("session_id", job.SessionID),
+		config.F("pattern_index", patternIndex), config.F("reason_code", reasonCode), config.F("status", "rejected"))
+}
+
+func patternPolicyRejectionCode(reason string) string {
+	switch reason {
+	case "semantic claim slot is incompatible with memory category":
+		return "invalid_claim_slot"
+	case "evidence is not an exact quote from normalized source user text":
+		return "evidence_mismatch"
+	default:
+		return "policy_rejected"
+	}
 }
 
 func (s *Service) processAgentSave(ctx context.Context, job *usermemory.FormationJob, turn usermemory.StoredSessionTurn) error {

@@ -35,9 +35,9 @@ func (f *summaryFakeChatter) Chat(_ context.Context, request llm.ChatRequest, _ 
 func TestLLMExtractorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	content := `{"narrative":"Atlas is active.","open_tasks":["ship"],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[]}`
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
-	extractor := NewLLMExtractor(client, "model", 2048)
+	extractor := newSummaryTestExtractor(t, client, 8192)
 	history := usermemory.ToolHistory{Version: usermemory.ToolHistoryVersion, Batches: []usermemory.ToolHistoryBatch{{Calls: []usermemory.ToolHistoryCall{{Name: "project.lookup", Status: "succeeded", Result: "Atlas is active", ExecutedAt: "2026-08-28T12:00:00Z"}}}}}
-	artifact, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}})
+	artifact, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestLLMExtractorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	if request.Temperature == nil || *request.Temperature != 0 {
 		t.Fatalf("temperature=%v", request.Temperature)
 	}
-	if request.MaxTokens != 2048 || request.Format != "" {
+	if request.MaxTokens != 8192 || request.Format != "" {
 		t.Fatalf("max tokens=%d format=%q", request.MaxTokens, request.Format)
 	}
 	if len(request.Tools) != 1 || request.Tools[0].Function.Name != sessionSummarySaveToolName {
@@ -97,7 +97,7 @@ func TestLLMExtractorClassifiesInvalidToolOutput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewLLMExtractor(test.client, "model", 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}})
+			_, err := newSummaryTestExtractor(t, test.client, 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 			var invalid *invalidCompactionOutputError
 			if !errors.As(err, &invalid) || invalid.code != test.wantCode {
 				t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -124,7 +124,7 @@ func TestLLMExtractorClassifiesProviderErrors(t *testing.T) {
 		permanent bool
 	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusRequestTimeout, false}, {http.StatusTooManyRequests, false}, {http.StatusServiceUnavailable, false}} {
 		client := &summaryFakeChatter{err: &llm.ChatHTTPError{StatusCode: test.status, Body: "secret reflected content"}}
-		_, err := NewLLMExtractor(client, "model", 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}})
+		_, err := newSummaryTestExtractor(t, client, 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 		if errors.Is(err, errPermanentProvider) != test.permanent {
 			t.Fatalf("status=%d permanent=%v error=%v", test.status, test.permanent, err)
 		}
@@ -134,7 +134,7 @@ func TestLLMExtractorClassifiesProviderErrors(t *testing.T) {
 func TestLLMExtractorRejectsNonemptyCandidates(t *testing.T) {
 	raw := `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[{"source_turn_id":9007199254740993,"statement":"The user works.","evidence":"I work.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.fact","claim_value":"works"}]}`
 	client := &summaryFakeChatter{response: summaryRawToolResponse(sessionSummarySaveToolName, raw)}
-	_, err := NewLLMExtractor(client, "model", 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}})
+	_, err := newSummaryTestExtractor(t, client, 2048).Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 	var invalid *invalidCompactionOutputError
 	if !errors.As(err, &invalid) || invalid.code != "invalid_argument_shape" {
 		t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -143,10 +143,49 @@ func TestLLMExtractorRejectsNonemptyCandidates(t *testing.T) {
 
 func TestLLMExtractorRejectsTrailingJSON(t *testing.T) {
 	client := &summaryFakeChatter{arguments: map[string]interface{}{"_raw": `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]} {}`}}
-	extractor := NewLLMExtractor(client, "model", 2048)
-	if _, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}); err == nil {
+	extractor := newSummaryTestExtractor(t, client, 2048)
+	if _, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, ""); err == nil {
 		t.Fatal("expected trailing JSON rejection")
 	}
+}
+
+func TestLLMExtractorAddsReasonAwareStructuredRetryInstructions(t *testing.T) {
+	content := `{"narrative":"Atlas is active.","open_tasks":[],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[]}`
+	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
+	extractor := newSummaryTestExtractor(t, client, 8192)
+	if _, err := extractor.Compact(context.Background(), nil, []usermemory.SessionTurn{{ID: 1, UserText: "Atlas", AssistantText: "Noted"}}, "missing_tool_call"); err != nil {
+		t.Fatal(err)
+	}
+	prompt := client.request.Messages[0].Content
+	for _, expected := range []string{"STRUCTURED OUTPUT RETRY", "omitted the required tool call", "call session_summary_save exactly once", "candidates field must be an empty array"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("corrective prompt missing %q: %q", expected, prompt)
+		}
+	}
+	if instruction := compactionRetryInstruction("transient_provider_error"); instruction != "" {
+		t.Fatalf("operational failure produced corrective instruction %q", instruction)
+	}
+}
+
+func TestNewLLMExtractorValidatesDependencies(t *testing.T) {
+	if _, err := NewLLMExtractor(nil, "model", 8192); err == nil {
+		t.Fatal("expected missing client error")
+	}
+	if _, err := NewLLMExtractor(&summaryFakeChatter{}, " ", 8192); err == nil {
+		t.Fatal("expected missing model error")
+	}
+	if _, err := NewLLMExtractor(&summaryFakeChatter{}, "model", 0); err == nil {
+		t.Fatal("expected invalid max output tokens error")
+	}
+}
+
+func newSummaryTestExtractor(t *testing.T, client llm.Chatter, maxTokens int) *LLMExtractor {
+	t.Helper()
+	extractor, err := NewLLMExtractor(client, "model", maxTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return extractor
 }
 
 func summaryArguments(t *testing.T, content string) map[string]interface{} {

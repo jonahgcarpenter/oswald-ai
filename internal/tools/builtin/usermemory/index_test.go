@@ -374,6 +374,46 @@ func TestStaleTranscriptIndexWriteCannotRepublishDeletedSession(t *testing.T) {
 	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName+` WHERE rowid = ?`, 0, turn.ID)
 }
 
+func TestDeliveryFailedTurnIsIneligibleForTranscriptIndex(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user")
+	profile, err := store.ResolveSessionProfile(ctx, "user", "session", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.AppendSessionTurnForGenerationResult(ctx, "session", "user", profile.Generation, "private failed transcript", "ack", nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivered_at = created_at WHERE id = ?`, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.TranscriptIndexRecordByID(ctx, turn.ID, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE session_turns SET delivery_failed_at = created_at WHERE id = ?`, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.DeliveredTranscriptIndexRecords(ctx, 0, 100)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("delivery-failed bulk records=%+v err=%v", records, err)
+	}
+	if _, err := store.TranscriptIndexRecordByID(ctx, turn.ID, "user"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("delivery-failed point read error=%v", err)
+	}
+	revision, err := store.CreateIndexRevision(ctx, IndexKindTranscriptFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteTranscriptIndexRecord(ctx, revision, record); !errors.Is(err, ErrStaleIndexRecord) {
+		t.Fatalf("delivery-failed stale write error=%v", err)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM `+revision.TableName, 0)
+}
+
 func TestMaintenanceSkipsBuildingRevision(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))

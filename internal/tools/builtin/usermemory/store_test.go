@@ -246,6 +246,38 @@ func TestStoreShortTermExpiry(t *testing.T) {
 	}
 }
 
+func TestRecallAndListFilterExpiryWithoutMutatingRetentionState(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "usr_test")
+	ctx := context.Background()
+	memory, err := store.SaveMemory(ctx, "usr_test", SaveRequest{Scope: ScopeShortTerm, Category: "notes", Statement: "Temporary marker is ORBITAL.", Evidence: "retained evidence", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuildTestIndexes(t, store)
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET expires_at = ? WHERE id = ?`, formatTime(time.Now().Add(-time.Hour)), memory.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	results, _ := store.Recall(ctx, "usr_test", "ORBITAL", RecallRequest{TopK: 2})
+	entries, err := store.ListMemories("usr_test", ScopeShortTerm, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 0 || len(entries) != 0 {
+		t.Fatalf("expired memory served: recall=%+v list=%+v", results, entries)
+	}
+	var status, statement string
+	if err := store.sql.QueryRow(`SELECT status, statement FROM memory_entries WHERE id = ?`, memory.ID).Scan(&status, &statement); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusActive || statement != "Temporary marker is ORBITAL." {
+		t.Fatalf("read path mutated expired memory: status=%q statement=%q", status, statement)
+	}
+	assertStoreCount(t, store.sql, `SELECT COUNT(*) FROM memory_candidates WHERE published_memory_id = ?`, 1, memory.ID)
+}
+
 func TestStoreSessionContextIncludesSummaryAndRecentTurn(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fakeMemoryEmbedder{}, "fake-embed", config.NewLogger(config.LevelError))
 	if err != nil {

@@ -51,9 +51,6 @@ func (s *Store) Recall(ctx context.Context, userID, query string, req RecallRequ
 	if userID == "" || query == "" {
 		return nil, stats
 	}
-	if err := s.expireOldMemories(); err != nil {
-		stats.LexicalError = err
-	}
 	candidateLimit := req.CandidateLimit
 	if candidateLimit <= 0 {
 		candidateLimit = defaultRecallCandidateCap
@@ -149,7 +146,7 @@ func (s *Store) lexicalRecallCandidates(ctx context.Context, userID, scope, cate
 	}
 	table := revision.TableName
 	query := `
-SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, ` + table + `.evidence,
+SELECT e.id, e.canonical_user_id, e.scope, e.category, e.statement, COALESCE((SELECT candidate.evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = e.canonical_user_id AND candidate.published_memory_id = e.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), ''),
 	e.confidence, e.importance, e.status, e.created_at,
 	e.updated_at, e.expires_at, COALESCE(e.supersedes_id, 0),
 	e.provenance_type, e.sensitivity,
@@ -286,6 +283,9 @@ func quotedFTSTerms(terms []string) []string {
 }
 
 func ftsTenantRecallQuery(userID string, terms []string) string {
+	if len(terms) == 0 {
+		return ""
+	}
 	tenant := `"` + strings.ReplaceAll(strings.ToLower(userID), `"`, `""`) + `"`
 	return `canonical_user_id : ` + tenant + ` AND {statement evidence} : (` + strings.Join(quotedFTSTerms(terms), " OR ") + `)`
 }

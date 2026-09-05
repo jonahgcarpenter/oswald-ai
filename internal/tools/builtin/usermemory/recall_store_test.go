@@ -57,6 +57,38 @@ func TestRecallFTSFindsExactTermsAndScopesTenant(t *testing.T) {
 	}
 }
 
+func TestRecallFTSHydratesEvidenceFromCanonicalCandidate(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	ctx := context.Background()
+	memory, err := store.SaveMemory(ctx, "user-1", SaveRequest{Scope: ScopeLongTerm, Category: "projects", Statement: "Project marker is Meridian.", Evidence: "stale indexed evidence", Confidence: 0.9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuildTestIndexes(t, store)
+	if _, err := store.sql.Exec(`UPDATE memory_candidates SET evidence = 'current canonical evidence' WHERE canonical_user_id = ? AND published_memory_id = ?`, "user-1", memory.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	results, stats := store.Recall(ctx, "user-1", "Meridian", RecallRequest{TopK: 2})
+	if stats.LexicalError != nil || len(results) != 1 || results[0].Entry.Evidence != "current canonical evidence" {
+		t.Fatalf("canonical evidence recall results=%+v stats=%+v", results, stats)
+	}
+}
+
+func TestRecallAllStopWordsIsAvailableEmpty(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oswald.db"), config.NewLogger(config.LevelError))
+	defer store.Close() // nolint:errcheck
+	seedAccountUsers(t, store, "user-1")
+	rebuildTestIndexes(t, store)
+
+	results, stats := store.Recall(context.Background(), "user-1", "what is the user", RecallRequest{TopK: 2})
+	if stats.LexicalError != nil || !stats.LexicalAvailable || len(results) != 0 || stats.LexicalCandidateCount != 0 {
+		t.Fatalf("all-stop-word recall results=%+v stats=%+v", results, stats)
+	}
+}
+
 func TestRecallVectorPrefilterPreventsForeignNeighborCrowding(t *testing.T) {
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "oswald.db"), fixedRecallEmbedder{vector: []float64{1, 0}}, "test-embed", config.NewLogger(config.LevelError))
 	if err != nil {

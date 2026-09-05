@@ -119,11 +119,6 @@ func (s *Service) run(ctx context.Context) {
 				if _, err := s.store.ReconcileSessionCompactionJobs(ctx, s.model, SummaryGeneratorVersion); err != nil {
 					s.warn("session.compaction.job.reconcile_failed", "failed to reconcile session compaction jobs", err)
 				}
-				if count, err := s.store.RedriveDeadSessionCompactionJobs(ctx, 5*time.Minute); err != nil {
-					s.warn("session.compaction.job.redrive_failed", "failed to redrive session compaction jobs", err)
-				} else if count > 0 && s.log != nil {
-					s.log.Server("session.compaction").Info("session.compaction.job.redriven", "redrove transient session compaction jobs", config.F("job_count", count), config.F("status", "ok"))
-				}
 				s.planActiveSessions(ctx)
 			}
 		}
@@ -203,7 +198,7 @@ func (s *Service) plan(ctx context.Context, userID, sessionID string, generation
 	}
 	inputLimit := s.budget.UsableInputLimit()
 	for coverCount > 0 {
-		messages, buildErr := compactionMessages(previous, available.Turns[:coverCount])
+		messages, buildErr := compactionMessages(previous, available.Turns[:coverCount], "invalid_argument_shape")
 		if buildErr != nil {
 			return 0, buildErr
 		}
@@ -274,10 +269,16 @@ func (s *Service) drain(ctx context.Context) {
 				}
 				return
 			}
+			if errors.Is(err, usermemory.ErrModelSubmissionBudgetExhausted) {
+				if retryErr := s.store.RetrySessionCompactionJob(context.Background(), job, "model_submission_budget_exhausted"); retryErr != nil {
+					s.warn("session.compaction.job.retry_failed", "failed to terminally close exhausted session compaction job", retryErr, config.F("job_id", job.ID))
+				}
+				continue
+			}
 			code := compactionErrorCode(err)
-			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("redrive_count", job.RedriveCount), config.F("error_code", code)}
+			fields := []config.Field{config.F("job_id", job.ID), config.F("user_id", job.UserID), config.F("session_id", job.SessionID), config.F("session_generation", job.SessionGeneration), config.F("model", job.Model), config.F("generator_version", job.GeneratorVersion), config.F("attempt_count", job.AttemptCount), config.F("invalid_output_retry_count", job.InvalidOutputRetryCount), config.F("model_submission_count", job.ModelSubmissionCount), config.F("redrive_count", job.RedriveCount), config.F("error_code", code)}
 			if errors.Is(err, errInvalidCompactionOutput) {
-				if job.InvalidOutputRetryCount == 0 {
+				if job.InvalidOutputRetryCount == 0 && job.ModelSubmissionCount < usermemory.DurableModelSubmissionLimit {
 					if retryErr := s.store.RetryInvalidSessionCompactionJob(context.Background(), job, code); retryErr != nil {
 						s.warn("session.compaction.job.retry_failed", "failed to schedule session compaction structured-output retry", retryErr, fields...)
 					} else {
@@ -373,7 +374,12 @@ func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionC
 			extractCtx := requestctx.WithMetadata(workCtx, requestctx.Metadata{RequestID: fmt.Sprintf("session-compaction:%d", job.ID), SessionID: job.SessionID, SessionGeneration: job.SessionGeneration, Model: job.Model})
 			extractCtx = requestctx.WithPrincipal(extractCtx, identity.Principal{CanonicalUserID: job.UserID, Gateway: "session_compaction", ExternalID: job.UserID, Assurance: identity.AssuranceSelfAsserted})
 			var compactErr error
-			artifact, compactErr = s.extractor.Compact(extractCtx, previous, turns)
+			count, reserveErr := s.store.ReserveSessionCompactionModelSubmission(workCtx, renewedJob)
+			if reserveErr != nil {
+				return reserveErr
+			}
+			renewedJob.ModelSubmissionCount = count
+			artifact, compactErr = s.extractor.Compact(extractCtx, previous, turns, renewedJob.CorrectiveErrorCode)
 			return compactErr
 		},
 	)
@@ -382,6 +388,13 @@ func (s *Service) generateArtifact(ctx context.Context, job *usermemory.SessionC
 	release()
 	release = func() {}
 	if wasPreempted {
+		if err != nil && !llm.WasAsyncJobSubmitted(err) && renewedJob.ModelSubmissionCount > 0 {
+			if refundErr := s.store.RefundSessionCompactionModelSubmission(context.Background(), renewedJob); refundErr != nil {
+				return usermemory.SummaryArtifact{}, refundErr
+			}
+			job.ModelSubmissionCount--
+			return usermemory.SummaryArtifact{}, errLowPriorityUnavailable
+		}
 		return usermemory.SummaryArtifact{}, errProviderPreempted
 	}
 	if err != nil {
