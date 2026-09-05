@@ -15,6 +15,7 @@ var (
 	secretPairRE  = regexp.MustCompile(`(?i)\b(api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|passwd|pwd|authorization)\b\s*[:=]\s*[^\s,;]+`)
 	secretQueryRE = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|passwd|pwd)=)[^\s&#]+`)
 	bearerRE      = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*`)
+	connectCodeRE = regexp.MustCompile(`(?i)\bOSW(?:-?[0-9A-HJKMNP-TV-Z]){20}\b`)
 	emailRE       = regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
 	phoneRE       = regexp.MustCompile(`\b(?:\+?\d[\d .()\-]{7,}\d)\b`)
 	linuxHomeRE   = regexp.MustCompile(`(/home/)[^/\s]+`)
@@ -38,6 +39,7 @@ func SafeText(text string) string {
 
 	text = urlUserInfoRE.ReplaceAllString(text, `${1}[redacted]@`)
 	text = bearerRE.ReplaceAllString(text, "Bearer [redacted]")
+	text = connectCodeRE.ReplaceAllString(text, "OSW-[redacted]")
 	text = secretPairRE.ReplaceAllString(text, `${1}=[redacted]`)
 	text = secretQueryRE.ReplaceAllString(text, `${1}[redacted]`)
 	text = emailRE.ReplaceAllString(text, "[redacted-email]")

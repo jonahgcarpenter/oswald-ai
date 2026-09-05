@@ -35,7 +35,7 @@ func TestValidateServerName(t *testing.T) {
 			t.Fatalf("valid name %q rejected: %v", name, err)
 		}
 	}
-	for _, name := range []string{"Ahome", "1home", "h", "home-assistant", "home.assistant"} {
+	for _, name := range []string{"Ahome", "1home", "h", "home-assistant", "home.assistant", "soul"} {
 		if err := validateServerName(name); err == nil {
 			t.Fatalf("invalid name %q accepted", name)
 		}

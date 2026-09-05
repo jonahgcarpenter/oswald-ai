@@ -1,5 +1,7 @@
 package llm
 
+import "encoding/json"
+
 type gatewayToolFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
@@ -37,12 +39,16 @@ type gatewayResponseFormat struct {
 }
 
 type gatewayChatRequest struct {
-	Model          string                 `json:"model"`
-	User           string                 `json:"user,omitempty"`
-	Messages       []gatewayMessage       `json:"messages"`
-	Tools          []Tool                 `json:"tools,omitempty"`
-	ResponseFormat *gatewayResponseFormat `json:"response_format,omitempty"`
-	Stream         bool                   `json:"stream"`
+	Model             string                 `json:"model"`
+	User              string                 `json:"user,omitempty"`
+	Messages          []gatewayMessage       `json:"messages"`
+	Tools             []Tool                 `json:"tools,omitempty"`
+	ToolChoice        ToolChoice             `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool                  `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64               `json:"temperature,omitempty"`
+	MaxTokens         int                    `json:"max_tokens,omitempty"`
+	ResponseFormat    *gatewayResponseFormat `json:"response_format,omitempty"`
+	Stream            bool                   `json:"stream"`
 }
 
 type gatewayChatResponse struct {
@@ -91,4 +97,12 @@ type gatewayEmbeddingResponse struct {
 
 type gatewayEmbeddingDatum struct {
 	Embedding []float64 `json:"embedding"`
+}
+
+type gatewayAsyncJob struct {
+	ID         string          `json:"id"`
+	Status     string          `json:"status"`
+	StatusCode int             `json:"status_code,omitempty"`
+	Result     json.RawMessage `json:"result,omitempty"`
+	Error      json.RawMessage `json:"error,omitempty"`
 }

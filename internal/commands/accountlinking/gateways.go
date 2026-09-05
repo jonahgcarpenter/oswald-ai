@@ -24,10 +24,10 @@ var SupportedGateways = []GatewayOption{
 		IdentifierExample: "123456789012345678",
 	},
 	{
-		Key:               "websocket",
-		Label:             "WebSocket",
-		IdentifierPrompt:  "Enter the WebSocket user identifier to link.",
-		IdentifierExample: "alice-local",
+		Key:               "homeassistant",
+		Label:             "Home Assistant",
+		IdentifierPrompt:  "Enter the Home Assistant user ID to link.",
+		IdentifierExample: "0123456789abcdef0123456789abcdef",
 	},
 	{
 		Key:               "imessage",
@@ -108,7 +108,10 @@ func NormalizeIdentifier(gateway, identifier string) (string, error) {
 			return "", fmt.Errorf("iMessage phone numbers must contain only digits, optionally with a leading +")
 		}
 		return "+" + identifier, nil
-	case "websocket":
+	case "homeassistant":
+		if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(identifier) {
+			return "", fmt.Errorf("Home Assistant identifiers must be valid user IDs")
+		}
 		return identifier, nil
 	default:
 		return "", fmt.Errorf("unsupported gateway %q", gateway)

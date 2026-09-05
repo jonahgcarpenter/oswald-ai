@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func TestRegistryLoadsMarkdownAndExecutesHandler(t *testing.T) {
@@ -35,11 +36,13 @@ Echo a value.
 	if reg.Count() != 1 || reg.Names()[0] != "test.echo" {
 		t.Fatalf("unexpected registry names: %+v", reg.Names())
 	}
-	if err := reg.RegisterHandler("missing", func(context.Context, map[string]interface{}) (string, error) { return "", nil }); err == nil {
+	if err := reg.RegisterHandler("missing", testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{}, nil
+	}); err == nil {
 		t.Fatal("expected unknown handler registration error")
 	}
-	if err := reg.RegisterHandler("test.echo", func(_ context.Context, args map[string]interface{}) (string, error) {
-		return args["text"].(string), nil
+	if err := reg.RegisterHandler("test.echo", testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: args["text"].(string), Outcome: governance.OutcomeProductive}, nil
 	}); err != nil {
 		t.Fatalf("register handler: %v", err)
 	}
@@ -48,8 +51,8 @@ Echo a value.
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if got != "hello" {
-		t.Fatalf("got %q, want hello", got)
+	if got.Content != "hello" || got.Outcome != governance.OutcomeProductive {
+		t.Fatalf("got %+v, want productive hello result", got)
 	}
 
 	tools := reg.LLMTools()
@@ -63,17 +66,17 @@ Echo a value.
 
 func TestRegistryUnknownToolListsMatchingPrefixHandlers(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
-	registerTestTool(t, reg, "memory.search")
-	registerTestTool(t, reg, "memory.list")
-	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "files.read")
+	registerTestTool(t, reg, "files.search")
+	registerTestTool(t, reg, "files.list")
+	registerTestTool(t, reg, "files.delete")
 	registerTestTool(t, reg, "web.search")
 
-	_, err := reg.Execute(context.Background(), "memory.delete", nil)
+	_, err := reg.Execute(context.Background(), "files.missing", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "memory.delete"; available tools in prefix "memory": memory.forget, memory.list, memory.save, memory.search`
+	want := `no handler registered for tool "files.missing"; available tools in prefix "files": files.delete, files.list, files.read, files.search`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}
@@ -81,15 +84,15 @@ func TestRegistryUnknownToolListsMatchingPrefixHandlers(t *testing.T) {
 
 func TestRegistryUnknownToolWithoutPrefixListsAllHandlers(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
-	registerTestTool(t, reg, "memory.forget")
+	registerTestTool(t, reg, "files.read")
+	registerTestTool(t, reg, "files.delete")
 	registerTestTool(t, reg, "web.search")
 
 	_, err := reg.Execute(context.Background(), "delete", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "delete"; available tools: memory.forget, memory.save, web.search`
+	want := `no handler registered for tool "delete"; available tools: files.delete, files.read, web.search`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}
@@ -97,14 +100,14 @@ func TestRegistryUnknownToolWithoutPrefixListsAllHandlers(t *testing.T) {
 
 func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 	reg := New(config.NewLogger(config.LevelError))
-	registerTestTool(t, reg, "memory.save")
+	registerTestTool(t, reg, "files.read")
 	registerTestTool(t, reg, "web.search")
 
-	_, err := reg.Execute(context.Background(), "soul.write", nil)
+	_, err := reg.Execute(context.Background(), "missing.write", nil)
 	if err == nil {
 		t.Fatal("expected unknown tool error")
 	}
-	want := `no handler registered for tool "soul.write"; available tools in prefix "soul": none`
+	want := `no handler registered for tool "missing.write"; available tools in prefix "missing": none`
 	if err.Error() != want {
 		t.Fatalf("unexpected error %q, want %q", err.Error(), want)
 	}
@@ -112,11 +115,15 @@ func TestRegistryUnknownToolWithEmptyPrefixMatchListsNone(t *testing.T) {
 
 func registerTestTool(t *testing.T, reg *Registry, name string) {
 	t.Helper()
-	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, func(context.Context, map[string]interface{}) (string, error) {
-		return "ok", nil
+	if err := reg.RegisterTool(Spec{Name: name, Description: strings.TrimPrefix(name, "test.")}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{Content: "ok", Outcome: governance.OutcomeProductive}, nil
 	}); err != nil {
 		t.Fatalf("register %s: %v", name, err)
 	}
+}
+
+func testToolPolicy() governance.ToolPolicy {
+	return governance.ToolPolicy{MaxExecutions: 1, MaxFailures: 1, MaxUnproductive: 1}
 }
 
 func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
@@ -143,6 +150,10 @@ func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
 	if tools[1].Function.Description != "Github MCP tool: Get issue" {
 		t.Fatalf("unexpected MCP description %q", tools[1].Function.Description)
 	}
+	tools = reg.LLMToolsForVisibility(ToolVisibility{HiddenBuiltins: map[string]bool{"builtin.tool": true}})
+	if len(tools) != 0 {
+		t.Fatalf("request-hidden builtin remained visible: %+v", tools)
+	}
 
 	builtin := reg.BuiltinCatalog()
 	if len(builtin) != 1 || builtin[0].Name != "builtin.tool" {
@@ -151,6 +162,38 @@ func TestRegistryMCPVisibilityAndCatalogOrdering(t *testing.T) {
 	mcp := reg.CatalogBySource(ToolSourceMCP)
 	if len(mcp) != 2 || mcp[0].Name != "github.get_issue" || mcp[1].Name != "github.get_repo" {
 		t.Fatalf("unexpected mcp catalog: %+v", mcp)
+	}
+}
+
+func TestDisableBuiltinHidesToolButKeepsNameReserved(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	if err := reg.RegisterSpec(Spec{Name: "web.search", Description: "Search", Source: ToolSourceBuiltin}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DisableBuiltin("web.search"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg.LLMTool("web.search"); ok || len(reg.BuiltinCatalog()) != 0 {
+		t.Fatal("disabled builtin remained model-visible")
+	}
+	if names := reg.Names(); len(names) != 1 || names[0] != "web.search" {
+		t.Fatalf("reserved names = %v", names)
+	}
+	if len(reg.EnabledBuiltinNames()) != 0 {
+		t.Fatalf("enabled builtins = %v", reg.EnabledBuiltinNames())
+	}
+}
+
+func TestDisableBuiltinRejectsUnknownAndMCPTools(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	if err := reg.DisableBuiltin("missing"); err == nil {
+		t.Fatal("unknown builtin was disabled")
+	}
+	if err := reg.RegisterSpec(Spec{Name: "server.tool", Source: ToolSourceMCP}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DisableBuiltin("server.tool"); err == nil {
+		t.Fatal("MCP tool was disabled as builtin")
 	}
 }
 

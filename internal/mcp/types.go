@@ -2,7 +2,8 @@ package mcp
 
 import (
 	"context"
-	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 const (
@@ -23,7 +24,19 @@ const (
 )
 
 // Handler executes an MCP-backed tool call.
-type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
+type Handler func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error)
+
+// ExecutionResult preserves provenance for the exact MCP handler that ran.
+type ExecutionResult struct {
+	governance.Result
+	ServerID       string
+	ServerName     string
+	Scope          string
+	OwnerUserID    string
+	ToolName       string
+	RemoteToolName string
+	IsDiscovery    bool
+}
 
 // ParamSpec describes a single MCP tool parameter after schema normalization.
 type ParamSpec struct {
@@ -38,6 +51,7 @@ type ParamSpec struct {
 type ToolSpec struct {
 	Name        string
 	Description string
+	ServerID    string
 	Server      string
 	Scope       string
 	OwnerUserID string
@@ -63,13 +77,11 @@ type ServerConfig struct {
 	Scope       string
 	OwnerUserID string
 	Name        string
-	Type        string
+	Description string
 	Transport   string
 	URL         string
 	Headers     map[string]string
 	Enabled     bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
 }
 
 type storedServerConfig struct {
@@ -77,14 +89,11 @@ type storedServerConfig struct {
 	Scope             string
 	OwnerUserID       string
 	Name              string
-	Type              string
+	Description       string
 	Transport         string
 	URLCiphertext     string
-	URLHostHash       string
 	HeadersCiphertext string
 	Enabled           bool
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
 }
 
 type server struct {

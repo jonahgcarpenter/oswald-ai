@@ -7,17 +7,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	gorilla "github.com/gorilla/websocket"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/routing"
@@ -375,15 +382,19 @@ func splitMessage(text string, limit int) []string {
 	runes := []rune(text)
 
 	for len(runes) > 0 {
-		if len(runes) <= limit {
+		prefixLen := discordPrefixRuneCount(runes, limit)
+		if prefixLen == len(runes) {
 			chunks = append(chunks, string(runes))
 			break
 		}
+		if prefixLen == 0 {
+			prefixLen = 1
+		}
 
-		chunkRunes := runes[:limit]
+		chunkRunes := runes[:prefixLen]
 		splitIdx := -1
 
-		for i := len(chunkRunes) - 1; i >= 0; i-- {
+		for i := len(chunkRunes) - 1; i > 0; i-- {
 			if chunkRunes[i] == '\n' {
 				splitIdx = i
 				break
@@ -400,7 +411,7 @@ func splitMessage(text string, limit int) []string {
 		}
 
 		if splitIdx == -1 {
-			for i := len(chunkRunes) - 1; i >= 0; i-- {
+			for i := len(chunkRunes) - 1; i > 0; i-- {
 				if chunkRunes[i] == ' ' {
 					splitIdx = i
 					break
@@ -409,7 +420,7 @@ func splitMessage(text string, limit int) []string {
 		}
 
 		if splitIdx == -1 {
-			splitIdx = limit
+			splitIdx = prefixLen
 		}
 
 		chunks = append(chunks, strings.TrimSpace(string(runes[:splitIdx])))
@@ -418,6 +429,25 @@ func splitMessage(text string, limit int) []string {
 	}
 
 	return chunks
+}
+
+func discordContentLength(value string) int {
+	return len(utf16.Encode([]rune(value)))
+}
+
+func discordPrefixRuneCount(runes []rune, limit int) int {
+	units := 0
+	for i, r := range runes {
+		width := 1
+		if r > 0xffff {
+			width = 2
+		}
+		if units+width > limit {
+			return i
+		}
+		units += width
+	}
+	return len(runes)
 }
 
 // resolveMentions replaces every <@ID> and <@!ID> token in text with @username.
@@ -483,7 +513,7 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 			config.F("is_reply", msg.ReferencedMessage != nil),
 			config.F("is_command", isCommandAttempt),
 			config.F("reason", preflight.Reason),
-			config.F("message_preview", routing.MessagePreview(msg.Content, 100)),
+			config.F("message_chars", len(msg.Content)),
 		)
 		return
 	}
@@ -543,11 +573,16 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		CreatedAt:   time.Now(),
 	})
 
+	responder := newRuntimeResponder(dg, requestID, msg.ChannelID, replyToID, sessionKey, msg.Author.ID)
 	gatewayruntime.Execute(gatewayruntime.Request{
-		RequestID:    requestID,
-		Gateway:      "discord",
-		ChatID:       msg.ChannelID,
-		SenderID:     canonicalUserID,
+		RequestID: requestID,
+		ChatID:    msg.ChannelID,
+		Principal: identity.Principal{
+			CanonicalUserID: canonicalUserID,
+			Gateway:         "discord",
+			ExternalID:      normalizedAuthorID,
+			Assurance:       identity.AssuranceDiscordGateway,
+		},
 		DisplayName:  msg.Author.Username,
 		SessionKey:   sessionKey,
 		IsDirect:     msg.GuildID == "",
@@ -558,14 +593,8 @@ func (dg *Gateway) handleMessage(msg MessageCreate) {
 		Images:       images,
 		Unsupported:  unsupported,
 		Reply:        reply,
-	}, dg.runtimeDependencies(), &runtimeResponder{
-		gateway:    dg,
-		requestID:  requestID,
-		channelID:  msg.ChannelID,
-		replyToID:  replyToID,
-		sessionKey: sessionKey,
-		authorID:   msg.Author.ID,
-	})
+		StreamFunc:   responder.Stream,
+	}, dg.runtimeDependencies(), responder)
 }
 
 func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
@@ -721,7 +750,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 		return messageResponse{}, false
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Debug("gateway.reply_lookup.failed", "discord reply lookup failed", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", trimResponseBody(respBody)))
+		log.Debug("gateway.reply_lookup.failed", "discord reply lookup failed", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(respBody)), config.F("status", "degraded"))
 		return messageResponse{}, false
 	}
 
@@ -765,7 +794,7 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int) ([]l
 
 		image, err := dg.fetchAttachmentImage(attachment.ID, attachment.URL, attachment.ContentType, attachment.Filename)
 		if err != nil {
-			dg.log().Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("filename", attachment.Filename), config.F("status", "degraded"), config.ErrorField(err))
+			dg.log().Debug("gateway.attachment.rejected", "rejected discord attachment", config.F("attachment_id", attachment.ID), config.F("declared_mime", strings.TrimSpace(attachment.ContentType)), config.F("status", "degraded"))
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -801,6 +830,9 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 	images := make([]llm.InputImage, 0, len(embeds))
 	unsupported := make([]string, 0)
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		label := discordEmbedLabel(embed)
 		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
@@ -846,11 +878,23 @@ func (dg *Gateway) loadEmbedImagesLimit(embeds []Embed, maxImages int) ([]llm.In
 func discordEmbedLabels(embeds []Embed) []string {
 	labels := make([]string, 0, len(embeds))
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		if discordEmbedVideoURL(embed) != "" || discordEmbedImageURL(embed) != "" {
 			labels = append(labels, discordEmbedLabel(embed))
 		}
 	}
 	return labels
+}
+
+func discordEmbedIsIntentionalMedia(embed Embed) bool {
+	switch strings.ToLower(strings.TrimSpace(embed.Type)) {
+	case "image", "gifv":
+		return true
+	default:
+		return false
+	}
 }
 
 func discordEmbedLabel(embed Embed) string {
@@ -895,6 +939,9 @@ func discordEmbedSourceURLs(embeds []Embed) []string {
 	urls := make([]string, 0, len(embeds)*7)
 	seen := make(map[string]struct{}, len(embeds)*7)
 	for _, embed := range embeds {
+		if !discordEmbedIsIntentionalMedia(embed) {
+			continue
+		}
 		for _, rawURL := range []string{
 			embed.URL,
 			embed.Image.URL,
@@ -952,29 +999,29 @@ func (dg *Gateway) fetchAttachmentImage(attachmentID, rawURL, declaredMIME, file
 
 	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("download attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("download attachment: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("filename", filename), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
-		return llm.InputImage{}, fmt.Errorf("download attachment %q: unexpected status %d", filename, resp.StatusCode)
+		dg.log().Warn("gateway.attachment.fetch_failed", "failed to fetch discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
+		return llm.InputImage{}, fmt.Errorf("download attachment: unexpected status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("read attachment %q: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("read attachment: %w", err)
 	}
 	if len(body) > media.MaxImageBytes {
-		return llm.InputImage{}, fmt.Errorf("attachment %q exceeds %d bytes", filename, media.MaxImageBytes)
+		return llm.InputImage{}, fmt.Errorf("attachment exceeds %d bytes", media.MaxImageBytes)
 	}
 
 	result, err := media.NormalizeInputImageFromBytes(resp.Header, declaredMIME, body, filename)
 	if err != nil {
-		return llm.InputImage{}, fmt.Errorf("attachment %q rejected: %w", filename, err)
+		return llm.InputImage{}, fmt.Errorf("attachment rejected: %w", err)
 	}
-	dg.log().Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("filename", filename), config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("content_chars", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
+	dg.log().Debug("gateway.attachment.normalized", "normalized discord attachment", config.F("attachment_id", attachmentID), config.F("declared_mime", strings.TrimSpace(declaredMIME)), config.F("detected_mime", result.DetectedMIME), config.F("normalized_mime", result.Image.MimeType), config.F("attachment_bytes", len(body)), config.F("original_width", result.OriginalWidth), config.F("original_height", result.OriginalHeight), config.F("width", result.Width), config.F("height", result.Height), config.F("is_resized", result.WasResized), config.F("normalized_bytes", result.NormalizedBytes), config.F("base64_chars", result.Base64Chars), config.F("preserved_alpha", result.PreservedAlpha), config.F("used_declared_mime", result.UsedDeclaredMIME))
 	return result.Image, nil
 }
 
@@ -1009,7 +1056,7 @@ func (dg *Gateway) sendTyping(channelID string) error {
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		dg.log().Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "degraded"), config.F("body_preview", strings.TrimSpace(string(body))))
+		dg.log().Debug("gateway.typing.failed", "discord typing request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("response_bytes", len(body)), config.F("status", "degraded"))
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 	return nil
@@ -1030,37 +1077,168 @@ func (dg *Gateway) sendMessage(channelID, content, replyToID string) (string, er
 		}
 	}
 
-	body, _ := json.Marshal(payload)
+	created, err := dg.doMessageJSON(http.MethodPost, url, payload)
+	if err != nil {
+		dg.log().Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("status", "error"), config.ErrorField(err))
+		return "", err
+	}
+	return created.ID, nil
+}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+// editMessage replaces the content of a message previously sent by Oswald.
+func (dg *Gateway) editMessage(channelID, messageID, content string) error {
+	url := fmt.Sprintf("%s/channels/%s/messages/%s", dg.apiBaseURL(), channelID, messageID)
+	_, err := dg.doMessageJSON(http.MethodPatch, url, map[string]string{"content": content})
+	return err
+}
+
+func (dg *Gateway) deleteMessage(channelID, messageID string) error {
+	url := fmt.Sprintf("%s/channels/%s/messages/%s", dg.apiBaseURL(), channelID, messageID)
+	_, err := dg.doMessageJSON(http.MethodDelete, url, nil)
+	return err
+}
+
+func (dg *Gateway) doMessageJSON(method, url string, payload interface{}) (createMessageResponse, error) {
+	var body []byte
+	if payload != nil {
+		var err error
+		body, err = json.Marshal(payload)
+		if err != nil {
+			return createMessageResponse{}, err
+		}
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		var requestBody io.Reader
+		if body != nil {
+			requestBody = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, url, requestBody)
+		if err != nil {
+			return createMessageResponse{}, err
+		}
+		req.Header.Set("Authorization", "Bot "+dg.Token)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := dg.httpClient(10 * time.Second).Do(req)
+		if err != nil {
+			return createMessageResponse{}, err
+		}
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return createMessageResponse{}, readErr
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests && attempt == 0 {
+			retryAfter := discordRetryAfter(resp, respBody)
+			if retryAfter > 0 && retryAfter <= 5*time.Second {
+				time.Sleep(retryAfter)
+				continue
+			}
+		}
+		if resp.StatusCode >= 500 && attempt == 0 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return createMessageResponse{}, fmt.Errorf("discord %s request returned status %d", method, resp.StatusCode)
+		}
+
+		var result createMessageResponse
+		if len(respBody) > 0 {
+			if err := json.Unmarshal(respBody, &result); err != nil {
+				return createMessageResponse{}, err
+			}
+		}
+		return result, nil
+	}
+	return createMessageResponse{}, fmt.Errorf("discord %s request exhausted retries", method)
+}
+
+func discordRetryAfter(resp *http.Response, body []byte) time.Duration {
+	if value := strings.TrimSpace(resp.Header.Get("Retry-After")); value != "" {
+		if seconds, err := strconv.ParseFloat(value, 64); err == nil && seconds > 0 {
+			return time.Duration(seconds * float64(time.Second))
+		}
+	}
+	var payload struct {
+		RetryAfter float64 `json:"retry_after"`
+	}
+	if json.Unmarshal(body, &payload) == nil && payload.RetryAfter > 0 {
+		return time.Duration(payload.RetryAfter * float64(time.Second))
+	}
+	return 0
+}
+
+// sendCommandAttachment posts ordered in-memory command attachments to Discord.
+func (dg *Gateway) sendCommandAttachment(channelID string, result commands.Result, replyToID string) (string, error) {
+	if err := result.ValidateAttachments(); err != nil {
+		return "", err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		return dg.sendMessage(channelID, result.Text, replyToID)
+	}
+
+	metadata := make([]map[string]any, 0, len(attachments))
+	for i, attachment := range attachments {
+		metadata = append(metadata, map[string]any{"id": i, "filename": attachment.Filename})
+	}
+	payload := map[string]any{
+		"content":     result.Text,
+		"attachments": metadata,
+	}
+	if replyToID != "" {
+		payload["message_reference"] = map[string]string{"message_id": replyToID}
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal Discord attachment payload: %w", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("payload_json", string(payloadJSON)); err != nil {
+		return "", fmt.Errorf("write Discord attachment payload: %w", err)
+	}
+	for i, attachment := range attachments {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": fmt.Sprintf("files[%d]", i), "filename": attachment.Filename}))
+		header.Set("Content-Type", attachment.MIMEType)
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			return "", fmt.Errorf("create Discord attachment part %d: %w", i, err)
+		}
+		if _, err := part.Write(attachment.Data); err != nil {
+			return "", fmt.Errorf("write Discord attachment %d: %w", i, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close Discord attachment payload: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/channels/%s/messages", dg.apiBaseURL(), channelID)
+	req, err := http.NewRequest(http.MethodPost, endpoint, &body)
 	if err != nil {
 		return "", err
 	}
-
 	req.Header.Set("Authorization", "Bot "+dg.Token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := dg.httpClient(10 * time.Second).Do(req)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := dg.httpClient(15 * time.Second).Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		dg.log().Warn("gateway.send.failed", "discord send request failed", config.F("chat_id", channelID), config.F("http_status", resp.StatusCode), config.F("status", "error"), config.F("body_preview", trimResponseBody(respBody)))
-		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return "", fmt.Errorf("Discord attachment send failed with status %d", resp.StatusCode)
 	}
-
 	var created createMessageResponse
-	if err := json.Unmarshal(respBody, &created); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&created); err != nil {
 		return "", err
 	}
-
 	return created.ID, nil
 }
 
@@ -1077,12 +1255,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max]) + "..."
-}
-
-func trimResponseBody(body []byte) string {
-	trimmed := strings.TrimSpace(string(body))
-	if len(trimmed) <= 512 {
-		return trimmed
-	}
-	return trimmed[:512] + "..."
 }

@@ -3,15 +3,17 @@ package accountlinking
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
@@ -30,19 +32,19 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("expected same canonical user, got %q then %q", userID, again)
 	}
 
-	linked, err := links.LinkAccount(userID, "websocket", "alice-local", "")
+	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
 	if err != nil {
-		t.Fatalf("link websocket: %v", err)
+		t.Fatalf("ensure websocket: %v", err)
 	}
-	if linked.CanonicalUserID != userID || linked.LinkedAccount.Identifier != "alice-local" {
-		t.Fatalf("unexpected link result: %+v", linked)
-	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken})
 
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts: %v", err)
 	}
-	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "websocket" {
+	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "homeassistant" {
 		t.Fatalf("unexpected sorted accounts: %+v", accounts)
 	}
 
@@ -54,11 +56,42 @@ func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
 		t.Fatalf("unexpected speaker line %q", line)
 	}
 
-	if err := links.DisconnectAccount(userID, "websocket", "alice-local"); err != nil {
+	descriptor, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "homeassistant", "alice-local", "disconnect-store-test")
+	if err != nil {
 		t.Fatalf("disconnect websocket: %v", err)
 	}
-	if err := links.DisconnectAccount(userID, "discord", "123"); err == nil {
+	if len(descriptor.ExternalIdentities) != 1 || descriptor.ExternalIdentities[0] != "homeassistant:alice-local" {
+		t.Fatalf("unexpected invalidation descriptor: %+v", descriptor)
+	}
+	if _, err := links.DisconnectAccountAs(context.Background(), identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}, "discord", "123", "disconnect-last-test"); err == nil {
 		t.Fatal("expected error disconnecting last account")
+	}
+}
+
+func TestClaimBootstrapAdminUsesAuthenticatedChatOwner(t *testing.T) {
+	links := newTestService(t)
+	userID, err := links.EnsureAccount("discord", "123", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasAdmin, err := links.HasAdmin(); err != nil || hasAdmin {
+		t.Fatalf("HasAdmin()=%t err=%v", hasAdmin, err)
+	}
+	principal := identity.Principal{CanonicalUserID: "stale-user", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
+	claimedID, claimed, err := links.ClaimBootstrapAdmin(principal)
+	if err != nil || !claimed || claimedID != userID {
+		t.Fatalf("ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
+	}
+	if admin, err := links.IsAdmin(userID); err != nil || !admin {
+		t.Fatalf("IsAdmin()=%t err=%v", admin, err)
+	}
+	otherID, err := links.EnsureAccount("imessage", "+15555550100", "Bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimedID, claimed, err = links.ClaimBootstrapAdmin(identity.Principal{CanonicalUserID: otherID, Gateway: "imessage", ExternalID: "+15555550100", Assurance: identity.AssuranceBlueBubblesWebhook})
+	if err != nil || claimed || claimedID != "" {
+		t.Fatalf("second ClaimBootstrapAdmin() id=%q claimed=%t err=%v", claimedID, claimed, err)
 	}
 }
 
@@ -68,28 +101,36 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
+	otherID, err := links.EnsureAccount("homeassistant", "alice-local", "Alice Local")
+	if err != nil {
+		t.Fatalf("ensure other account: %v", err)
+	}
 	service, err := commands.NewService(New(links)...)
 	if err != nil {
 		t.Fatalf("new command service: %v", err)
 	}
 
-	response, err := executeAccountCommand(service, userID, "/connect")
+	initiator := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
+	confirmer := identity.Principal{CanonicalUserID: otherID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken}
+	response, err := executeAccountCommand(service, initiator, "/connect")
 	if err != nil {
 		t.Fatalf("start connect err=%v", err)
 	}
-	if !strings.Contains(response, "Connect an account.") || !strings.Contains(response, "Discord (connected)") {
+	code := regexp.MustCompile(`OSW-(?:[A-Z0-9]{4}-){4}[A-Z0-9]{4}`).FindString(response)
+	if code == "" {
 		t.Fatalf("unexpected connect menu: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/connect 2 alice-local")
+	response, err = executeAccountCommand(service, confirmer, "/connect "+code)
 	if err != nil {
 		t.Fatalf("connect err=%v", err)
 	}
-	if !strings.Contains(response, "Linked WebSocket as alice-local.") {
+	if !strings.Contains(response, "Accounts connected successfully") {
 		t.Fatalf("unexpected connect response: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/disconnect")
+	confirmer.CanonicalUserID = userID
+	response, err = executeAccountCommand(service, confirmer, "/disconnect")
 	if err != nil {
 		t.Fatalf("start disconnect err=%v", err)
 	}
@@ -97,83 +138,90 @@ func TestCommandHandlerConnectAndDisconnect(t *testing.T) {
 		t.Fatalf("unexpected disconnect menu: %q", response)
 	}
 
-	response, err = executeAccountCommand(service, userID, "/disconnect 2")
+	result, err := service.Execute(context.Background(), commands.Request{Principal: confirmer, Raw: "/disconnect 2", RequestID: "req_disconnect"})
 	if err != nil {
 		t.Fatalf("disconnect err=%v", err)
 	}
-	if !strings.Contains(response, "Disconnected WebSocket: alice-local.") {
-		t.Fatalf("unexpected disconnect response: %q", response)
+	if !strings.Contains(result.Text, "Disconnected Home Assistant: alice-local.") {
+		t.Fatalf("unexpected disconnect response: %q", result.Text)
+	}
+	if result.Invalidation == nil || !result.Invalidation.CloseConnections || len(result.Invalidation.ExternalIdentities) != 1 || result.Invalidation.ExternalIdentities[0] != "homeassistant:alice-local" {
+		t.Fatalf("unexpected disconnect invalidation: %+v", result.Invalidation)
+	}
+	definition, ok := service.Definition("disconnect")
+	if !ok || !definition.UserExclusive {
+		t.Fatalf("disconnect definition is not user-exclusive: %+v", definition)
 	}
 }
 
-func executeAccountCommand(service *commands.Service, userID, raw string) (string, error) {
-	result, err := service.Execute(context.Background(), commands.Request{UserID: userID, Raw: raw})
+func TestDisconnectRejectsStalePrincipalAndNonOwnedExactTarget(t *testing.T) {
+	links := newTestService(t)
+	userID, _ := links.EnsureAccount("discord", "702", "Owner")
+	localID, _ := links.EnsureAccount("homeassistant", "owner-local", "Owner Local")
+	principal := identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "702", Assurance: identity.AssuranceDiscordGateway}
+	connectTestAccounts(t, links, principal, identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "owner-local", Assurance: identity.AssuranceHomeAssistantToken})
+	_, _ = links.EnsureAccount("imessage", "outsider@example.com", "Outsider")
+
+	stale := principal
+	stale.CanonicalUserID = "usr_stale"
+	if _, err := links.DisconnectAccountAs(context.Background(), stale, "homeassistant", "owner-local", "req-stale"); !errors.Is(err, ErrPrincipalMismatch) {
+		t.Fatalf("stale principal error=%v", err)
+	}
+	if _, err := links.DisconnectAccountAs(context.Background(), principal, "imessage", "outsider@example.com", "req-target"); err == nil || !strings.Contains(err.Error(), "linked account not found") {
+		t.Fatalf("non-owned exact target error=%v", err)
+	}
+	accounts, err := links.AccountsForUser(userID)
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("rejected disconnect mutated accounts: accounts=%+v err=%v", accounts, err)
+	}
+}
+
+func executeAccountCommand(service *commands.Service, principal identity.Principal, raw string) (string, error) {
+	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, Raw: raw, RequestID: "req_test"})
 	return result.Text, err
 }
 
 func TestServicePersistsSQLiteAccounts(t *testing.T) {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
 	dbPath := filepath.Join(dir, "oswald.db")
-	legacyPath := filepath.Join(dir, "links.json")
+	memories := usermemory.NewStore(dbPath, log)
 
-	links := NewService(dbPath, memories, log)
-	links.legacyPath = legacyPath
+	links := NewService(dbPath, memories, nil, log)
 	userID, err := links.EnsureAccount("discord", "123", "Alice")
 	if err != nil {
 		t.Fatalf("ensure account: %v", err)
 	}
-	if _, err := links.LinkAccount(userID, "websocket", "alice-local", ""); err != nil {
-		t.Fatalf("link websocket: %v", err)
+	localID, err := links.EnsureAccount("homeassistant", "alice-local", "")
+	if err != nil {
+		t.Fatalf("ensure websocket: %v", err)
 	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: userID, Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "alice-local", Assurance: identity.AssuranceHomeAssistantToken})
 
-	reopened := NewService(dbPath, memories, log)
-	reopened.legacyPath = legacyPath
+	reopened := NewService(dbPath, memories, nil, log)
 	accounts, err := reopened.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts after reopen: %v", err)
 	}
-	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "websocket" {
+	if len(accounts) != 2 || accounts[0].Gateway != "discord" || accounts[1].Gateway != "homeassistant" {
 		t.Fatalf("unexpected persisted accounts: %+v", accounts)
 	}
 }
 
-func TestServiceMigratesLegacyJSON(t *testing.T) {
+func TestServiceIgnoresLegacyJSON(t *testing.T) {
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
 	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
 	legacyPath := filepath.Join(dir, "links.json")
-	now := time.Now().UTC().Truncate(time.Second)
-
-	legacy := fileData{
-		Version: 1,
-		Users: map[string]UserRecord{
-			"usr_legacy": {
-				CreatedAt: now,
-				UpdatedAt: now,
-				Accounts: []LinkedAccount{{
-					Gateway:     "discord",
-					Identifier:  "123",
-					DisplayName: "Alice",
-					LinkedAt:    now,
-					Verified:    true,
-				}},
-			},
-		},
-		AccountIndex: map[string]string{"discord:123": "usr_legacy"},
-	}
-	raw, err := json.Marshal(legacy)
-	if err != nil {
-		t.Fatalf("marshal legacy: %v", err)
-	}
-	if err := os.WriteFile(legacyPath, raw, 0o644); err != nil {
+	legacy := []byte(`{"version":1,"users":{"usr_legacy":{"accounts":[{"gateway":"discord","identifier":"123"}]}},"account_index":{"discord:123":"usr_legacy"}}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o644); err != nil {
 		t.Fatalf("write legacy: %v", err)
 	}
 
-	links := NewService(dbPath, memories, log)
-	links.legacyPath = legacyPath
+	links := NewService(dbPath, memories, nil, log)
 	if err := links.Initialize(); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
@@ -182,18 +230,18 @@ func TestServiceMigratesLegacyJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure migrated account: %v", err)
 	}
-	if userID != "usr_legacy" {
-		t.Fatalf("got user %q, want legacy user", userID)
+	if userID == "usr_legacy" {
+		t.Fatalf("legacy canonical user was imported")
 	}
 	accounts, err := links.AccountsForUser(userID)
 	if err != nil {
 		t.Fatalf("accounts: %v", err)
 	}
-	if len(accounts) != 1 || accounts[0].DisplayName != "Alice Updated" || !accounts[0].Verified {
-		t.Fatalf("unexpected migrated account: %+v", accounts)
+	if len(accounts) != 1 || accounts[0].DisplayName != "Alice Updated" || accounts[0].Verified {
+		t.Fatalf("unexpected new account: %+v", accounts)
 	}
 	if _, err := os.Stat(legacyPath); err != nil {
-		t.Fatalf("legacy file should remain as backup: %v", err)
+		t.Fatalf("legacy file should remain untouched: %v", err)
 	}
 }
 
@@ -275,44 +323,52 @@ func TestServiceAdminBanAndListUsers(t *testing.T) {
 	}
 }
 
-func TestServiceMergePreservesAdminAndBanState(t *testing.T) {
+func TestServiceAdminAuthorizationRebindsExternalAccountOwner(t *testing.T) {
+	links := newTestService(t)
+	adminID, err := links.EnsureAccount("discord", "810", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := links.SetAdmin(adminID, adminID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.EnsureAccount("discord", "811", "User"); err != nil {
+		t.Fatal(err)
+	}
+	stale := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "811", Assurance: identity.AssuranceDiscordGateway}
+	isAdmin, err := links.IsAdminPrincipal(stale)
+	if err != nil || isAdmin {
+		t.Fatalf("stale principal authorized: admin=%t err=%v", isAdmin, err)
+	}
+	missing := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "812", Assurance: identity.AssuranceDiscordGateway}
+	isAdmin, err = links.IsAdminPrincipal(missing)
+	if err != nil || isAdmin {
+		t.Fatalf("unowned principal authorized: admin=%t err=%v", isAdmin, err)
+	}
+}
+
+func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	links := newTestService(t)
 	targetID, err := links.EnsureAccount("discord", "300", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	sourceID, err := links.EnsureAccount("websocket", "source", "Source")
+	sourceID, err := links.EnsureAccount("homeassistant", "source", "Source")
 	if err != nil {
 		t.Fatalf("ensure source: %v", err)
 	}
 	if err := links.SetAdmin(sourceID, sourceID, true); err != nil {
 		t.Fatalf("set source admin: %v", err)
 	}
-	if err := links.BanUser(targetID, sourceID, "merged ban"); err != nil {
-		t.Fatalf("ban source: %v", err)
-	}
-
-	result, err := links.LinkAccount(targetID, "websocket", "source", "")
-	if err != nil {
-		t.Fatalf("merge link: %v", err)
-	}
+	result := connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "300", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: sourceID, Gateway: "homeassistant", ExternalID: "source", Assurance: identity.AssuranceHomeAssistantToken})
 	if !result.Merged {
 		t.Fatalf("expected merge result: %+v", result)
 	}
 	isAdmin, err := links.IsAdmin(targetID)
 	if err != nil || !isAdmin {
 		t.Fatalf("expected merged admin true, got %v err=%v", isAdmin, err)
-	}
-	isBanned, err := links.IsBanned(targetID)
-	if err != nil || !isBanned {
-		t.Fatalf("expected merged banned true, got %v err=%v", isBanned, err)
-	}
-	user, ok, err := links.User(targetID)
-	if err != nil || !ok {
-		t.Fatalf("merged user lookup ok=%v err=%v", ok, err)
-	}
-	if user.BanReason != "merged ban" {
-		t.Fatalf("expected ban metadata preserved, got %+v", user)
 	}
 }
 
@@ -326,32 +382,36 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
 	}
-	if _, err := links.LinkAccount(targetID, "websocket", "target-local", "Target Local"); err != nil {
-		t.Fatalf("link websocket: %v", err)
+	localID, err := links.EnsureAccount("homeassistant", "target-local", "Target Local")
+	if err != nil {
+		t.Fatalf("ensure websocket: %v", err)
 	}
+	connectTestAccounts(t, links,
+		identity.Principal{CanonicalUserID: targetID, Gateway: "discord", ExternalID: "500", Assurance: identity.AssuranceDiscordGateway},
+		identity.Principal{CanonicalUserID: localID, Gateway: "homeassistant", ExternalID: "target-local", Assurance: identity.AssuranceHomeAssistantToken})
 	if err := links.SetAdmin(adminID, adminID, true); err != nil {
 		t.Fatalf("set admin: %v", err)
 	}
 
 	db := links.db.SQL()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT OR REPLACE INTO user_memory_profiles (canonical_user_id, intro, created_at, updated_at) VALUES (?, ?, ?, ?)`, targetID, "You are speaking with Target.", now, now); err != nil {
+	if _, err := db.Exec(`UPDATE account_users SET speaker_intro = ? WHERE canonical_user_id = ?`, "You are speaking with Target.", targetID); err != nil {
 		t.Fatalf("insert profile: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, statement_key, evidence, confidence, importance, status, source_session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "the user likes green.", "test", 0.9, 3, "active", "session-target", now, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO memory_entries (canonical_user_id, scope, category, statement, claim_slot, claim_value, confidence, importance, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, "long_term", "durable_preferences", "The user likes green.", "durable_preferences.fact", "the_user_likes_green", 0.9, 3, "active", now, now); err != nil {
 		t.Fatalf("insert memory entry: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO session_turns (session_id, canonical_user_id, user_text, assistant_text, created_at) VALUES (?, ?, ?, ?, ?)`, "session-target", targetID, "hello", "hi", now); err != nil {
 		t.Fatalf("insert session turn: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO mcp_servers (id, scope, owner_user_id, name, type, transport, url_ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "mcp-target", "user", targetID, "target-tools", "generic", "streamable_http", "ciphertext", now, now); err != nil {
+	if _, err := db.Exec(`INSERT INTO mcp_servers (id, scope, owner_user_id, name, transport, url_ciphertext) VALUES (?, ?, ?, ?, ?, ?)`, "mcp-target", "user", targetID, "target-tools", "streamable_http", "ciphertext"); err != nil {
 		t.Fatalf("insert mcp server: %v", err)
 	}
 
-	if err := links.DeleteUser(adminID, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
+	if err := links.deleteUser(adminID, adminID); err == nil || !strings.Contains(err.Error(), "cannot delete yourself") {
 		t.Fatalf("expected self delete error, got %v", err)
 	}
-	if err := links.DeleteUser(adminID, targetID); err != nil {
+	if err := links.deleteUser(adminID, targetID); err != nil {
 		t.Fatalf("delete user: %v", err)
 	}
 
@@ -368,7 +428,7 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 
 	assertRowCount(t, db, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM linked_accounts WHERE canonical_user_id = ?`, targetID, 0)
-	assertRowCount(t, db, `SELECT COUNT(*) FROM user_memory_profiles WHERE canonical_user_id = ?`, targetID, 0)
+	assertRowCount(t, db, `SELECT COUNT(*) FROM account_users WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM memory_entries WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM session_turns WHERE canonical_user_id = ?`, targetID, 0)
 	assertRowCount(t, db, `SELECT COUNT(*) FROM mcp_servers WHERE owner_user_id = ?`, targetID, 0)
@@ -399,8 +459,23 @@ func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
 	log := config.NewLogger(config.LevelError)
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := NewService(filepath.Join(dir, "oswald.db"), memories, log)
-	links.legacyPath = filepath.Join(dir, "links.json")
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	t.Cleanup(func() { memories.Close() })
+	links := NewService(dbPath, memories, nil, log)
+	t.Cleanup(func() { links.Close() })
 	return links
+}
+
+func connectTestAccounts(t *testing.T, links *Service, initiator, confirmer identity.Principal) ConfirmResult {
+	t.Helper()
+	challenge, err := links.CreateChallenge(context.Background(), initiator, "req_create")
+	if err != nil {
+		t.Fatalf("create challenge: %v", err)
+	}
+	result, err := links.ConfirmChallenge(context.Background(), confirmer, challenge.Code, "req_confirm")
+	if err != nil {
+		t.Fatalf("confirm challenge: %v", err)
+	}
+	return result
 }

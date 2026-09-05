@@ -2,33 +2,62 @@ package builtin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	globalmemorycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/globalmemory"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
+	memoriescommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/memories"
+	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/session"
+	stopcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/stop"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	mcpmanager "github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	globalmemorystore "github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
 )
 
 // MCPDeps contains optional dependencies for MCP management commands.
 type MCPDeps struct {
-	Store   *mcpmanager.Store
-	Manager *mcpmanager.Manager
+	Store    *mcpmanager.Store
+	Manager  *mcpmanager.Manager
+	Canceler stopcommands.Canceler
 }
 
 // NewService creates the application command service with all built-in commands.
-func NewService(users *accountlinking.Service, optionalMCP ...MCPDeps) (*commands.Service, error) {
+func NewService(users *accountlinking.Service, memory *usermemory.Store, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	return NewServiceWithGlobalMemory(users, memory, nil, nil, nil, optionalMCP...)
+}
+
+// NewServiceWithGlobalMemory creates the full command service including global-memory administration.
+func NewServiceWithGlobalMemory(users *accountlinking.Service, memory *usermemory.Store, globalMemory *globalmemorystore.Store, log *config.Logger, bootstrap commands.Handler, optionalMCP ...MCPDeps) (*commands.Service, error) {
+	if memory == nil {
+		return nil, fmt.Errorf("user memory store is required for built-in commands")
+	}
 	help := &helpHandler{auth: users}
-	registrations := []commands.Command{{Handler: help}}
+	registrations := []commands.Command{{Handler: help}, {Handler: sessioncommands.New(memory)}}
+	if users != nil {
+		registrations = append(registrations, commands.Command{Handler: memoriescommands.New(users, memory)})
+	}
 	if len(optionalMCP) > 0 && optionalMCP[0].Store != nil && optionalMCP[0].Manager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(optionalMCP[0].Store, optionalMCP[0].Manager, users)})
+	}
+	if len(optionalMCP) > 0 && optionalMCP[0].Canceler != nil {
+		registrations = append(registrations, commands.Command{Handler: stopcommands.New(optionalMCP[0].Canceler, users, users)})
+	}
+	if bootstrap != nil {
+		registrations = append(registrations, commands.Command{Handler: bootstrap})
 	}
 	for _, handler := range accountlinking.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler})
 	}
 	for _, handler := range usermanagement.New(users) {
 		registrations = append(registrations, commands.Command{Handler: handler, Middleware: []commands.Middleware{commands.RequireAdmin(users)}})
+	}
+	if globalMemory != nil {
+		registrations = append(registrations, commands.Command{Handler: globalmemorycommands.New(globalMemory, log), Middleware: []commands.Middleware{commands.RequireAdmin(users)}})
 	}
 	service, err := commands.NewServiceWithCommands(registrations...)
 	if err != nil {
@@ -48,7 +77,7 @@ func (h helpHandler) Definition() commands.Definition {
 }
 
 func (h helpHandler) Execute(ctx context.Context, req commands.Request) (commands.Result, error) {
-	definitions, err := h.visibleDefinitions(ctx, req.UserID)
+	definitions, err := h.visibleDefinitions(ctx, req.Principal.CanonicalUserID)
 	if err != nil {
 		return commands.Result{}, err
 	}

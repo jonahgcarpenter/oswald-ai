@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
 )
 
 const (
@@ -83,7 +84,7 @@ type messageResponse struct {
 	} `json:"author"`
 }
 
-// Embed describes Discord link-preview media that can be treated like an image.
+// Embed describes Discord direct-media embeds and derived webpage previews.
 type Embed struct {
 	Type      string     `json:"type,omitempty"`
 	URL       string     `json:"url,omitempty"`
@@ -165,4 +166,26 @@ func (dg *Gateway) httpClient(timeout time.Duration) *http.Client {
 		return dg.HTTPClient
 	}
 	return &http.Client{Timeout: timeout}
+}
+
+// HandleRuntimeInvalidation purges reply context owned by the invalidated tenant.
+func (dg *Gateway) HandleRuntimeInvalidation(event runtimeinvalidation.Event) {
+	sessions := make(map[string]bool, len(event.SessionIDs))
+	for _, sessionID := range event.SessionIDs {
+		sessions[sessionID] = true
+	}
+	senders := make(map[string]bool)
+	const prefix = "discord:"
+	for _, external := range event.ExternalIdentities {
+		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
+			senders[external[len(prefix):]] = true
+		}
+	}
+	dg.replyMu.Lock()
+	for id, ctx := range dg.replyIndex {
+		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
+			delete(dg.replyIndex, id)
+		}
+	}
+	dg.replyMu.Unlock()
 }

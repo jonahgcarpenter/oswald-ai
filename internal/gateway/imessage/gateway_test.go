@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,12 +22,47 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/promptbudget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/runtimeinvalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
+
+func TestRuntimeInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
+	g := &Gateway{
+		messageIndex: map[string]messageContext{
+			"session": {SessionKey: "imessage:chat:one", SenderID: "+15550000001"},
+			"sender":  {SessionKey: "imessage:other:one", SenderID: "+15550000001"},
+			"foreign": {SessionKey: "imessage:chat:two", SenderID: "+15550000002"},
+		},
+		contactNames: map[string]contactNameCacheEntry{
+			"+15550000001": {DisplayName: "One"},
+			"+15550000002": {DisplayName: "Two"},
+		},
+	}
+	g.HandleRuntimeInvalidation(runtimeinvalidation.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
+	if _, ok := g.messageIndex["session"]; ok {
+		t.Fatal("matching session message context remained")
+	}
+	if _, ok := g.messageIndex["sender"]; ok {
+		t.Fatal("matching sender message context remained")
+	}
+	if _, ok := g.messageIndex["foreign"]; !ok || len(g.messageIndex) != 1 {
+		t.Fatalf("foreign message context was purged: %+v", g.messageIndex)
+	}
+	if _, ok := g.contactNames["+15550000001"]; ok {
+		t.Fatal("matching contact cache entry remained")
+	}
+	if _, ok := g.contactNames["+15550000002"]; !ok || len(g.contactNames) != 1 {
+		t.Fatalf("foreign contact cache entry was purged: %+v", g.contactNames)
+	}
+}
 
 func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
@@ -44,7 +82,7 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello imessage" {
+	if last.Content != "hello imessage" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if bb.sentMessage() != "imessage response" {
@@ -56,11 +94,149 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	if _, ok := g.lookupMessage("sent-1"); !ok {
 		t.Fatal("expected sent bot message remembered")
 	}
+	principal := chat.lastPrincipal()
+	if principal.CanonicalUserID == "" || principal.Gateway != "imessage" || principal.ExternalID != "+15551234567" || principal.Assurance != identity.AssuranceBlueBubblesWebhook {
+		t.Fatalf("unexpected principal: %+v", principal)
+	}
+}
+
+func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
+	var filename, mimeType, chatGUID, name, tempGUID string
+	var attachmentData []byte
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.URL.Query().Get("password") != "pw" {
+			t.Fatalf("missing BlueBubbles password")
+		}
+		if r.URL.Path != "/api/v1/message/attachment" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+			t.Fatalf("parse attachment: %v", err)
+		}
+		file, header, err := r.FormFile("attachment")
+		if err != nil {
+			t.Fatalf("read attachment: %v", err)
+		}
+		defer file.Close()
+		filename = header.Filename
+		mimeType = header.Header.Get("Content-Type")
+		attachmentData, err = io.ReadAll(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chatGUID = r.FormValue("chatGuid")
+		name = r.FormValue("name")
+		tempGUID = r.FormValue("tempGuid")
+		_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 1 || filename != "export.json" || mimeType != "application/json" || string(attachmentData) != "private-content" || chatGUID != "chat-1" || name != "export.json" || tempGUID == "" {
+		t.Fatalf("unexpected attachment request count=%d filename=%q mime=%q data=%q chat=%q name=%q temp_set=%t", requestCount, filename, mimeType, attachmentData, chatGUID, name, tempGUID != "")
+	}
+}
+
+func TestIMessageCommandAttachmentProviderFailures(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "private-content", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err == nil || strings.Contains(err.Error(), "private-content") || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/message/text":
+			calls = append(calls, "text")
+			_, _ = w.Write([]byte(`{"data":{"guid":"text-1"}}`))
+		case "/api/v1/message/attachment":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+				t.Fatal(err)
+			}
+			file, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = file.Close()
+			calls = append(calls, "send:"+header.Filename)
+			if header.Filename == "part002" {
+				http.Error(w, "failed", http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-1"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1"}
+	err := responder.SendCommandResponse(commands.Result{Text: "join in order", Attachments: []commands.Attachment{
+		{Filename: "part001", MIMEType: "application/octet-stream", Data: []byte("first")},
+		{Filename: "part002", MIMEType: "application/octet-stream", Data: []byte("second")},
+		{Filename: "part003", MIMEType: "application/octet-stream", Data: []byte("third")},
+	}})
+	if err == nil {
+		t.Fatal("second-part failure was ignored")
+	}
+	want := []string{"send:part001", "send:part002"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want %v", calls, want)
+	}
+}
+
+func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/message/attachment":
+			if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 4096); err != nil {
+				t.Fatal(err)
+			}
+			_, header, err := r.FormFile("attachment")
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = append(calls, "attachment:"+header.Filename)
+			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-guid"}}`))
+		case "/api/v1/message/text":
+			calls = append(calls, "text")
+			_, _ = w.Write([]byte(`{"data":{"guid":"text-guid"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request"}
+	err := responder.SendAgentResponse(&agent.AgentResponse{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"attachment:generated.png", "text"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
+	}
 }
 
 func TestIMessageWebhookRequiresBlueBubblesCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -72,7 +248,7 @@ func TestIMessageWebhookRequiresBlueBubblesCredential(t *testing.T) {
 
 func TestIMessageWebhookAcceptsPasswordCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -88,11 +264,11 @@ func TestIMessageWebhookAcceptsCredentialSources(t *testing.T) {
 		path   string
 		header string
 	}{
-		{name: "password query", path: "/imessage/webhook?password=pw"},
-		{name: "guid query", path: "/imessage/webhook?guid=pw"},
-		{name: "x-password header", path: "/imessage/webhook", header: "x-password"},
-		{name: "x-guid header", path: "/imessage/webhook", header: "x-guid"},
-		{name: "x-bluebubbles-guid header", path: "/imessage/webhook", header: "x-bluebubbles-guid"},
+		{name: "password query", path: "/bluebubbles/webhook?password=pw"},
+		{name: "guid query", path: "/bluebubbles/webhook?guid=pw"},
+		{name: "x-password header", path: "/bluebubbles/webhook", header: "x-password"},
+		{name: "x-guid header", path: "/bluebubbles/webhook", header: "x-guid"},
+		{name: "x-bluebubbles-guid header", path: "/bluebubbles/webhook", header: "x-bluebubbles-guid"},
 	}
 
 	for _, tt := range tests {
@@ -115,7 +291,7 @@ func TestIMessageWebhookAcceptsCredentialSources(t *testing.T) {
 
 func TestIMessageWebhookRejectsWrongCredential(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=wrong", strings.NewReader(`{"type":"typing-indicator"}`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=wrong", strings.NewReader(`{"type":"typing-indicator"}`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -127,7 +303,7 @@ func TestIMessageWebhookRejectsWrongCredential(t *testing.T) {
 
 func TestIMessageWebhookMalformedJSONReturnsBadRequest(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(`{"type":`))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(`{"type":`))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -139,7 +315,7 @@ func TestIMessageWebhookMalformedJSONReturnsBadRequest(t *testing.T) {
 
 func TestIMessageWebhookWrongMethodReturnsMethodNotAllowed(t *testing.T) {
 	g := &Gateway{BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	req := httptest.NewRequest(http.MethodGet, "/imessage/webhook?password=pw", nil)
+	req := httptest.NewRequest(http.MethodGet, "/bluebubbles/webhook?password=pw", nil)
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -162,7 +338,7 @@ func TestIMessageWebhookDirectMessageRoutesAndReplies(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello from webhook" {
+	if last.Content != "hello from webhook" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if !bb.waitForSentCount(1) {
@@ -186,7 +362,7 @@ func TestIMessageWebhookGroupMentionRoutesCleanedText(t *testing.T) {
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello" {
+	if last.Content != "hello" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 }
@@ -319,7 +495,7 @@ func TestIMessageWebhookIgnoresTapback(t *testing.T) {
 	defer bb.server.Close()
 
 	body := `{"type":"new-message","data":{"guid":"tapback-1","text":"Liked an image","associatedMessageType":2001,"handle":{"address":"+15551234567"},"chats":[{"guid":"chat-direct","style":45}]}}`
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	g.handleWebhook(rec, req)
@@ -586,18 +762,26 @@ func TestChooseContactDisplayNameFallbackOrder(t *testing.T) {
 }
 
 type imFakeChatter struct {
-	mu       sync.Mutex
-	requests []llm.ChatRequest
+	mu        sync.Mutex
+	requests  []llm.ChatRequest
+	principal identity.Principal
 }
 
-func (f *imFakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+func (f *imFakeChatter) Chat(ctx context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
+	f.principal, _ = requestctx.PrincipalFromContext(ctx)
 	f.mu.Unlock()
 	if req.Format == "json_object" {
 		return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: `{"session_updates":{"summary":"","open_threads":[],"decisions":[],"user_goals":[]},"memory_candidates":[]}`}}, nil
 	}
 	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "imessage response"}}, nil
+}
+
+func (f *imFakeChatter) lastPrincipal() identity.Principal {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.principal
 }
 
 func primaryIMessageRequests(requests []llm.ChatRequest) []llm.ChatRequest {
@@ -618,7 +802,7 @@ func (f *imFakeChatter) primaryRequests() []llm.ChatRequest {
 
 func postIMessageWebhook(t *testing.T, g *Gateway, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/imessage/webhook?password=pw", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/bluebubbles/webhook?password=pw", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	g.handleWebhook(rec, req)
 	return rec
@@ -768,14 +952,16 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	memories := usermemory.NewStore(filepath.Join(dir, "users"), log)
-	links := accountlinking.NewService(filepath.Join(dir, "oswald.db"), memories, log)
-	soulStore := soul.NewStore(filepath.Join(dir, "soul.md"), log)
-	if err := soulStore.Write("You are Oswald."); err != nil {
-		t.Fatalf("write soul: %v", err)
+	dbPath := filepath.Join(dir, "oswald.db")
+	memories := usermemory.NewStore(dbPath, log)
+	links := accountlinking.NewService(dbPath, memories, nil, log)
+	soulPath := filepath.Join(dir, "soul.md")
+	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
+		t.Fatalf("write soul fixture: %v", err)
 	}
+	soulStore := soul.NewStore(soulPath)
 	chat := &imFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, 3, time.Minute, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, promptbudget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8, MaxConsecutiveFailures: 3}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewService()

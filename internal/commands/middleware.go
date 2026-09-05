@@ -10,10 +10,10 @@ func RequireAdmin(auth Authorizer) Middleware {
 		return HandlerFunc{
 			DefinitionValue: next.Definition(),
 			ExecuteFunc: func(ctx context.Context, req Request) (Result, error) {
-				if auth == nil {
+				if !req.Principal.Authenticated() || auth == nil {
 					return Result{Text: adminDeniedMessage}, nil
 				}
-				isAdmin, err := auth.IsAdmin(req.UserID)
+				isAdmin, err := IsPrincipalAdmin(auth, req.Principal)
 				if err != nil {
 					return Result{}, err
 				}

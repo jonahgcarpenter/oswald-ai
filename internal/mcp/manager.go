@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,20 +13,91 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Manager owns scoped MCP client sessions and resolves tools for active users.
 type Manager struct {
-	store    *Store
-	sessions map[string]*server
-	mu       sync.Mutex
-	log      *config.Logger
+	store           *Store
+	sessions        map[string]*server
+	userGenerations map[string]uint64
+	mu              sync.Mutex
+	log             *config.Logger
 }
 
 // NewManagerFromStore creates a DB-backed MCP manager.
 func NewManagerFromStore(store *Store, log *config.Logger) *Manager {
-	return &Manager{store: store, sessions: make(map[string]*server), log: log.Server("mcp.manager")}
+	return &Manager{store: store, sessions: make(map[string]*server), userGenerations: make(map[string]uint64), log: log.Server("mcp.manager")}
+}
+
+// MergeUsersTx transfers user-scoped MCP configs in the supplied account merge transaction.
+func (m *Manager) MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID string) error {
+	if m == nil || m.store == nil {
+		return fmt.Errorf("MCP manager is not initialized")
+	}
+	return m.store.MergeUsersTx(ctx, tx, winnerID, loserID)
+}
+
+// DeleteUserTx removes user-scoped MCP configs in the supplied transaction.
+func (m *Manager) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string) error {
+	if m == nil || m.store == nil {
+		return fmt.Errorf("MCP manager is not initialized")
+	}
+	return m.store.DeleteUserTx(ctx, tx, userID)
+}
+
+// UserDeleteCommitted invalidates sessions owned by a deleted user.
+func (m *Manager) UserDeleteCommitted(userID string) {
+	if m == nil {
+		return
+	}
+	userID = strings.TrimSpace(userID)
+	prefix := ScopeUser + ":" + userID + ":"
+	var closeFns []func() error
+	m.mu.Lock()
+	m.userGenerations[userID]++
+	for key, srv := range m.sessions {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if srv != nil && srv.close != nil {
+			closeFns = append(closeFns, srv.close)
+		}
+		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
+	for _, closeFn := range closeFns {
+		closeFn() // nolint:errcheck
+	}
+}
+
+// UserMergeCommitted invalidates sessions affected by a committed user merge.
+func (m *Manager) UserMergeCommitted(winnerID, loserID string) {
+	if m == nil {
+		return
+	}
+	winnerID = strings.TrimSpace(winnerID)
+	loserID = strings.TrimSpace(loserID)
+	winnerPrefix := ScopeUser + ":" + winnerID + ":"
+	loserPrefix := ScopeUser + ":" + loserID + ":"
+	var closeFns []func() error
+	m.mu.Lock()
+	m.userGenerations[winnerID]++
+	m.userGenerations[loserID]++
+	for key, srv := range m.sessions {
+		if !strings.HasPrefix(key, winnerPrefix) && !strings.HasPrefix(key, loserPrefix) {
+			continue
+		}
+		if srv != nil && srv.close != nil {
+			closeFns = append(closeFns, srv.close)
+		}
+		delete(m.sessions, key)
+	}
+	m.mu.Unlock()
+	for _, closeFn := range closeFns {
+		closeFn() // nolint:errcheck
+	}
 }
 
 // ServerInfos returns global and user-scoped MCP server metadata visible to userID.
@@ -40,7 +112,7 @@ func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
 	}
 	infos := make([]ServerInfo, 0, len(configs))
 	for _, cfg := range configs {
-		info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+		info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 		if !cfg.Enabled {
 			info.Status = serverStatusDisabled
 			infos = append(infos, info)
@@ -85,7 +157,7 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 	}
 	var specs []ToolSpec
 	for _, cfg := range configs {
-		if !cfg.Enabled {
+		if !cfg.Enabled || strings.TrimSpace(cfg.Description) == "" || isReservedServerName(cfg.Name) {
 			continue
 		}
 		srv, err := m.ensureConnected(ctx, cfg)
@@ -100,6 +172,9 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 
 // ServerToolSpecs returns tools for a single visible server, connecting lazily.
 func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]ToolSpec, ServerInfo, error) {
+	if isReservedServerName(name) {
+		return nil, ServerInfo{}, fmt.Errorf("MCP server name %q is reserved", name)
+	}
 	cfg, ok, err := m.resolveConfig(ctx, userID, name)
 	if err != nil {
 		return nil, ServerInfo{}, err
@@ -107,7 +182,7 @@ func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]T
 	if !ok {
 		return nil, ServerInfo{}, fmt.Errorf("no configured MCP server named %q", name)
 	}
-	info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+	info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 	if !cfg.Enabled {
 		info.Status = serverStatusDisabled
 		return nil, info, nil
@@ -124,21 +199,22 @@ func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]T
 }
 
 // Execute calls a scoped MCP tool visible to userID.
-func (m *Manager) Execute(ctx context.Context, userID string, toolName string, args map[string]interface{}) (string, error) {
+func (m *Manager) Execute(ctx context.Context, userID string, toolName string, args map[string]interface{}) (ExecutionResult, error) {
 	serverName, remoteName, ok := splitToolName(toolName)
 	if !ok {
-		return "", fmt.Errorf("invalid MCP tool name %q", toolName)
+		return ExecutionResult{}, fmt.Errorf("invalid MCP tool name %q", toolName)
 	}
 	tols, _, err := m.ServerToolSpecs(ctx, userID, serverName)
 	if err != nil {
-		return "", err
+		return ExecutionResult{}, err
 	}
 	for _, tool := range tols {
 		if tool.RemoteName == remoteName || tool.Name == toolName {
-			return tool.Handler(ctx, args)
+			result, err := tool.Handler(ctx, args)
+			return ExecutionResult{Result: result, ServerID: tool.ServerID, ServerName: tool.Server, Scope: tool.Scope, OwnerUserID: tool.OwnerUserID, ToolName: tool.Name, RemoteToolName: tool.RemoteName}, err
 		}
 	}
-	return "", fmt.Errorf("MCP tool %q is not available", toolName)
+	return ExecutionResult{}, fmt.Errorf("MCP tool %q is not available", toolName)
 }
 
 // Close shuts down connected MCP sessions.
@@ -196,31 +272,50 @@ func (m *Manager) resolveConfig(ctx context.Context, userID, name string) (Serve
 
 func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*server, error) {
 	key := scopeKey(cfg)
-	if srv := m.cached(key); srv != nil && srv.reason == "" {
+	m.mu.Lock()
+	srv := m.sessions[key]
+	generation := m.userGenerations[cfg.OwnerUserID]
+	m.mu.Unlock()
+	if srv != nil && srv.reason == "" {
 		return srv, nil
 	}
+	if cfg.Scope == ScopeUser {
+		current, ok, err := m.store.Get(ctx, cfg.Scope, cfg.OwnerUserID, cfg.Name)
+		if err != nil {
+			return nil, err
+		}
+		if !ok || current.ID != cfg.ID {
+			return nil, fmt.Errorf("MCP server ownership changed before connecting")
+		}
+		cfg = current
+	}
 	if _, err := parseAndValidateURL(ctx, cfg.URL, m.store.resolver); err != nil {
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	if cfg.Transport != TransportStreamableHTTP {
 		err := fmt.Errorf("MCP transport %q is not implemented", cfg.Transport)
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	session, closeFn, err := connectStreamableHTTP(ctx, cfg)
 	if err != nil {
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
 	tools, err := loadToolSpecs(ctx, cfg, session, m.log)
 	if err != nil {
 		closeFn() // nolint:errcheck
-		m.rememberError(key, cfg, err)
+		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
-	srv := &server{config: cfg, tools: tools, close: closeFn}
+	srv = &server{config: cfg, tools: tools, close: closeFn}
 	m.mu.Lock()
+	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+		m.mu.Unlock()
+		closeFn() // nolint:errcheck
+		return nil, fmt.Errorf("MCP server ownership changed while connecting")
+	}
 	if old := m.sessions[key]; old != nil && old.close != nil {
 		old.close() // nolint:errcheck
 	}
@@ -230,9 +325,12 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (*serve
 	return srv, nil
 }
 
-func (m *Manager) rememberError(key string, cfg ServerConfig, err error) {
+func (m *Manager) rememberError(key string, cfg ServerConfig, generation uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+		return
+	}
 	m.sessions[key] = &server{config: cfg, reason: config.SafeErrorText(err)}
 }
 
@@ -287,30 +385,48 @@ func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientS
 }
 
 func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, log *config.Logger) (ToolSpec, error) {
+	remoteName := strings.TrimSpace(tool.Name)
+	if err := validateProviderIdentifier(remoteName); err != nil {
+		return ToolSpec{}, fmt.Errorf("invalid remote tool name: %w", err)
+	}
+	localName := cfg.Name + "." + remoteName
+	if len(localName) > maxProviderIdentifierBytes {
+		return ToolSpec{}, fmt.Errorf("qualified tool name exceeds %d bytes", maxProviderIdentifierBytes)
+	}
 	params, err := schemaToParams(tool.InputSchema)
 	if err != nil {
 		return ToolSpec{}, fmt.Errorf("normalize input schema: %w", err)
 	}
-	remoteName := strings.TrimSpace(tool.Name)
-	localName := cfg.Name + "." + remoteName
-	description := strings.TrimSpace(tool.Description)
+	description := normalizeCatalogDescription(tool.Description, maxToolDescriptionRuneCount)
 	if description == "" {
-		description = strings.TrimSpace(tool.Title)
+		description = normalizeCatalogDescription(tool.Title, maxToolDescriptionRuneCount)
 	}
-	return ToolSpec{Name: localName, Description: description, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (string, error) {
+	return ToolSpec{Name: localName, Description: description, ServerID: cfg.ID, Server: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, RemoteName: remoteName, Parameters: params, Handler: func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error) {
 		meta := requestctx.MetadataFromContext(ctx)
-		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, meta.SenderID, meta.Gateway, meta.Model)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		reqLog := log.Agent("agent.tool.mcp", meta.RequestID, meta.SessionID, principal.CanonicalUserID, principal.Gateway, meta.Model)
 		reqLog.Debug("agent.tool.mcp.start", "starting MCP tool execution", config.F("tool_name", localName), config.F("remote_tool_name", remoteName), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 		result, err := session.CallTool(ctx, &gomcp.CallToolParams{Name: remoteName, Arguments: arguments})
 		if err != nil {
-			return "", fmt.Errorf("MCP tool %q failed: %w", remoteName, err)
+			return governance.Result{}, safeMCPRequestError(err)
 		}
 		flattened, err := flattenToolResult(result)
 		if err != nil {
-			return "", fmt.Errorf("format MCP tool %q result: %w", remoteName, err)
+			return governance.Result{}, err
 		}
 		return flattened, nil
 	}}, nil
+}
+
+func safeMCPRequestError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("MCP request was canceled (category: canceled). Do not retry automatically")
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("MCP request timed out (category: timeout). Retry once")
+	default:
+		return fmt.Errorf("MCP request failed (category: transport). Retry once; if it fails again, check server availability")
+	}
 }
 
 func scopeKey(cfg ServerConfig) string {

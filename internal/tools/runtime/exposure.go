@@ -8,12 +8,28 @@ import (
 
 // Exposure tracks tools exposed during a single agent request.
 type Exposure struct {
-	mcpTools map[string]bool
+	mcpTools      map[string]bool
+	hiddenBuiltin map[string]bool
 }
 
 // NewExposure creates empty request-local tool exposure state.
 func NewExposure() *Exposure {
-	return &Exposure{mcpTools: make(map[string]bool)}
+	return &Exposure{
+		mcpTools:      make(map[string]bool),
+		hiddenBuiltin: make(map[string]bool),
+	}
+}
+
+// HideBuiltins records builtin tools that must not be visible for this request.
+func (e *Exposure) HideBuiltins(names ...string) {
+	if e == nil {
+		return
+	}
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			e.hiddenBuiltin[name] = true
+		}
+	}
 }
 
 // ExposeTools records MCP tools that should be visible for the active request.
@@ -35,7 +51,7 @@ func (e *Exposure) Visibility() registry.ToolVisibility {
 	if e == nil {
 		return registry.ToolVisibility{}
 	}
-	return registry.ToolVisibility{ExposedMCPTools: e.mcpTools}
+	return registry.ToolVisibility{ExposedMCPTools: e.mcpTools, HiddenBuiltins: e.hiddenBuiltin}
 }
 
 // ExposedMCPTools returns a copy of request-local exposed MCP tool names.

@@ -39,6 +39,9 @@ func schemaToParams(inputSchema any) ([]ParamSpec, error) {
 
 	params := make([]ParamSpec, 0, len(schema.Properties))
 	for name, property := range schema.Properties {
+		if err := validateProviderIdentifier(name); err != nil {
+			return nil, fmt.Errorf("invalid property name %q: %w", name, err)
+		}
 		propType := schemaType(property.Type)
 		if propType == "" {
 			propType = "string"
@@ -50,8 +53,8 @@ func schemaToParams(inputSchema any) ([]ParamSpec, error) {
 			Name:        name,
 			Type:        propType,
 			Required:    required[name],
-			Description: strings.TrimSpace(property.Description),
-			Enum:        property.Enum,
+			Description: normalizeCatalogDescription(property.Description, maxParamDescriptionRuneCount),
+			Enum:        safeCatalogEnum(property.Enum),
 		})
 	}
 

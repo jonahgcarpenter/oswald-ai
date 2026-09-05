@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +11,13 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 // Handler is the execution function for a single tool.
-// It receives the model's tool call arguments and returns the text content to
-// inject as a tool response message. ctx is propagated for timeout cancellation.
-type Handler func(ctx context.Context, arguments map[string]interface{}) (string, error)
+// It receives the model's tool call arguments and returns typed productivity
+// plus the content injected as a tool response. ctx propagates cancellation.
+type Handler func(ctx context.Context, arguments map[string]interface{}) (governance.Result, error)
 
 // ParamSpec describes one parameter row parsed from the markdown table.
 type ParamSpec struct {
@@ -42,6 +44,7 @@ type Spec struct {
 	Source      string
 	Server      string
 	Parameters  []ParamSpec
+	Schema      *llm.ToolParameters
 }
 
 // CatalogEntry is a registry tool definition annotated with its source.
@@ -56,6 +59,7 @@ type CatalogEntry struct {
 // ToolVisibility controls which non-default tools are sent to the model.
 type ToolVisibility struct {
 	ExposedMCPTools map[string]bool
+	HiddenBuiltins  map[string]bool
 }
 
 // Registry maps tool names to their parsed Spec and registered Handler.
@@ -64,6 +68,8 @@ type ToolVisibility struct {
 type Registry struct {
 	specs    map[string]Spec
 	handlers map[string]Handler
+	policies map[string]governance.ToolPolicy
+	disabled map[string]bool
 	log      *config.Logger
 }
 
@@ -73,8 +79,27 @@ func New(log *config.Logger) *Registry {
 	return &Registry{
 		specs:    make(map[string]Spec),
 		handlers: make(map[string]Handler),
+		policies: make(map[string]governance.ToolPolicy),
+		disabled: make(map[string]bool),
 		log:      log,
 	}
+}
+
+// DisableBuiltin keeps a builtin name reserved while removing it from model-visible catalogs.
+func (r *Registry) DisableBuiltin(name string) error {
+	spec, ok := r.specs[name]
+	if !ok {
+		return fmt.Errorf("cannot disable builtin %q: no tool spec loaded with that name", name)
+	}
+	if spec.Source != ToolSourceBuiltin {
+		return fmt.Errorf("cannot disable builtin %q: tool source is %q", name, spec.Source)
+	}
+	if _, ok := r.handlers[name]; ok {
+		return fmt.Errorf("cannot disable builtin %q after registering its handler", name)
+	}
+	r.disabled[name] = true
+	r.log.Debug("tool.registry.builtin_disabled", "disabled builtin tool", config.F("tool_name", name))
+	return nil
 }
 
 // NewFromDirectory creates a Registry and loads tool definitions from dir.
@@ -131,11 +156,15 @@ func (r *Registry) LoadFromDirectory(dir string) error {
 // RegisterHandler associates a Handler with a tool name.
 // Returns an error if the name does not match any loaded tool spec, to catch
 // typos and orphaned handlers early at startup.
-func (r *Registry) RegisterHandler(name string, handler Handler) error {
+func (r *Registry) RegisterHandler(name string, policy governance.ToolPolicy, handler Handler) error {
 	if _, ok := r.specs[name]; !ok {
 		return fmt.Errorf("cannot register handler for %q: no tool spec loaded with that name", name)
 	}
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("invalid policy for tool %q: %w", name, err)
+	}
 	r.handlers[name] = handler
+	r.policies[name] = policy
 	r.log.Debug("tool.registry.handler_registered", "registered tool handler", config.F("tool_name", name))
 	return nil
 }
@@ -159,11 +188,11 @@ func (r *Registry) RegisterSpec(spec Spec) error {
 
 // RegisterTool registers a programmatically discovered tool and its handler in a
 // single step.
-func (r *Registry) RegisterTool(spec Spec, handler Handler) error {
+func (r *Registry) RegisterTool(spec Spec, policy governance.ToolPolicy, handler Handler) error {
 	if err := r.RegisterSpec(spec); err != nil {
 		return err
 	}
-	return r.RegisterHandler(spec.Name, handler)
+	return r.RegisterHandler(spec.Name, policy, handler)
 }
 
 // LLMTools converts builtin Specs into the []llm.Tool slice passed to
@@ -172,37 +201,55 @@ func (r *Registry) LLMTools() []llm.Tool {
 	return r.LLMToolsForVisibility(ToolVisibility{})
 }
 
+// LLMTool returns one model-facing tool definition by name.
+func (r *Registry) LLMTool(name string) (llm.Tool, bool) {
+	for _, tool := range r.LLMToolsForVisibility(ToolVisibility{}) {
+		if tool.Function.Name == name {
+			return tool, true
+		}
+	}
+	return llm.Tool{}, false
+}
+
 // LLMToolsForVisibility converts loaded Specs into the []llm.Tool slice passed to
 // ChatRequest.Tools. Builtin tools are always included. MCP tools are included
 // only when explicitly named by the active request's visibility state.
 func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 	tools := make([]llm.Tool, 0, len(r.specs))
 	for _, spec := range r.orderedSpecs() {
+		if spec.Source == ToolSourceBuiltin && r.disabled[spec.Name] {
+			continue
+		}
+		if spec.Source == ToolSourceBuiltin && visibility.HiddenBuiltins[spec.Name] {
+			continue
+		}
 		if spec.Source == ToolSourceMCP && !visibility.ExposedMCPTools[spec.Name] {
 			continue
 		}
-		props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
-		required := []string{}
-		for _, p := range spec.Parameters {
-			props[p.Name] = llm.ToolParameterProperty{
-				Type:        p.Type,
-				Description: p.Description,
-				Enum:        p.Enum,
+		parameters := llm.ToolParameters{}
+		if spec.Schema != nil {
+			parameters = *spec.Schema
+		} else {
+			props := make(map[string]llm.ToolParameterProperty, len(spec.Parameters))
+			required := []string{}
+			for _, p := range spec.Parameters {
+				props[p.Name] = llm.ToolParameterProperty{
+					Type:        p.Type,
+					Description: p.Description,
+					Enum:        p.Enum,
+				}
+				if p.Required {
+					required = append(required, p.Name)
+				}
 			}
-			if p.Required {
-				required = append(required, p.Name)
-			}
+			parameters = llm.ToolParameters{Type: "object", Properties: props, Required: required}
 		}
 		tools = append(tools, llm.Tool{
 			Type: "function",
 			Function: llm.ToolDefinition{
 				Name:        spec.Name,
 				Description: toolDescription(spec),
-				Parameters: llm.ToolParameters{
-					Type:       "object",
-					Properties: props,
-					Required:   required,
-				},
+				Parameters:  parameters,
 			},
 		})
 	}
@@ -213,12 +260,25 @@ func (r *Registry) LLMToolsForVisibility(visibility ToolVisibility) []llm.Tool {
 func (r *Registry) BuiltinCatalog() []CatalogEntry {
 	entries := make([]CatalogEntry, 0)
 	for _, spec := range r.orderedSpecs() {
-		if spec.Source != ToolSourceBuiltin {
+		if spec.Source != ToolSourceBuiltin || r.disabled[spec.Name] {
 			continue
 		}
 		entries = append(entries, catalogEntry(spec))
 	}
 	return entries
+}
+
+// EnabledBuiltinNames returns executable, model-visible builtin names in stable order.
+func (r *Registry) EnabledBuiltinNames() []string {
+	names := make([]string, 0, len(r.handlers))
+	for name := range r.handlers {
+		spec, ok := r.specs[name]
+		if ok && spec.Source == ToolSourceBuiltin && !r.disabled[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // CatalogBySource returns tool definitions for source in stable order.
@@ -235,12 +295,18 @@ func (r *Registry) CatalogBySource(source string) []CatalogEntry {
 
 // Execute calls the registered handler for the named tool with the given arguments.
 // Returns an error if no handler is registered for the tool name.
-func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name string, args map[string]interface{}) (governance.Result, error) {
 	handler, ok := r.handlers[name]
 	if !ok {
-		return "", r.unknownToolError(name)
+		return governance.Result{}, r.unknownToolError(name)
 	}
 	return handler(ctx, args)
+}
+
+// Policy returns the validated runtime governance policy for a builtin tool.
+func (r *Registry) Policy(name string) (governance.ToolPolicy, bool) {
+	policy, ok := r.policies[name]
+	return policy, ok
 }
 
 func (r *Registry) unknownToolError(name string) error {
@@ -428,6 +494,21 @@ func parseToolMarkdown(content string) (Spec, error) {
 		return spec, err
 	}
 	spec.Parameters = params
+	if schemaSection, ok := sections["Schema"]; ok && strings.TrimSpace(schemaSection) != "" {
+		schemaText := strings.TrimSpace(schemaSection)
+		schemaText = strings.TrimPrefix(schemaText, "```json")
+		schemaText = strings.TrimPrefix(schemaText, "```")
+		schemaText = strings.TrimSuffix(schemaText, "```")
+		schemaText = strings.TrimSpace(schemaText)
+		var schema llm.ToolParameters
+		if err := json.Unmarshal([]byte(schemaText), &schema); err != nil {
+			return spec, fmt.Errorf("tool %q: invalid ## Schema JSON: %w", spec.Name, err)
+		}
+		if schema.Type != "object" || schema.Properties == nil {
+			return spec, fmt.Errorf("tool %q: ## Schema must describe an object with properties", spec.Name)
+		}
+		spec.Schema = &schema
+	}
 
 	return spec, nil
 }

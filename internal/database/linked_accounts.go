@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 )
 
 // LinkedAccount records a single external gateway identity linked to a canonical user.
 type LinkedAccount struct {
-	Gateway     string    `json:"gateway"`
-	Identifier  string    `json:"identifier"`
-	DisplayName string    `json:"display_name"`
-	LinkedAt    time.Time `json:"linked_at"`
-	Verified    bool      `json:"verified"`
+	Gateway     string `json:"gateway"`
+	Identifier  string `json:"identifier"`
+	DisplayName string `json:"display_name"`
+	Verified    bool   `json:"verified"`
 }
 
 // AccountLinkData is the complete account-link dataset persisted in SQLite.
@@ -22,26 +20,6 @@ type AccountLinkData struct {
 	Version      int                    `json:"version"`
 	Users        map[string]AccountUser `json:"users"`
 	AccountIndex map[string]string      `json:"account_index"`
-}
-
-func (d *DB) initializeLinkedAccounts() error {
-	_, err := d.db.Exec(`
-CREATE TABLE IF NOT EXISTS linked_accounts (
-	gateway TEXT NOT NULL,
-	identifier TEXT NOT NULL,
-	canonical_user_id TEXT NOT NULL,
-	display_name TEXT NOT NULL DEFAULT '',
-	linked_at TEXT NOT NULL,
-	verified INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (gateway, identifier),
-	UNIQUE (canonical_user_id, gateway),
-	FOREIGN KEY (canonical_user_id) REFERENCES account_users(canonical_user_id) ON DELETE CASCADE
-);
-`)
-	if err != nil {
-		return fmt.Errorf("failed to initialize linked_accounts table: %w", err)
-	}
-	return nil
 }
 
 // LoadAccountLinks reads all canonical users and linked accounts.
@@ -52,45 +30,28 @@ func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 		AccountIndex: make(map[string]string),
 	}
 
-	userRows, err := d.db.Query(`SELECT canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason FROM account_users`)
+	userRows, err := d.db.Query(`SELECT canonical_user_id, is_admin, is_banned, ban_reason FROM account_users`)
 	if err != nil {
 		return AccountLinkData{}, fmt.Errorf("failed to read account users: %w", err)
 	}
 	defer userRows.Close()
 
 	for userRows.Next() {
-		var canonicalID, createdRaw, updatedRaw, bannedRaw string
+		var canonicalID string
 		var user AccountUser
 		var isAdmin, isBanned int
-		if err := userRows.Scan(&canonicalID, &createdRaw, &updatedRaw, &isAdmin, &isBanned, &bannedRaw, &user.BannedBy, &user.BanReason); err != nil {
+		if err := userRows.Scan(&canonicalID, &isAdmin, &isBanned, &user.BanReason); err != nil {
 			return AccountLinkData{}, fmt.Errorf("failed to scan account user: %w", err)
 		}
-		createdAt, err := parseDBTime(createdRaw)
-		if err != nil {
-			return AccountLinkData{}, err
-		}
-		updatedAt, err := parseDBTime(updatedRaw)
-		if err != nil {
-			return AccountLinkData{}, err
-		}
-		user.CreatedAt = createdAt
-		user.UpdatedAt = updatedAt
 		user.IsAdmin = isAdmin != 0
 		user.IsBanned = isBanned != 0
-		if bannedRaw != "" {
-			bannedAt, err := parseDBTime(bannedRaw)
-			if err != nil {
-				return AccountLinkData{}, err
-			}
-			user.BannedAt = bannedAt
-		}
 		data.Users[canonicalID] = user
 	}
 	if err := userRows.Err(); err != nil {
 		return AccountLinkData{}, fmt.Errorf("failed to read account users: %w", err)
 	}
 
-	accountRows, err := d.db.Query(`SELECT gateway, identifier, canonical_user_id, display_name, linked_at, verified FROM linked_accounts ORDER BY gateway, identifier`)
+	accountRows, err := d.db.Query(`SELECT gateway, identifier, canonical_user_id, display_name, verified FROM linked_accounts ORDER BY gateway, identifier`)
 	if err != nil {
 		return AccountLinkData{}, fmt.Errorf("failed to read linked accounts: %w", err)
 	}
@@ -98,16 +59,11 @@ func (d *DB) LoadAccountLinks() (AccountLinkData, error) {
 
 	for accountRows.Next() {
 		var account LinkedAccount
-		var canonicalID, linkedRaw string
+		var canonicalID string
 		var verified int
-		if err := accountRows.Scan(&account.Gateway, &account.Identifier, &canonicalID, &account.DisplayName, &linkedRaw, &verified); err != nil {
+		if err := accountRows.Scan(&account.Gateway, &account.Identifier, &canonicalID, &account.DisplayName, &verified); err != nil {
 			return AccountLinkData{}, fmt.Errorf("failed to scan linked account: %w", err)
 		}
-		linkedAt, err := parseDBTime(linkedRaw)
-		if err != nil {
-			return AccountLinkData{}, err
-		}
-		account.LinkedAt = linkedAt
 		account.Verified = verified != 0
 
 		user := data.Users[canonicalID]
@@ -137,15 +93,11 @@ func (d *DB) ReplaceAccountLinks(data AccountLinkData) error {
 	}
 
 	userStmt, err := tx.Prepare(`
-INSERT INTO account_users (canonical_user_id, created_at, updated_at, is_admin, is_banned, banned_at, banned_by, ban_reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO account_users (canonical_user_id, is_admin, is_banned, ban_reason)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(canonical_user_id) DO UPDATE SET
-	created_at = excluded.created_at,
-	updated_at = excluded.updated_at,
 	is_admin = excluded.is_admin,
 	is_banned = excluded.is_banned,
-	banned_at = excluded.banned_at,
-	banned_by = excluded.banned_by,
 	ban_reason = excluded.ban_reason
 `)
 	if err != nil {
@@ -153,7 +105,7 @@ ON CONFLICT(canonical_user_id) DO UPDATE SET
 	}
 	defer userStmt.Close()
 
-	accountStmt, err := tx.Prepare(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, linked_at, verified) VALUES (?, ?, ?, ?, ?, ?)`)
+	accountStmt, err := tx.Prepare(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, verified) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare linked account insert: %w", err)
 	}
@@ -167,11 +119,11 @@ ON CONFLICT(canonical_user_id) DO UPDATE SET
 
 	for _, canonicalID := range userIDs {
 		user := data.Users[canonicalID]
-		if _, err := userStmt.Exec(canonicalID, formatDBTime(user.CreatedAt), formatDBTime(user.UpdatedAt), boolToInt(user.IsAdmin), boolToInt(user.IsBanned), formatOptionalDBTime(user.BannedAt), user.BannedBy, user.BanReason); err != nil {
+		if _, err := userStmt.Exec(canonicalID, boolToInt(user.IsAdmin), boolToInt(user.IsBanned), user.BanReason); err != nil {
 			return fmt.Errorf("failed to save account user: %w", err)
 		}
 		for _, account := range user.Accounts {
-			if _, err := accountStmt.Exec(account.Gateway, account.Identifier, canonicalID, account.DisplayName, formatDBTime(account.LinkedAt), boolToInt(account.Verified)); err != nil {
+			if _, err := accountStmt.Exec(account.Gateway, account.Identifier, canonicalID, account.DisplayName, boolToInt(account.Verified)); err != nil {
 				return fmt.Errorf("failed to save linked account: %w", err)
 			}
 		}
@@ -206,39 +158,8 @@ func deleteStaleAccountUsers(tx *sql.Tx, userIDs []string) error {
 	return nil
 }
 
-// AccountLinksEmpty reports whether any canonical account users are stored.
-func (d *DB) AccountLinksEmpty() (bool, error) {
-	var count int
-	if err := d.db.QueryRow(`SELECT COUNT(*) FROM account_users`).Scan(&count); err != nil {
-		return false, fmt.Errorf("failed to inspect account link database: %w", err)
-	}
-	return count == 0, nil
-}
-
 func accountKey(gateway, identifier string) string {
 	return strings.ToLower(strings.TrimSpace(gateway)) + ":" + strings.TrimSpace(identifier)
-}
-
-func formatDBTime(t time.Time) string {
-	if t.IsZero() {
-		return time.Now().UTC().Format(time.RFC3339Nano)
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-func formatOptionalDBTime(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
-}
-
-func parseDBTime(value string) (time.Time, error) {
-	t, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse account link timestamp: %w", err)
-	}
-	return t, nil
 }
 
 func boolToInt(value bool) int {

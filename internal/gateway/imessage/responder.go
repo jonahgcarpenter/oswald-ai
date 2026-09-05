@@ -4,7 +4,9 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 type runtimeResponder struct {
@@ -24,17 +26,42 @@ func (r *runtimeResponder) SendFallback(text string) error {
 	return r.sendAndRemember(text)
 }
 
-func (r *runtimeResponder) SendCommandResponse(text string) error {
-	return r.sendAndRemember(text)
+func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
+	if err := result.ValidateAttachments(); err != nil {
+		return err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		return r.sendAndRemember(result.Text)
+	}
+	for _, attachment := range attachments {
+		if err := r.gateway.sendCommandAttachment(r.chatGUID, attachment); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(result.Text) != "" {
+		return r.sendAndRemember(result.Text)
+	}
+	return nil
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {
 	return r.sendAndRemember(text)
 }
 
+func (r *runtimeResponder) CancelAgentResponse() error { return nil }
+
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return nil
+	}
+	if err := media.ValidateOutputAttachments(response.Attachments); err != nil {
+		return err
+	}
+	for _, attachment := range response.Attachments {
+		if err := r.gateway.sendCommandAttachment(r.chatGUID, attachment); err != nil {
+			return err
+		}
 	}
 	responseText := strings.TrimSpace(response.Response)
 	if responseText == "" {

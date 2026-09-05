@@ -2,60 +2,253 @@ package builtin
 
 import (
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/toolnames"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/globalmemory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/usermemory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
 // Register wires all builtin tools into the shared registry.
-func Register(reg *registry.Registry, cfg *config.Config, soulStore *soul.Store, userMemStore *usermemory.Store, chatClient llm.Chatter, model string, log *config.Logger) error {
+func Register(reg *registry.Registry, cfg *config.Config, userMemStore *usermemory.Store, globalMemStore *globalmemory.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	searchClient := websearch.NewClient(cfg.SearxngURL, log.Server("tool.web.search"))
-	if err := reg.RegisterHandler("web.search", registry.Handler(websearch.NewHandler(searchClient, log))); err != nil {
-		return fmt.Errorf("failed to initialize web.search tool: %w", err)
+	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
+	if comfyURL == "" {
+		for _, name := range []string{toolnames.ComfyUIImageToImage, toolnames.ComfyUITextToImage} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled ComfyUI tools because no server is configured", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage), config.F("status", "ok"))
+	} else {
+		textWorkflow, err := comfyui.LoadWorkflow(cfg.ComfyUITextToImageWorkflowPath, comfyui.TextToImage)
+		if err != nil {
+			return err
+		}
+		imageWorkflow, err := comfyui.LoadWorkflow(cfg.ComfyUIImageToImageWorkflowPath, comfyui.ImageToImage)
+		if err != nil {
+			return err
+		}
+		client, err := comfyui.NewClient(comfyURL, cfg.ComfyUIGenerationTimeout)
+		if err != nil {
+			return fmt.Errorf("initialize ComfyUI client: %w", err)
+		}
+		policy := governance.ToolPolicy{
+			BlockDuplicates: true, NormalizeArgs: normalizeComfyArgs,
+			History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		}
+		if err := reg.RegisterHandler(toolnames.ComfyUITextToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.TextToImage, textWorkflow, client, log))); err != nil {
+			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUITextToImage, err)
+		}
+		if err := reg.RegisterHandler(toolnames.ComfyUIImageToImage, policy, registry.Handler(comfyui.NewHandler(comfyui.ImageToImage, imageWorkflow, client, log))); err != nil {
+			return fmt.Errorf("initialize %s tool: %w", toolnames.ComfyUIImageToImage, err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured ComfyUI image tools", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage))
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("path", cfg.SearxngURL))
+	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
+	searxngURL := strings.TrimSpace(cfg.SearxngURL)
+	var braveClient websearch.Searcher
+	var searxngClient websearch.Searcher
+	if braveKey != "" {
+		client, err := websearch.NewBraveClient(braveKey, log.Server("tool.web.search"))
+		if err != nil {
+			return fmt.Errorf("failed to initialize Brave web.search client: %w", err)
+		}
+		braveClient = client
+	}
+	if searxngURL != "" {
+		client, err := websearch.NewSearxngClient(searxngURL, log.Server("tool.web.search"))
+		if err != nil {
+			return fmt.Errorf("failed to initialize SearXNG web.search client: %w", err)
+		}
+		searxngClient = client
+	}
 
-	if err := reg.RegisterHandler("time.current", registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
+	var searcher websearch.Searcher
+	primary := ""
+	fallback := ""
+	switch {
+	case braveClient != nil && searxngClient != nil:
+		searcher = websearch.NewFallbackSearcher(braveClient, searxngClient)
+		primary, fallback = "brave", "searxng"
+	case braveClient != nil:
+		searcher = braveClient
+		primary = "brave"
+	case searxngClient != nil:
+		searcher = searxngClient
+		primary = "searxng"
+	default:
+		for _, name := range []string{"web.fetch", "web.search"} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", "web.search,web.fetch"), config.F("status", "ok"))
+	}
+	if searcher != nil {
+		searchPolicy := toolPolicy(2, normalizeSearchArgs)
+		searchPolicy.MaxFailures = 2
+		if err := reg.RegisterHandler("web.search", searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
+			return fmt.Errorf("failed to initialize web.search tool: %w", err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", "web.search"), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
+
+		fetchPolicy := governance.ToolPolicy{
+			MaxExecutions:   4,
+			MaxFailures:     2,
+			MaxUnproductive: 2,
+			BlockDuplicates: true,
+			NormalizeArgs:   normalizeFetchArgs,
+			History:         governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		}
+		if err := reg.RegisterHandler("web.fetch", fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
+			return fmt.Errorf("failed to initialize web.fetch tool: %w", err)
+		}
+		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", "web.fetch"))
+	}
+
+	if err := reg.RegisterHandler("time.current", toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
 		return fmt.Errorf("failed to initialize time.current tool: %w", err)
 	}
 	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", "time.current"))
 
-	if err := reg.RegisterHandler("memory.save", registry.Handler(usermemory.NewSaveHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize memory.save tool: %w", err)
+	savePolicy := governance.ToolPolicy{
+		MaxExecutions: 2, BlockDuplicates: true, NormalizeArgs: normalizeMemorySaveArgs,
+		History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.save"), config.F("path", config.DefaultAccountLinkPath))
+	if err := reg.RegisterHandler(toolnames.UserMemorySave, savePolicy, registry.Handler(usermemory.NewSaveHandler(log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySave, err)
+	}
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySave))
 
-	if err := reg.RegisterHandler("memory.search", registry.Handler(usermemory.NewSearchHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize memory.search tool: %w", err)
+	if err := reg.RegisterHandler(toolnames.UserMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(8)), registry.Handler(usermemory.NewSearchHandler(userMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemorySearch, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.search"), config.F("path", config.DefaultAccountLinkPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemorySearch), config.F("path", config.DefaultAccountLinkPath))
 
-	if err := reg.RegisterHandler("memory.list", registry.Handler(usermemory.NewListHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize memory.list tool: %w", err)
+	if err := reg.RegisterHandler(toolnames.UserMemoryList, toolPolicy(0, normalizeMemorySearchArgs(25)), registry.Handler(usermemory.NewListHandler(userMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.UserMemoryList, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.list"), config.F("path", config.DefaultAccountLinkPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured user memory tool", config.F("tool_name", toolnames.UserMemoryList), config.F("path", config.DefaultAccountLinkPath))
 
-	if err := reg.RegisterHandler("memory.forget", registry.Handler(usermemory.NewForgetHandler(userMemStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize memory.forget tool: %w", err)
+	if err := reg.RegisterHandler(toolnames.SessionTranscriptSearch, toolPolicy(0, normalizeMemorySearchArgs(5)), registry.Handler(usermemory.NewTranscriptSearchHandler(userMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.SessionTranscriptSearch, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured memory tool", config.F("tool_name", "memory.forget"), config.F("path", config.DefaultAccountLinkPath))
 
-	if err := reg.RegisterHandler("soul.read", registry.Handler(soul.NewReadHandler(soulStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize soul.read tool: %w", err)
+	if err := reg.RegisterHandler(toolnames.GlobalMemorySearch, toolPolicy(0, normalizeMemorySearchArgs(globalmemory.DefaultSearchLimit)), registry.Handler(globalmemory.NewSearchHandler(globalMemStore, log))); err != nil {
+		return fmt.Errorf("failed to initialize %s tool: %w", toolnames.GlobalMemorySearch, err)
 	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.read"), config.F("path", config.DefaultSoulPath))
-
-	if err := reg.RegisterHandler("soul.patch", registry.Handler(soul.NewPatchHandler(soulStore, log))); err != nil {
-		return fmt.Errorf("failed to initialize soul.patch tool: %w", err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured soul tool", config.F("tool_name", "soul.patch"), config.F("path", config.DefaultSoulPath))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured session transcript tool", config.F("tool_name", toolnames.SessionTranscriptSearch))
+	bootstrapLog.Debug("tool.bootstrap.configured", "configured global memory tool", config.F("tool_name", toolnames.GlobalMemorySearch))
 
 	return nil
+}
+
+func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) governance.ToolPolicy {
+	return governance.ToolPolicy{
+		MaxUnproductive: maxUnproductive,
+		BlockDuplicates: true,
+		NormalizeArgs:   normalize,
+		History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
+	}
+}
+
+func normalizeSearchArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{"query": normalizedString(args, "query", true)}
+}
+
+func normalizeFetchArgs(args map[string]interface{}) interface{} {
+	value, _ := args["url"].(string)
+	return map[string]interface{}{"url": webfetch.NormalizeURL(value)}
+}
+
+func normalizeComfyArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"prompt":          normalizedString(args, "prompt", false),
+		"negative_prompt": normalizedString(args, "negative_prompt", false),
+	}
+}
+
+func normalizeTimeArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{"timezone": normalizedString(args, "timezone", false)}
+}
+
+func normalizeMemorySearchArgs(defaultLimit int) governance.ArgumentNormalizer {
+	return func(args map[string]interface{}) interface{} {
+		var limit interface{} = defaultLimit
+		if raw, exists := args["limit"]; exists && raw != nil {
+			if value, ok := numericInt(raw); ok {
+				limit = value
+			} else {
+				limit = map[string]interface{}{"invalid": raw}
+			}
+		}
+		return map[string]interface{}{
+			"query":    normalizedString(args, "query", true),
+			"scope":    normalizedString(args, "scope", true),
+			"category": normalizedString(args, "category", true),
+			"limit":    limit,
+		}
+	}
+}
+
+func normalizeMemorySaveArgs(args map[string]interface{}) interface{} {
+	rawMemories, _ := args["memories"].([]interface{})
+	memories := make([]map[string]interface{}, 0, len(rawMemories))
+	for _, raw := range rawMemories {
+		item, _ := raw.(map[string]interface{})
+		reinforcesID := item["reinforces_memory_id"]
+		if reinforcesID == nil {
+			reinforcesID = float64(0)
+		}
+		memories = append(memories, map[string]interface{}{
+			"statement":            normalizedString(item, "statement", false),
+			"evidence":             normalizedString(item, "evidence", false),
+			"category":             normalizedString(item, "category", true),
+			"claim_slot":           normalizedString(item, "claim_slot", true),
+			"claim_value":          normalizedString(item, "claim_value", true),
+			"supersedes":           normalizedString(item, "supersedes", false),
+			"evidence_type":        normalizedString(item, "evidence_type", true),
+			"confidence":           item["confidence"],
+			"reinforces_memory_id": reinforcesID,
+		})
+	}
+	return map[string]interface{}{"memories": memories}
+}
+
+func normalizedString(args map[string]interface{}, key string, lower bool) string {
+	value, _ := args[key].(string)
+	value = strings.Join(strings.Fields(value), " ")
+	if lower {
+		value = strings.ToLower(value)
+	}
+	return value
+}
+
+func numericInt(value interface{}) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, true
+	case int64:
+		return int(number), true
+	case float64:
+		if !math.IsNaN(number) && !math.IsInf(number, 0) && number == math.Trunc(number) && float64(int(number)) == number {
+			return int(number), true
+		}
+	case float32:
+		value := float64(number)
+		if !math.IsNaN(value) && !math.IsInf(value, 0) && number == float32(int(number)) {
+			return int(number), true
+		}
+	}
+	return 0, false
 }

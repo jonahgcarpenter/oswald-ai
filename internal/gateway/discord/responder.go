@@ -1,10 +1,11 @@
 package discord
 
 import (
+	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 )
 
 type runtimeResponder struct {
@@ -14,25 +15,72 @@ type runtimeResponder struct {
 	replyToID  string
 	sessionKey string
 	authorID   string
+	stream     *discordResponseStream
+	typingMu   sync.Mutex
+	stopTyping chan struct{}
+	typingOnce sync.Once
+}
+
+func newRuntimeResponder(gateway *Gateway, requestID, channelID, replyToID, sessionKey, authorID string) *runtimeResponder {
+	r := &runtimeResponder{
+		gateway: gateway, requestID: requestID, channelID: channelID,
+		replyToID: replyToID, sessionKey: sessionKey, authorID: authorID,
+	}
+	r.stream = newDiscordResponseStream(r)
+	return r
 }
 
 func (r *runtimeResponder) StartProcessing() (func(), error) {
 	stopTyping := make(chan struct{})
+	r.typingMu.Lock()
+	r.stopTyping = stopTyping
+	r.typingMu.Unlock()
 	go func() {
-		_ = r.gateway.sendTyping(r.channelID)
+		r.typingMu.Lock()
+		select {
+		case <-stopTyping:
+			r.typingMu.Unlock()
+			return
+		default:
+			_ = r.gateway.sendTyping(r.channelID)
+			r.typingMu.Unlock()
+		}
+
 		ticker := time.NewTicker(9 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				_ = r.gateway.sendTyping(r.channelID)
+				r.typingMu.Lock()
+				select {
+				case <-stopTyping:
+					r.typingMu.Unlock()
+					return
+				default:
+					_ = r.gateway.sendTyping(r.channelID)
+					r.typingMu.Unlock()
+				}
 			case <-stopTyping:
 				return
 			}
 		}
 	}()
-	return func() { close(stopTyping) }, nil
+	return r.stopTypingIndicator, nil
+}
+
+func (r *runtimeResponder) stopTypingIndicator() {
+	r.typingOnce.Do(func() {
+		r.typingMu.Lock()
+		defer r.typingMu.Unlock()
+		if r.stopTyping != nil {
+			close(r.stopTyping)
+		}
+	})
+}
+
+func (r *runtimeResponder) Stream(chunk agent.StreamChunk) {
+	r.stream.Push(chunk)
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
@@ -40,56 +88,43 @@ func (r *runtimeResponder) SendFallback(text string) error {
 	return err
 }
 
-func (r *runtimeResponder) SendCommandResponse(text string) error {
-	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID)
-	return err
+func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
+	if err := result.ValidateAttachments(); err != nil {
+		return err
+	}
+	attachments := result.OrderedAttachments()
+	if len(attachments) == 0 {
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, r.replyToID)
+		return err
+	}
+	for i := range attachments {
+		replyToID := ""
+		if i == 0 {
+			replyToID = r.replyToID
+		}
+		attachmentResult := commands.Result{Attachment: &attachments[i]}
+		if _, err := r.gateway.sendCommandAttachment(r.channelID, attachmentResult, replyToID); err != nil {
+			return err
+		}
+	}
+	if result.Text != "" {
+		_, err := r.gateway.sendMessage(r.channelID, result.Text, "")
+		return err
+	}
+	return nil
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {
-	_, err := r.gateway.sendMessage(r.channelID, text, r.replyToID)
-	return err
+	return r.stream.Fail(text)
+}
+
+func (r *runtimeResponder) CancelAgentResponse() error {
+	return r.stream.Abort()
 }
 
 func (r *runtimeResponder) SendAgentResponse(response *agent.AgentResponse) error {
 	if response == nil {
 		return nil
 	}
-
-	responseText := response.Response
-	chunks := splitMessage(responseText, 2000)
-	originCtx := replyContext{
-		SessionKey:  r.sessionKey,
-		ChannelID:   r.channelID,
-		SenderID:    r.authorID,
-		DisplayName: "Oswald",
-		Text:        responseText,
-		IsFromBot:   true,
-		CreatedAt:   time.Now(),
-	}
-
-	log := r.gateway.log()
-	log.Debug("gateway.response.prepared", "prepared discord response", config.F("request_id", r.requestID), config.F("chunk_count", len(chunks)), config.F("response_chars", len(responseText)), config.F("model", response.Model))
-
-	sentCount := 0
-	for i, chunk := range chunks {
-		currentReplyID := ""
-		if i == 0 {
-			currentReplyID = r.replyToID
-		}
-
-		sentMessageID, err := r.gateway.sendMessage(r.channelID, chunk, currentReplyID)
-		if err != nil {
-			log.Error("gateway.send.failed", "failed to send discord response chunk", config.F("request_id", r.requestID), config.F("chunk_index", i+1), config.ErrorField(err))
-			return err
-		}
-		sentCount++
-
-		chunkCtx := originCtx
-		chunkCtx.Text = chunk
-		r.gateway.rememberReply(sentMessageID, chunkCtx)
-	}
-	if sentCount == len(chunks) {
-		log.Debug("gateway.response.sent", "sent discord response", config.F("request_id", r.requestID), config.F("chunk_count", sentCount), config.F("status", "ok"))
-	}
-	return nil
+	return r.stream.Finish(response)
 }

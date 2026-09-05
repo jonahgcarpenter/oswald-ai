@@ -3,7 +3,4 @@ tmp/
 .env
 
 # database
-*.db
-
-# bkp
-bkp/
+*.db*

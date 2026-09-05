@@ -8,7 +8,38 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
+
+const (
+	maxProviderIdentifierBytes    = 64
+	maxServerDescriptionRuneCount = 500
+	maxToolDescriptionRuneCount   = 1000
+	maxParamDescriptionRuneCount  = 500
+	maxEnumValueCount             = 100
+	maxEnumValueRuneCount         = 200
+	maxEnumTotalRuneCount         = 4000
+)
+
+func validateProviderIdentifier(name string) error {
+	if len(name) == 0 || len(name) > maxProviderIdentifierBytes {
+		return fmt.Errorf("identifier must contain 1-%d bytes", maxProviderIdentifierBytes)
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if i == 0 {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '_' {
+				return fmt.Errorf("identifier must start with an ASCII letter or underscore")
+			}
+			continue
+		}
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
+			return fmt.Errorf("identifier may contain only ASCII letters, numbers, underscores, and hyphens")
+		}
+	}
+	return nil
+}
 
 type hostnameResolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
@@ -29,7 +60,73 @@ func validateServerName(name string) error {
 			return fmt.Errorf("server name may contain only lowercase letters, numbers, and underscores")
 		}
 	}
+	if isReservedServerName(name) {
+		return fmt.Errorf("server name %q is reserved", name)
+	}
 	return nil
+}
+
+func normalizeServerDescription(description string) (string, error) {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return "", fmt.Errorf("MCP server description cannot be empty")
+	}
+	if utf8.RuneCountInString(description) > maxServerDescriptionRuneCount {
+		return "", fmt.Errorf("MCP server description must be at most %d characters", maxServerDescriptionRuneCount)
+	}
+	for _, r := range description {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("MCP server description cannot contain control characters")
+		}
+	}
+	return description, nil
+}
+
+func normalizeCatalogDescription(description string, maxRunes int) string {
+	description = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return ' '
+		}
+		return r
+	}, description)
+	description = strings.Join(strings.Fields(description), " ")
+	runes := []rune(description)
+	if len(runes) > maxRunes {
+		description = strings.TrimSpace(string(runes[:maxRunes]))
+	}
+	return description
+}
+
+func safeCatalogEnum(values []string) []string {
+	if len(values) == 0 || len(values) > maxEnumValueCount {
+		return nil
+	}
+	totalRunes := 0
+	for _, value := range values {
+		runeCount := utf8.RuneCountInString(value)
+		if runeCount > maxEnumValueRuneCount {
+			return nil
+		}
+		totalRunes += runeCount
+		if totalRunes > maxEnumTotalRuneCount {
+			return nil
+		}
+		for _, r := range value {
+			if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+				return nil
+			}
+		}
+	}
+	return append([]string(nil), values...)
+}
+
+func isReservedServerName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "soul")
+}
+
+func isReservedToolName(name string) bool {
+	server, _, ok := splitToolName(name)
+	return ok && isReservedServerName(server)
 }
 
 func validateScope(scope, ownerUserID string) error {

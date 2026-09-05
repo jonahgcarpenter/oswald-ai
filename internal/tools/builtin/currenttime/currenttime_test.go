@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 func TestNewHandlerReturnsCurrentTimeInRequestedTimezone(t *testing.T) {
@@ -72,14 +74,17 @@ func TestNewHandlerReturnsCurrentTimeInRequestedTimezone(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			handler := NewHandler(func() time.Time { return tt.now })
-			raw, err := handler(context.Background(), map[string]interface{}{"timezone": tt.timezone})
+			toolResult, err := handler(context.Background(), map[string]interface{}{"timezone": tt.timezone})
 			if err != nil {
 				t.Fatalf("handler returned error: %v", err)
 			}
+			if toolResult.Outcome != governance.OutcomeProductive {
+				t.Fatalf("handler outcome = %q, want %q", toolResult.Outcome, governance.OutcomeProductive)
+			}
 
 			var got result
-			if err := json.Unmarshal([]byte(raw), &got); err != nil {
-				t.Fatalf("decode result %q: %v", raw, err)
+			if err := json.Unmarshal([]byte(toolResult.Content), &got); err != nil {
+				t.Fatalf("decode result %q: %v", toolResult.Content, err)
 			}
 			if got != tt.want {
 				t.Fatalf("result = %+v, want %+v", got, tt.want)
