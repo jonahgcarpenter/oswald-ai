@@ -255,6 +255,9 @@ func TestRunLifecycle(t *testing.T) {
 			if !logs.hasEvent("app.shutdown") || !logs.hasEvent("app.shutdown.complete") {
 				t.Fatal("missing ordered shutdown lifecycle logs")
 			}
+			if !logs.hasEvent("app.documents.capabilities") || !logs.hasEvent("documents.worker.started") || !logs.hasEvent("documents.worker.stopped") {
+				t.Fatal("missing document capability probe or joined worker lifecycle")
+			}
 			logs.mu.Lock()
 			cleanupEnd := bytes.LastIndex(logs.buf.Bytes(), []byte(`"event":"app.cleanup.completed"`))
 			shutdownEnd := bytes.LastIndex(logs.buf.Bytes(), []byte(`"event":"app.shutdown.complete"`))
@@ -335,11 +338,11 @@ func (w *startupLogWriter) hasEvent(name string) bool {
 }
 
 func TestShutdownOrder(t *testing.T) {
-	names := []string{"maintenance", "broker", "formation", "compaction", "index", "mcp", "accounts", "mcpStore", "globalMemory", "userMemory"}
+	names := []string{"maintenance", "broker", "documents", "formation", "compaction", "index", "mcp", "accounts", "mcpStore", "globalMemory", "userMemory"}
 	for _, partial := range []bool{false, true} {
 		var got, want []string
 		var s shutdown
-		slots := []*func(){&s.maintenance, &s.broker, &s.formation, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.globalMemory, &s.userMemory}
+		slots := []*func(){&s.maintenance, &s.broker, &s.documents, &s.formation, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.globalMemory, &s.userMemory}
 		for i, slot := range slots {
 			if partial && i%2 == 0 {
 				continue

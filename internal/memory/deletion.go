@@ -146,7 +146,7 @@ func (s *Store) ResetUserDataPreservingAccount(ctx context.Context, userID strin
 		return nil, err
 	}
 	nowText := formatTime(now)
-	for _, table := range []string{"memory_observations", "memory_observation_receipts", "memory_suppressions", "memory_assessment_receipts"} {
+	for _, table := range []string{"user_document_reservations", "user_documents", "memory_observations", "memory_observation_receipts", "memory_suppressions", "memory_assessment_receipts"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE canonical_user_id = ?`, userID); err != nil {
 			return nil, err
 		}
@@ -270,7 +270,7 @@ ORDER BY 2, 1`)
 		if item.kind == IndexKindGlobalMemoryFTS || item.kind == IndexKindGlobalMemoryVector {
 			continue
 		}
-		if entityKind == "memory" && item.kind == IndexKindTranscriptFTS || entityKind == "session_turn" && item.kind != IndexKindTranscriptFTS {
+		if entityKind == "memory" && item.kind != IndexKindMemoryFTS && item.kind != IndexKindMemoryVector || entityKind == "session_turn" && item.kind != IndexKindTranscriptFTS || entityKind == "user_document_chunk" && item.kind != IndexKindUserDocumentFTS && item.kind != IndexKindUserDocumentVector {
 			continue
 		}
 		if entityKind == "all" {

@@ -172,6 +172,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	ctx = requestctx.WithMetadata(ctx, inherited)
 	reqLog = reqLog.With(requestctx.LogFields(ctx)...)
+	documentContext, documentErr := a.loadDocumentContext(ctx, senderID, formationSourceText, reqLog)
+	if documentErr != nil {
+		return nil, documentErr
+	}
 	contextImages := make([]requestctx.InputImage, 0, len(userImages))
 	for i, image := range userImages {
 		contextImages = append(contextImages, requestctx.InputImage{ID: fmt.Sprintf("current-%d", i+1), MIMEType: image.MimeType, Data: image.Data, Source: image.Source})
@@ -336,11 +340,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		previousSummary = &sessionSummary
 	}
 	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, profileContent, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	if documentContext.Content != "" {
+		foregroundCompaction.documentContext = &documentContext
+	}
 	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
 	}
+	messages = fitDocumentContext(messages, documentContext, initialCatalog.Tools, inputLimit)
 	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
 			config.F("estimated_after", promptContext.EstimatedAfter),

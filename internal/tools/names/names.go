@@ -6,9 +6,12 @@ const (
 	WebSearch   = "web.search"
 	WebFetch    = "web.fetch"
 
-	UserMemorySearch = "user_memory_search"
-	UserMemoryList   = "user_memory_list"
-	UserMemorySave   = "user_memory_save"
+	UserMemorySearch   = "user_memory_search"
+	UserMemoryList     = "user_memory_list"
+	UserMemorySave     = "user_memory_save"
+	UserDocumentList   = "user_document_list"
+	UserDocumentSearch = "user_document_search"
+	UserDocumentRead   = "user_document_read"
 
 	GlobalMemorySearch = "global_memory_search"
 

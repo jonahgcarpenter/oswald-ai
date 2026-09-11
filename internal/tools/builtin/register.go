@@ -23,6 +23,12 @@ import (
 // Register wires all builtin tools into the shared registry.
 func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.Store, globalMemStore *global.Store, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
+	for _, name := range []string{toolnames.UserDocumentList, toolnames.UserDocumentSearch, toolnames.UserDocumentRead} {
+		policy := governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}
+		if err := reg.RegisterHandler(name, policy, documentHandler(userMemStore, name)); err != nil {
+			return fmt.Errorf("initialize %s: %w", name, err)
+		}
+	}
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
 		for _, name := range []string{toolnames.ComfyUIImageToImage, toolnames.ComfyUITextToImage} {

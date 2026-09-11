@@ -1,0 +1,34 @@
+name: oswald-documents-test
+
+services:
+  oswald:
+    image: oswald-ai:documents
+    build:
+      context: .
+      target: runtime
+    env_file:
+      - .env.documents
+    environment:
+      HOME_ASSISTANT_LISTEN_PORT: "8000"
+      BLUEBUBBLES_LISTEN_PORT: "8090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:18000:8000"
+      - "127.0.0.1:18090:8090"
+    volumes:
+      - documents-test-data:/home/oswald-ai/data/database
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=268435456,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 256
+    stop_grace_period: 45s
+
+volumes:
+  documents-test-data:

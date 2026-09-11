@@ -71,7 +71,8 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	}
 
 	normalizationStarted := time.Now()
-	images, unsupported := g.loadImages(msg.Attachments, log)
+	imageAttachments, documentLoader := g.currentDocuments(msg.Attachments)
+	images, unsupported := g.loadImages(imageAttachments, log)
 	if len(msg.Attachments) > 0 {
 		status := "ok"
 		if len(unsupported) > 0 {
@@ -79,14 +80,14 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		}
 		log.Info("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
-	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
+	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && documentLoader == nil {
 		if len(unsupported) == 0 {
 			g.logIgnoredMessage("no_supported_content", "new-message", msg, config.F("request_id", requestID))
 			return
 		}
 	}
 
-	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && len(unsupported) == 0 {
+	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 && len(unsupported) == 0 && documentLoader == nil {
 		g.logIgnoredMessage("no_supported_content", "new-message", msg, config.F("request_id", requestID))
 		return
 	}
@@ -160,6 +161,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		Text:           textWithoutMention,
 		PublicUserText: publicUserText,
 		Images:         images,
+		DocumentLoader: documentLoader,
 		Unsupported:    unsupported,
 		Reply:          reply,
 	}, g.runtimeDependencies(), &runtimeResponder{

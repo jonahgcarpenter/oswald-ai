@@ -17,9 +17,11 @@ const (
 	IndexKindMemoryVector       = "memory_vector"
 	IndexKindGlobalMemoryFTS    = "global_memory_fts"
 	IndexKindGlobalMemoryVector = "global_memory_vector"
+	IndexKindUserDocumentFTS    = "user_document_fts"
+	IndexKindUserDocumentVector = "user_document_vector"
 )
 
-var generatedIndexTable = regexp.MustCompile(`^derived_index_(memory_fts|transcript_fts|memory_vector|global_memory_fts|global_memory_vector)_r[1-9][0-9]*$`)
+var generatedIndexTable = regexp.MustCompile(`^derived_index_(memory_fts|transcript_fts|memory_vector|global_memory_fts|global_memory_vector|user_document_fts|user_document_vector)_r[1-9][0-9]*$`)
 
 // ErrStaleIndexRecord reports that canonical state changed after an index
 // record was loaded. Callers should reload canonical state and retry.
@@ -63,7 +65,7 @@ type TranscriptIndexRecord struct {
 }
 
 func providerForKind(kind string) string {
-	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector {
+	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector || kind == IndexKindUserDocumentVector {
 		return "llm_gateway"
 	}
 	return "sqlite_fts5"
@@ -98,13 +100,13 @@ func scanIndexRevision(row interface{ Scan(...any) error }) (DerivedIndexRevisio
 
 // CreateIndexRevision creates an empty internally named shadow table.
 func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model string, dimension int) (DerivedIndexRevision, error) {
-	if kind != IndexKindMemoryFTS && kind != IndexKindTranscriptFTS && kind != IndexKindMemoryVector && kind != IndexKindGlobalMemoryFTS && kind != IndexKindGlobalMemoryVector {
+	if kind != IndexKindMemoryFTS && kind != IndexKindTranscriptFTS && kind != IndexKindMemoryVector && kind != IndexKindGlobalMemoryFTS && kind != IndexKindGlobalMemoryVector && kind != IndexKindUserDocumentFTS && kind != IndexKindUserDocumentVector {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid derived index kind")
 	}
 	if provider != providerForKind(kind) {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid derived index provider")
 	}
-	if (kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector) && (provider != "llm_gateway" || strings.TrimSpace(model) == "" || dimension <= 0) {
+	if providerForKind(kind) == "llm_gateway" && (strings.TrimSpace(model) == "" || dimension <= 0) {
 		return DerivedIndexRevision{}, fmt.Errorf("invalid vector revision metadata")
 	}
 	tx, err := s.sql.BeginTx(ctx, nil)
@@ -129,12 +131,16 @@ func (s *Store) CreateIndexRevision(ctx context.Context, kind, provider, model s
 		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(memory)`
 	} else if kind == IndexKindGlobalMemoryVector {
 		ddl = fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(embedding_model text, canonical_version text, embedding float[%d])`, table, dimension)
+	} else if kind == IndexKindUserDocumentFTS {
+		ddl = `CREATE VIRTUAL TABLE ` + table + ` USING fts5(canonical_user_id UNINDEXED, text)`
+	} else if kind == IndexKindUserDocumentVector {
+		ddl = fmt.Sprintf(`CREATE VIRTUAL TABLE %s USING vec0(canonical_user_id text, embedding_model text, canonical_version text, embedding float[%d])`, table, dimension)
 	}
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return DerivedIndexRevision{}, fmt.Errorf("create derived index table: %w", err)
 	}
 	schemaVersion := 1
-	if kind == IndexKindMemoryVector || kind == IndexKindGlobalMemoryVector || kind == IndexKindTranscriptFTS {
+	if providerForKind(kind) == "llm_gateway" || kind == IndexKindTranscriptFTS {
 		schemaVersion = 2
 	}
 	if kind == IndexKindTranscriptFTS {
@@ -454,6 +460,10 @@ func (s *Store) WritableIndexRevisions(ctx context.Context, entityKind string) (
 		kinds = []string{IndexKindMemoryFTS, IndexKindMemoryVector}
 	} else if entityKind == "global_memory" {
 		kinds = []string{IndexKindGlobalMemoryFTS, IndexKindGlobalMemoryVector}
+	} else if entityKind == "user_document_chunk" {
+		kinds = []string{IndexKindUserDocumentFTS, IndexKindUserDocumentVector}
+	} else if entityKind != "session_turn" {
+		return nil, fmt.Errorf("invalid derived entity kind")
 	}
 	query := `SELECT id, revision, index_kind, model, dimension, schema_version, table_name, state, expected_count, indexed_count, created_at, updated_at FROM derived_index_revisions WHERE state IN ('live', 'building') AND index_kind IN (`
 	args := make([]any, 0, len(kinds))
@@ -499,7 +509,7 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 	if revision.Kind == IndexKindTranscriptFTS && revision.SchemaVersion != 3 {
 		return DerivedIndexRevision{}, fmt.Errorf("derived transcript schema version mismatch: metadata=%d want=3", revision.SchemaVersion)
 	}
-	if revision.Kind == IndexKindMemoryVector || revision.Kind == IndexKindGlobalMemoryVector {
+	if providerForKind(revision.Kind) == "llm_gateway" {
 		if generatedIndexTable.MatchString(revision.TableName) && revision.SchemaVersion != 2 {
 			return DerivedIndexRevision{}, fmt.Errorf("derived vector schema version mismatch: metadata=%d want=2", revision.SchemaVersion)
 		}
@@ -541,6 +551,9 @@ func (s *Store) ValidateAndPublishIndexRevision(ctx context.Context, id int64) (
 }
 
 func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
+	if revision.Kind == IndexKindUserDocumentFTS || revision.Kind == IndexKindUserDocumentVector {
+		return documentIndexValidationSQL(revision)
+	}
 	nowClause := `(entries.expires_at IS NULL OR entries.expires_at > ?)`
 	expected := `SELECT COUNT(*) FROM memory_entries entries WHERE entries.status = 'active' AND ` + nowClause
 	valid := `SELECT COUNT(*) FROM ` + revision.TableName + ` idx JOIN memory_entries entries ON entries.id = idx.rowid AND entries.canonical_user_id = idx.canonical_user_id WHERE entries.status = 'active' AND ` + nowClause + ` AND idx.statement = entries.statement AND idx.evidence = COALESCE((SELECT evidence FROM memory_candidates candidate WHERE candidate.canonical_user_id = entries.canonical_user_id AND candidate.published_memory_id = entries.id AND candidate.evidence != '' ORDER BY CASE candidate.provenance_type WHEN 'user_statement' THEN 3 WHEN 'model_inference' THEN 2 ELSE 1 END DESC, candidate.confidence DESC, candidate.id LIMIT 1), '')`
@@ -569,6 +582,14 @@ func canonicalValidationSQL(revision DerivedIndexRevision) (string, string) {
 }
 
 func validationArgs(revision DerivedIndexRevision, now string) ([]any, []any) {
+	if revision.Kind == IndexKindUserDocumentFTS || revision.Kind == IndexKindUserDocumentVector {
+		millis := parseTime(now).UnixMilli()
+		valid := []any{millis}
+		if revision.Kind == IndexKindUserDocumentVector {
+			valid = append(valid, revision.Model)
+		}
+		return []any{millis}, valid
+	}
 	if revision.Kind == IndexKindGlobalMemoryFTS {
 		return nil, nil
 	}
@@ -640,6 +661,12 @@ func (s *Store) MaintainDerivedIndexes(ctx context.Context, now time.Time, retir
 		} else if revision.Kind == IndexKindGlobalMemoryVector {
 			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT idx.rowid FROM ` + revision.TableName + ` idx WHERE idx.embedding_model != ? OR idx.canonical_version IS NOT COALESCE((SELECT memories.created_at FROM global_memories memories WHERE memories.id = idx.rowid), '') LIMIT ?)`
 			args = []any{revision.Model, batch}
+		} else if revision.Kind == IndexKindUserDocumentFTS || revision.Kind == IndexKindUserDocumentVector {
+			_, valid := documentIndexValidationSQL(revision)
+			valid = strings.Replace(valid, "SELECT COUNT(*)", "SELECT idx.rowid", 1)
+			deleteSQL = `DELETE FROM ` + revision.TableName + ` WHERE rowid IN (SELECT rowid FROM ` + revision.TableName + ` EXCEPT ` + valid + ` LIMIT ?)`
+			_, args = validationArgs(revision, nowText)
+			args = append(args, batch)
 		}
 		result, err := s.sql.ExecContext(ctx, deleteSQL, args...)
 		if err != nil {

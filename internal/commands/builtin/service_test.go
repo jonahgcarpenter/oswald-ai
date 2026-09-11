@@ -1,13 +1,17 @@
 package builtin
 
 import (
+	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/bootstrap"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
@@ -53,7 +57,7 @@ func TestNewServiceOptionalDependencies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"mcp", "stop", "bootstrap", "global-memory", "memories"} {
+			for _, name := range []string{"mcp", "stop", "bootstrap", "global-memory", "memories", "documents"} {
 				if _, found := service.Definition(name); found != tc.want[name] {
 					t.Errorf("command %q registered=%t, want %t", name, found, tc.want[name])
 				}
@@ -81,5 +85,20 @@ func TestNewServiceRegistersMemories(t *testing.T) {
 	}
 	if !foundMemories {
 		t.Fatal("memories command was not registered")
+	}
+	definition, ok := service.Definition("documents")
+	if !ok || definition.AdminOnly || !definition.UserExclusive {
+		t.Fatalf("documents definition=%+v found=%t", definition, ok)
+	}
+	id, err := users.EnsureAccount(context.Background(), "homeassistant", "document-help", "Synthetic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{CanonicalUserID: id, Gateway: "homeassistant", ExternalID: "document-help", Assurance: identity.AssuranceHomeAssistantToken}
+	for _, raw := range []string{"/help", "/help documents"} {
+		result, err := service.Execute(context.Background(), commands.Request{Principal: principal, Raw: raw})
+		if err != nil || !strings.Contains(result.Text, "/documents") || !strings.Contains(result.Text, "administrators automatically") {
+			t.Fatalf("help=%q err=%v", result.Text, err)
+		}
 	}
 }

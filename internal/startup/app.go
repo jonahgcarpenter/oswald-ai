@@ -16,6 +16,7 @@ import (
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database/maintenance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/documents"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -188,6 +189,14 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	maintenanceService := maintenance.NewService(userMemStore, retentionPolicy, rootLog)
 	cleanup.maintenance = maintenanceService.Stop
 	maintenanceService.Start(context.Background())
+	capabilities := documents.ProbeCapabilities()
+	log.Info("app.documents.capabilities", "local document extraction capabilities", config.F("is_pdf_available", capabilities.PDF), config.F("is_ocr_available", capabilities.OCR), config.F("is_office_available", capabilities.Office))
+	if !capabilities.PDF || !capabilities.OCR || !capabilities.Office {
+		log.Warn("app.documents.degraded", "some local document extraction capabilities are unavailable", config.F("status", "degraded"))
+	}
+	documentService := documents.NewService(userMemStore, rootLog)
+	cleanup.documents = documentService.Stop
+	documentService.Start(context.Background())
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", deps.databasePath))
 
 	toolRegistry, err := deps.newRegistry(cfg, userMemStore, globalMemStore, rootLog)
@@ -304,14 +313,14 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 // Shutdown is deliberately not reverse acquisition order: maintenance stops
 // before broker drain, and all workers stop before MCP clients and stores close.
 type shutdown struct {
-	log                                               *config.Logger
-	maintenance, broker, formation, compaction, index func()
-	mcp, accounts, mcpStore, globalMemory, userMemory func()
+	log                                                          *config.Logger
+	maintenance, broker, documents, formation, compaction, index func()
+	mcp, accounts, mcpStore, globalMemory, userMemory            func()
 }
 
 func (s *shutdown) run() {
-	names := []string{"maintenance", "broker", "formation", "compaction", "indexing", "mcp", "accounts", "mcp_store", "global_memory", "user_memory"}
-	for i, stop := range []func(){s.maintenance, s.broker, s.formation, s.compaction, s.index,
+	names := []string{"maintenance", "broker", "documents", "formation", "compaction", "indexing", "mcp", "accounts", "mcp_store", "global_memory", "user_memory"}
+	for i, stop := range []func(){s.maintenance, s.broker, s.documents, s.formation, s.compaction, s.index,
 		s.mcp, s.accounts, s.mcpStore, s.globalMemory, s.userMemory} {
 		if stop != nil {
 			started := time.Now()

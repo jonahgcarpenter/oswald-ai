@@ -98,6 +98,8 @@ type ToolExposer interface {
 
 // Metadata carries request-scoped fields needed by tools and provider logging.
 type Metadata struct {
+	// DocumentLoader downloads current-turn documents only after admission and principal refresh.
+	DocumentLoader    *DocumentLoader `json:"-"`
 	RequestID         string
 	SessionID         string
 	SessionGeneration int

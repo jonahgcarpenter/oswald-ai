@@ -6,7 +6,7 @@ Keep this document current when changing architecture, authorization, persistenc
 
 ## Project And Verification
 
-Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, and an optional Home Assistant WebSocket gateway. Discord and iMessage accept current-turn images; Home Assistant accepts text only. There is no JavaScript, TypeScript, or frontend application in this repository.
+Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, and an optional Home Assistant WebSocket gateway. Discord and iMessage accept current-turn images and supported document uploads; Home Assistant accepts text only but can query the user's document library. There is no JavaScript, TypeScript, or frontend application in this repository.
 
 The module declares Go 1.25.7. SQLite, sqlite-vec, and image decoding include native/CGO dependencies. Use a working C/C++ toolchain, CGO, and the `sqlite_fts5` build tag. Discord GIFV extraction additionally uses `ffmpeg` and `ffprobe`.
 
@@ -43,6 +43,7 @@ internal/
     builtin/                 Command composition and help
     accountlinking/          Connect/disconnect adapters, not account infrastructure
     bootstrap/               First-administrator command
+    documents/               Private/global library management and confirmations
     globalmemory/ mcp/ memories/ session/ stop/ usermanagement/
   compaction/                Foreground/background model compactor and durable planner
     budget/                  Token estimates, input capacity, pressure and tail policy
@@ -50,6 +51,7 @@ internal/
   database/                  SQLite opening, migrations, low-level account persistence
     migrations/              Immutable released SQL files
     maintenance/             Serialized maintenance worker
+  documents/                 Local format extraction, subprocess bounds, durable worker
   gateway/
     routing/                 Transport-neutral admission and prompt construction
     runtime/                 Shared command/agent execution and delivery handling
@@ -58,7 +60,7 @@ internal/
   llm/                       Provider-neutral types and model gateway HTTP client
   mcp/                       Configuration, encryption, sessions, schemas, execution
   media/                     Shared image/video normalization and output attachments
-  memory/                    Transactional user-memory/session/job/index storage
+  memory/                    Transactional user-memory/document/session/job/index storage
     policy/                  Pure evidence validation and activation policy
     extraction/              Private user-memory model calls and decoding
     formation/               Durable post-delivery formation worker
@@ -66,13 +68,13 @@ internal/
     indexing/                Derived-index lifecycle worker
     memorytest/              Shared fixtures imported only by tests
   shared/                    Directory grouping only, not a Go package
-    requestctx/              Request metadata, principal, images, exposure, staging
+    requestctx/              Request metadata, principal, images, document loader, exposure, staging
     lease/                   Renewable lease heartbeat
     invalidation/            In-process authorization/gateway-cache invalidation
   soul/                      Read-only system-prompt loader
   startup/                   Application assembly, ordered cleanup, startup output
   tools/
-    names/                   All ten stable builtin tool-name constants
+    names/                   All thirteen stable builtin tool-name constants
     exposure/                Request-local tool visibility
     governance/              Duplicate, per-tool, and request-wide limits
     registry/                Markdown schemas and builtin handler registration
@@ -84,7 +86,7 @@ internal/
 - `internal/startup` is the composition root. It imports domain packages; domain packages must not import it. `main` should not assemble stores, workers, tools, or gateways.
 - Shared account functionality belongs in `accounts`, not `commands/accountlinking`. User/global-memory storage belongs in `memory`, not builtin tool handlers. Commands and tools adapt their respective entry points to those services.
 - Keep transaction-fenced candidate publication, job/outbox changes, account merges, and deletion together. Do not turn an atomic operation into independent service commits to achieve a directory split.
-- Worker packages depend on stores, never the reverse. `memory` must not import `memory/formation` or `memory/indexing`; `database` must not import `database/maintenance`.
+- Worker packages depend on stores, never the reverse. `memory` must not import `documents`, `memory/formation`, or `memory/indexing`; `database` must not import `database/maintenance`. Document persistence belongs in `memory/user_document*.go`; `documents/service.go` runs extraction jobs, and command/tool adapters use the store.
 - Token-budget policy belongs under `compaction/budget`. The agent assembles prompts using that policy; `llm` owns wire token fields and provider usage telemetry. Budget estimators depend on LLM types, so the LLM client must not import the budget package back.
 - Concrete gateways are composed by `gateway/bootstrap.go`. They use `gateway/routing` and `gateway/runtime` without importing the parent composition package. Neither `main` nor `startup` should import concrete gateways directly.
 - `shared` is not a utility facade. Import `shared/requestctx`, `shared/lease`, or `shared/invalidation` directly. Do not add a generic `utils`, `common`, or forwarding package for unrelated functions.
@@ -141,12 +143,14 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 1. LLM client, context budget, and soul loader.
 2. User-memory, global-memory, MCP, and account database handles; MCP manager and account service.
 3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
-4. Indexing and immediate-then-periodic maintenance workers.
+4. Indexing, immediate-then-periodic maintenance, and local document extraction workers.
 5. Builtin registry, MCP provider, private memory extractor, formation service, and shared compactor/compaction service.
 6. Agent, then broker workers, command service, invalidation bus, and enabled gateways.
 7. Formation/compaction low-priority gates and worker starts, then gateway goroutines.
 
-Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, formation, compaction, indexing, MCP clients, accounts DB, MCP DB, global-memory DB, user-memory DB**. It is intentionally not reverse acquisition order.
+Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, documents, formation, compaction, indexing, MCP clients, accounts DB, MCP DB, global-memory DB, user-memory DB**. It is intentionally not reverse acquisition order.
+
+The local document extraction worker starts alongside maintenance with an independent lifetime and no broker model permit. It claims queued or expired-lease jobs sequentially, polling every two seconds when idle. Extraction is bounded to three minutes within a five-minute lease; publication renews synchronously and uses the exact rotated token. Shutdown cancels and joins extraction/subprocess cleanup before database closure, leaving interrupted jobs reclaimable after lease expiry. Storage conversion assigns zero-based ordinals and splits UTF-8 text into at most 1,024 chunks of 16 KiB each, with text plus locator/method metadata capped at 1 MiB. Budget omissions are partial; useful resource-limit results may publish partial, other extraction errors fail with fixed safe codes, and empty extraction fails as `no_extractable_text`. Startup logs capability booleans at INFO and warns without disabling chat when local binaries are unavailable. `documents.job.complete` measures each attempt with a fresh operation ID, canonical user, `document_extraction` workload, committed chunk/byte counts, and outcome, without payloads. Maintenance reports committed expiry deletions as `user_document_deleted_count` in its existing summary and row-operation total.
 
 - Startup returns `startup.Error` with the original event, message, and cause only after cleanup. MCP close failures are warnings; database close errors are discarded here and do not replace initialization errors.
 - Startup logs build metadata and initialization/cleanup phase boundaries. `app.shutdown.complete` follows every acquired resource's cleanup callback, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
@@ -166,7 +170,7 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 - Private conversations do not require mentions. Ordinary group messages require a mention or a recognized reply to Oswald. Group slash-command attempts require a mention even when replying to Oswald.
 - Command handlers do not receive private/group scope. `/connect`, `/bootstrap`, and other admitted authenticated commands can run in groups; codes and responses may be visible there.
 - Reply enrichment can include quoted text, replied-to images within remaining slots, unsupported labels, or unavailable-message markers. Incomplete Discord references or uncached iMessage replies can be ignored during preflight before later lookup occurs; invocation through every incomplete reply is not guaranteed.
-- Shared routing checks for empty assembled input, including reply and unsupported-file notes. Home Assistant rejects blank text earlier; iMessage ignores payloads without text or attachments.
+- Shared routing checks for empty assembled input, including reply and unsupported-file notes; a current document loader admits document-only model requests without inventing authored text. Home Assistant rejects blank text earlier; iMessage ignores payloads without text or attachments.
 - Runtime requires authentication and checks bans before admitted commands/model work. Ignore and direct empty-fallback paths return earlier. A ban is not a universal execution-time recheck or cancellation of already-admitted work.
 - The command dispatcher validates principals but does not enforce `AdminOnly` metadata by itself. Builtin assembly installs admin middleware; `/mcp global` and `/stop all` check authorization explicitly.
 - Admin authorization re-resolves the external account. Account mutations and memory commands have additional ownership/fencing rules; do not assume every handler refreshes ownership identically. `/reset` and user MCP commands use the carried canonical ID.
@@ -182,7 +186,7 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 
 ### Account And Command Contracts
 
-User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and `/mcp global`. See command definitions and README for exact argument syntax.
+User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/documents`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and `/mcp global`; the same `/documents` command automatically uses global scope for administrators. See command definitions for exact argument syntax.
 
 - Account-link challenges last ten minutes. Store hashes, expiry, and consumption/replay identity, not plaintext codes. A new outgoing challenge invalidates the user's prior active one.
 - The initiator's canonical account remains the owner after a merge; admin status is preserved if either participant is admin. Reject banned participants, conflicting accounts for the same gateway, and conflicting user MCP names. Frozen session-profile selection follows the separate generation/snapshot rules below.
@@ -191,8 +195,8 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memor
 - `/bootstrap` promotes the submitting account's currently resolved owner only while no administrator exists. Its process-local code is consumed after a successful update; restart replaces it only while no admin exists.
 - `/memories list` exports all active, unexpired memories with stated/inferred/unknown origin labels, not just the model list limit. `/memories observations` exports live temporary observations and expiry. `/memories suppress <id>`, `/memories suppressions`, and `/memories unsuppress <rule-id>` manage identified-claim suppression. All use the existing authenticated user-exclusive command path and UTF-8-safe multipart bounds; export fails rather than returning a partial list. Correction remains conversational, not a separate command.
 - `/memories forget <id>` requires a positive decimal ID and physically deletes the memory, candidates, affected profile references, and physical/queued derived-index state. Source conversation and summaries remain.
-- `/memories forget all` uses `ResetUserDataPreservingAccount`: delete learned memory, candidates, observations, suppression rules, assessment inputs/receipts, user MCP config, session turns/summaries/jobs, derived serving state, and account-link challenges; reset session generations while retaining account identity, linked accounts, moderation, speaker intro, and high-water bookkeeping.
-- `/reset` advances one tenant/session generation, deletes its turns, summaries, formation/compaction work, and binds the latest profile. Durable user facts remain.
+- `/memories forget all` uses `ResetUserDataPreservingAccount`: delete learned memory, candidates, observations, suppression rules, assessment inputs/receipts, document libraries and upload reservations, user MCP config, session turns/summaries/jobs, derived serving state, and account-link challenges; reset session generations while retaining account identity, linked accounts, moderation, speaker intro, and high-water bookkeeping.
+- `/reset` advances one tenant/session generation, deletes its turns, summaries, formation/compaction work, and binds the latest profile. Durable user facts and the document library remain.
 - Invalidation clears relevant gateway caches. Disconnect/delete-user can request closure of matching Home Assistant sockets; forget-all does not currently request connection closure.
 
 ## Agent And Context Management
@@ -225,7 +229,7 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memor
 - A provider context-length failure can force compaction. Non-cancellation context failures use a deterministic partial-completion response that warns completed actions were not undone and retains permitted artifacts. Cancellation exits without publishing a completed turn.
 - After successful image generation, non-cancellation model failures (including parser retries, tools-disabled final calls, and empty-response corrective calls) retain selected files and finalize a deterministic partial response through ordinary pending persistence and delivery gating. Ordinary failures use `response_kind=image_partial` with degraded status; context failures keep their context fallback. No `Response.Error` is set for this deliverable partial result. With no generated outputs, existing provider-error and fallback semantics remain unchanged. Cancellation still aborts without publishing a completed turn, and image persistence failure still prevents delivery.
 - Ordinary session append failures may log and still return the answer. If a memory save or generated image was staged, unavailable or failed persistence returns an error instead of delivering an unpersisted save claim or silently selecting an older image on the next turn.
-- Pending or failed-delivery turns cannot enter durable summaries, transcript search, or background extraction. Late successful delivery can clear a timeout failure and restore eligibility.
+- Pending or failed-delivery turns cannot enter durable summaries, transcript search, or background memory extraction. Late successful delivery can clear a timeout failure and restore eligibility. Document admission/extraction is independent of turn delivery.
 
 ## Memory And Compaction
 
@@ -235,6 +239,42 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memor
 | Global facts about Oswald | `global_memories` | Administrator commands |
 | Durable user facts | `memory_entries` and candidate evidence | Post-delivery formation |
 | Conversation continuity | `sessions`, `session_turns`, `session_summaries` | Agent persistence and validated compaction |
+| User document library | `user_documents`, `user_document_sources`, `user_document_chunks` | Authenticated upload admission and lease-fenced local extraction |
+
+### User Documents
+
+Documents are private canonical-user libraries across sessions and linked gateways, including addressed group requests. They are not group-shared documents or personal-memory evidence. The sender's own library can inform a group answer, which is visible to that group. Home Assistant can retrieve an existing library but cannot upload files. There are no native model file blocks or vision-based PDF processing: the model receives bounded extracted text, not source files or PDF page images. Ordinary images retain the separate vision path, not document OCR ingestion.
+
+- Only supported **current** Discord/iMessage attachments become lazy document loaders; replied-to documents remain unsupported attachment labels and are not imported. Normal mention/reply, authentication, ban, and broker admission rules apply before document download. Command attachments do not run agent admission. Routing accepts PDF, text/Markdown, CSV/TSV, JSON/XML/HTML, DOC/DOCX/ODT/RTF, PPT/PPTX/ODP, XLSX/ODS, and its explicit source/config extension allowlist in `gateway/routing/documents.go`; this is narrower than the extractor's extension list. Image MIME takes precedence over document classification; MIME-based document selection is used only without an extension. Legacy XLS and arbitrary binary files are unsupported.
+- Before downloading, reserve up to four file slots, 20 MiB per file, and 40 MiB aggregate source bytes, plus 1 MiB extracted capacity per file. Unknown/nonpositive transport sizes reserve the full 20 MiB per file; declared positive sizes are download ceilings, not estimates that may grow. Loaders enforce actual streamed bytes, a two-minute overall deadline, and at most three redirects. Discord URLs/redirects require HTTPS on port 443 at `cdn.discordapp.com` or `media.discordapp.net`; BlueBubbles requires the configured exact scheme/host. These are transport-origin restrictions, not `web.fetch`'s validated-IP dialing boundary.
+- SQLite immediate transactions serialize reservations and admission across owners/handles. Five-minute upload reservations are single-use and nonrenewable; successful acceptance atomically consumes them, inserts source BLOBs/metadata/extraction jobs, and releases unused capacity. Failed or canceled work attempts independent five-second cleanup; otherwise expiry releases capacity. Owner-scoped admission keys deduplicate only exact source-hash/filename/media-type retries, under a new reservation after consumption. Admission commits independently of model success, session persistence, and response delivery. The initial request does **not** await extraction jobs, and there is no automatic completion notification; later catalog/search/read requests observe status.
+
+| Library Limit | Per Canonical User | Global |
+| --- | --- | --- |
+| Retained documents plus reserved slots | 50 | No separate count cap |
+| Source bytes plus upload reservations | 250 MiB | 2 GiB |
+| Extracted bytes plus extraction/upload reservations | 25 MiB | 200 MiB |
+
+- Limits include physically retained expired documents until cleanup; live reservations count once. Each queued/extracting document reserves 1 MiB until terminal publication/failure. Stored extracted usage counts UTF-8 text **plus locator and method bytes**, not tokens/runes: at most 1 MiB per document, 1,024 contiguous zero-based chunks, 16 KiB text per chunk, 1,024-byte locator and 64-byte method. Acceptance/expiry/reservation/lease timestamps are integer Unix **milliseconds**; acceptance is UTC at millisecond precision and expiry is exactly 30 days from acceptance, not last access or session activity.
+- File-backed admission also checks filesystem bytes available to the process before reservation and before BLOB insertion: require `256 MiB + 2 * (new source bytes + global reserved source bytes + global reserved text bytes)`. The reservation check includes the proposed reservation; acceptance consumes its own upload reservation before checking, without double charging it. Existing database/WAL bytes already reduce filesystem availability. Unknown/failed disk probes reject uploads; in-memory stores skip the disk check. Linux uses `statfs` available blocks; the non-Linux probe fails closed. This is a snapshot against database/WAL growth, not a filesystem quota, parser temporary-space reservation, or guarantee against unrelated writers.
+- Expired documents immediately leave model serving. Maintenance physically deletes expired documents and reservations in separately bounded selections (default 100 each), cascading sources/chunks/extraction jobs. `/reset` and ordinary session expiry preserve the library; `/memories forget all` and account deletion remove it and upload reservations. Account merge moves the library atomically or rejects the entire merge on combined quota overflow, drops the losing owner's in-flight reservations, requeues its running extraction, and invalidates old leases. Winner admission mappings prevail on key collisions. Document deletion cannot erase transcripts, delivered quotations, logs, or backups; derived document index cleanup follows the asynchronous lifecycle described below.
+- The agent builds separate user-authority, explicitly untrusted reference context: at most 20 newest catalog entries within 5,000 bytes and up to three search excerpts within a 12,000-byte assembled envelope, using at most the first 250 query runes. Whole JSON records fit only in remaining actual prompt capacity, including images/tools, and are refitted after active compaction. Document context is not concatenated into authored/current-user/public transcript text or formation evidence. Document tool traces are metadata-only and not transcript-search content; final answers and active compaction may still quote excerpts. Catalog omission and empty search do not prove a processing document has been read or lacks content.
+- All three document tools require the authenticated canonical owner and remain private even for administrators; no tool argument grants global scope. List defaults to 20, maximum 50, excluding expired metadata. Search defaults to five, maximum ten, with an optional exact document ID and query bounds of 400 runes/1,024 UTF-8 bytes; it uses canonical lexical plus optional FTS/vector retrieval, not merely literal substring search. Excerpts are at most 1,500 runes. Read defaults to three chunks, maximum eight. Storage retains zero-based whole-chunk paging; the tool adds optional zero-based rune `text_offset` within the starting `offset` chunk. When `HasMore` is true, continue with both `offset=NextOffset` and `text_offset=NextTextOffset`: nonzero text offsets resume the same chunk, zero starts the next chunk. `Partial` marks pages containing a chunk fragment; ordinals, locators, and methods are preserved, and queued/failed documents can return metadata without readable chunks. All three tools cap their complete encoded JSON output at 16 KiB. Read splits oversized text at rune boundaries with advancing cursors rather than dropping an oversized first chunk; list/search drop whole trailing records, with list reporting `truncated`. Encoding disables optional HTML escaping but still accounts for mandatory JSON escaping and all metadata/cursor bytes. Duplicate blocking is enabled, without custom argument normalization or per-tool execution/failure/unproductive ceilings.
+
+Local extraction uses native UTF-8 text/structured parsers, Poppler page text, English Tesseract OCR for pages with fewer than 40 alphanumeric characters, and LibreOffice-to-PDF conversion for word-processing/presentation formats. XLSX/ODS use ZIP/XML parsing, never LibreOffice or formula evaluation: cached formula values are labeled and may be stale, missing caches mark partial, numeric date serials remain raw, and drawings/comments/charts/embedded files are not spreadsheet text. HTML fetches no resources and executes no JavaScript; XML rejects DTDs and nesting beyond 64.
+
+- Extraction allows 100 PDF pages, 25 OCR pages, one retained raster with edges at most 3,000 pixels and at most nine million pixels, 100 spreadsheet sheets/10,000 cells, and 10,000 CSV/TSV rows. CSV/TSV preflight checks the entire input before allocating fields: at most 1,024 fields and 256 KiB raw bytes per logical record, including quotes/embedded newlines. ZIP checks cover at most 2,048 entries, 32 MiB total actual inflation/CRC, and a 200:1 ratio limit for members over 1 MiB; reject unsafe/duplicate names, encrypted/nonregular entries, and symlinks. Archives are not unpacked to disk. Output text truncation and bounded omissions mark partial; the worker's stricter text-plus-metadata/chunk budget can omit more.
+- Linux subprocesses use fixed executable paths without a shell, a minimal environment without inherited credentials/proxies, private `/tmp` directories, server-owned filenames, and fresh LibreOffice profiles with fixed import/export filters and macro/plugin/update restrictions. First-use exit code 81 permits one restart under the same deadline. `prlimit` sets per-process 1 GiB address space, 150 CPU seconds, 128 descriptors, zero core size, and 32 MiB per file; stdout is capped at 1 MiB and stderr discarded. A 25 ms watchdog checks 64 MiB aggregate temporary files and 2,048 filesystem entries; it can overshoot and does not bound unlinked open files. Cleanup removes temporary directories and kills ordinary process-group descendants on success/error/cancellation. This is **not a sandbox**: no filesystem/network isolation or containment of escaped sessions is implemented; importer vulnerabilities/external-resource access remain possible. Hostile input requires deployment-owned OS isolation and disk quotas.
+- Worker document statuses are `queued`, `extracting`, `ready`, `partial`, `failed`; separate `user_document_extraction_jobs` states are `queued`, `running`, `succeeded`, `failed`, not `durable_jobs` formation states. Claim/publication require an active, unbanned owner and unexpired document; exact live lease checks fence merges/deletion/reclaims. Successful partial work still marks the job `succeeded`. Useful `ErrLimit` results may publish partial; unsupported input fails as `unsupported_format`, deadline expiry as `extraction_timeout`, other extraction errors as `extraction_failed`, and empty successful output as `no_extractable_text`. Terminal failure releases extracted reservations but retains source bytes until deletion/expiry. Storage failures leave work reclaimable, not terminally retried with model credits; shutdown cancellation also leaves reclaimable work. Attempt telemetry uses `ok/ready`, `degraded/partial`, `error/failed`, `ok/canceled`, or `degraded/reclaimable` (`storage_failed`) and `degraded/stale` (`lease_lost`). Startup/lease timing is documented above.
+
+`/documents usage [owner-cursor] | list [cursor] | forget <id|all> | confirm <code>` uses authenticated user-exclusive commands and refreshes ownership/admin authorization. Ordinary users manage only their library; administrators automatically manage **all libraries with the same syntax**, not a `global` subcommand. Commands may run in groups, exposing metadata or confirmation codes there.
+
+- List uses ten-item opaque-ID keyset pages, includes expired retained rows, and includes canonical owners in admin scope. Usage counts retained bytes/documents, upload slots/source/text reservations, extraction reservations, and live statuses separately from expired counts; upload text is already included in total reserved text. Admin usage adds whole-application database/WAL sizes and available filesystem space (or unavailable/unknown), plus ten independently sampled owners per cursor page. Neither list pagination nor owner usage is a frozen database snapshot.
+- `forget <id>` deletes one exact in-scope ID immediately, including expired rows. `forget all` captures exact IDs and owners during pagination, at most 10,000 documents, then issues a five-minute, process-local, hashed, one-use confirmation tied to the exact principal and authorization scope. Issuing a new confirmation replaces that principal's prior confirmation; all pending confirmations together retain at most 10,000 IDs and 100 entries. Uploads after capture are not selected and in-flight upload reservations are not canceled. Confirmation fences captured owners, refreshes authorization for each owner-scoped atomic batch of at most 50, and never follows a moved ID into a broader owner scope. Missing/moved IDs or another batch failure stop deletion; earlier committed batches remain deleted, partial counts are reported, and the consumed confirmation must be replaced. Global exact-ID deletion fences the current account graph against ownership moves.
+
+Runtime populates `commands.Request.FencedUserIDs` only inside the broker's acquired exclusive-fence callback. Resolver output is not itself a held-fence grant. Document confirmations verify every captured owner against that set before any batch is deleted; single-ID and batch deletion additionally check each current row owner inside the deletion transaction via `DeleteUserDocumentsFenced`. Promotion between resolution and execution cannot expand the held owner set, and a newly created or moved-to owner outside that set is rejected with no deletion in that batch. Direct unscheduled document deletion has no fence grant and is rejected; direct tests must explicitly provide synthetic held owners. Administrator authorization is still refreshed separately and is never granted by fence membership.
+
+Safe INFO events include `agent.documents.loaded`, `memory.documents.complete`, `memory.documents.disk.complete`, `documents.extraction.complete`, `documents.job.complete`, worker lifecycle events, and committed `memory.documents.expired` cleanup. Filenames, admission/confirmation keys, URLs, source/extracted content, and subprocess output are not logged. Maintenance includes `user_document_deleted_count` and `user_document_reservation_deleted_count`; extraction attempts and derived-index work are distinct measurement owners, not extra addressed requests.
 
 ### Durable User Memory
 
@@ -305,11 +345,12 @@ New compaction output requires an empty `candidates` array. Persisted summary ar
 
 The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, global memory, and user memory open separate handles to it. Initialization is serialized by a process schema mutex.
 
-- Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.13`, fourteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
+- Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.14`, fifteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
 - Accept empty databases or an exact applied prefix of that registry. Reject nonempty ledgerless/development schemas and checksum drift without modifying canonical schema/data. There is no pre-v4 importer.
 - Apply missing migrations on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled, check foreign keys before commit, and restore enforcement afterward. Never edit a released migration.
 - `durable_jobs` contains typed formation, compaction, and derived-index work. Job-kind checks and tenant/source/lease predicates are part of the persistence contract, not redundant metadata.
-- Canonical state remains authoritative when indexes are absent. Derived kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`.
+- Canonical state remains authoritative when indexes are absent. Derived kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, `global_memory_vector`, `user_document_fts`, and `user_document_vector`.
+- Document chunks use non-reusable internal integer IDs mapped to `(document_id, ordinal)` for the `user_document_chunk` outbox entity. Immutable chunks, transactional publication/deletion/ownership triggers, and periodic reconciliation feed the existing revision worker. Only ready/partial, unexpired, tenant-owned chunks are indexable. Search always includes canonical lexical matches to cover index lag, fuses optional FTS and semantic ranks, and rechecks current ownership/status/expiry before returning bounded excerpts. Semantic queries require configured embeddings and use the live revision's model during replacement; exact vector distance is evaluated over the quota-bounded private library, not a cross-tenant top-k pool. Existing index lifecycle and document-search measurements cover these paths; unavailable channels warn without exposing content. Deleted/expired chunks immediately lose serving eligibility; physical derived cleanup is asynchronous, except account-wide deletion's existing physical cleanup.
 - Canonical mutations enqueue outbox work transactionally. Indexing applies it to relevant live/building revisions, validates canonical version and ownership, and retries without weakening filters.
 - Rebuild into generated shadow tables, validate physical dimension/schema/model, exact canonical and valid indexed counts, tenant joins, memory eligibility, and delivered active-generation transcript eligibility, then atomically switch the live pointer. Failed shadows do not replace working indexes.
 - Transcript FTS schema 3 adds public prompt and group provenance columns. Group matching uses only public prompt/final-answer columns plus exact canonical scope and indexed-content checks. Persisted schema-2 live indexes remain writable and privately searchable during rebuild; group search is unavailable until schema 3 is published. Public answers and provenance are immutable; legacy rows cannot be opted into sharing by later updates.
@@ -341,11 +382,13 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 
 Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
 
-The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the path actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
+The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`. The image creates that database directory owned by the nonroot `oswald-ai` user with mode 0700; mount/persist the path actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. Runtime includes `ffmpeg`, SQLite tools, Poppler, Tesseract with English data, LibreOffice Writer/Calc/Impress, fonts, and util-linux (`prlimit`). Sources/documents live in SQLite, not a separate upload volume; extraction uses temporary `/tmp` space. Explicit build copies and `.dockerignore` exclude local databases/credentials while retaining synthetic fixtures.
+
+The `document-tests` Docker target inherits the same document runtime/parser packages and runs as nonroot with `sqlite_fts5,document_integration` and networking disabled. Build with `docker build --target document-tests -t oswald-document-tests .`; repeat with `docker run --rm --network=none oswald-document-tests`. These exercise installed native parsers separately from ordinary fake-backed tests; network-disabled testing does not make production extraction a sandbox.
 
 ## Tools And MCP
 
-Builtin names live in `tools/names/names.go`; its contract test pins all ten strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
+Builtin names live in `tools/names/names.go`; its contract test pins all thirteen strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
 
 | Tool | Enablement | Execution / Failure / Unproductive Limits | Durable History |
 | --- | --- | --- | --- |
@@ -355,12 +398,15 @@ Builtin names live in `tools/names/names.go`; its contract test pins all ten str
 | `user_memory_list` | Always | 0 / 0 / 0 | Full |
 | `session_transcript_search` | Always | 0 / 0 / 0 | Full |
 | `global_memory_search` | Always | 0 / 0 / 0 | Full |
+| `user_document_list` | Always; authenticated private library | 0 / 0 / 0 | Metadata; not searchable |
+| `user_document_search` | Always; authenticated private library | 0 / 0 / 0 | Metadata; not searchable |
+| `user_document_read` | Always; authenticated private library | 0 / 0 / 0 | Metadata; not searchable |
 | `web.search` | Brave or SearXNG configured | 0 / 2 / 2 | Full |
 | `web.fetch` | Same enablement as search | 4 / 2 / 2 | Metadata |
 | `comfyui.text_to_image` | ComfyUI configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
 | `comfyui.image_to_image` | ComfyUI configured; hidden from Home Assistant even when an image exists | 0 / 0 / 0 | Metadata |
 
-Zero disables a per-tool guard; it does not bypass global limits. Full history is bounded and searchable; metadata-only fetch/save/image results are not persisted as full model/tool content. Default per-call durable-history bounds are 16 KiB of arguments and 16,000 result runes; the complete trace has additional aggregate bounds.
+Zero disables a per-tool guard; it does not bypass global limits. Full history is bounded and searchable; metadata-only fetch/save/image/document results are not persisted as full model/tool content. Default per-call durable-history bounds are 16 KiB of arguments and 16,000 result runes; the complete trace has additional aggregate bounds.
 
 - `governance.DefaultGlobalPolicy()` caps requests at 50 actual handler executions and 30 model responses containing tool calls. There is no request-wide consecutive-failure guard.
 - Authorize against the exact catalog advertised for that iteration. Discovery cannot authorize another call in the same model-emitted batch. Complete every declared call with a correlated result, including blocked calls, before finishing with tools disabled.
@@ -449,7 +495,7 @@ ComfyUI handlers accept positive/negative prompts, each bounded to 2,000 runes. 
 
 Validate downloaded bytes using metadata, MIME/sniffing, and format signatures. Preserve transparency with PNG; otherwise normalize to JPEG. Unsupported or unusable attachments become bounded prompt notes rather than raw binary model input. Output filenames must be basenames without separators/controls, no more than 255 bytes, and unique within the response.
 
-Source decoding precedes resizing, and animated GIF uses full animation decoding. Encoded-byte and output-dimension limits do **not** establish a strict peak decoded-memory or animation-frame bound. General files, audio, and arbitrary video inputs are not supported.
+Source decoding precedes resizing, and animated GIF uses full animation decoding. Encoded-byte and output-dimension limits do **not** establish a strict peak decoded-memory or animation-frame bound. Supported document uploads use the separate User Documents extraction path and limits above; arbitrary files, audio, and arbitrary video inputs remain unsupported.
 
 ## Model Gateway Transport
 
@@ -541,7 +587,7 @@ Stop can return immediately with broker result `ExecutionComplete=false`, before
 
 ### Background And Health
 
-Workload values are `foreground`, `formation`, `compaction`, `indexing`, `maintenance`, and `system`. `memory_formation` is a `job_kind`, not a workload. Formation and compaction services use fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
+Workload values are `foreground`, `formation`, `compaction`, `document_extraction`, `indexing`, `maintenance`, and `system`. `memory_formation` is a `job_kind`, not a workload; document extraction has its own job table and no model permit. Formation and compaction services use fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
 
 `internal/memory/formation/service.go` logs formation completion only after durable completion succeeds, including local saves, empty extraction, and artifact replay. Retry APIs return the successfully persisted state; `internal/compaction/service.go` uses stored submission/artifact state for retry/dead reporting rather than attempt-count guesses. Worker cancellation/preemption/refund outcomes are INFO; independent storage failures remain warnings.
 

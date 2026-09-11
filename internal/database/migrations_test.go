@@ -551,6 +551,7 @@ func TestPermanentV400CanonicalTableInventory(t *testing.T) {
 		"global_memories", "linked_accounts", "mcp_servers", "memory_assessment_inputs", "memory_assessment_receipts", "memory_candidates",
 		"memory_entries", "memory_observation_evidence", "memory_observation_receipts", "memory_observations", "memory_suppressions", "schema_migration_versions", "session_images", "session_summaries",
 		"session_turns", "sessions",
+		"user_document_chunk_ids", "user_document_chunks", "user_document_extraction_jobs", "user_document_reservations", "user_document_sources", "user_documents",
 	}
 	rows, err := db.SQL().Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
@@ -577,7 +578,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 19, "index": 29, "trigger": 37, "view": 0} {
+	for objectType, want := range map[string]int{"table": 25, "index": 34, "trigger": 41, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master

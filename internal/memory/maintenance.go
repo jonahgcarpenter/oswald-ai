@@ -11,27 +11,29 @@ import (
 
 // MaintenanceCounts contains aggregate results from one sweep.
 type MaintenanceCounts struct {
-	SessionImagesDeleted       int64                `json:"session_images_deleted"`
-	Phase                      string               `json:"-"`
-	SessionCleanup             SessionCleanupCounts `json:"session_cleanup"`
-	PendingDeliveriesFailed    int64                `json:"pending_deliveries_failed"`
-	CandidatesDeleted          int64                `json:"candidates_deleted"`
-	AssessmentReceiptsDeleted  int64                `json:"assessment_receipts_deleted"`
-	ObservationReceiptsDeleted int64                `json:"observation_receipts_deleted"`
-	FormationJobsDeleted       int64                `json:"formation_jobs_deleted"`
-	CompactionJobsDeleted      int64                `json:"compaction_jobs_deleted"`
-	DerivedIndexJobsDeleted    int64                `json:"derived_index_jobs_deleted"`
-	ChallengesDeleted          int64                `json:"account_challenges_deleted"`
-	IndexRowsDeleted           int64                `json:"index_rows_deleted"`
-	IndexRevisionsDegraded     int64                `json:"index_revisions_degraded"`
-	IndexTablesDropped         int64                `json:"index_tables_dropped"`
-	OptimizeRun                bool                 `json:"optimize_run"`
+	UserDocumentReservationsDeleted int64                `json:"user_document_reservations_deleted"`
+	UserDocumentsDeleted            int64                `json:"user_documents_deleted"`
+	SessionImagesDeleted            int64                `json:"session_images_deleted"`
+	Phase                           string               `json:"-"`
+	SessionCleanup                  SessionCleanupCounts `json:"session_cleanup"`
+	PendingDeliveriesFailed         int64                `json:"pending_deliveries_failed"`
+	CandidatesDeleted               int64                `json:"candidates_deleted"`
+	AssessmentReceiptsDeleted       int64                `json:"assessment_receipts_deleted"`
+	ObservationReceiptsDeleted      int64                `json:"observation_receipts_deleted"`
+	FormationJobsDeleted            int64                `json:"formation_jobs_deleted"`
+	CompactionJobsDeleted           int64                `json:"compaction_jobs_deleted"`
+	DerivedIndexJobsDeleted         int64                `json:"derived_index_jobs_deleted"`
+	ChallengesDeleted               int64                `json:"account_challenges_deleted"`
+	IndexRowsDeleted                int64                `json:"index_rows_deleted"`
+	IndexRevisionsDegraded          int64                `json:"index_revisions_degraded"`
+	IndexTablesDropped              int64                `json:"index_tables_dropped"`
+	OptimizeRun                     bool                 `json:"optimize_run"`
 }
 
 // Changed returns the number of rows changed, excluding database hygiene.
 func (c MaintenanceCounts) Changed() int64 {
 	s := c.SessionCleanup
-	return c.SessionImagesDeleted + s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired + s.ObservationsDeleted +
+	return c.UserDocumentReservationsDeleted + c.UserDocumentsDeleted + c.SessionImagesDeleted + s.SessionTurnsDeleted + s.SessionsDeactivated + s.MemoryEntriesExpired + s.CandidatesDeleted + s.FormationJobsDeleted + s.SessionSummariesDeleted + s.CompactionJobsRetired + s.ObservationsDeleted +
 		c.PendingDeliveriesFailed + c.CandidatesDeleted + c.FormationJobsDeleted + c.CompactionJobsDeleted + c.DerivedIndexJobsDeleted + c.ChallengesDeleted + c.IndexRowsDeleted + c.IndexRevisionsDegraded + c.IndexTablesDropped + c.AssessmentReceiptsDeleted + c.ObservationReceiptsDeleted
 }
 
@@ -70,6 +72,12 @@ func (s *Store) MaintenanceSweep(ctx context.Context, now time.Time, policy conf
 	}
 	batch := policy.BatchSize
 	nowText := formatTime(now)
+	if counts.UserDocumentReservationsDeleted, err = execAffected(ctx, tx, `DELETE FROM user_document_reservations WHERE id IN (SELECT id FROM user_document_reservations WHERE expires_at<=? ORDER BY expires_at,id LIMIT ?)`, now.UnixMilli(), batch); err != nil {
+		return counts, err
+	}
+	if counts.UserDocumentsDeleted, err = execAffected(ctx, tx, `DELETE FROM user_documents WHERE id IN (SELECT id FROM user_documents WHERE expires_at<=? ORDER BY expires_at,id LIMIT ?)`, now.UnixMilli(), batch); err != nil {
+		return counts, err
+	}
 	deadCutoff := formatTime(now.Add(-policy.DeadJobRetention))
 	successCutoff := formatTime(now.Add(-policy.SuccessfulJobRetention))
 	pendingCutoff := formatTime(now.Add(-policy.PendingDeliveryTimeout))
@@ -103,7 +111,7 @@ AND NOT EXISTS(SELECT 1 FROM memory_assessment_inputs i JOIN durable_jobs j ON j
 	if counts.CompactionJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE id IN (SELECT job.id FROM durable_jobs job WHERE job.job_kind = 'session_compaction' AND ((job.state IN ('succeeded','skipped') AND julianday(job.completed_at) <= julianday(?)) OR (job.state = 'dead' AND julianday(job.completed_at) <= julianday(?))) AND NOT (job.artifact_summary_id IS NULL AND job.state IN ('skipped','dead') AND EXISTS (SELECT 1 FROM sessions active WHERE active.canonical_user_id = job.canonical_user_id AND active.session_id = job.session_id AND active.generation = job.session_generation AND active.is_active = 1 AND julianday(active.expires_at) > julianday(?))) ORDER BY job.id LIMIT ?)`, successCutoff, deadCutoff, nowText, batch); err != nil {
 		return counts, err
 	}
-	if counts.DerivedIndexJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE id IN (SELECT job.id FROM durable_jobs job WHERE job.job_kind = 'derived_index' AND job.state = 'succeeded' AND julianday(job.completed_at) <= julianday(?) AND NOT (job.operation = 'upsert' AND ((job.entity_kind = 'memory' AND EXISTS (SELECT 1 FROM memory_entries entity WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.status = 'active' AND (entity.expires_at IS NULL OR julianday(entity.expires_at) > julianday(?)))) OR (job.entity_kind = 'session_turn' AND EXISTS (SELECT 1 FROM session_turns entity JOIN sessions active ON active.canonical_user_id = entity.canonical_user_id AND active.session_id = entity.session_id AND active.generation = entity.session_generation WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.delivered_at IS NOT NULL AND entity.delivery_failed_at IS NULL AND active.is_active = 1 AND julianday(active.expires_at) > julianday(?))) OR (job.entity_kind = 'global_memory' AND EXISTS (SELECT 1 FROM global_memories entity WHERE entity.id = job.entity_id))) AND job.id = (SELECT MAX(receipt.id) FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = job.entity_kind AND receipt.entity_id = job.entity_id AND receipt.canonical_user_id IS job.canonical_user_id)) ORDER BY job.id LIMIT ?)`, successCutoff, nowText, nowText, batch); err != nil {
+	if counts.DerivedIndexJobsDeleted, err = execAffected(ctx, tx, `DELETE FROM durable_jobs WHERE id IN (SELECT job.id FROM durable_jobs job WHERE job.job_kind = 'derived_index' AND job.state = 'succeeded' AND julianday(job.completed_at) <= julianday(?) AND NOT (job.operation = 'upsert' AND ((job.entity_kind = 'memory' AND EXISTS (SELECT 1 FROM memory_entries entity WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.status = 'active' AND (entity.expires_at IS NULL OR julianday(entity.expires_at) > julianday(?)))) OR (job.entity_kind = 'session_turn' AND EXISTS (SELECT 1 FROM session_turns entity JOIN sessions active ON active.canonical_user_id = entity.canonical_user_id AND active.session_id = entity.session_id AND active.generation = entity.session_generation WHERE entity.id = job.entity_id AND entity.canonical_user_id = job.canonical_user_id AND entity.delivered_at IS NOT NULL AND entity.delivery_failed_at IS NULL AND active.is_active = 1 AND julianday(active.expires_at) > julianday(?))) OR (job.entity_kind = 'global_memory' AND EXISTS (SELECT 1 FROM global_memories entity WHERE entity.id = job.entity_id)) OR (job.entity_kind = 'user_document_chunk' AND EXISTS (SELECT 1 FROM user_document_chunk_ids key JOIN user_documents d ON d.id=key.document_id WHERE key.id=job.entity_id AND d.canonical_user_id=job.canonical_user_id AND d.status IN ('ready','partial') AND d.expires_at>?))) AND job.id = (SELECT MAX(receipt.id) FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = job.entity_kind AND receipt.entity_id = job.entity_id AND receipt.canonical_user_id IS job.canonical_user_id)) ORDER BY job.id LIMIT ?)`, successCutoff, nowText, nowText, now.UnixMilli(), batch); err != nil {
 		return counts, err
 	}
 	if counts.ChallengesDeleted, err = execAffected(ctx, tx, `DELETE FROM account_link_challenges WHERE id IN (SELECT id FROM account_link_challenges WHERE julianday(expires_at) <= julianday(?) ORDER BY julianday(expires_at), id LIMIT ?)`, formatTime(now.Add(-policy.AccountChallengeGrace)), batch); err != nil {
@@ -113,6 +121,9 @@ AND NOT EXISTS(SELECT 1 FROM memory_assessment_inputs i JOIN durable_jobs j ON j
 		return counts, fmt.Errorf("commit maintenance retention: %w", err)
 	}
 	retentionCommitted = true
+	if s.log != nil {
+		s.log.Server("memory").Info("memory.documents.expired", "document expiry cleanup committed", config.F("record_kind", "measurement"), config.F("document_deleted_count", counts.UserDocumentsDeleted), config.F("reservation_deleted_count", counts.UserDocumentReservationsDeleted), config.F("status", "ok"))
+	}
 	s.signalDerivedIndex()
 
 	counts.Phase = "indexes"

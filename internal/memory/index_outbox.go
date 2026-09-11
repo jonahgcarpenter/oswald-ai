@@ -113,12 +113,17 @@ SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_
 ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
 INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
 SELECT 'derived_index', 'reconcile:global_memory:' || entity.id || ':' || entity.created_at, NULL, 'global_memory', entity.id, 'upsert', ?, ? FROM global_memories entity WHERE NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'global_memory' AND receipt.entity_id = entity.id AND receipt.canonical_user_id IS NULL)
-ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;
+INSERT INTO durable_jobs(job_kind,idempotency_key,canonical_user_id,entity_kind,entity_id,operation,available_at,updated_at)
+SELECT 'derived_index','reconcile:document:'||key.id||':'||d.canonical_user_id,d.canonical_user_id,'user_document_chunk',key.id,'upsert',?,?
+FROM user_document_chunk_ids key JOIN user_documents d ON d.id=key.document_id
+WHERE d.status IN ('ready','partial') AND d.expires_at>? AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind='derived_index' AND receipt.entity_kind='user_document_chunk' AND receipt.entity_id=key.id AND receipt.canonical_user_id=d.canonical_user_id AND receipt.operation='upsert' AND receipt.state IN ('queued','running','retry','succeeded'))
+ON CONFLICT(job_kind,idempotency_key) DO NOTHING;`, now, now, now, now, now, now, now, now, now, now, now, now, now, time.Now().UnixMilli())
 	return err
 }
 
 func enqueueDerivedChangeTx(ctx context.Context, tx *sql.Tx, userID, entityKind string, entityID int64, operation, token string) error {
-	if entityID <= 0 || (entityKind != "memory" && entityKind != "session_turn") || (operation != "upsert" && operation != "delete") {
+	if entityID <= 0 || (entityKind != "memory" && entityKind != "session_turn" && entityKind != "user_document_chunk") || (operation != "upsert" && operation != "delete") {
 		return fmt.Errorf("invalid derived index change")
 	}
 	now := formatTime(time.Now().UTC())

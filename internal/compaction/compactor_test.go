@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -72,7 +73,7 @@ func TestForegroundCompactionPreservesOriginAndUsageCollector(t *testing.T) {
 	if requestctx.UsageCollectorFromContext(client.ctx) != collector {
 		t.Fatal("compaction detached usage collector")
 	}
-	if requestctx.MetadataFromContext(ctx) != meta {
+	if !reflect.DeepEqual(requestctx.MetadataFromContext(ctx), meta) {
 		t.Fatal("compaction mutated parent metadata")
 	}
 }

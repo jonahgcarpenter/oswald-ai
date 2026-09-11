@@ -127,12 +127,14 @@ func (s *Service) cycle(ctx context.Context) {
 	s.ensureFTS(ctx, memory.IndexKindMemoryFTS)
 	s.ensureFTS(ctx, memory.IndexKindTranscriptFTS)
 	s.ensureFTS(ctx, memory.IndexKindGlobalMemoryFTS)
+	s.ensureFTS(ctx, memory.IndexKindUserDocumentFTS)
 	if s.model != "" && s.embedder != nil {
 		if _, err := s.vectorDimension(ctx); err != nil {
 			s.warn("index.vector.probe_failed", "vector", err)
 		} else {
 			s.ensureVector(ctx, memory.IndexKindMemoryVector)
 			s.ensureVector(ctx, memory.IndexKindGlobalMemoryVector)
+			s.ensureVector(ctx, memory.IndexKindUserDocumentVector)
 		}
 	}
 	s.drain(ctx)
@@ -160,6 +162,8 @@ func (s *Service) ensureFTS(ctx context.Context, kind string) {
 		err = s.buildMemoryFTS(ctx, revision)
 	} else if kind == memory.IndexKindTranscriptFTS {
 		err = s.buildTranscriptFTS(ctx, revision)
+	} else if kind == memory.IndexKindUserDocumentFTS {
+		err = s.buildUserDocuments(ctx, revision)
 	} else {
 		err = s.buildGlobalMemory(ctx, revision)
 	}
@@ -222,6 +226,8 @@ func (s *Service) ensureVector(ctx context.Context, kind string) {
 	started := time.Now()
 	if kind == memory.IndexKindMemoryVector {
 		err = s.buildMemoryVector(ctx, revision)
+	} else if kind == memory.IndexKindUserDocumentVector {
+		err = s.buildUserDocuments(ctx, revision)
 	} else {
 		err = s.buildGlobalMemory(ctx, revision)
 	}
@@ -398,6 +404,27 @@ func (s *Service) applyChange(ctx context.Context, change memory.DerivedIndexCha
 	revisions, err := s.store.WritableIndexRevisions(ctx, change.EntityKind)
 	if err != nil {
 		return err
+	}
+	if change.EntityKind == "user_document_chunk" {
+		for _, revision := range revisions {
+			record, err := s.store.UserDocumentIndexRecordByID(ctx, change.EntityID, change.UserID)
+			if errors.Is(err, sql.ErrNoRows) {
+				if err := s.store.DeleteIndexRecord(ctx, revision, change.EntityID, change.UserID); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if revision.Kind == memory.IndexKindUserDocumentVector && (s.embedder == nil || s.model == "") {
+				continue
+			}
+			if err := s.writeCurrentUserDocument(ctx, revision, record); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if change.EntityKind == "memory" {
 		for _, revision := range revisions {
@@ -609,8 +636,8 @@ func (s *Service) snapshot(ctx context.Context) {
 			log.Info("memory.jobs.health", "durable job backlog snapshot", config.F("job_kind", job.Kind), config.F("queued_count", job.Queued), config.F("active_count", job.Running), config.F("retry_count", job.Retry), config.F("dead_count", job.Dead), config.F("succeeded_count", job.Succeeded), config.F("skipped_count", job.Skipped), config.F("expired_lease_count", job.ExpiredLeaseCount), config.F("oldest_ready_age_ms", job.OldestReadyAgeMS), config.F("status", "ok"))
 		}
 	}
-	for _, kind := range []string{memory.IndexKindMemoryFTS, memory.IndexKindTranscriptFTS, memory.IndexKindGlobalMemoryFTS, memory.IndexKindMemoryVector, memory.IndexKindGlobalMemoryVector} {
-		if (kind == memory.IndexKindMemoryVector || kind == memory.IndexKindGlobalMemoryVector) && s.model == "" {
+	for _, kind := range []string{memory.IndexKindMemoryFTS, memory.IndexKindTranscriptFTS, memory.IndexKindGlobalMemoryFTS, memory.IndexKindMemoryVector, memory.IndexKindGlobalMemoryVector, memory.IndexKindUserDocumentFTS, memory.IndexKindUserDocumentVector} {
+		if (kind == memory.IndexKindMemoryVector || kind == memory.IndexKindGlobalMemoryVector || kind == memory.IndexKindUserDocumentVector) && s.model == "" {
 			continue
 		}
 		needs, err := s.store.IndexRevisionNeedsRebuild(ctx, kind)

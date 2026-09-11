@@ -25,6 +25,7 @@ type Input struct {
 	Text               string
 	CurrentImages      []llm.InputImage
 	CurrentUnsupported []string
+	HasDocuments       bool
 	Reply              *ReplyContext
 }
 

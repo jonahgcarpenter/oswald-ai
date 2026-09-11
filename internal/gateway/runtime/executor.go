@@ -50,6 +50,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Text:               req.Text,
 		CurrentImages:      req.Images,
 		CurrentUnsupported: req.Unsupported,
+		HasDocuments:       req.DocumentLoader != nil,
 		Reply:              req.Reply,
 	})
 	if decision.Action == routing.ActionIgnore {
@@ -285,7 +286,10 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			if deps.Broker != nil && !definition.OutOfBand {
 				if definition.UserExclusive || len(fenceTargets) > 0 {
 					fenceTargets = append(fenceTargets, userID)
-					commandErr = deps.Broker.RunUsersExclusive(context.Background(), fenceTargets, executeCommand)
+					commandErr = deps.Broker.RunUsersExclusive(context.Background(), fenceTargets, func() error {
+						commandReq.FencedUserIDs = append([]string(nil), fenceTargets...)
+						return executeCommand()
+					})
 				} else {
 					commandErr = deps.Broker.RunInLane(context.Background(), req.Principal, req.SessionKey, executeCommand)
 				}
@@ -363,6 +367,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		config.F("prompt_chars", len(decision.Prompt)),
 	)
 
+	meta.DocumentLoader = req.DocumentLoader
 	brokerReq := &broker.Request{
 		Usage:        usage,
 		Metadata:     meta,

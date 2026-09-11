@@ -1,6 +1,7 @@
 # Golang
 tmp/ 
 .env
+.env.documents
 
 # database
 *.db*

@@ -6,6 +6,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/accountlinking"
+	"github.com/jonahgcarpenter/oswald-ai/internal/commands/documents"
 	globalmemorycommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/globalmemory"
 	mcpcommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/mcp"
 	memoriescommands "github.com/jonahgcarpenter/oswald-ai/internal/commands/memories"
@@ -42,6 +43,7 @@ func NewService(deps Dependencies) (*commands.Service, error) {
 	registrations := []commands.Command{{Handler: help}, {Handler: sessioncommands.New(deps.Memory)}}
 	if deps.Accounts != nil {
 		registrations = append(registrations, commands.Command{Handler: memoriescommands.New(deps.Accounts, deps.Memory)})
+		registrations = append(registrations, commands.Command{Handler: documents.New(deps.Accounts, deps.Memory)})
 	}
 	if deps.MCPStore != nil && deps.MCPManager != nil {
 		registrations = append(registrations, commands.Command{Handler: mcpcommands.New(deps.MCPStore, deps.MCPManager, deps.Accounts)})

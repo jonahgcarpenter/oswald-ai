@@ -30,6 +30,7 @@ type Store struct {
 
 	formationFailpoint func(string) error
 	indexWriteHook     func(string)
+	documentDiskStat   func(string) (DocumentStorageStats, error)
 }
 
 // NewSQLiteStore opens or initializes a supported SQLite-backed memory store.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
@@ -36,6 +37,10 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int, scop
 	unsupported := make([]string, 0)
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
+		if routing.IsDocumentAttachment(attachment.Filename, attachment.ContentType) {
+			unsupported = append(unsupported, label)
+			continue
+		}
 		if len(images) >= maxImages {
 			unsupported = append(unsupported, label)
 			continue

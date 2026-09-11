@@ -27,7 +27,7 @@ func Decide(input Input) Decision {
 
 	images, unsupported := combineImages(input.CurrentImages, input.CurrentUnsupported, reply)
 	prompt := BuildPrompt(text, images, unsupported, reply)
-	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
+	if strings.TrimSpace(prompt) == "" && len(images) == 0 && !input.HasDocuments {
 		return Decision{Action: ActionGatewayFallback, ResponseText: "What do you want idiot.", Reason: "empty_prompt"}
 	}
 

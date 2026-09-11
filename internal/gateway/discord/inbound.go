@@ -90,7 +90,8 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	}
 
 	normalizationStarted := time.Now()
-	images, unsupported := dg.loadImages(msg.Attachments, log)
+	imageAttachments, documentLoader := dg.currentDocuments(msg.Attachments)
+	images, unsupported := dg.loadImages(imageAttachments, log)
 	embedImageCount := 0
 	if len(msg.Embeds) > 0 {
 		embedImages, embedUnsupported := dg.loadEmbedImagesLimit(msg.Embeds, media.MaxImagesPerRequest-len(images), log)
@@ -172,6 +173,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		Text:           text,
 		PublicUserText: publicUserText,
 		Images:         images,
+		DocumentLoader: documentLoader,
 		Unsupported:    unsupported,
 		Reply:          reply,
 		StreamFunc:     responder.Stream,

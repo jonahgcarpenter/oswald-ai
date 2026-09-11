@@ -24,6 +24,9 @@ func MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID, intro stri
 	if winnerID == loserID {
 		return nil
 	}
+	if err := mergeUserDocumentsTx(ctx, tx, winnerID, loserID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`); err != nil {
 		return fmt.Errorf("defer memory merge foreign keys: %w", err)
 	}
@@ -406,8 +409,10 @@ SELECT SUM(row_count) FROM (
 	UNION ALL SELECT COUNT(*) FROM memory_assessment_inputs WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_assessment_receipts WHERE canonical_user_id = ?
 	UNION ALL SELECT COUNT(*) FROM memory_observation_receipts WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM user_documents WHERE canonical_user_id = ?
+	UNION ALL SELECT COUNT(*) FROM user_document_reservations WHERE canonical_user_id = ?
 )
-`, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
+`, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID, loserID).Scan(&remaining); err != nil {
 		return fmt.Errorf("verify merged tenant ownership: %w", err)
 	}
 	if remaining != 0 {

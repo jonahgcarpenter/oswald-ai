@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
@@ -63,6 +64,7 @@ type Request struct {
 	PublicUserText string
 	Text           string
 	Images         []llm.InputImage
+	DocumentLoader *requestctx.DocumentLoader
 	Unsupported    []string
 	Reply          *routing.ReplyContext
 

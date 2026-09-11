@@ -43,6 +43,12 @@ type Request struct {
 	Name     string
 	Args     []string
 	ArgsText string
+
+	// FencedUserIDs is the immutable canonical-owner set held exclusively for
+	// this execution and delivery. Only the scheduler's acquired-fence callback
+	// may populate it; resolver output alone is not proof of a held fence.
+	// Nil means no exclusive fences, including direct unscheduled execution.
+	FencedUserIDs []string `json:"-"`
 }
 
 // Attachment is an in-memory file delivered with a command response.

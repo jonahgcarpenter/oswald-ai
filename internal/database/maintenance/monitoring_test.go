@@ -20,6 +20,8 @@ type monitoringSweeper struct {
 
 func TestSweepSummariesFlattenCommittedExpiryCounts(t *testing.T) {
 	counts := memory.MaintenanceCounts{CandidatesDeleted: 8, SessionCleanup: memory.SessionCleanupCounts{SessionTurnsDeleted: 1, SessionsDeactivated: 2, MemoryEntriesExpired: 3, CandidatesDeleted: 4, FormationJobsDeleted: 5, SessionSummariesDeleted: 6, CompactionJobsRetired: 7}}
+	counts.UserDocumentsDeleted = 9
+	counts.UserDocumentReservationsDeleted = 10
 	for _, failure := range []bool{false, true} {
 		var output bytes.Buffer
 		log := config.NewLogger(config.LevelInfo)
@@ -33,12 +35,12 @@ func TestSweepSummariesFlattenCommittedExpiryCounts(t *testing.T) {
 		if err := json.Unmarshal(output.Bytes(), &record); err != nil {
 			t.Fatal(err)
 		}
-		for key, want := range map[string]any{"record_kind": "summary", "session_turn_deleted_count": float64(1), "session_deactivated_count": float64(2), "memory_expired_count": float64(3), "expiry_candidate_deleted_count": float64(4), "expiry_formation_job_deleted_count": float64(5), "session_summary_deleted_count": float64(6), "compaction_job_retired_count": float64(7), "candidate_deleted_count": float64(8), "rows_changed": float64(36)} {
+		for key, want := range map[string]any{"record_kind": "summary", "session_turn_deleted_count": float64(1), "session_deactivated_count": float64(2), "memory_expired_count": float64(3), "expiry_candidate_deleted_count": float64(4), "expiry_formation_job_deleted_count": float64(5), "session_summary_deleted_count": float64(6), "compaction_job_retired_count": float64(7), "candidate_deleted_count": float64(8), "user_document_deleted_count": float64(9), "user_document_reservation_deleted_count": float64(10), "rows_changed": float64(55)} {
 			if record[key] != want {
 				t.Fatalf("failure=%v %s=%v want=%v", failure, key, record[key], want)
 			}
 		}
-		if failure && record["partial_committed_count"] != float64(36) {
+		if failure && record["partial_committed_count"] != float64(55) {
 			t.Fatalf("partial count=%v", record)
 		}
 	}

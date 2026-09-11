@@ -195,6 +195,9 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		toolnames.UserMemorySearch:        true,
 		toolnames.UserMemoryList:          true,
 		toolnames.UserMemorySave:          true,
+		toolnames.UserDocumentList:        true,
+		toolnames.UserDocumentSearch:      true,
+		toolnames.UserDocumentRead:        true,
 		toolnames.GlobalMemorySearch:      true,
 		toolnames.SessionTranscriptSearch: true,
 	}
