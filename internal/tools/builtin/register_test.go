@@ -2,13 +2,17 @@ package builtin
 
 import (
 	"encoding/json"
+	"math"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -290,13 +294,71 @@ func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 			continue
 		}
 		schema := tool.Function.Parameters
-		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != 1 || len(schema.Required) != 1 || schema.Required[0] != parameter {
+		propertyCount := 1
+		if tool.Function.Name == toolnames.WebSearch {
+			propertyCount = 2
+			results := schema.Properties["results"]
+			if results.Type != "integer" || results.Minimum == nil || *results.Minimum != 1 || results.Maximum == nil || *results.Maximum != websearch.MaxWebResults || !strings.Contains(results.Description, "defaults to 5") {
+				t.Fatalf("web.search results schema = %+v", results)
+			}
+		}
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != propertyCount || len(schema.Required) != 1 || schema.Required[0] != parameter {
 			t.Fatalf("%s schema is not strict: %+v", tool.Function.Name, schema)
 		}
 		delete(wantParameter, tool.Function.Name)
 	}
 	if len(wantParameter) != 0 {
 		t.Fatalf("web schemas were not advertised: %v", wantParameter)
+	}
+}
+
+func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	reg := newTestRegistry(t, log)
+	cfg := testConfig()
+	cfg.BraveAPIKey = "synthetic"
+	if err := Register(reg, cfg, nil, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name                   string
+		defaultLimit, maxLimit int
+	}{{toolnames.WebSearch, websearch.DefaultWebResults, websearch.MaxWebResults}, {toolnames.WebImageSearch, websearch.DefaultImageResults, websearch.MaxImageResults}} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, ok := reg.Policy(test.name)
+			if !ok || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
+				t.Fatal("missing duplicate policy")
+			}
+			omitted, err := governance.Fingerprint(test.name, map[string]interface{}{"query": " Search   Query "}, policy.NormalizeArgs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, raw := range []interface{}{test.defaultLimit, float64(test.defaultLimit), int64(test.defaultLimit), json.Number(strconv.Itoa(test.defaultLimit))} {
+				got, err := governance.Fingerprint(test.name, map[string]interface{}{"query": "search query", "results": raw}, policy.NormalizeArgs)
+				if err != nil || got != omitted {
+					t.Fatalf("default %v differs: %v", raw, err)
+				}
+			}
+			seen := map[string]bool{}
+			for limit := 1; limit <= test.maxLimit; limit++ {
+				got, err := governance.Fingerprint(test.name, map[string]interface{}{"query": "search query", "results": float64(limit)}, policy.NormalizeArgs)
+				if err != nil || seen[got] {
+					t.Fatalf("limit %d not distinct: %v", limit, err)
+				}
+				seen[got] = true
+			}
+			for _, raw := range []interface{}{nil, "2", 0, -1, 1.5, test.maxLimit + 1, math.Inf(1)} {
+				args := map[string]interface{}{"query": "search query", "results": raw}
+				normalized := policy.NormalizeArgs(args).(map[string]interface{})
+				if !reflect.DeepEqual(normalized["results"], map[string]interface{}{"invalid": raw}) {
+					t.Fatal("invalid value not preserved")
+				}
+				got, err := governance.Fingerprint(test.name, args, policy.NormalizeArgs)
+				if err == nil && got == omitted {
+					t.Fatal("invalid value collides with default")
+				}
+			}
+		})
 	}
 }
 

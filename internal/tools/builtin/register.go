@@ -58,6 +58,23 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured ComfyUI image tools", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage))
 	}
 	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
+	if braveKey == "" {
+		for _, name := range []string{toolnames.WebImageSearch, toolnames.WebImageSelect} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("disable image tool: %w", err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled image search tools because Brave is not configured", config.F("tool_name", toolnames.WebImageSearch+","+toolnames.WebImageSelect), config.F("status", "ok"))
+	} else {
+		policy := governance.ToolPolicy{MaxExecutions: 2, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchArgs(websearch.DefaultImageResults, websearch.MaxImageResults), History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+		if err := reg.RegisterHandler(toolnames.WebImageSearch, policy, registry.Handler(websearch.NewImageSearchHandler(braveKey, log))); err != nil {
+			return fmt.Errorf("register image search: %w", err)
+		}
+		policy = governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+		if err := reg.RegisterHandler(toolnames.WebImageSelect, policy, registry.Handler(websearch.NewImageSelectHandler())); err != nil {
+			return fmt.Errorf("register image selection: %w", err)
+		}
+	}
 	searxngURL := strings.TrimSpace(cfg.SearxngURL)
 	var braveClient websearch.Searcher
 	var searxngClient websearch.Searcher
@@ -98,7 +115,7 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", toolnames.WebSearch+","+toolnames.WebFetch), config.F("status", "ok"))
 	}
 	if searcher != nil {
-		searchPolicy := toolPolicy(2, normalizeSearchArgs)
+		searchPolicy := toolPolicy(2, normalizeSearchArgs(websearch.DefaultWebResults, websearch.MaxWebResults))
 		searchPolicy.MaxFailures = 2
 		if err := reg.RegisterHandler(toolnames.WebSearch, searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
 			return fmt.Errorf("failed to initialize web.search tool: %w", err)
@@ -165,8 +182,15 @@ func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) go
 	}
 }
 
-func normalizeSearchArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{"query": normalizedString(args, "query", true)}
+func normalizeSearchArgs(defaultLimit, maxLimit int) governance.ArgumentNormalizer {
+	return func(args map[string]interface{}) interface{} {
+		limit, err := websearch.ResultLimit(args, defaultLimit, maxLimit)
+		var results interface{} = limit
+		if err != nil {
+			results = map[string]interface{}{"invalid": args["results"]}
+		}
+		return map[string]interface{}{"query": normalizedString(args, "query", true), "results": results}
+	}
 }
 
 func normalizeFetchArgs(args map[string]interface{}) interface{} {

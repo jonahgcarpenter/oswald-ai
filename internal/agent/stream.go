@@ -102,6 +102,16 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
 	}
+	if toolName == toolnames.WebImageSearch || toolName == toolnames.WebImageSelect {
+		payload.Arguments = nil
+		payload.ResultText = ""
+		if toolName == toolnames.WebImageSearch {
+			if query, ok := args["query"].(string); ok {
+				payload.Arguments = map[string]interface{}{"query": strings.TrimSpace(query)}
+			}
+		}
+		return payload
+	}
 	if toolName == toolnames.UserMemorySave {
 		payload.Arguments = nil
 		payload.ResultText = ""

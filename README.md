@@ -11,7 +11,7 @@ It combines tools, private long-term memory, conversation continuity, image unde
 
 - Chat through iMessage, Discord, or the [Home Assistant integration](https://github.com/jonahgcarpenter/has-oswald-conversation)
 - Send text, images, animated GIFs, and replies with quoted context
-- Search the web, check the current time, generate images with ComfyUI, and use connected MCP tools
+- Search the web, find image previews with Brave, generate images with ComfyUI, check the current time, and use connected MCP tools
 - Remember your preferences, projects, and other useful details across conversations
 - Keep continuity in long conversations and search earlier conversation details
 - Link your accounts so your personal memory follows you across gateways
@@ -86,9 +86,9 @@ In Discord servers and iMessage groups, slash commands must mention Oswald
 | `/disconnect`  | `/disconnect [account_number]`                                                            | List or disconnect linked accounts. The final account cannot be removed.                                   |
 | `/reset`       | `/reset`                                                                                  | Clear the current conversation history and load the latest user profile.                                   |
 | `/stop`        | `/stop`                                                                                   | Stop the currently running response in this conversation without removing queued prompts.                  |
-| `/memories`    | `/memories list`, `/memories observations`                                               | Inspect durable memories or temporary observations.                                                        |
-| `/memories`    | `/memories forget <id\|all>`                                                            | Delete one durable memory or clear learned/conversation data.                                              |
-| `/memories`    | `/memories suppress <id>`, `/memories suppressions`, `/memories unsuppress <rule-id>`      | Manage persistent do-not-relearn rules for identified claims.                                               |
+| `/memories`    | `/memories list`, `/memories observations`                                                | Inspect durable memories or temporary observations.                                                        |
+| `/memories`    | `/memories forget <id\|all>`                                                              | Delete one durable memory or clear learned/conversation data.                                              |
+| `/memories`    | `/memories suppress <id>`, `/memories suppressions`, `/memories unsuppress <rule-id>`     | Manage persistent do-not-relearn rules for identified claims.                                              |
 | `/mcp servers` | `/mcp servers`                                                                            | List your user-scoped MCP servers and their model-visible descriptions.                                    |
 | `/mcp add`     | `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>] <description>` | Add or update a server with a required description. URLs and headers, but not descriptions, are encrypted. |
 | `/mcp remove`  | `/mcp remove <name>`                                                                      | Remove one of your MCP servers.                                                                            |

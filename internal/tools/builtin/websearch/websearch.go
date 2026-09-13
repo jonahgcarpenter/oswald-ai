@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
@@ -89,16 +90,49 @@ func encodeToolResponse(response SearchResponse) (string, error) {
 
 // NewHandler returns a handler that executes web searches via the provided searcher.
 func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (result governance.Result, err error) {
+		started := time.Now()
+		meta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := log.Agent("agent.tool.web.search", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
+		limit, limitErr := ResultLimit(args, DefaultWebResults, MaxWebResults)
+		invoked, rejected, resultCount := false, false, 0
+		defer func() {
+			status, outcome := "ok", "ok"
+			if resultCount == 0 {
+				outcome = "empty"
+			}
+			if result.IsDegraded {
+				status, outcome = "degraded", "degraded"
+			}
+			if err != nil {
+				status, outcome = "error", "error"
+			}
+			if rejected {
+				status, outcome = "rejected", "rejected"
+			}
+			if errors.Is(err, context.Canceled) {
+				status, outcome = "ok", "canceled"
+			}
+			// The Searcher interface cannot establish remote submission; provider
+			// measurements continue to own submission and candidate statistics.
+			fields := []config.Field{config.F("record_kind", "measurement"), config.F("tool_name", toolnames.WebSearch), config.F("status", status), config.F("outcome", outcome), config.F("is_search_invoked", invoked), config.F("result_count", resultCount), config.F("duration_ms", time.Since(started).Milliseconds())}
+			if limitErr == nil {
+				fields = append(fields, config.F("requested_result_count", limit))
+			}
+			agentLog.Info("agent.tool.web.search.complete", "web search tool completed", fields...)
+		}()
+		if limitErr != nil {
+			rejected = true
+			return governance.Result{}, limitErr
+		}
 		query, _ := args["query"].(string)
 		if err := validateQuery(query); err != nil {
+			rejected = true
 			return governance.Result{}, err
 		}
 		query = strings.TrimSpace(query)
 
-		meta := requestctx.MetadataFromContext(ctx)
-		principal, _ := requestctx.PrincipalFromContext(ctx)
-		agentLog := log.Agent("agent.tool.web.search", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
 		agentLog.Debug(
 			"agent.tool.web.search.start",
 			"starting web search tool",
@@ -106,12 +140,19 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 			config.F("query_chars", len([]rune(query))),
 		)
 
+		if err := ctx.Err(); err != nil {
+			return governance.Result{}, err
+		}
+		invoked = true
 		response, err := searcher.Search(ctx, query)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return governance.Result{}, fmt.Errorf("search canceled: %w", ctxErr)
 			}
 			return governance.Result{}, errors.New("search failed")
+		}
+		if len(response.Results) > limit {
+			response.Results = response.Results[:limit]
 		}
 		response, outputTruncated, err := boundToolResponse(response)
 		if err != nil {
@@ -124,7 +165,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 				config.F("status", "degraded"),
 			)
 		}
-		result := governance.Result{Outcome: governance.OutcomeProductive}
+		result = governance.Result{Outcome: governance.OutcomeProductive}
 		switch {
 		case len(response.Results) > 0 && (response.Degraded || len(response.UnresponsiveEngines) > 0):
 			response.Degraded = true
@@ -150,6 +191,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 			return governance.Result{}, err
 		}
 		result.Content = content
+		resultCount = len(response.Results)
 		return result, nil
 	}
 }
