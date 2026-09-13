@@ -49,7 +49,7 @@ If results are empty, degraded, irrelevant, or insufficient, say so. Do not inve
 
 Do not issue minor reformulations of an already successful query. Do not repeat searches merely to collect redundant sources or confirm facts that are already adequately supported. Once the available evidence is sufficient, answer the user.
 
-The tool returns a bounded JSON envelope containing up to eight diverse results with titles, URLs, snippets or extracted content, source metadata, and degradation status.
+The tool returns a bounded JSON envelope containing up to five diverse results by default, with titles, URLs, snippets or extracted content, source metadata, and degradation status. Set `results` from 1 to 8 to request a smaller or larger set. Request only as many results as needed; fewer may be available.
 
 ### Search Privacy
 
@@ -76,6 +76,7 @@ If a request falls into one of these categories, skip the search tool.
 | Name  | Type   | Required | Description |
 | ----- | ------ | -------- | ----------- |
 | query | string | yes      | A concise general web-search query, limited to 400 characters and 50 words |
+| results | integer | no | Maximum returned results, from 1 to 8; defaults to 5 |
 
 ## Schema
 
@@ -86,6 +87,12 @@ If a request falls into one of these categories, skip the search tool.
     "query": {
       "type": "string",
       "description": "A concise factual web-search query of at most 400 characters and 50 words, without secrets or unnecessary personal information"
+    },
+    "results": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "description": "Maximum returned results, from 1 to 8; defaults to 5. Request only as many as needed; fewer may be available."
     }
   },
   "required": ["query"],

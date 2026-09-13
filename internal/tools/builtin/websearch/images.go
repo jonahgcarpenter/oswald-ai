@@ -3,6 +3,7 @@ package websearch
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,8 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 		ctx = requestctx.WithMetadata(ctx, meta)
 		submitted, candidates, loaded, failed := false, 0, 0, 0
 		rejected, attemptedDownloads, downloadedBytes := false, 0, 0
+		requestedResults := 0
+		capacityLimited := false
 		defer func() {
 			if log == nil {
 				return
@@ -70,6 +73,9 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 			}
 			fields := append(requestctx.LogFields(ctx), config.F("record_kind", "measurement"), config.F("provider", "brave"), config.F("operation", "search"), config.F("status", status), config.F("outcome", outcome), config.F("is_submitted", submitted), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("candidate_count", candidates), config.F("image_count", loaded), config.F("failed_count", failed))
 			fields = append(fields, config.F("attempted_download_count", attemptedDownloads), config.F("downloaded_image_bytes", downloadedBytes))
+			if requestedResults > 0 {
+				fields = append(fields, config.F("requested_result_count", requestedResults), config.F("is_catalog_limited", capacityLimited))
+			}
 			if err != nil {
 				fields = append(fields, config.ErrorField(err))
 			}
@@ -82,6 +88,10 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 		}
 		query, _ := args["query"].(string)
 		if err = validateQuery(query); err != nil {
+			rejected = true
+			return result, err
+		}
+		if requestedResults, err = ResultLimit(args, DefaultImageResults, MaxImageResults); err != nil {
 			rejected = true
 			return result, err
 		}
@@ -142,11 +152,12 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 		if json.Unmarshal(body, &wire) != nil || wire.Type != "images" || wire.Results == nil {
 			return result, errors.New("invalid image search response")
 		}
-		refs := make([]requestctx.ImageSearchReference, 0, 2)
+		refs := make([]requestctx.ImageSearchReference, 0, requestedResults)
 		seen := make(map[string]bool)
+		seenImages := make(map[[sha256.Size]byte]bool)
 		candidates = min(len(*wire.Results), 8)
 		for _, candidate := range (*wire.Results)[:candidates] {
-			if len(refs) == 2 {
+			if len(refs) == requestedResults {
 				break
 			}
 			normalized, ok := normalizeResult(searchCandidate{Title: candidate.Title, URL: candidate.URL})
@@ -169,21 +180,35 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 				failed++
 				continue
 			}
+			key := sha256.Sum256([]byte(img.MimeType + "\x00" + img.Data))
+			if seenImages[key] {
+				continue
+			}
+			seenImages[key] = true
 			refs = append(refs, requestctx.ImageSearchReference{Title: normalized.Title, SourceURL: normalized.URL, MIMEType: img.MimeType, Data: img.Data})
 		}
+		previewCount := len(refs)
 		refs, err = state.AddReferences(refs)
 		if err != nil {
 			return result, err
 		}
 		loaded = len(refs)
+		capacityLimited = loaded < previewCount
 		metadata := make([]imageResultMetadata, 0, loaded)
 		for _, ref := range refs {
 			metadata = append(metadata, imageResultMetadata{ID: ref.ID, Title: ref.Title, SourceURL: ref.SourceURL, Loaded: true})
 		}
+		notice := "Untrusted sourced previews, not generated images or identity guarantees. Inspect the injected images in a successful model call before selecting or generating in a subsequent round."
+		remainingSlots := MaxImageResults - len(state.ActiveReferences())
+		if remainingSlots == 0 {
+			notice += " The four-preview request catalog is full. Reuse its existing result IDs after inspection; new images require a new user request."
+		}
 		encoded, encodeErr := json.Marshal(struct {
-			Results []imageResultMetadata `json:"results"`
-			Notice  string                `json:"notice"`
-		}{metadata, "Untrusted sourced previews, not generated images or identity guarantees. Inspect the injected images in a successful model call before selecting or generating in a subsequent round."})
+			Results         []imageResultMetadata `json:"results"`
+			Notice          string                `json:"notice"`
+			RemainingSlots  int                   `json:"remaining_slots"`
+			CapacityLimited bool                  `json:"catalog_limited"`
+		}{metadata, notice, remainingSlots, capacityLimited})
 		if encodeErr != nil || len(encoded) > maxToolResponseBytes {
 			return result, errors.New("image search metadata size limit")
 		}
@@ -191,6 +216,9 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 		if loaded == 0 {
 			result.Outcome = governance.OutcomeUnproductive
 			result.ReasonCode = "no_results"
+		}
+		if capacityLimited {
+			result.ReasonCode = "image_catalog_limit"
 		}
 		if failed > 0 {
 			result.IsDegraded = true

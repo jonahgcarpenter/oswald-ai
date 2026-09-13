@@ -1,9 +1,12 @@
 package websearch
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
@@ -365,5 +369,109 @@ func TestRetryDelayCapsLargeValues(t *testing.T) {
 	t.Parallel()
 	if got := retryDelay("9223372036854775807", time.Now()); got != maxRetryDelay {
 		t.Fatalf("retry delay = %v, want %v", got, maxRetryDelay)
+	}
+}
+
+func TestHandlerCapsRequestedResultsWithoutDegradation(t *testing.T) {
+	results := make([]SearchResult, MaxWebResults)
+	for i := range results {
+		results[i] = SearchResult{Title: fmt.Sprint(i), URL: fmt.Sprintf("https://host%d.example/", i)}
+	}
+	for _, limit := range []int{0, 1, 3, MaxWebResults} {
+		args := map[string]interface{}{"query": "test"}
+		want := limit
+		if limit == 0 {
+			want = DefaultWebResults
+		} else {
+			args["results"] = float64(limit)
+		}
+		searcher := &countingSearcher{response: SearchResponse{Results: results, Stats: CandidateStats{CandidateCount: 20}}}
+		result, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := DecodeToolResponse(result.Content)
+		if err != nil || len(response.Results) != want || result.IsDegraded || response.Degraded || searcher.response.Stats.CandidateCount != 20 || searcher.calls != 1 {
+			t.Fatalf("limit %d: response=%+v result=%+v err=%v", limit, response, result, err)
+		}
+		for i, result := range response.Results {
+			if result.Title != fmt.Sprint(i) {
+				t.Fatal("source order changed")
+			}
+		}
+	}
+}
+
+func TestHandlerRejectsInvalidResultsBeforeSearch(t *testing.T) {
+	for _, raw := range []interface{}{nil, "5", true, 0, -1, 9, 1.5, math.NaN(), math.Inf(1), json.Number("bad")} {
+		searcher := &countingSearcher{}
+		if _, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "results": raw}); err == nil || searcher.calls != 0 {
+			t.Fatalf("invalid %v: calls=%d err=%v", raw, searcher.calls, err)
+		}
+	}
+}
+
+func TestHandlerTerminalResultMeasurement(t *testing.T) {
+	const canary = "private_search_payload"
+	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+		for _, test := range []struct {
+			name, status, outcome         string
+			args                          map[string]interface{}
+			response                      SearchResponse
+			err                           error
+			canceled, invoked, validLimit bool
+			count                         int
+		}{
+			{name: "success", status: "ok", outcome: "ok", invoked: true, validLimit: true, count: 1, response: SearchResponse{Results: []SearchResult{{Title: canary}}}},
+			{name: "empty", status: "ok", outcome: "empty", invoked: true, validLimit: true},
+			{name: "degraded", status: "degraded", outcome: "degraded", invoked: true, validLimit: true, count: 1, response: SearchResponse{Results: []SearchResult{{Title: canary}}, Degraded: true}},
+			{name: "failure", status: "error", outcome: "error", invoked: true, validLimit: true, err: errors.New(canary)},
+			{name: "invalid results", status: "rejected", outcome: "rejected", args: map[string]interface{}{"query": canary, "results": canary}},
+			{name: "invalid query", status: "rejected", outcome: "rejected", validLimit: true, args: map[string]interface{}{"query": ""}},
+			{name: "canceled", status: "ok", outcome: "canceled", validLimit: true, canceled: true},
+		} {
+			t.Run(fmt.Sprintf("%v/%s", level, test.name), func(t *testing.T) {
+				var output bytes.Buffer
+				log := config.NewLogger(level)
+				log.SetOutput(&output)
+				ctx, cancel := context.WithCancel(requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: "req_search", OperationID: "op_search", ParentOperationID: "op_parent"}))
+				defer cancel()
+				if test.canceled {
+					cancel()
+				}
+				args := test.args
+				if args == nil {
+					args = map[string]interface{}{"query": canary}
+				}
+				_, _ = NewHandler(&countingSearcher{response: test.response, err: test.err}, log)(ctx, args)
+				if strings.Contains(output.String(), canary) {
+					t.Fatal("private payload logged")
+				}
+				completions := 0
+				for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+					var record map[string]interface{}
+					if err := json.Unmarshal([]byte(line), &record); err != nil {
+						t.Fatal(err)
+					}
+					if record["event"] != "agent.tool.web.search.complete" {
+						continue
+					}
+					completions++
+					if record["level"] != "info" || record["record_kind"] != "measurement" || record["request_id"] != "req_search" || record["operation_id"] != "op_search" || record["parent_operation_id"] != "op_parent" || record["status"] != test.status || record["outcome"] != test.outcome || record["result_count"] != float64(test.count) || record["is_search_invoked"] != test.invoked {
+						t.Fatalf("measurement=%+v", record)
+					}
+					limit, exists := record["requested_result_count"]
+					if exists != test.validLimit || exists && limit != float64(DefaultWebResults) {
+						t.Fatalf("requested count=%v", limit)
+					}
+					if _, ok := record["duration_ms"].(float64); !ok {
+						t.Fatal("duration is not numeric")
+					}
+				}
+				if completions != 1 {
+					t.Fatalf("completions=%d logs=%s", completions, output.String())
+				}
+			})
+		}
 	}
 }

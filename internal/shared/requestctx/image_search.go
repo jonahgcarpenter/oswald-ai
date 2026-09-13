@@ -58,32 +58,26 @@ func (s *ImageSearchState) ReserveSearch() error {
 	return nil
 }
 
-// AddReferences atomically admits at most two tool-normalized previews, assigns
+// AddReferences validates and admits at most four tool-normalized previews, assigns
 // server-owned IDs, and returns unique value copies in search order. Repeated
 // original MIME/data pairs reuse IDs and refresh recency, preserving provenance.
-// The catalog never exceeds four unique previews.
+// New previews beyond the four-entry catalog are omitted; existing IDs remain
+// reusable even at capacity. Invalid batches never mutate the catalog.
 func (s *ImageSearchState) AddReferences(refs []ImageSearchReference) ([]ImageSearchReference, error) {
 	if s == nil {
 		return nil, errors.New("image search state unavailable")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(refs) > 2 {
+	if len(refs) > 4 {
 		return nil, errors.New("image search catalog limit reached")
 	}
 	keys := make([][sha256.Size]byte, len(refs))
-	newKeys := make(map[[sha256.Size]byte]bool)
 	for i, ref := range refs {
 		if ref.Data == "" || (ref.MIMEType != "image/jpeg" && ref.MIMEType != "image/png") {
 			return nil, errors.New("invalid normalized preview")
 		}
 		keys[i] = sha256.Sum256([]byte(ref.MIMEType + "\x00" + ref.Data))
-		if s.originalIDs[keys[i]] == "" {
-			newKeys[keys[i]] = true
-		}
-	}
-	if len(s.refs)+len(newKeys) > 4 {
-		return nil, errors.New("image search catalog limit reached")
 	}
 	if s.originalIDs == nil {
 		s.originalIDs = make(map[[sha256.Size]byte]string)
@@ -96,6 +90,9 @@ func (s *ImageSearchState) AddReferences(refs []ImageSearchReference) ([]ImageSe
 			continue
 		}
 		if id == "" {
+			if len(s.refs) == 4 {
+				continue
+			}
 			s.nextID++
 			ref.ID = fmt.Sprintf("search-%d", s.nextID)
 			s.originalIDs[keys[i]] = ref.ID
@@ -115,14 +112,15 @@ func (s *ImageSearchState) AddReferences(refs []ImageSearchReference) ([]ImageSe
 	return out, nil
 }
 
-// ActiveReferences returns value copies of the latest two loaded previews.
+// ActiveReferences returns copies of all admitted previews, oldest first, with
+// a maximum of four. The agent may omit whole previews to fit its input budget.
 func (s *ImageSearchState) ActiveReferences() []ImageSearchReference {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]ImageSearchReference(nil), s.refs[max(0, len(s.refs)-2):]...)
+	return append([]ImageSearchReference(nil), s.refs...)
 }
 
 // MarkInspected verifies the original request image against the catalog and

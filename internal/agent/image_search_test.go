@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -22,6 +23,156 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
+func TestImageSearchFourReferencesAcrossCallsAndRequestIsolation(t *testing.T) {
+	chat := &fakeChatter{}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	var refs []requestctx.ImageSearchReference
+	for i := 0; i < 4; i++ {
+		img := testInputImage(t, 20+i*10, 20)
+		refs = append(refs, requestctx.ImageSearchReference{Title: "private_four_preview", MIMEType: img.MimeType, Data: img.Data})
+	}
+	searches := 0
+	var state *requestctx.ImageSearchState
+	policy := governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.WebImageSearch}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+		state = requestctx.ImageSearchStateFromContext(ctx)
+		if err := state.ReserveSearch(); err != nil {
+			return governance.Result{}, err
+		}
+		batch := refs[searches*2 : searches*2+2]
+		searches++
+		admitted, err := state.AddReferences(batch)
+		if err != nil {
+			return governance.Result{}, err
+		}
+		if searches == 2 && (len(state.SelectedReferences()) != 1 || state.SelectedReferences()[0].ID != "search-1") {
+			t.Fatal("second search lost first selection")
+		}
+		encoded, err := json.Marshal(admitted)
+		return productiveResult(string(encoded)), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.WebImageSelect}, policy, registry.Handler(websearch.NewImageSelectHandler())); err != nil {
+		t.Fatal(err)
+	}
+	a, store := newTestAgent(t, chat, nil, reg)
+	first := toolCallResponse("search-first", toolnames.WebImageSearch, map[string]interface{}{"query": "first"})
+	first.Message.ToolCalls = append(first.Message.ToolCalls, toolCallResponse("premature", toolnames.WebImageSelect, map[string]interface{}{"result_id": "search-1"}).Message.ToolCalls...)
+	second := toolCallResponse("select-first", toolnames.WebImageSelect, map[string]interface{}{"result_id": "search-1"})
+	second.Message.ToolCalls = append(second.Message.ToolCalls, toolCallResponse("search-second", toolnames.WebImageSearch, map[string]interface{}{"query": "second"}).Message.ToolCalls...)
+	second.Message.ToolCalls = append(second.Message.ToolCalls, toolCallResponse("premature-fourth", toolnames.WebImageSelect, map[string]interface{}{"result_id": "search-4"}).Message.ToolCalls...)
+	selectRest := toolCallResponse("select-2", toolnames.WebImageSelect, map[string]interface{}{"result_id": "search-2"})
+	for i := 3; i <= 5; i++ {
+		selectRest.Message.ToolCalls = append(selectRest.Message.ToolCalls, toolCallResponse(fmt.Sprintf("select-%d", i), toolnames.WebImageSelect, map[string]interface{}{"result_id": fmt.Sprintf("search-%d", i)}).Message.ToolCalls...)
+	}
+	chat.responses = []*llm.ChatResponse{first, second, selectRest, {Message: llm.ChatMessage{Role: "assistant", Content: "Four previews."}}}
+	response, err := processAgent(a, "four", "discord", "session", "user-1", "User", "find four previews", nil, nil)
+	if err != nil || response == nil || response.Error != "" || len(response.Attachments) != 4 || len(chat.requests) != 4 || searches != 2 {
+		t.Fatalf("response=%+v requests=%d searches=%d err=%v", response, len(chat.requests), searches, err)
+	}
+	for i, want := range []int{0, 2, 4, 4} {
+		images := searchReferenceImages(chat.requests[i])
+		if len(images) != want {
+			t.Fatalf("round %d images=%d want=%d", i, len(images), want)
+		}
+		for j, img := range images {
+			if img.Data != refs[j].Data || img.Source != fmt.Sprintf("search-reference:search-%d", j+1) {
+				t.Fatal("reference bytes or oldest-first order changed")
+			}
+		}
+	}
+	for i, id := range []string{"premature", "premature-fourth"} {
+		rejected := false
+		for _, message := range chat.requests[i+1].Messages {
+			if message.Role == "tool" && message.ToolCallID == id && strings.Contains(message.Content, "select an image result inspected") {
+				rejected = true
+			}
+		}
+		if !rejected {
+			t.Fatalf("same-batch selection %s was not rejected", id)
+		}
+	}
+	for i, attachment := range response.Attachments {
+		data, _ := base64.StdEncoding.DecodeString(refs[i].Data)
+		if !bytes.Equal(attachment.Data, data) {
+			t.Fatal("delivered bytes differ from inspected preview")
+		}
+	}
+	if len(state.ActiveReferences()) != 4 || len(state.SelectedReferences()) != 4 {
+		t.Fatal("catalog or selection exceeded four")
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", response.SessionGeneration, 10)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("turns=%d err=%v", len(turns), err)
+	}
+	history, err := json.Marshal(turns[0].ToolHistory)
+	if err != nil || bytes.Contains(history, []byte("private_four_preview")) {
+		t.Fatal("preview metadata persisted in tool history")
+	}
+	for _, ref := range refs {
+		if bytes.Contains(history, []byte(ref.Data)) {
+			t.Fatal("preview bytes persisted")
+		}
+	}
+	var count int
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM session_images`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("persisted images=%d err=%v", count, err)
+	}
+	chat.requests = nil
+	chat.responses = []*llm.ChatResponse{selectRest, {Message: llm.ChatMessage{Role: "assistant", Content: "Search again."}}}
+	response, err = processAgent(a, "next-four", "discord", "session", "user-1", "User", "send again", nil, nil)
+	if err != nil || response == nil || len(response.Attachments) != 0 {
+		t.Fatalf("reused catalog: response=%+v err=%v", response, err)
+	}
+	for _, req := range chat.requests {
+		if len(searchReferenceImages(req)) != 0 {
+			t.Fatal("request-local references replayed")
+		}
+	}
+}
+
+func TestImageSearchBudgetOmitsFourReferencesOldestFirst(t *testing.T) {
+	for keep := 0; keep <= 4; keep++ {
+		t.Run(fmt.Sprintf("keep_%d", keep), func(t *testing.T) {
+			state := requestctx.NewImageSearchState()
+			var input []requestctx.ImageSearchReference
+			for i := 0; i < 4; i++ {
+				img := testInputImage(t, 20+i*10, 20)
+				input = append(input, requestctx.ImageSearchReference{MIMEType: img.MimeType, Data: img.Data})
+			}
+			refs, err := state.AddReferences(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := requestctx.WithImageSearchState(context.Background(), state)
+			message := searchImageContext(refs)
+			wanted := searchImageContext(refs[4-keep:])
+			compaction := &foregroundCompactionState{inputLimit: budget.EstimateRequest([]llm.ChatMessage{wanted}, nil), searchContext: &message}
+			fitted := compaction.fitSearchImages(ctx, []llm.ChatMessage{message}, nil)
+			images := searchReferenceImages(llm.ChatRequest{Messages: fitted})
+			if len(images) != keep {
+				t.Fatalf("kept=%d want=%d", len(images), keep)
+			}
+			for i, img := range images {
+				if img.Data != refs[4-keep+i].Data {
+					t.Fatal("budget omitted newest rather than oldest")
+				}
+			}
+			if !reflect.DeepEqual(state.ActiveReferences(), refs) {
+				t.Fatal("budget mutated catalog")
+			}
+			markSearchImagesInspected(ctx, fitted, fitted, nil)
+			for i, ref := range refs {
+				_, err := state.InspectedReference(ref.ID)
+				if (err == nil) != (i >= 4-keep) {
+					t.Fatal("omitted reference became selectable")
+				}
+			}
+		})
+	}
+}
+
 func TestSearchReferenceMeasurementsAreSafe(t *testing.T) {
 	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
@@ -30,7 +181,11 @@ func TestSearchReferenceMeasurementsAreSafe(t *testing.T) {
 			root.SetOutput(&output)
 			log := root.Agent("agent", "reference-request", "user-1", "discord", "test-model")
 			state := requestctx.NewImageSearchState()
-			refs, err := state.AddReferences([]requestctx.ImageSearchReference{{Title: "private-title", SourceURL: "https://private.example", MIMEType: "image/png", Data: "private-bytes"}})
+			var input []requestctx.ImageSearchReference
+			for i := 0; i < 4; i++ {
+				input = append(input, requestctx.ImageSearchReference{Title: "private-title", SourceURL: "https://private.example", MIMEType: "image/png", Data: fmt.Sprintf("private-bytes-%d", i)})
+			}
+			refs, err := state.AddReferences(input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,8 +205,11 @@ func TestSearchReferenceMeasurementsAreSafe(t *testing.T) {
 				if err := json.Unmarshal([]byte(lines[i]), &record); err != nil {
 					t.Fatal(err)
 				}
-				if record["event"] != event || record["level"] != "info" || record["request_id"] != "reference-request" || record["image_count"] != float64(1-i) {
+				if record["event"] != event || record["level"] != "info" || record["request_id"] != "reference-request" || record["image_count"] != float64(4*(1-i)) {
 					t.Fatalf("unexpected measurement: %v", record)
+				}
+				if i == 1 && record["omitted_image_count"] != float64(4) {
+					t.Fatalf("omission count: %v", record)
 				}
 			}
 		})

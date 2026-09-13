@@ -64,8 +64,8 @@ func TestImageSearchDedupRecencyAtomicValidationAndOriginalIdentity(t *testing.T
 	before := append([]ImageSearchReference(nil), s.refs...)
 	for _, invalid := range [][]ImageSearchReference{
 		{refs[0], {MIMEType: "image/png"}},
-		{refs[0], {MIMEType: "image/png", Data: "overflow"}},
-		{refs[0], refs[1], refs[2]},
+		{refs[0], {MIMEType: "image/gif", Data: "invalid"}},
+		{refs[0], refs[1], refs[2], refs[3], refs[0]},
 	} {
 		if _, err := s.AddReferences(invalid); err == nil || !reflect.DeepEqual(s.refs, before) || s.nextID != 4 || len(s.originalIDs) != 4 {
 			t.Fatal("invalid batch mutated catalog")
@@ -83,11 +83,55 @@ func TestImageSearchDedupRecencyAtomicValidationAndOriginalIdentity(t *testing.T
 	if err != nil || len(got) != 2 || got[0].ID != "search-1" || got[0].Data != "resized" || got[0].Title != "first" || got[1].ID != "search-3" {
 		t.Fatalf("repeated references: %v %v", got, err)
 	}
-	if !reflect.DeepEqual(s.ActiveReferences(), got) || s.MarkSelected(got[0].ID) || s.SelectedReferences()[0].ID != "search-1" {
+	wantActive := []ImageSearchReference{before[1], before[3], got[0], got[1]}
+	if !reflect.DeepEqual(s.ActiveReferences(), wantActive) || s.MarkSelected(got[0].ID) || s.SelectedReferences()[0].ID != "search-1" {
 		t.Fatal("recency changed selection")
 	}
-	if _, err := s.AddReferences(nil); err != nil || !reflect.DeepEqual(s.ActiveReferences(), got) {
+	if _, err := s.AddReferences(nil); err != nil || !reflect.DeepEqual(s.ActiveReferences(), wantActive) {
 		t.Fatal("empty search changed active previews")
+	}
+}
+
+func TestImageSearchPartialAndFullCatalogAdmission(t *testing.T) {
+	s := NewImageSearchState()
+	refs := []ImageSearchReference{
+		{MIMEType: "image/png", Data: "a"},
+		{MIMEType: "image/png", Data: "b"},
+		{MIMEType: "image/png", Data: "c"},
+		{MIMEType: "image/png", Data: "d"},
+		{MIMEType: "image/png", Data: "e"},
+		{MIMEType: "image/png", Data: "f"},
+		{MIMEType: "image/png", Data: "g"},
+	}
+	first, err := s.AddReferences(refs[:3])
+	if err != nil || len(first) != 3 {
+		t.Fatalf("first admission: %v %v", first, err)
+	}
+	s.MarkInspected(first[0], first[0])
+	s.MarkSelected(first[0].ID)
+	second, err := s.AddReferences(refs[3:])
+	if err != nil || len(second) != 1 || second[0].ID != "search-4" {
+		t.Fatalf("partial admission: %v %v", second, err)
+	}
+	for i := 0; i < 10; i++ {
+		got, err := s.AddReferences([]ImageSearchReference{refs[4], refs[0], refs[5], refs[3]})
+		if err != nil || len(got) != 2 || got[0].ID != "search-1" || got[1].ID != "search-4" {
+			t.Fatalf("full catalog reuse: %v %v", got, err)
+		}
+		if len(s.refs) != 4 || len(s.originalIDs) != 4 || s.nextID != 4 || len(s.SelectedReferences()) != 1 {
+			t.Fatal("omitted previews grew catalog state or lost selection")
+		}
+	}
+	active := s.ActiveReferences()
+	if active[0].ID != "search-2" || active[1].ID != "search-3" || active[2].ID != "search-1" || active[3].ID != "search-4" {
+		t.Fatalf("oldest-first recency: %v", active)
+	}
+	for _, ref := range active {
+		s.MarkInspected(ref, ref)
+		s.MarkSelected(ref.ID)
+	}
+	if len(s.SelectedReferences()) != 4 || s.MarkSelected("search-5") || len(s.inspected) != 4 {
+		t.Fatal("selection exceeded catalog capacity")
 	}
 }
 
