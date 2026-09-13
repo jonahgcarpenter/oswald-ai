@@ -867,6 +867,9 @@ func TestProcessRetriesStoppedModelRunnerWithExponentiallySmallerImages(t *testi
 	}
 	wants := []image.Point{{X: 800, Y: 600}, {X: 600, Y: 450}, {X: 450, Y: 338}}
 	for i, req := range requests {
+		if !req.Stream {
+			t.Fatal("image retry did not retain silent streaming transport")
+		}
 		got := inputImageDimensions(t, req.Messages[len(req.Messages)-1].Images[0])
 		if got != wants[i] {
 			t.Fatalf("attempt %d dimensions = %v, want %v", i+1, got, wants[i])
@@ -1288,7 +1291,7 @@ func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
 				t.Fatalf("model requests = %d, want 3", len(chat.requests))
 			}
 			for i, req := range chat.requests {
-				if req.Stream != streaming || !requestHasTool(req, "home.tools") || requestHasTool(req, "home.turn_on") != (i > 0) {
+				if !req.Stream || !requestHasTool(req, "home.tools") || requestHasTool(req, "home.turn_on") != (i > 0) {
 					t.Fatalf("request %d: stream=%t tools=%v", i, req.Stream, toolNames(req))
 				}
 			}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -477,8 +478,11 @@ func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
 			t.Fatal("streaming request did not set stream=true")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"model\":\"silent-model\",\"choices\":[{\"delta\":{\"reasoning\":\"private thought\",\"content\":\"hello\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning\":\" continued\",\"content\":\" world\"}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"memory.save\",\"arguments\":\"{\\\"ok\\\":\"}}]}}]}\n\n"))
 		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"true}\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8,\"total_tokens\":15}}\n\n"))
 		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer server.Close()
@@ -488,9 +492,88 @@ func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].Function.Arguments["ok"] != true {
+	if resp.Model != "silent-model" || resp.Message.Content != "hello world" || resp.Message.Thinking != "private thought continued" || resp.DoneReason != "tool_calls" {
+		t.Fatalf("unexpected silent stream response: %+v", resp)
+	}
+	if resp.PromptTokens != 7 || resp.CompletionTokens != 8 || resp.TotalTokens != 15 {
+		t.Fatalf("unexpected silent stream usage: %+v", resp)
+	}
+	if len(resp.Message.ToolCalls) != 1 || resp.Message.ToolCalls[0].ID != "call_1" || resp.Message.ToolCalls[0].Function.Name != "memory.save" || resp.Message.ToolCalls[0].Function.RawArguments != `{"ok":true}` || resp.Message.ToolCalls[0].Function.Arguments["ok"] != true {
 		t.Fatalf("tool calls=%+v", resp.Message.ToolCalls)
 	}
+}
+
+func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
+	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+		t.Run(fmt.Sprint(level), func(t *testing.T) {
+			var output bytes.Buffer
+			log := config.NewLogger(level)
+			log.SetOutput(&output)
+			established, disconnected := make(chan struct{}), make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"reasoning\":%q}}],\"usage\":{\"prompt_tokens\":7}}\n\n", reflectedSoulCanary)
+				w.(http.Flusher).Flush()
+				close(established)
+				<-r.Context().Done()
+				close(disconnected)
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			client := newTestGatewayClient(server.URL, "", "", log)
+			// Cancel on the next body read, after the parser consumed the usage frame.
+			// This synchronizes partial telemetry without needing a progress callback.
+			client.HTTPClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				resp, err := http.DefaultTransport.RoundTrip(r)
+				if err == nil {
+					resp.Body = &cancelAfterStreamFrame{ReadCloser: resp.Body, cancel: cancel}
+				}
+				return resp, err
+			})
+			_, err := client.Chat(ctx, ChatRequest{Model: "model", Stream: true}, nil)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Chat error=%v, want cancellation", err)
+			}
+			select {
+			case <-established:
+			default:
+				t.Fatal("stream was not established")
+			}
+			select {
+			case <-disconnected:
+			case <-time.After(5 * time.Second):
+				t.Fatal("server did not observe closed stream")
+			}
+			records := measurementRecords(t, output.String(), "provider.gateway.chat.complete")
+			if len(records) != 1 {
+				t.Fatalf("completion count=%d logs=%s", len(records), output.String())
+			}
+			for key, want := range map[string]any{"level": "info", "status": "ok", "outcome": "canceled", "is_submitted": true, "is_usage_reported": true, "is_usage_complete": false, "prompt_tokens": float64(7)} {
+				if records[0][key] != want {
+					t.Errorf("%s=%v want %v", key, records[0][key], want)
+				}
+			}
+			if strings.Contains(output.String(), reflectedSoulCanary) {
+				t.Fatal("stream reasoning leaked into logs")
+			}
+		})
+	}
+}
+
+type cancelAfterStreamFrame struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	frame  string
+}
+
+func (r *cancelAfterStreamFrame) Read(p []byte) (int, error) {
+	if strings.Contains(r.frame, "\n\n") {
+		r.cancel()
+	}
+	n, err := r.ReadCloser.Read(p)
+	r.frame += string(p[:n])
+	return n, err
 }
 
 func TestGatewayClientChatStreamCancellationStopsAcceptedRequest(t *testing.T) {

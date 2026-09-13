@@ -473,18 +473,18 @@ Source decoding precedes resizing, and animated GIF uses full animation decoding
 
 ## Model Gateway Transport
 
-`llm/gateway.go` maps provider-neutral types through `gateway_wire.go`. Chat transport follows the request's streaming setting, not whether tools are present:
+`llm/gateway.go` maps provider-neutral types through `gateway_wire.go`. The agent always requests streaming model transport, independently of tools or gateway progress callbacks:
 
 | Request | Transport |
 | --- | --- |
 | Foreground with stream callback: Discord and Home Assistant | Synchronous streaming `POST /v1/chat/completions` |
-| Foreground without stream callback: iMessage | `POST /v1/async/chat/completions`, authenticated status polling |
+| Foreground without progress callback: iMessage | Silent synchronous streaming `POST /v1/chat/completions`; final response only to the user |
 | Private extraction and compaction | Silent synchronous chat stream |
 | Embeddings | `POST /v1/async/embeddings`, authenticated status polling |
 
-Tool rounds and final tools-disabled calls retain the foreground stream setting. Silent streams allow foreground priority to close the active background HTTP request immediately.
+Tool rounds, retries, and final tools-disabled calls retain streaming transport. The client assembles silent streams into complete responses; iMessage does not send intermediate text, reasoning, or tool activity. Its existing typing indicators, final attachment/text delivery, reply threading, and delivery acknowledgement are unchanged. Silent streams also allow foreground priority to close the active background HTTP request immediately.
 
-- The gateway must support the Bifrost async contract and have a Logs Store configured for async routes. Polling defaults to one second; Oswald does not set a total LLM-client timeout.
+- Embeddings still require the Bifrost async contract and a Logs Store configured for async routes when enabled. The low-level client retains async chat support for explicit non-streaming requests, but foreground agent calls do not use it. Polling defaults to one second; Oswald does not set a total LLM-client timeout or an overall agent generation deadline. Each model invocation creates a separate stream (or, for an explicit non-streaming client call, a separate async job); there is no shared async job spanning agent tool rounds. Streaming does not bypass upstream provider or proxy timeouts.
 - Async IDs are process-local, not persisted. Cancellation/restart after submission may leave remote jobs running until completion or the provider's independently configured timeout; no async cancellation endpoint is implemented here.
 - Current-turn images use OpenAI-compatible image URL content blocks. Provider-reported thinking, content, usage, and finish reasons are mapped separately.
 - `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap. Private extraction/compaction send the resolved value as `max_tokens`.
