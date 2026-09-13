@@ -164,6 +164,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
 	memoryStage := requestctx.NewMemoryStageCollector()
 	ctx = requestctx.WithMemoryStageCollector(ctx, memoryStage)
+	imageSearch := requestctx.NewImageSearchState()
+	ctx = requestctx.WithImageSearchState(ctx, imageSearch)
+	imageFailureText := imageSizeFallback
+	if len(userImages) == 0 {
+		imageFailureText = "I couldn't process the reference images. Please try another search or try again later."
+	}
 	formationSourceText, _ := stripReplyContext(userPrompt)
 	inherited := requestctx.MetadataFromContext(ctx)
 	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, a.model, formationSourceText
@@ -179,7 +185,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
-		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
+		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage, toolnames.WebImageSelect)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -336,6 +342,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		previousSummary = &sessionSummary
 	}
 	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, profileContent, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	foregroundCompaction.log = reqLog
 	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
@@ -400,6 +407,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var generatedImages []requestctx.InputImage
 	var visionGeneratedImages []requestctx.InputImage
 	var generatedAttachmentSlots []int
+	partialImageResponse := func() string {
+		if len(generatedImages) > 0 {
+			return generatedImagePartialResponse
+		}
+		return foundImagePartialResponse
+	}
 	imageHighwater := make(map[string]int)
 	for _, image := range contextImages {
 		if image.VersionHighwater > imageHighwater[image.ImageID] {
@@ -489,14 +502,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if err == nil {
 				// Continue with the response recovered after compaction.
 				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
-			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
-				useFallback(generatedImagePartialResponse)
+			} else if (len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0) && !llm.IsTemporaryOllamaToolParserError(err) {
+				useFallback(partialImageResponse())
 				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
-				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
 				if streamCallback != nil {
-					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
 				}
 			} else if llm.IsTemporaryOllamaToolParserError(err) {
 				// Temporary workaround for an upstream Ollama/Qwen tool-markup parser
@@ -515,6 +528,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					return nil, ctxErr
 				}
 				if err == nil {
+					markSearchImagesInspected(ctx, req.Messages, req.Messages, reqLog)
 					reqLog.Info("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
@@ -529,11 +543,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						config.F("status", "error"),
 						config.ErrorField(err),
 					)
-					if len(generatedImages) > 0 {
+					if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
 						if llm.IsContextLengthExceededError(err) {
 							useFallback(contextCompactionFallback)
 						} else {
-							useFallback(generatedImagePartialResponse)
+							useFallback(partialImageResponse())
 						}
 						goto finalize
 					}
@@ -725,6 +739,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						}
 					}
 				}
+				if execErr != nil && toolName == toolnames.WebImageSelect {
+					id, _ := tc.Function.Arguments["result_id"].(string)
+					imageSearch.Unselect(id)
+				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
 				status, outcome := "ok", string(result.Outcome)
 				if result.IsDegraded {
@@ -835,6 +853,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
 			foregroundCompaction.imageContext = &imageContext
 		}
+		if refs := imageSearch.ActiveReferences(); len(refs) > 0 {
+			referenceContext := searchImageContext(refs)
+			messages = replaceSessionImageContext(messages, foregroundCompaction.searchContext, referenceContext)
+			foregroundCompaction.searchContext = &referenceContext
+		}
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
@@ -896,14 +919,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if llm.IsContextLengthExceededError(err) {
 					useFallback(contextCompactionFallback)
 					goto finalize
-				} else if len(generatedImages) > 0 {
-					useFallback(generatedImagePartialResponse)
+				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
+					useFallback(partialImageResponse())
 					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
+					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
 					}
 				} else {
 					errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
@@ -950,6 +973,9 @@ finalize:
 		} else if compactionStats.Compacted {
 			messages = preparedMessages
 			retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+			retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
+		} else {
+			retryMessages = preparedMessages
 		}
 
 		if finalContent == "" {
@@ -977,6 +1003,7 @@ finalize:
 					} else if recoveryStats.Compacted {
 						messages = preparedMessages
 						retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+						retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
 						retryReq.Messages = retryMessages
 						modelIterations++
 						retryResp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
@@ -999,14 +1026,14 @@ finalize:
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
 					}
-				} else if len(generatedImages) > 0 {
-					useFallback(generatedImagePartialResponse)
-					finalContent = generatedImagePartialResponse
+				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
+					useFallback(partialImageResponse())
+					finalContent = partialImageResponse()
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					finalContent = imageSizeFallback
+					finalContent = imageFailureText
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
 					}
 				}
 			} else {
@@ -1037,6 +1064,8 @@ finalize:
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
+	baseFinalContent := finalContent
+	finalContent = appendSearchImageAttribution(finalContent, imageSearch.SelectedReferences())
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)
 	}
@@ -1094,7 +1123,7 @@ finalize:
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || baseFinalContent == contextCompactionFallback || baseFinalContent == generatedImagePartialResponse || baseFinalContent == foundImagePartialResponse {
 		responseStatus = "degraded"
 	}
 	reqLog.Debug("agent.response.detail", "completed agent response",
@@ -1116,13 +1145,13 @@ finalize:
 	if imageSizeFallbackUsed {
 		responseKind = "image_fallback"
 	}
-	if finalContent == contextCompactionFallback {
+	if baseFinalContent == contextCompactionFallback {
 		responseKind = "context_fallback"
 	}
-	if finalContent == emptyResponseFallback && !temporaryParserFallback {
+	if baseFinalContent == emptyResponseFallback && !temporaryParserFallback {
 		responseKind = "empty_fallback"
 	}
-	if finalContent == generatedImagePartialResponse {
+	if baseFinalContent == generatedImagePartialResponse || baseFinalContent == foundImagePartialResponse {
 		responseKind = "image_partial"
 	}
 	return &Response{

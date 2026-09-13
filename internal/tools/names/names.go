@@ -2,9 +2,11 @@
 package names
 
 const (
-	CurrentTime = "time.current"
-	WebSearch   = "web.search"
-	WebFetch    = "web.fetch"
+	CurrentTime    = "time.current"
+	WebSearch      = "web.search"
+	WebFetch       = "web.fetch"
+	WebImageSearch = "web.image_search"
+	WebImageSelect = "web.image_select"
 
 	UserMemorySearch = "user_memory_search"
 	UserMemoryList   = "user_memory_list"

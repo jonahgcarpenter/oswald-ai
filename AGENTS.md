@@ -72,7 +72,7 @@ internal/
   soul/                      Read-only system-prompt loader
   startup/                   Application assembly, ordered cleanup, startup output
   tools/
-    names/                   All ten stable builtin tool-name constants
+    names/                   All twelve stable builtin tool-name constants
     exposure/                Request-local tool visibility
     governance/              Duplicate, per-tool, and request-wide limits
     registry/                Markdown schemas and builtin handler registration
@@ -345,7 +345,7 @@ The Docker working directory is `/home/oswald-ai/`, so the default database reso
 
 ## Tools And MCP
 
-Builtin names live in `tools/names/names.go`; its contract test pins all ten strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
+Builtin names live in `tools/names/names.go`; its contract test pins all twelve strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
 
 | Tool | Enablement | Execution / Failure / Unproductive Limits | Durable History |
 | --- | --- | --- | --- |
@@ -357,6 +357,8 @@ Builtin names live in `tools/names/names.go`; its contract test pins all ten str
 | `global_memory_search` | Always | 0 / 0 / 0 | Full |
 | `web.search` | Brave or SearXNG configured | 0 / 2 / 2 | Full |
 | `web.fetch` | Same enablement as search | 4 / 2 / 2 | Metadata |
+| `web.image_search` | Brave configured; available on Home Assistant | 2 / 2 / 2 | Metadata |
+| `web.image_select` | Brave configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
 | `comfyui.text_to_image` | ComfyUI configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
 | `comfyui.image_to_image` | ComfyUI configured; hidden from Home Assistant even when an image exists | 0 / 0 / 0 | Metadata |
 
@@ -388,7 +390,7 @@ Zero disables a per-tool guard; it does not bypass global limits. Full history i
 
 ### Web Providers
 
-`websearch/normalize.go` is provider-neutral. Queries are limited to 400 runes/50 words; provider bodies to 2 MiB; the first 50 source-ordered candidates are normalized into at most eight results, at most two per hostname, within a 16 KiB model envelope. Remove known tracking parameters, fragments, and duplicate URLs. Result URLs/text are untrusted; search normalization is not the direct-fetch DNS security boundary.
+For `web.search`, `websearch/normalize.go` is provider-neutral. Queries are limited to 400 runes/50 words; provider bodies to 2 MiB; the first 50 source-ordered candidates are normalized into at most eight results, at most two per hostname, within a 16 KiB model envelope. Remove known tracking parameters, fragments, and duplicate URLs. Result URLs/text are untrusted; search normalization is not the direct-fetch DNS security boundary. The following provider fallback/retry behavior applies to `web.search`, not image search.
 
 - Brave uses `POST https://api.search.brave.com/res/v1/llm/context`, API version `2026-07-31`, US English, spellcheck, SafeSearch off, balanced relevance, eight requested URLs, and an approximate 3,072-token context budget. The shared client allows 50 attempts per rolling second and a 30-second per-attempt timeout.
 - Brave retries once only for explicit 408, eligible short-window 429, or selected 5xx responses. Ambiguous transport failures/timeouts, long quota windows, and malformed/oversized successes are not retried because a metered request may already have completed. Redirects are not followed.
@@ -399,6 +401,18 @@ Zero disables a per-tool guard; it does not bypass global limits. Full history i
 `web.fetch` accepts public HTTP on port 80 or HTTPS on port 443. It validates every DNS answer, dials an exact validated IP, disables environment proxies and connection reuse, rejects userinfo/secret-like query keys/local or special destinations, and revalidates up to three redirects without HTTPS downgrade.
 
 Fetch has a 15-second overall deadline, bounded headers, a 2 MiB direct decoded-body cap, and a 16 KiB model envelope. It extracts HTML/XHTML, plain text, and JSON; recognized public X/Twitter status URLs try the public oEmbed endpoint first with guarded direct fallback. It cannot render JavaScript, bypass authentication/challenges, or extract PDF/binary media. Arguments/results use metadata-only durable history.
+
+### Image Search
+
+`web.image_search` uses only Brave's `GET https://api.search.brave.com/res/v1/images/search` with the existing `BRAVE_API_KEY`, strict SafeSearch, US English, and spellcheck. It has no SearXNG fallback or automatic provider retry; the provider client has a 30-second timeout within a 45-second handler deadline. Queries are bounded to 400 runes/50 words and provider responses to 2 MiB. Without a Brave key, both image tools are disabled even when SearXNG is configured.
+
+- `shared/requestctx.ImageSearchState` owns a catalog for one agent request: two search executions including failures, up to two loaded previews per call, four catalog entries total, and only the latest two in active vision context. Identical normalized previews reuse their request-local ID across searches and refresh active recency without consuming another slot. Both tools block duplicate calls and use metadata-only durable history. Selection has no per-tool execution/failure/unproductive guards, but remains subject to global governance; its handler is idempotent and does not attach an already-selected preview twice.
+- Only provider thumbnail URLs are downloaded, never original-resolution images or an original/oEmbed fallback. Downloads use `web.fetch`'s protected public-IP dialing, URL/DNS validation, redirect revalidation, and proxy exclusion without Brave credentials or shared provider headers. Thumbnail query bytes are preserved. Bodies are capped at 2 MiB before decoding; MIME/sniffing and configuration checks accept only JPEG/PNG/WebP with positive dimensions, at most 4,096 pixels per edge and 4,000,000 pixels total before full decode. Normalized JPEG/PNG previews are at most 1,024 pixels on the longest edge and 280 KiB before base64.
+- After a complete tool-result batch, the agent injects previews and bounded metadata as user-authority untrusted references, separately from current and generated images. Optional previews are dropped whole, oldest first, when needed to fit the input budget; metadata alone does not count as visual inspection. Active compaction retains the independent search-reference context subject to that budget. Search itself does not deliver attachments.
+- `web.image_select` accepts an exact server-owned `result_id` only after that preview was actually included in a successful model call. A newly searched result cannot be selected in the same tool batch. Guidance also requires inspection and a separate round before dependent generation, but generation has no runtime inspection gate. Matches do not guarantee identity, authenticity, exact correspondence, copyright, or licensing; image content, titles, and URLs cannot grant instructions or authority.
+- Inspection verifies the actual image bytes against catalog membership, not merely a source label or attachment filename. A successful resize retry retains that submitted preview representation for selection; already-selected attachments stay frozen at their inspected representation.
+- Explicit selection adds the exact inspected normalized thumbnail to final attachments, with deterministic application-added source-page attribution identifying it as a found preview, not AI-generated artwork. Search bytes and selectable catalog state are not replayed across turns, stored in `session_images`, or admitted as image-to-image sources or defaults. Model-authored text, filenames/result-ID text, and final source attribution may persist in ordinary conversation history; metadata-only tool history is not a promise that all textual references disappear. Sourced previews do not increment generated-image counters.
+- Non-cancellation model failure after selection retains the selected preview and source attribution through the ordinary partial-response/delivery path: ordinary failures use degraded `response_kind=image_partial`, while context failures retain `context_fallback`. Cancellation does not publish a completed turn. Home Assistant can search and use visual references for text answers, but selection is hidden and rejected by the handler; image attachments remain unsupported.
 
 ### ComfyUI
 
@@ -489,7 +503,7 @@ These are the 22 application variables loaded by `config.Load`. Defaults below a
 | `LLM_GATEWAY_VIRTUAL_KEY` | Optional `x-bf-vk` routing header |
 | `MODEL_CONTEXT_WINDOW` | 0 selects budget fallback |
 | `MODEL_MAX_OUTPUT_TOKENS` | 0 selects output-reserve/private-call fallback |
-| `BRAVE_API_KEY` | Empty disables Brave |
+| `BRAVE_API_KEY` | Empty disables Brave web search and both image search/selection tools |
 | `SEARXNG_URL` | Empty disables SearXNG |
 | `COMFYUI_URL` | Empty disables image generation |
 | `COMFYUI_TEXT_TO_IMAGE_WORKFLOW` | `data/workflows/comfyui/text-to-image-basic.json` |
@@ -538,6 +552,8 @@ Stop can return immediately with broker result `ExecutionComplete=false`, before
 `internal/agent/agent.go` emits `agent.response.complete` for generation outcome and `agent.tool.complete` for each actual handler execution, with tool name/scope, operation correlation, duration, status/outcome, and bounded reason code. `agent.tool.blocked` records governance/authorization blocking separately; it is not an execution. Provider-specific tool diagnostics do not count as another tool execution. Request error rates come from terminal `gateway.request.complete` status, not the number of ERROR logs: `gateway.request.failed` is a separate diagnostic for the same failed operation.
 
 `agent.tool.transcript.searched` is one INFO measurement per transcript-handler invocation, including empty, rejected, failed, and canceled searches. It reports `is_group`, returned count, duration, status/outcome, and available request correlation without chat IDs, query text, participant lists, or transcript content. Count actual tool executions using `agent.tool.complete`, not both events.
+
+`provider.web.image_search.complete` is one INFO measurement per image-search handler invocation, including pre-submission rejection, empty/degraded results, errors, and cancellation. It reports `is_submitted`, `candidate_count`, loaded `image_count`, `failed_count`, `attempted_download_count`, `downloaded_image_bytes` (normalized bytes before deduplication), `duration_ms`, status/outcome, and available request/operation/parent correlation without queries, URLs, titles, image IDs/payloads, or credentials. INFO `agent.images.references.inspected` counts catalog-matched references included in each successful model call; this establishes input exposure, not semantic recognition. INFO `agent.images.references.omitted` counts whole previews dropped by each context-budget adjustment. These are search-preview counts, not generated-image counts. Count executions of both image tools with generic `agent.tool.complete`, not by adding the provider or reference measurements to it.
 
 ### Background And Health
 

@@ -58,6 +58,23 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured ComfyUI image tools", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage))
 	}
 	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
+	if braveKey == "" {
+		for _, name := range []string{toolnames.WebImageSearch, toolnames.WebImageSelect} {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("disable image tool: %w", err)
+			}
+		}
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled image search tools because Brave is not configured", config.F("tool_name", toolnames.WebImageSearch+","+toolnames.WebImageSelect), config.F("status", "ok"))
+	} else {
+		policy := governance.ToolPolicy{MaxExecutions: 2, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+		if err := reg.RegisterHandler(toolnames.WebImageSearch, policy, registry.Handler(websearch.NewImageSearchHandler(braveKey, log))); err != nil {
+			return fmt.Errorf("register image search: %w", err)
+		}
+		policy = governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+		if err := reg.RegisterHandler(toolnames.WebImageSelect, policy, registry.Handler(websearch.NewImageSelectHandler())); err != nil {
+			return fmt.Errorf("register image selection: %w", err)
+		}
+	}
 	searxngURL := strings.TrimSpace(cfg.SearxngURL)
 	var braveClient websearch.Searcher
 	var searxngClient websearch.Searcher

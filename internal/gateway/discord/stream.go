@@ -458,6 +458,10 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 			completed += " with limited sources"
 		}
 		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), completed, "Web search failed for "+quoteToolDetail(query))
+	case toolnames.WebImageSearch:
+		return actionToolStatus(tool.Name, "Searching images for "+quoteToolDetail(query), "Searched images for "+quoteToolDetail(query), "Image search failed for "+quoteToolDetail(query))
+	case toolnames.WebImageSelect:
+		return actionToolStatus(tool.Name, "Selecting found image preview", "Selected found image preview", "Found image preview selection failed")
 	case toolnames.CurrentTime:
 		timezone := toolStringArgument(tool.Arguments, "timezone")
 		if timezone == "" {
