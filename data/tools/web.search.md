@@ -4,6 +4,8 @@
 
 Search the public web for current, uncertain, or externally verifiable information using a concise general search query.
 
+Use textual evidence to establish facts, currency, and context. When appearance is central to the request, use `web.image_search` for visual evidence; textual search results do not constitute visual inspection. These tools can complement each other: establishing the relevant subject or version does not replace inspecting its appearance.
+
 Use this tool when the answer depends on information that may be current, page-specific, outside existing knowledge, or better supported by public sources. Do not search when the answer is already known with sufficient confidence and does not require current verification.
 
 ### Direct URLs

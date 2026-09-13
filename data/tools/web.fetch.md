@@ -4,6 +4,8 @@
 
 Fetch readable content from one exact public HTTP or HTTPS URL. Use this tool when the user supplies a URL and asks what that page says, contains, means, or should be summarized.
 
+This tool reads page content; it does not retrieve images for visual inspection or delivery. Use `web.image_search` for visual evidence and `web.image_select` to deliver an inspected preview when visual output serves the request.
+
 The tool supports ordinary HTML pages, plain text, JSON documents, and public X/Twitter post URLs. It does not support PDFs, images, audio, video, archives, authenticated pages, private-network addresses, nonstandard ports, or pages that require browser-side JavaScript to reveal their content.
 
 Use the complete public canonical URL. Never submit credentials, access tokens, API keys, signed private parameters, authentication cookies, or other secrets. If a supplied URL contains authentication data, ask for a public canonical URL instead.

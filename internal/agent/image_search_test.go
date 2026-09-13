@@ -275,9 +275,9 @@ func TestImageSearchInspectionDeliveryAndRequestIsolation(t *testing.T) {
 		ext = ".png"
 	}
 	filename := "found-preview-search-1" + ext
-	want := "A bird.\n\nFound thumbnail preview (not AI-generated), `" + filename + "`\nSource: <https://example.org/bird>"
+	want := "A bird."
 	if response.Response != want || len(response.Attachments) != 1 || response.Attachments[0].Filename != filename || response.Attachments[0].MIMEType != ref.MIMEType || !bytes.Equal(response.Attachments[0].Data, data) {
-		t.Fatal("selection changed normalized bytes or deterministic attribution")
+		t.Fatal("selection changed normalized bytes or appended text to the model response")
 	}
 	turns, err := store.RecentSessionTurns("user-1", "session", response.SessionGeneration, 10)
 	if err != nil || len(turns) != 1 || turns[0].AssistantText != want {
@@ -364,13 +364,16 @@ func TestImageSearchModelPaths(t *testing.T) {
 			wantAttachment := selects && mode != "tiny_budget"
 			if wantAttachment {
 				data, _ := base64.StdEncoding.DecodeString(ref.Data)
-				if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, data) || !strings.Contains(response.Response, "Source: <https://example.org/bird>") {
-					t.Fatal("selected preview or attribution lost")
+				if len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, data) {
+					t.Fatal("selected preview lost")
 				}
 			} else if len(response.Attachments) != 0 || strings.Contains(response.Response, "Found thumbnail preview") {
 				t.Fatal("unselected research preview delivered")
 			}
-			if failure && (response.Kind != "image_partial" || !strings.HasPrefix(response.Response, foundImagePartialResponse) || response.SourceTurnID == 0 || response.PersistenceStatus != "pending") {
+			if !failure && response.Response != "Finished." {
+				t.Fatal("appended text to the model response")
+			}
+			if failure && (response.Kind != "image_partial" || response.Response != foundImagePartialResponse || response.SourceTurnID == 0 || response.PersistenceStatus != "pending") {
 				t.Fatalf("selected preview failure not finalized: %+v", response)
 			}
 			for _, req := range chat.requests[1:] {

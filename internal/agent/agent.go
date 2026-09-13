@@ -1064,8 +1064,6 @@ finalize:
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
-	baseFinalContent := finalContent
-	finalContent = appendSearchImageAttribution(finalContent, imageSearch.SelectedReferences())
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)
 	}
@@ -1123,7 +1121,7 @@ finalize:
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || baseFinalContent == contextCompactionFallback || baseFinalContent == generatedImagePartialResponse || baseFinalContent == foundImagePartialResponse {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
 		responseStatus = "degraded"
 	}
 	reqLog.Debug("agent.response.detail", "completed agent response",
@@ -1145,13 +1143,13 @@ finalize:
 	if imageSizeFallbackUsed {
 		responseKind = "image_fallback"
 	}
-	if baseFinalContent == contextCompactionFallback {
+	if finalContent == contextCompactionFallback {
 		responseKind = "context_fallback"
 	}
-	if baseFinalContent == emptyResponseFallback && !temporaryParserFallback {
+	if finalContent == emptyResponseFallback && !temporaryParserFallback {
 		responseKind = "empty_fallback"
 	}
-	if baseFinalContent == generatedImagePartialResponse || baseFinalContent == foundImagePartialResponse {
+	if finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
 		responseKind = "image_partial"
 	}
 	return &Response{

@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
@@ -75,18 +74,4 @@ func (s *foregroundCompactionState) fitSearchImages(ctx context.Context, message
 		s.log.Info("agent.images.references.omitted", "omitted optional search previews for context capacity", config.F("record_kind", "measurement"), config.F("omitted_image_count", omitted), config.F("image_count", len(s.searchContext.Images)), config.F("status", "degraded"))
 	}
 	return messages
-}
-
-func appendSearchImageAttribution(content string, refs []requestctx.ImageSearchReference) string {
-	for _, ref := range refs {
-		// Keep attribution developer-owned and prevent a URL from breaking its
-		// Markdown autolink. Provider titles are never rendered as instructions.
-		source := strings.NewReplacer("<", "%3C", ">", "%3E", "\r", "%0D", "\n", "%0A").Replace(ref.SourceURL)
-		ext := ".jpg"
-		if ref.MIMEType == "image/png" {
-			ext = ".png"
-		}
-		content += fmt.Sprintf("\n\nFound thumbnail preview (not AI-generated), `found-preview-%s%s`\nSource: <%s>", ref.ID, ext, source)
-	}
-	return content
 }

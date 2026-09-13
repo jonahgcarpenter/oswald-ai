@@ -99,7 +99,7 @@ func newImageSearchHandler(apiKey, endpoint string, client *http.Client, downloa
 			rejected = true
 			return result, errors.New("invalid image search endpoint")
 		}
-		u.RawQuery = url.Values{"q": {strings.TrimSpace(query)}, "count": {"8"}, "safesearch": {"strict"}, "country": {"US"}, "search_lang": {"en"}, "spellcheck": {"true"}}.Encode()
+		u.RawQuery = url.Values{"q": {strings.TrimSpace(query)}, "count": {"8"}, "safesearch": {"off"}, "country": {"US"}, "search_lang": {"en"}, "spellcheck": {"true"}}.Encode()
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if reqErr != nil {
 			rejected = true

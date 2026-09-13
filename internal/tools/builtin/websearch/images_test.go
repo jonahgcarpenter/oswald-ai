@@ -25,7 +25,7 @@ func TestImageSearchWireInspectionSelectionAndTelemetry(t *testing.T) {
 	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != "GET" || r.URL.Path != "/res/v1/images/search" || r.Header.Get("X-Subscription-Token") != canary || r.URL.Query().Get("q") != canary || r.URL.Query().Get("safesearch") != "strict" || r.URL.Query().Get("count") != "8" {
+				if r.Method != "GET" || r.URL.Path != "/res/v1/images/search" || r.Header.Get("X-Subscription-Token") != canary || r.URL.Query().Get("q") != canary || r.URL.Query().Get("safesearch") != "off" || r.URL.Query().Get("count") != "8" {
 					t.Error("wire contract")
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"type": "images", "results": []any{
