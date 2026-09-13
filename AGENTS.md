@@ -4,6 +4,10 @@ This is the implementation and contributor reference for the current codebase. `
 
 Keep this document current when changing architecture, authorization, persistence, provider contracts, or operational limits. Describe implemented behavior, not planned features. Preserve documentation of compatibility paths that still read persisted data; do not maintain a history of removed features here.
 
+## README Editing Policy
+
+Do not edit `README.md` unless the user explicitly requests README changes. Feature work, bug fixes, refactors, and general documentation updates do not imply permission to modify it. This includes formatting, typo fixes, and automatic documentation synchronization. Keep implementation and contributor documentation current in `AGENTS.md` instead; mention any needed README updates without making them unless explicitly authorized.
+
 ## Project And Verification
 
 Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, and an optional Home Assistant WebSocket gateway. Discord and iMessage accept current-turn images; Home Assistant accepts text only. There is no JavaScript, TypeScript, or frontend application in this repository.
