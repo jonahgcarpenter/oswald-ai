@@ -368,9 +368,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	)
 
 	req := llm.ChatRequest{
-		Model:  a.model,
-		User:   requestUser,
-		Stream: streamCallback != nil,
+		Model: a.model,
+		User:  requestUser,
+		// Model transport is independent of whether the gateway displays progress.
+		Stream: true,
 	}
 
 	// Track accumulated thinking and content across all iterations.
@@ -946,7 +947,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 finalize:
 	// Extract the final response content. The LLM client already handles
 	// thinking-to-content promotion for non-streaming calls.
-	// For streaming, we tracked content separately via the callback above.
+	// When progress is displayed, content is tracked separately via the callback.
 	finalContent := accumulatedContent.String()
 	if finalContent == "" && lastResp != nil {
 		finalContent = lastResp.Message.Content

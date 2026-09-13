@@ -93,6 +93,11 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 							}
 						}
 						response, err := a.Process(context.Background(), Request{RequestID: "failure", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "discord", Assurance: identity.AssuranceDiscordGateway}, SessionKey: "session", Prompt: "generate then edit", StreamFunc: callback})
+						for _, request := range chat.requests {
+							if !request.Stream {
+								t.Fatal("model retry or final call did not retain streaming transport")
+							}
+						}
 						if canceled {
 							if !errors.Is(err, context.Canceled) || response != nil {
 								t.Fatalf("response=%v err=%v", response, err)
@@ -375,8 +380,8 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 					t.Fatalf("response persisted=%v err=%v", response != nil, err)
 				}
 				final := chat.requests[len(chat.requests)-1]
-				if final.Stream != streaming {
-					t.Fatal("stream setting changed")
+				if !final.Stream {
+					t.Fatal("model transport depends on progress callback")
 				}
 				last := final.Messages[len(final.Messages)-1]
 				if len(last.Images) != 1 || last.Images[0].Data != previous || !strings.Contains(last.Content, "Generated image shown:") {
