@@ -49,8 +49,11 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
 	currentIsReplyToBot := false
-	if replyCtx, ok := g.lookupMessage(replyGUID); ok {
-		currentIsReplyToBot = replyCtx.IsFromBot
+	var resolvedReply messageContext
+	var replyFound bool
+	if replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt) {
+		resolvedReply, replyFound = g.resolveReply(ctx, msg, isGroup && !mentionsBot && !currentIsCommandAttempt, requestID)
+		currentIsReplyToBot = replyFound && resolvedReply.IsFromBot
 	}
 	preflight := routing.Preflight(routing.PreflightInput{
 		IsGroup:      isGroup,
@@ -113,8 +116,15 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	log = log.With(config.F("user_id", canonicalUserID))
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
-		if replyCtx, ok := g.lookupReplyContext(replyGUID, chat.GUID, sessionKey, requestID); ok {
-			currentIsReplyToBot = replyCtx.IsFromBot
+		if replyFound {
+			replyCtx := resolvedReply
+			// Contact enrichment is deliberately after admission, never a lookup
+			// side effect of an ignored group thread message.
+			if !replyCtx.IsFromBot && replyCtx.SenderID != "" && replyCtx.SenderID != "imessage:self" {
+				if name, err := g.lookupContactDisplayName(replyCtx.SenderID, log); err == nil && name != "" {
+					replyCtx.DisplayName = name
+				}
+			}
 			replyName := strings.TrimSpace(replyCtx.DisplayName)
 			if replyName == "" && replyCtx.IsFromBot {
 				replyName = "Oswald"
@@ -123,6 +133,9 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 				SenderName: replyName,
 				Text:       strings.TrimSpace(replyCtx.Text),
 				IsFromBot:  replyCtx.IsFromBot,
+			}
+			if replyCtx.IsPredecessor {
+				reply.SenderName += " (preceding thread message, not necessarily the selected bubble)"
 			}
 			if len(replyCtx.Attachments) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(images)

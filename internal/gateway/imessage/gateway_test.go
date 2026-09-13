@@ -867,6 +867,7 @@ type fakeBlueBubbles struct {
 	helperConnected  bool
 	serverInfoCount  int
 	helperReadyAfter int
+	messageLookup    http.HandlerFunc
 }
 
 func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
@@ -880,6 +881,7 @@ func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
 		bb.seenPaths = append(bb.seenPaths, r.URL.EscapedPath())
 		privateAPI := bb.privateAPI
 		helperConnected := bb.helperConnected
+		messageLookup := bb.messageLookup
 		if r.URL.Path == "/api/v1/server/info" {
 			bb.serverInfoCount++
 			if bb.helperReadyAfter > 0 && bb.serverInfoCount >= bb.helperReadyAfter {
@@ -888,6 +890,10 @@ func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
 			}
 		}
 		bb.mu.Unlock()
+		if messageLookup != nil && (r.URL.Path == "/api/v1/message/query" || (strings.HasPrefix(r.URL.Path, "/api/v1/message/") && r.Method == http.MethodGet)) {
+			messageLookup(w, r)
+			return
+		}
 		switch {
 		case r.URL.Path == "/api/v1/server/info":
 			_ = json.NewEncoder(w).Encode(serverInfoResponse{Data: struct {
@@ -986,6 +992,7 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 	dbPath := filepath.Join(dir, "oswald.db")
 	memories := memorytest.NewStore(t, dbPath, log)
 	links := accounts.NewService(dbPath, memories, nil, log)
+	t.Cleanup(func() { _ = links.Close() })
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)

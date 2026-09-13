@@ -14,7 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
-func captureInfoSummaries(t *testing.T) (*config.Logger, func() []map[string]any) {
+func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger, func() []map[string]any) {
 	t.Helper()
 	file, err := os.CreateTemp(t.TempDir(), "summary-log")
 	if err != nil {
@@ -23,7 +23,11 @@ func captureInfoSummaries(t *testing.T) (*config.Logger, func() []map[string]any
 	t.Cleanup(func() { _ = file.Close() })
 	old := os.Stderr
 	os.Stderr = file
-	log := config.NewLogger(config.LevelInfo)
+	level := config.LevelInfo
+	if len(levels) > 0 {
+		level = levels[0]
+	}
+	log := config.NewLogger(level)
 	os.Stderr = old
 	return log, func() []map[string]any {
 		data, err := os.ReadFile(file.Name())

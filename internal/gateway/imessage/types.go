@@ -31,6 +31,7 @@ type webhookMessage struct {
 	AssociatedMessageType json.RawMessage `json:"associatedMessageType"`
 	ReplyToGUID           string          `json:"replyToGuid"`
 	ThreadOriginatorGUID  string          `json:"threadOriginatorGuid"`
+	ThreadOriginatorPart  string          `json:"threadOriginatorPart"`
 	Chats                 []messageChat   `json:"chats"`
 }
 
@@ -76,10 +77,12 @@ type messageLookupResponse struct {
 }
 
 type messageQueryRequest struct {
-	Limit  int                  `json:"limit"`
-	Offset int                  `json:"offset"`
-	With   []string             `json:"with"`
-	Where  []messageQueryClause `json:"where"`
+	ChatGUID string               `json:"chatGuid,omitempty"`
+	Sort     string               `json:"sort,omitempty"`
+	Limit    int                  `json:"limit"`
+	Offset   int                  `json:"offset"`
+	With     []string             `json:"with"`
+	Where    []messageQueryClause `json:"where"`
 }
 
 type messageQueryClause struct {
@@ -95,12 +98,24 @@ type messageQueryResponse struct {
 }
 
 type messageLookupData struct {
-	GUID        string        `json:"guid"`
-	Text        string        `json:"text"`
-	IsFromMe    bool          `json:"isFromMe"`
-	Handle      messageHandle `json:"handle"`
-	Chats       []messageChat `json:"chats"`
-	Attachments []attachment  `json:"attachments"`
+	OriginalROWID         int64           `json:"originalROWID"`
+	DateCreated           *int64          `json:"dateCreated"`
+	ThreadOriginatorGUID  string          `json:"threadOriginatorGuid"`
+	ThreadOriginatorPart  string          `json:"threadOriginatorPart"`
+	ReplyToGUID           string          `json:"replyToGuid"`
+	IsSystemMessage       *bool           `json:"isSystemMessage"`
+	IsServiceMessage      *bool           `json:"isServiceMessage"`
+	AssociatedMessageType json.RawMessage `json:"associatedMessageType"`
+	SendError             *int            `json:"error"`
+	IsCorrupt             bool            `json:"isCorrupt"`
+	DateRetracted         *int64          `json:"dateRetracted"`
+	ItemType              int             `json:"itemType"`
+	GUID                  string          `json:"guid"`
+	Text                  string          `json:"text"`
+	IsFromMe              bool            `json:"isFromMe"`
+	Handle                messageHandle   `json:"handle"`
+	Chats                 []messageChat   `json:"chats"`
+	Attachments           []attachment    `json:"attachments"`
 }
 
 type contactQueryRequest struct {
@@ -131,12 +146,13 @@ type serverInfoResponse struct {
 }
 
 type messageContext struct {
-	SessionKey  string
-	ChatGUID    string
-	SenderID    string
-	DisplayName string
-	Text        string
-	Attachments []attachment
-	IsFromBot   bool
-	CreatedAt   time.Time
+	IsPredecessor bool
+	SessionKey    string
+	ChatGUID      string
+	SenderID      string
+	DisplayName   string
+	Text          string
+	Attachments   []attachment
+	IsFromBot     bool
+	CreatedAt     time.Time
 }
