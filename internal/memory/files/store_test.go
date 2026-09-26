@@ -38,8 +38,8 @@ func TestApplyReadDeleteAndAtomicValidation(t *testing.T) {
 	if _, err := store.Apply(ctx, "two", "memory", []Operation{{Action: "add", Content: "other"}}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"USER.md", "MEMORY.md", ".lock"} {
-		info, err := os.Stat(filepath.Join(root, "one", name))
+	for _, name := range []string{"USER.md", "MEMORY.md", "USER.md.lock", "MEMORY.md.lock"} {
+		info, err := os.Stat(filepath.Join(root, "one", "memories", name))
 		if err != nil || info.Mode().Perm() != 0600 {
 			t.Fatalf("file mode %s: %v %v", name, info, err)
 		}
@@ -47,6 +47,10 @@ func TestApplyReadDeleteAndAtomicValidation(t *testing.T) {
 	info, err := os.Stat(filepath.Join(root, "one"))
 	if err != nil || info.Mode().Perm() != 0700 {
 		t.Fatalf("directory mode: %v %v", info, err)
+	}
+	info, err = os.Stat(filepath.Join(root, "one", "memories"))
+	if err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("memory directory mode: %v %v", info, err)
 	}
 	if err := store.Delete(ctx, "one"); err != nil {
 		t.Fatal(err)
@@ -84,7 +88,7 @@ func TestRejectUnsafePathsAndContent(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "one"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, "one", "MEMORY.md")); err != nil {
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, "one", "memories", "MEMORY.md")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := store.Read(ctx, "one"); err == nil {
@@ -106,6 +110,15 @@ func TestRejectUnsafePathsAndContent(t *testing.T) {
 	if _, _, err := store.Read(ctx, "three"); err == nil {
 		t.Fatal("followed user directory symlink")
 	}
+	if err := os.Mkdir(filepath.Join(root, "two"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "one", "memories"), filepath.Join(root, "two", "memories")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Read(ctx, "two"); err == nil {
+		t.Fatal("followed memory directory symlink")
+	}
 	if err := os.Chmod(filepath.Join(root, "one"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -121,13 +134,19 @@ func TestLockHonorsCancellation(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- store.locked(ctx, "one", true, func(string) error { close(entered); <-release; return nil })
+		done <- store.locked(ctx, "one", true, []string{"USER.md.lock"}, func(string) error { close(entered); <-release; return nil })
 	}()
 	<-entered
+	if _, _, err := store.Read(ctx, "one"); err != nil {
+		t.Fatalf("read while writer holds lock: %v", err)
+	}
+	if _, err := store.Apply(ctx, "one", "memory", []Operation{{Action: "add", Content: "independent"}}); err != nil {
+		t.Fatalf("other target blocked: %v", err)
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
 	defer cancel()
-	if _, _, err := store.Read(waitCtx, "one"); err != context.DeadlineExceeded {
-		t.Fatalf("lock wait: %v", err)
+	if _, err := store.Apply(waitCtx, "one", "user", []Operation{{Action: "add", Content: "blocked"}}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("same-target lock wait: %v", err)
 	}
 	close(release)
 	if err := <-done; err != nil {
@@ -137,8 +156,8 @@ func TestLockHonorsCancellation(t *testing.T) {
 
 func TestReadReflectsOperatorEditsAndRejectsOversizedExistingFile(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "one")
-	if err := os.Mkdir(dir, 0700); err != nil {
+	dir := filepath.Join(root, "one", "memories")
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	store := NewStore(root)
@@ -246,14 +265,14 @@ func TestDeleteMissingRetryAndCancellation(t *testing.T) {
 	if _, err := store.Apply(ctx, "one", "memory", []Operation{{Action: "add", Content: "other"}}); err != nil {
 		t.Fatal(err)
 	}
-	blocked := filepath.Join(root, "one", "MEMORY.md")
+	blocked := filepath.Join(root, "one", "memories", "MEMORY.md")
 	if err := os.Chmod(blocked, 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Delete(ctx, "one"); err == nil {
 		t.Fatal("deleted despite unsafe file")
 	}
-	if _, err := os.Stat(filepath.Join(root, "one", "USER.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "one", "memories", "USER.md")); err != nil {
 		t.Fatalf("deleted first file on validation failure: %v", err)
 	}
 	if err := os.Chmod(blocked, 0600); err != nil {
@@ -279,13 +298,13 @@ func TestDeleteMissingRetryAndCancellation(t *testing.T) {
 	}
 }
 
-func TestRejectUnsafeLockAndPublicFile(t *testing.T) {
+func TestRejectUnsafeLocksAndPublicFile(t *testing.T) {
 	root := t.TempDir()
-	dir := filepath.Join(root, "one")
-	if err := os.Mkdir(dir, 0700); err != nil {
+	dir := filepath.Join(root, "one", "memories")
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	lock := filepath.Join(dir, ".lock")
+	lock := filepath.Join(dir, "USER.md.lock")
 	if err := os.Symlink(filepath.Join(root, "outside"), lock); err != nil {
 		t.Fatal(err)
 	}
@@ -299,11 +318,17 @@ func TestRejectUnsafeLockAndPublicFile(t *testing.T) {
 	if err := os.WriteFile(lock, nil, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Read(context.Background(), "one"); err == nil {
+	if _, err := store.Apply(context.Background(), "one", "user", []Operation{{Action: "add", Content: "secret"}}); err == nil {
 		t.Fatal("accepted public lock")
 	}
 	if err := os.Chmod(lock, 0600); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(dir, "MEMORY.md.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(context.Background(), "one"); err == nil {
+		t.Fatal("accepted symlinked memory lock")
 	}
 	path := filepath.Join(dir, "USER.md")
 	if err := os.WriteFile(path, []byte("private"), 0644); err != nil {
@@ -332,7 +357,7 @@ func TestDeleteCanceledWhileWaitingForSeparateStore(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- writer.locked(ctx, "one", false, func(string) error { close(entered); <-release; return nil })
+		done <- writer.locked(ctx, "one", false, []string{"USER.md.lock"}, func(string) error { close(entered); <-release; return nil })
 	}()
 	<-entered
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
@@ -350,5 +375,33 @@ func TestDeleteCanceledWhileWaitingForSeparateStore(t *testing.T) {
 	}
 	if err := remover.Delete(ctx, "one"); err != nil {
 		t.Fatalf("retry delete: %v", err)
+	}
+}
+
+func TestDeleteReleasesFirstLockWhenSecondLockWaitIsCanceled(t *testing.T) {
+	root := t.TempDir()
+	writer, remover := NewStore(root), NewStore(root)
+	ctx := context.Background()
+	if _, err := writer.Apply(ctx, "one", "user", []Operation{{Action: "add", Content: "keep"}}); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- writer.locked(ctx, "one", false, []string{"MEMORY.md.lock"}, func(string) error { close(entered); <-release; return nil })
+	}()
+	<-entered
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if err := remover.Delete(waitCtx, "one"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("delete wait on second lock: %v", err)
+	}
+	if _, err := remover.Apply(ctx, "one", "user", []Operation{{Action: "add", Content: "still writable"}}); err != nil {
+		t.Fatalf("first lock was not released: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

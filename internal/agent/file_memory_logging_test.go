@@ -82,7 +82,7 @@ func TestProcessFileMemoryReadFailureWarnsWithoutModelSubmission(t *testing.T) {
 	if _, err := fileStore.Apply(context.Background(), "user-1", "user", []files.Operation{{Action: "add", Content: "private-user-canary"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("private-target-canary", filepath.Join(root, "user-1", "MEMORY.md")); err != nil {
+	if err := os.Symlink("private-target-canary", filepath.Join(root, "user-1", "memories", "MEMORY.md")); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer

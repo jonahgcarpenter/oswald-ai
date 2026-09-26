@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 )
 
 func TestServiceEnsureLinkDisconnectAndSpeakerLine(t *testing.T) {
@@ -246,6 +247,12 @@ func TestServiceAdminAuthorizationRebindsExternalAccountOwner(t *testing.T) {
 
 func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	links := newTestService(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "SOUL.md"), []byte("default"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	souls := soul.NewStore(filepath.Join(root, "SOUL.md"))
+	links.SetSoul(souls)
 	targetID, err := links.EnsureAccount(context.Background(), "discord", "300", "Target")
 	if err != nil {
 		t.Fatalf("ensure target: %v", err)
@@ -253,6 +260,17 @@ func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	sourceID, err := links.EnsureAccount(context.Background(), "homeassistant", "source", "Source")
 	if err != nil {
 		t.Fatalf("ensure source: %v", err)
+	}
+	for _, id := range []string{targetID, sourceID} {
+		if _, err := souls.Read(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, targetID, "SOUL.md"), []byte("winner"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, sourceID, "SOUL.md"), []byte("loser"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	claimTestAdmin(t, links, identity.Principal{CanonicalUserID: sourceID, Gateway: "homeassistant", ExternalID: "source", Assurance: identity.AssuranceHomeAssistantToken})
 	result := connectTestAccounts(t, links,
@@ -264,6 +282,46 @@ func TestServiceVerifiedMergePreservesAdminState(t *testing.T) {
 	isAdmin, err := links.IsAdmin(targetID)
 	if err != nil || !isAdmin {
 		t.Fatalf("expected merged admin true, got %v err=%v", isAdmin, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, targetID, "SOUL.md")); err != nil || string(data) != "winner" {
+		t.Fatalf("winner soul changed: %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, sourceID, "SOUL.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("loser soul remains: %v", err)
+	}
+}
+
+func TestServiceMergeSoulCleanupFailureReportsCommittedMerge(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	winnerID, err := links.EnsureAccount(ctx, "discord", "9011", "Winner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loserID, err := links.EnsureAccount(ctx, "homeassistant", "9012", "Loser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, loserID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, loserID, "SOUL.md")); err != nil {
+		t.Fatal(err)
+	}
+	links.SetSoul(soul.NewStore(filepath.Join(root, "SOUL.md")))
+	initiator := identity.Principal{CanonicalUserID: winnerID, Gateway: "discord", ExternalID: "9011", Assurance: identity.AssuranceDiscordGateway}
+	confirmer := identity.Principal{CanonicalUserID: loserID, Gateway: "homeassistant", ExternalID: "9012", Assurance: identity.AssuranceHomeAssistantToken}
+	challenge, err := links.CreateChallenge(ctx, initiator, "req_create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := links.ConfirmChallenge(ctx, confirmer, challenge.Code, "req_confirm")
+	if err == nil || !result.Merged || result.CanonicalUserID != winnerID {
+		t.Fatalf("expected committed merge and cleanup failure: %+v %v", result, err)
+	}
+	if owner, ok, err := links.ResolveAccount("homeassistant", "9012"); err != nil || !ok || owner != winnerID {
+		t.Fatalf("committed ownership lost: owner=%q ok=%t err=%v", owner, ok, err)
 	}
 }
 
@@ -351,7 +409,16 @@ func TestServiceDeleteUserRemovesPrivateFiles(t *testing.T) {
 	claimTestAdmin(t, links, admin)
 	store := files.NewStore(filepath.Join(t.TempDir(), "files"))
 	links.SetFileMemory(store)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "SOUL.md"), []byte("default"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	souls := soul.NewStore(filepath.Join(root, "SOUL.md"))
+	links.SetSoul(souls)
 	for _, id := range []string{adminID, targetID} {
+		if _, err := souls.Read(ctx, id); err != nil {
+			t.Fatal(err)
+		}
 		for _, name := range []string{"user", "memory"} {
 			if _, err := store.Apply(ctx, id, name, []files.Operation{{Action: "add", Content: "private note"}}); err != nil {
 				t.Fatalf("write %s for %s: %v", name, id, err)
@@ -368,6 +435,12 @@ func TestServiceDeleteUserRemovesPrivateFiles(t *testing.T) {
 	user, memory, err = store.Read(ctx, adminID)
 	if err != nil || user != "private note" || memory != "private note" {
 		t.Fatalf("admin files changed: user=%q memory=%q err=%v", user, memory, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, targetID, "SOUL.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted user's soul remains: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, adminID, "SOUL.md")); err != nil || string(data) != "default" {
+		t.Fatalf("admin soul changed: %q %v", data, err)
 	}
 }
 
@@ -409,6 +482,35 @@ func TestServiceDeleteUserFileFailureRetainsAccount(t *testing.T) {
 	}
 	if _, err := links.DeleteUserAs(ctx, admin, targetID); err != nil {
 		t.Fatalf("retry deletion: %v", err)
+	}
+}
+
+func TestServiceDeleteUserUnsafeSoulRetainsAccount(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	adminID, err := links.EnsureAccount(ctx, "discord", "9101", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := links.EnsureAccount(ctx, "discord", "9102", "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "9101", Assurance: identity.AssuranceDiscordGateway}
+	claimTestAdmin(t, links, admin)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, targetID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, targetID, "SOUL.md")); err != nil {
+		t.Fatal(err)
+	}
+	links.SetSoul(soul.NewStore(filepath.Join(root, "SOUL.md")))
+	if _, err := links.DeleteUserAs(ctx, admin, targetID); err == nil {
+		t.Fatal("deleted user despite unsafe soul")
+	}
+	if _, exists, err := links.User(targetID); err != nil || !exists {
+		t.Fatalf("soul failure deleted account: exists=%t err=%v", exists, err)
 	}
 }
 

@@ -28,16 +28,17 @@ type Operation struct {
 	OldText string
 }
 
-// Store owns per-user files below root/<userID>.
+// Store owns per-user files below root/<userID>/memories.
 type Store struct{ root string }
 
 // NewStore creates a store rooted at the supplied data directory.
 func NewStore(root string) *Store { return &Store{root: root} }
 
 // Read returns the private USER.md and MEMORY.md contents; missing files are empty.
+// Each file is read independently without a lock because writes replace files atomically.
 func (s *Store) Read(ctx context.Context, userID string) (string, string, error) {
 	var user, memory string
-	err := s.locked(ctx, userID, false, func(dir string) error {
+	err := s.withDir(ctx, userID, false, func(dir string) error {
 		var err error
 		user, err = readFile(dir, "USER.md", 1375)
 		if err != nil {
@@ -63,7 +64,7 @@ func (s *Store) Apply(ctx context.Context, userID, target string, ops []Operatio
 		return "", errors.New("operations must contain 1 to 20 items")
 	}
 	var result string
-	err = s.locked(ctx, userID, true, func(dir string) error {
+	err = s.locked(ctx, userID, true, []string{name + ".lock"}, func(dir string) error {
 		current, err := readFile(dir, name, limit)
 		if err != nil {
 			return err
@@ -121,17 +122,17 @@ func (s *Store) Apply(ctx context.Context, userID, target string, ops []Operatio
 		}
 		result = strings.Join(entries, "\n§\n")
 		if utf8.RuneCountInString(result) > limit {
-			return fmt.Errorf("target exceeds %d runes", limit)
+			return fmt.Errorf("target exceeds %d runes; current entries (%d/%d chars): %s", limit, utf8.RuneCountInString(current), limit, current)
 		}
 		return writeFile(ctx, dir, name, result)
 	})
 	return result, err
 }
 
-// Delete removes both private files while holding the user's lock. The lock
-// file and directory remain to preserve cross-process lock identity.
+// Delete removes both private files while holding both writer locks. The lock
+// files and directory remain to preserve cross-process lock identity.
 func (s *Store) Delete(ctx context.Context, userID string) error {
-	err := s.locked(ctx, userID, false, func(dir string) (removeErr error) {
+	err := s.locked(ctx, userID, false, []string{"USER.md.lock", "MEMORY.md.lock"}, func(dir string) (removeErr error) {
 		for _, name := range []string{"USER.md", "MEMORY.md"} {
 			if _, err := readFile(dir, name, 2200); err != nil {
 				return err
@@ -266,7 +267,7 @@ func writeFile(ctx context.Context, dir, name, content string) error {
 	return d.Sync()
 }
 
-func (s *Store) locked(ctx context.Context, userID string, create bool, fn func(string) error) error {
+func (s *Store) withDir(ctx context.Context, userID string, create bool, fn func(string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -280,7 +281,7 @@ func (s *Store) locked(ctx context.Context, userID string, create bool, fn func(
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(root, userID)
+	dir := filepath.Join(root, userID, "memories")
 	// Reject symlinks at every ancestor, including a configured root symlink.
 	path := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(dir, path), path) {
@@ -304,39 +305,61 @@ func (s *Store) locked(ctx context.Context, userID string, create bool, fn func(
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe store directory")
 		}
-		if path == dir && info.Mode().Perm()&0077 != 0 {
+		if (path == dir || path == filepath.Dir(dir)) && info.Mode().Perm()&0077 != 0 {
 			return errors.New("store directory is not private")
 		}
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	return fn(dir)
+}
+
+func (s *Store) locked(ctx context.Context, userID string, create bool, names []string, fn func(string) error) error {
+	return s.withDir(ctx, userID, create, func(dir string) error {
+		for _, name := range names {
+			lock, err := acquireLock(ctx, dir, name)
+			if err != nil {
+				return err
+			}
+			defer func() {
+				syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+				lock.Close()
+			}()
+		}
+		return fn(dir)
+	})
+}
+
+func acquireLock(ctx context.Context, dir, name string) (*os.File, error) {
+	lock, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer lock.Close()
 	info, err := lock.Stat()
 	if err != nil {
-		return err
+		lock.Close()
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return errors.New("unsafe lock file")
+		lock.Close()
+		return nil, errors.New("unsafe lock file")
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			lock.Close()
+			return nil, err
 		}
 		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
-			break
+			return lock, nil
 		}
 		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
-			return err
+			lock.Close()
+			return nil, err
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			lock.Close()
+			return nil, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	return fn(dir)
 }

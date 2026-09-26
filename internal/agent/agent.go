@@ -202,11 +202,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
 
-	// Read the operator-managed soul file fresh on every request.
-	soulContent, soulErr := a.soul.Read()
+	// Read the canonical user's operator-managed soul fresh on every request.
+	soulStarted := time.Now()
+	soulContent, soulErr := a.soul.Read(ctx, senderID)
 	if soulErr != nil {
-		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
+		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.F("status", "error"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.ErrorField(soulErr))
+		return nil, fmt.Errorf("read user soul: %w", soulErr)
 	}
+	reqLog.Info("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
 
 	// Keep deployment policy separate from lower-authority file memory.
 	var promptParts []string

@@ -35,8 +35,9 @@ Use shallow domain grouping. Separate files by responsibility within a package b
 ```text
 cmd/agent/                    Process entry, signals, final exit handling
 data/
-  <canonical_user_id>/         Private USER.md and MEMORY.md plus .lock
-  memory/soul/                Operator-managed system prompt
+  <canonical_user_id>/        Operator-managed SOUL.md
+    memories/                 Private USER.md and MEMORY.md plus their .lock files
+  SOUL.md                     Operator-managed default soul template
   tools/                      Markdown builtin tool schemas
   workflows/comfyui/          Supported operator workflow templates
   database/                  Runtime database, not test fixtures
@@ -72,7 +73,7 @@ internal/
     requestctx/              Request metadata, principal, images, exposure, legacy staging
     lease/                   Renewable lease heartbeat
     invalidation/            In-process authorization/gateway-cache invalidation
-  soul/                      Read-only system-prompt loader
+  soul/                      Per-user system-prompt initialization and loading
   startup/                   Application assembly, ordered cleanup, startup output
   tools/
     names/                   Stable builtin names, including disabled legacy names
@@ -142,8 +143,8 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 
 `startup/app.go` validates required model settings and assembles components in this order:
 
-1. LLM client, context budget, and soul loader.
-2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `data`; MCP manager and account service. A valid enabled OpenAI loopback gateway creates its persistent local administrator here, before bootstrap. No global-memory handle is opened.
+1. LLM client, context budget, and per-user soul loader rooted at `data/SOUL.md`.
+2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `data` with legacy file migration before gateways start; legacy global soul-template conflicts are checked before gateways start. MCP manager and account service. A valid enabled OpenAI loopback gateway creates its persistent local administrator here, before bootstrap. No global-memory handle is opened.
 3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
 4. Indexing and immediate-then-periodic maintenance workers.
 5. Builtin registry (including `memory`), MCP provider, and shared compactor/compaction service. No formation worker or private memory extractor is started.
@@ -189,18 +190,18 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, and `/mcp global`. `/memories` and `/global-memory` have retained handler source but are not registered.
 
 - Account-link challenges last ten minutes. Store hashes, expiry, and consumption/replay identity, not plaintext codes. A new outgoing challenge invalidates the user's prior active one.
-- Account merge does not move `USER.md` or `MEMORY.md` and is unsupported for users with file memory. Link accounts before writing files. Retained SQLite merge code may still move legacy rows, sessions, jobs, summaries, and MCP ownership, but does not provide a file-memory merge contract.
+- Account merge does not move `USER.md` or `MEMORY.md` and is unsupported for users with file memory. Link accounts before writing files. The winning canonical user's `SOUL.md` is retained and the losing user's `SOUL.md` is removed after commit; a cleanup failure is returned as an error even though the merge already committed. Retained SQLite merge code may still move legacy rows, sessions, jobs, summaries, and MCP ownership, but does not provide a file-memory merge contract.
 - A valid `OPENAI_LISTEN_PORT` provisions one persistent canonical user as administrator with the reserved `openai:local` identity and `local_loopback` assurance. Reopens do not reset its admin or ban state; deleted identities cannot serve requests, but enabling the gateway again after deleting the reserved link creates a new local admin. OpenAI requests do not accept a client-supplied user identity or require a bearer key. Existing issued keys do not authenticate; the removed `cmd/apikey` CLI and live key APIs cannot issue or revoke them. Retained database key rows and links remain for migration/account-merge compatibility and cascade on user deletion, but cannot authenticate HTTP work. All local processes that reach the listener share the administrator's access and file memory.
 - `/disconnect` cannot remove the final account. An administrator cannot unadmin, ban, or delete themselves.
 - `/bootstrap` promotes the submitting account's currently resolved owner only while no administrator exists. Its process-local code is consumed after a successful update; restart replaces it only while no admin exists.
 - `/reset` advances one tenant/session generation and clears its SQLite turns, summaries, and jobs. It does not clear either memory file; the retained SQLite profile binding is not injected as user facts.
-- `/deleteuser` removes both file-memory files under the target's lock before the SQLite deletion transaction. File deletion and DB deletion are not atomic: later SQL failure can leave an account without files; a file failure aborts DB deletion. The directory and `.lock` remain. Disconnect/delete-user invalidation can request closure of matching Home Assistant sockets.
+- `/deleteuser` removes both file-memory files under both target locks and the target's `SOUL.md` before the SQLite deletion transaction. File deletion and DB deletion are not atomic: later SQL failure can leave an account without files; a file failure aborts DB deletion. The user and `memories/` directories and `USER.md.lock` / `MEMORY.md.lock` remain. Disconnect/delete-user invalidation can request closure of matching Home Assistant sockets.
 
 ## Agent And Context Management
 
 `Agent.Process` receives `agent.Request` and returns `agent.Response`. Prompt assembly is in `agent/context.go`; tool/catalog/history helpers, image retry, streaming, and active-loop compaction coordination are separate files in that package.
 
-1. Load the soul fresh, add trusted gateway instructions, resolve the SQLite session generation/speaker intro, and read the authenticated canonical user's `USER.md` and `MEMORY.md` fresh.
+1. Ensure the authenticated canonical user's `SOUL.md` exists (copy the current global template once if missing), load it fresh as the system prompt, add trusted gateway instructions, resolve the SQLite session generation/speaker intro, and read the user's `USER.md` and `MEMORY.md` fresh.
 2. Load the latest summary and delivered recent exchanges for the session generation. Independently query recent successful MCP names for continuity.
 3. Assemble required deployment policy, lower-authority file contents (when nonempty), current text/images, and advertised tool cost. Reserve up to two newest complete exchanges within the recent-tail allowance, then a summary if it fits, then additional recent exchanges. No SQLite profile facts or fact recall enter the active prompt.
 4. Call the model; authorize calls against that iteration's exact catalog, execute allowed tools serially, append one correlated result for every declared call, and repeat.
@@ -215,7 +216,7 @@ OpenAI requests instead use stateless agent mode: read soul and private files fo
 - Default context window is 32,768 tokens; default output reserve is 8,192; safety margin is 256. Nonpositive model-limit configuration selects these fallbacks. Tools and images are estimated within each actual request, not a fixed tool reserve.
 - The recent-tail allowance is 25% of usable input, bounded to 2,000-8,000 tokens and never more than available input. This is the exchange allowance, not a combined summary-plus-tail allocation. Under pressure, a selected tail can take priority over the optional durable summary.
 - Additional history stops at the first complete exchange that cannot fit even after native tool history is omitted. Required file context is not truncated to fit.
-- Soul/gateway deployment policy is system-authority content. File contents are user-authority, lower-authority reference data; summaries and historical tool results are untrusted reference data. They cannot grant authorization or tool access.
+- Operator-owned per-user soul/gateway deployment policy is system-authority content. `USER.md` and `MEMORY.md` contents are user-authority, lower-authority reference data; summaries and historical tool results are untrusted reference data. They cannot grant authorization or tool access. No model tool edits either soul file.
 - Current attached/replied images are not replayed into later requests or persisted as image bytes. Generated images use the separate bounded session-image lifecycle below. Stored user text uses an attachment marker; reply context is stripped from durable conversation text.
 - Historical exchanges replay native tool calls and correlated results only when current tool availability and history policy allow it and the trace fits. Otherwise retain the exact user/final-assistant pair.
 - Required context that exceeds input capacity is retained and logged; optional context is omitted. Provider usage is telemetry, not the compaction policy input.
@@ -234,16 +235,19 @@ OpenAI requests instead use stateless agent mode: read soul and private files fo
 
 | Layer | Canonical Location | Write Authority |
 | --- | --- | --- |
-| Soul | `data/memory/soul/soul.md` | Operator filesystem access only |
-| Private user notes | `data/<canonical_user_id>/USER.md` and `MEMORY.md` | Authenticated `memory` tool, immediately |
+| Default soul template | `data/SOUL.md` | Operator filesystem access only |
+| Per-user soul | `data/<canonical_user_id>/SOUL.md` | Operator filesystem access only |
+| Private user notes | `data/<canonical_user_id>/memories/USER.md` and `MEMORY.md` | Authenticated `memory` tool, immediately |
 | Conversation continuity | `sessions`, `session_turns`, `session_summaries` | Agent persistence and validated compaction |
 
 ### File-Backed Durable User Memory
 
 - Ownership is the authenticated canonical user, shared across linked accounts. Addressed group turns use the sender's private files; groups do not create shared memory. Files are read fresh on each request, not imported from legacy SQLite facts or profiles.
 - `USER.md` is limited to 1,375 Unicode runes and `MEMORY.md` to 2,200, including separators. Missing files are empty. Entries are separated by a standalone `§` line (`\n§\n`); entries must be nonempty UTF-8 and cannot contain a standalone separator line. File contents are lower-authority user context, never system policy.
-- The `memory` tool requires an authenticated principal and an exact `target` of `user` or `memory`. Supply either one `action` (`add`, `replace`, `remove`) with its fields or 1-20 ordered `operations`, not both. `add` requires `content`; `replace` requires `old_text` and `content` or its `new_text` alias (not both); `remove` requires `old_text` only. A nonempty `old_text` must occur in exactly one whole entry; replace changes the entire entry, remove deletes it. The tool returns the resulting file contents, not a deferred staging receipt, and uses metadata-only durable tool history.
-- All operations on one target validate and commit as one atomic file replacement under a per-user `.lock`; errors leave that target unchanged. Files and lock are private, symlinked paths/nonregular files are rejected, and writes use a synced temporary file, rename, and directory sync. There is no transaction spanning both targets, a model response, or SQLite delivery. An edit remains in effect even if the response is not delivered.
+- The `memory` tool requires an authenticated principal and an exact `target` of `user` or `memory`. Supply either one `action` (`add`, `replace`, `remove`) with its fields or 1-20 ordered `operations`, not both. `add` requires `content`; `replace` requires `old_text` and `content` or its `new_text` alias (`content` wins if both are supplied); `remove` requires `old_text` only. A nonempty `old_text` must occur in exactly one whole entry; replace changes the entire entry, remove deletes it. Successful results confirm completion, report current/limit Unicode character counts, and return the resulting file contents; capacity errors show the current entries so the model can consolidate in one batch. Edits are immediate rather than staged and use metadata-only durable tool history. The tool description mentions `skill_manage` and `session_search`, but neither tool is currently registered by this application.
+- Each target has its own stable `USER.md.lock` or `MEMORY.md.lock`. Writers re-read, validate, and commit one target as an atomic file replacement under that target's lock; competing writes to the same file serialize, while writes to different targets can proceed concurrently. Prompt reads do not acquire locks: atomic replacement prevents partial-file reads, but the two files are not a single point-in-time snapshot. Deletion acquires both locks in fixed order. Files and locks are private, symlinked paths/nonregular files are rejected, and writes use a synced temporary file, rename, and directory sync. There is no transaction spanning both targets, a model response, or SQLite delivery. An edit remains in effect even if the response is not delivered. External editors must follow the same locking protocol to avoid lost updates.
+- Before gateways start, startup moves existing private files from `data/<canonical_user_id>/` into `memories/`. The migration validates source files, refuses destination conflicts, leaves old lock files in place, and can resume after a partial move. Migration failures abort startup; do not run old and new versions simultaneously during the layout change. New requests use only the `memories/` path.
+- The global `data/SOUL.md` is a template, not an additional injected system prompt. First use creates the canonical user's private `SOUL.md` by a synced temporary file and no-overwrite hard link; concurrent first requests cannot read a partial copy or overwrite an operator edit. Existing per-user souls are read fresh, not resynchronized when the template changes. Missing/unreadable templates or unsafe per-user paths fail the request rather than running without a system prompt. Per-user soul files are regular private files (at most 1 MiB); profile directories are private, and symlinks are rejected. Startup checks the former `data/memory/soul/soul.md` template location: if only the legacy path exists it moves it; if both exist with identical contents it removes the obsolete old copy; if both differ startup fails instead of overwriting an operator edit. The shipped template is at the new path, so deployed legacy edits need operator reconciliation before restart.
 
 ### Retained SQLite Fact Compatibility
 
@@ -295,7 +299,7 @@ New compaction output requires an empty `candidates` array. Persisted summary ar
 
 ## SQLite, Indexing, And Retention
 
-The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to it; global memory is not opened at startup. Private memory files live separately under `data/<canonical_user_id>/`. Initialization is serialized by a process schema mutex.
+The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to it; global memory is not opened at startup. Private memory files live separately under `data/<canonical_user_id>/memories/`. Initialization is serialized by a process schema mutex.
 
 - Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.14`, fifteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
 - `v4.0.14.sql` rebuilds `linked_accounts` with `idx_linked_accounts_single_gateway` (unique per owner/gateway except `openai`) and `idx_linked_accounts_owner`, then adds the retained `api_keys` table (`key_id`, `canonical_user_id`, 32-byte `secret_hash`, `created_at`) and `idx_api_keys_owner`. Both owner references cascade on deletion. Legacy key rows move with account merges for persisted-data compatibility; they no longer grant API access. The fixed `openai:local` link requires no key row.
@@ -332,9 +336,9 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 
 ### Backups And Container Paths
 
-Back up both the private `data/<canonical_user_id>/USER.md` and `MEMORY.md` files and SQLite session/account state, including the `openai:local` linked identity and retained historical `api_keys` rows. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately; no OpenAI bearer token is required. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
+Back up `data/SOUL.md`, each private `data/<canonical_user_id>/SOUL.md`, both private `data/<canonical_user_id>/memories/USER.md` and `MEMORY.md` files, and SQLite session/account state, including the `openai:local` linked identity and retained historical `api_keys` rows. Before the layout migrations have run, also back up the legacy global soul and legacy memory files directly under `data/<canonical_user_id>/`. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately; no OpenAI bearer token is required. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
 
-The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db` and private user files to `/home/oswald-ai/data/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
+The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`, the global soul template to `/home/oswald-ai/data/SOUL.md`, and private user files to `/home/oswald-ai/data/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
 
 ## Tools And MCP
 
@@ -668,4 +672,4 @@ An absent rate series is not necessarily an explicit zero; a missing snapshot ma
 2. Preserve tenant/source/delivery/lease checks, foreign keys, JSON references, non-reusable IDs/high-water, and atomic outbox writes. Add fresh, supported-prefix, checksum-rejection, rollback, foreign-key, concurrent-open, and reopen coverage.
 3. Version persisted artifact changes explicitly and retain decoders needed by existing v4 data. Do not rename JSON/schema/tool/log contracts as a side effect of Go cleanup.
 4. Keep retained SQLite profile compilation deterministic; distinguish active file-memory behavior from legacy policy and test file locking, immediate edits, merge limitations, reset/deletion, and retained replay paths as applicable.
-5. Soul changes are operator filesystem edits to `data/memory/soul/soul.md`, applied on the next request; no model tool may mutate that policy.
+5. Soul changes are operator filesystem edits to `data/SOUL.md` for future users or to `data/<canonical_user_id>/SOUL.md` for an existing user; per-user edits apply on the next request. No model tool may mutate either policy.

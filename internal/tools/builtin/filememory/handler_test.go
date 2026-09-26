@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
@@ -33,24 +34,31 @@ func TestHandlerRequiresPrincipalAndValidatesArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := handler(ctx, map[string]interface{}{"target": "memory", "operations": []interface{}{map[string]interface{}{"action": "replace", "old_text": "note", "new_text": "updated"}, map[string]interface{}{"action": "add", "content": "another"}}})
-	if err != nil || result.Content != "updated\n§\nanother" {
+	if err != nil || result.Content != "Memory updated (current/limit chars: 17/2200).\nupdated\n§\nanother" {
 		t.Fatalf("write: %+v %v", result, err)
 	}
 	_, memory, err := store.Read(ctx, "one")
-	if err != nil || memory != result.Content {
+	if err != nil || memory != "updated\n§\nanother" {
 		t.Fatalf("store: %q %v", memory, err)
+	}
+	result, err = handler(ctx, map[string]interface{}{"target": "memory", "operations": []interface{}{
+		map[string]interface{}{"action": "replace", "old_text": "updated", "content": "preferred", "new_text": "ignored"},
+		map[string]interface{}{"action": "remove", "old_text": "another"},
+		map[string]interface{}{"action": "add", "content": "new"},
+	}})
+	if err != nil || result.Content != "Memory updated (current/limit chars: 15/2200).\npreferred\n§\nnew" {
+		t.Fatalf("content precedence and batch: %+v %v", result, err)
 	}
 	for _, args := range []map[string]interface{}{
 		{"action": "read", "target": "memory"},
 		{"action": "add", "content": "missing target"},
-		{"action": "replace", "target": "memory", "old_text": "updated", "content": "one", "new_text": "two"},
-		{"action": "replace", "target": "memory", "old_text": "updated", "content": "same", "new_text": "same"},
+		{"action": "replace", "target": "memory", "old_text": "preferred", "content": "one", "new_text": 42},
 		{"action": "add", "target": "memory", "new_text": "not an add alias"},
 		{"action": "remove", "target": "memory", "old_text": "updated", "new_text": "not a remove alias"},
-		{"action": "replace", "target": "memory", "old_text": "updated", "new_text": 42},
+		{"action": "replace", "target": "memory", "old_text": "preferred", "new_text": 42},
 		{"action": "add", "target": "memory", "operations": []interface{}{map[string]interface{}{"action": "add", "content": "wrong"}}},
 		{"target": "memory", "operations": []interface{}{map[string]interface{}{"action": "add", "content": 5}}},
-		{"target": "memory", "operations": []interface{}{map[string]interface{}{"action": "replace", "old_text": "updated", "new_text": "one", "content": "two"}}},
+		{"target": "memory", "operations": []interface{}{map[string]interface{}{"action": "replace", "old_text": "missing", "new_text": "one", "content": "two"}}},
 		{"target": "memory", "operations": []interface{}{map[string]interface{}{"action": "add", "content": "safe"}, map[string]interface{}{"action": "remove", "old_text": "missing"}}},
 	} {
 		if _, err := handler(ctx, args); err == nil {
@@ -58,7 +66,18 @@ func TestHandlerRequiresPrincipalAndValidatesArguments(t *testing.T) {
 		}
 	}
 	_, memory, err = store.Read(ctx, "one")
-	if err != nil || memory != result.Content {
+	if err != nil || memory != "preferred\n§\nnew" {
 		t.Fatalf("invalid call changed stored memory: %q %v", memory, err)
+	}
+	_, err = handler(ctx, map[string]interface{}{"target": "memory", "action": "add", "content": strings.Repeat("x", 2200)})
+	if err == nil || !strings.Contains(err.Error(), "preferred\n§\nnew") || !strings.Contains(err.Error(), "15/2200 chars") {
+		t.Fatalf("full memory did not show current entries: %v", err)
+	}
+	result, err = handler(ctx, map[string]interface{}{"target": "memory", "operations": []interface{}{
+		map[string]interface{}{"action": "remove", "old_text": "preferred"},
+		map[string]interface{}{"action": "replace", "old_text": "new", "new_text": strings.Repeat("界", 2200)},
+	}})
+	if err != nil || !strings.Contains(result.Content, "2200/2200") {
+		t.Fatalf("final-only capacity: %+v %v", result, err)
 	}
 }

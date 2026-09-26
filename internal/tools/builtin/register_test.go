@@ -181,7 +181,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestRegisterMemoryPolicyAndStrictSchema(t *testing.T) {
+func TestRegisterMemoryPolicyAndBatchSchema(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg := newTestRegistry(t, log)
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
@@ -196,8 +196,8 @@ func TestRegisterMemoryPolicyAndStrictSchema(t *testing.T) {
 		t.Fatal("memory schema is unavailable")
 	}
 	operations := tool.Function.Parameters.Properties["operations"]
-	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || operations.MinItems == nil || *operations.MinItems != 1 || operations.MaxItems == nil || *operations.MaxItems != 20 || operations.Items == nil || operations.Items.AdditionalProperties == nil || *operations.Items.AdditionalProperties {
-		t.Fatalf("memory schema is not strict: %+v", tool.Function.Parameters)
+	if tool.Function.Parameters.AdditionalProperties != nil || operations.MinItems != nil || operations.MaxItems != nil || operations.Items == nil || operations.Items.AdditionalProperties != nil {
+		t.Fatalf("memory schema differs from advertised batch shape: %+v", tool.Function.Parameters)
 	}
 	for _, name := range []string{"action", "content", "new_text", "old_text"} {
 		if _, ok := operations.Items.Properties[name]; !ok {

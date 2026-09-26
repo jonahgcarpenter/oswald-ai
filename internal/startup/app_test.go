@@ -83,6 +83,86 @@ func TestRunValidatesBeforeStorage(t *testing.T) {
 	}
 }
 
+func TestRunMigratesFileMemoryBeforeGateways(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "legacy", true: "conflict"}[conflict], func(t *testing.T) {
+			root := t.TempDir()
+			userDir := filepath.Join(root, "one")
+			if err := os.Mkdir(userDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(userDir, "USER.md"), []byte("legacy note"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if conflict {
+				if err := os.Mkdir(filepath.Join(userDir, "memories"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(userDir, "memories", "USER.md"), []byte("new note"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log := config.NewLogger(config.LevelError)
+			log.SetOutput(io.Discard)
+			cfg := &config.Config{LLMGatewayModel: "test-model", LLMGatewayURL: "http://unused.invalid", MCPConfigEncryptionKey: "12345678901234567890123456789012"}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deps := dependencies{
+				databasePath:   filepath.Join(t.TempDir(), "oswald.db"),
+				fileMemoryRoot: root,
+				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, log *config.Logger) (*registry.Registry, error) {
+					return registry.New(log), nil
+				},
+				newGateways: func(_ *config.Config, _ *accounts.Service, _ gatewayruntime.Dependencies, _ *config.Logger) ([]gateway.Service, error) {
+					user, _, err := files.NewStore(root).Read(ctx, "one")
+					if err != nil || user != "legacy note" {
+						t.Errorf("gateway saw user memory %q: %v", user, err)
+					}
+					cancel()
+					return nil, nil
+				},
+			}
+			err := run(ctx, cfg, log, io.Discard, deps)
+			if conflict {
+				var startupErr *Error
+				if !errors.As(err, &startupErr) || startupErr.Event != "app.memory_files.migration_failed" {
+					t.Fatalf("migration conflict: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRunRejectsConflictingSoulTemplatesBeforeGateways(t *testing.T) {
+	root := t.TempDir()
+	legacyDir := filepath.Join(root, "memory", "soul")
+	if err := os.MkdirAll(legacyDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "soul.md"), []byte("operator customization"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "SOUL.md"), []byte("shipped default"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log := config.NewLogger(config.LevelError)
+	log.SetOutput(io.Discard)
+	cfg := &config.Config{LLMGatewayModel: "test-model", LLMGatewayURL: "http://unused.invalid", MCPConfigEncryptionKey: "12345678901234567890123456789012"}
+	var startupErr *Error
+	err := run(context.Background(), cfg, log, io.Discard, dependencies{
+		databasePath:   filepath.Join(t.TempDir(), "oswald.db"),
+		fileMemoryRoot: root,
+	})
+	if !errors.As(err, &startupErr) || startupErr.Event != "app.soul.migration_failed" {
+		t.Fatalf("conflicting templates: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(legacyDir, "soul.md")); err != nil || string(data) != "operator customization" {
+		t.Fatalf("legacy template changed: %q %v", data, err)
+	}
+}
+
 func TestRunProvisionsLocalOpenAIAdminBeforeBootstrap(t *testing.T) {
 	for _, tc := range []struct {
 		name, port string
@@ -101,7 +181,8 @@ func TestRunProvisionsLocalOpenAIAdminBeforeBootstrap(t *testing.T) {
 			cfg := &config.Config{LLMGatewayModel: "test-model", LLMGatewayURL: "http://unused.invalid", MCPConfigEncryptionKey: "12345678901234567890123456789012", OpenAIListenPort: tc.port}
 			var output bytes.Buffer
 			deps := dependencies{
-				databasePath: path,
+				databasePath:   path,
+				fileMemoryRoot: t.TempDir(),
 				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, log *config.Logger) (*registry.Registry, error) {
 					return registry.New(log), nil
 				},
@@ -171,7 +252,8 @@ func TestRunLifecycle(t *testing.T) {
 				gw.name = "test"
 			}
 			deps := dependencies{
-				databasePath: filepath.Join(t.TempDir(), "oswald.db"),
+				databasePath:   filepath.Join(t.TempDir(), "oswald.db"),
+				fileMemoryRoot: t.TempDir(),
 				newRegistry: func(_ *config.Config, m *memory.Store, f *files.Store, l *config.Logger) (*registry.Registry, error) {
 					userStore, fileStore = m, f
 					if mode == "registry failure" {

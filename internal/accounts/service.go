@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 )
 
 // Service manages canonical user IDs and linked gateway accounts.
@@ -18,6 +19,7 @@ type Service struct {
 	path     string
 	memories *memory.Store
 	files    *files.Store
+	soul     *soul.Store
 	log      *config.Logger
 	db       *database.DB
 	mcp      MCPUserMerger
@@ -37,6 +39,11 @@ func NewService(path string, memories *memory.Store, mcp MCPUserMerger, log *con
 // Account merges do not move files; callers must link accounts before writing files.
 func (s *Service) SetFileMemory(store *files.Store) {
 	s.files = store
+}
+
+// SetSoul installs the private soul store for account deletion and linking.
+func (s *Service) SetSoul(store *soul.Store) {
+	s.soul = store
 }
 
 // Initialize prepares the account-link database.

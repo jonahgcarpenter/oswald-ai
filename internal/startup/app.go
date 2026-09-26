@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime/debug"
 	"time"
 
@@ -49,9 +50,10 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Cause }
 
 type dependencies struct {
-	databasePath string
-	newRegistry  func(*config.Config, *memory.Store, *files.Store, *config.Logger) (*registry.Registry, error)
-	newGateways  func(*config.Config, *accounts.Service, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
+	databasePath   string
+	fileMemoryRoot string
+	newRegistry    func(*config.Config, *memory.Store, *files.Store, *config.Logger) (*registry.Registry, error)
+	newGateways    func(*config.Config, *accounts.Service, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
 }
 
 // Run assembles the application and waits for ctx cancellation before ordered
@@ -59,9 +61,10 @@ type dependencies struct {
 // have no stop contract, so Run is process-oriented, not restartable in-process.
 func Run(ctx context.Context, cfg *config.Config, log *config.Logger, stdout io.Writer) error {
 	return run(ctx, cfg, log, stdout, dependencies{
-		databasePath: config.DefaultDatabasePath,
-		newRegistry:  tools.NewRegistryFromConfig,
-		newGateways:  gateway.NewServicesFromConfig,
+		databasePath:   config.DefaultDatabasePath,
+		fileMemoryRoot: "data",
+		newRegistry:    tools.NewRegistryFromConfig,
+		newGateways:    gateway.NewServicesFromConfig,
 	})
 }
 
@@ -126,9 +129,8 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		config.F("usable_input_limit", budget.UsableInputLimit()),
 	)
 
-	// The operator-managed soul file is read fresh for every request and used as
-	// the agent's system prompt.
-	soulStore := soul.NewStore(config.DefaultSoulPath)
+	// The global template seeds each canonical user's operator-managed soul.
+	soulStore := soul.NewStore(filepath.Join(deps.fileMemoryRoot, "SOUL.md"))
 	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
 
 	// The user memory store shares the account-link database and initializes its
@@ -143,7 +145,15 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	retentionPolicy := config.DefaultRetentionPolicy()
 	userMemStore.SetRetentionPolicy(retentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", deps.databasePath))
-	fileMemStore := files.NewStore("data")
+	fileMemStore := files.NewStore(deps.fileMemoryRoot)
+	if err := soulStore.MigrateTemplate(filepath.Join(deps.fileMemoryRoot, "memory", "soul", "soul.md")); err != nil {
+		return &Error{Event: "app.soul.migration_failed", Message: "failed to migrate soul template", Cause: err}
+	}
+	moved, err := fileMemStore.Migrate(ctx)
+	if err != nil {
+		return &Error{Event: "app.memory_files.migration_failed", Message: "failed to migrate private memory files", Cause: err}
+	}
+	log.Info("app.memory_files.migration.complete", "private memory migration completed", config.F("moved_count", moved), config.F("status", "ok"))
 	mcpStore, err := mcp.NewStore(deps.databasePath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize MCP config store", Cause: err}
@@ -157,6 +167,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	}
 	accountLinkService := accounts.NewService(deps.databasePath, userMemStore, mcpManager, rootLog.Server("account_link"))
 	accountLinkService.SetFileMemory(fileMemStore)
+	accountLinkService.SetSoul(soulStore)
 	cleanup.accounts = func() { _ = accountLinkService.Close() }
 	if err := accountLinkService.Initialize(); err != nil {
 		return &Error{Event: "app.account_link.init_failed", Message: "failed to initialize account link store", Cause: err}

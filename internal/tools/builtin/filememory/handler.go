@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
@@ -65,7 +66,11 @@ func NewHandler(store *files.Store) func(context.Context, map[string]interface{}
 		if err != nil {
 			return governance.Result{}, fmt.Errorf("memory: %w", err)
 		}
-		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+		limit := 2200
+		if target == "user" {
+			limit = 1375
+		}
+		return governance.Result{Content: fmt.Sprintf("Memory updated (current/limit chars: %d/%d).\n%s", utf8.RuneCountInString(content), limit, content), Outcome: governance.OutcomeProductive}, nil
 	}
 }
 
@@ -93,16 +98,15 @@ func decodeOperation(item map[string]interface{}) (files.Operation, error) {
 		case "content":
 			op.Content = value
 		case "new_text":
-			op.Content = value
+			if _, hasContent := item["content"]; !hasContent {
+				op.Content = value
+			}
 		case "old_text":
 			op.OldText = value
 		}
 	}
 	_, hasContent := item["content"]
 	_, hasNewText := item["new_text"]
-	if hasContent && hasNewText {
-		return op, errors.New("memory: content and new_text conflict")
-	}
 	switch action {
 	case "add":
 		if !hasContent || hasNewText || op.OldText != "" {

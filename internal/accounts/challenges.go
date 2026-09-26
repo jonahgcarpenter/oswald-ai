@@ -337,6 +337,12 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 	if mergedLoser != "" && s.mcp != nil {
 		s.mcp.UserMergeCommitted(result.CanonicalUserID, mergedLoser)
 	}
+	if mergedLoser != "" && s.soul != nil {
+		if err := s.soul.Delete(ctx, mergedLoser); err != nil {
+			s.log.With(requestctx.LogFields(ctx)...).Warn("account_link.challenge.soul_delete_failed", "failed to delete merged user soul", config.F("target_user_id", mergedLoser), config.F("status", "error"), config.ErrorField(err))
+			return result, fmt.Errorf("account merge committed but delete losing soul: %w", err)
+		}
+	}
 	event := "account_link.challenge.confirmed"
 	if result.Replayed {
 		event = "account_link.challenge.replayed"

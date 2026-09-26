@@ -1221,6 +1221,7 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "first"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "second"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "third"}},
 	}}
 	agent, _, soulPath := newTestAgentWithSoulPath(t, chat, nil, nil)
 
@@ -1232,8 +1233,11 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 		t.Fatalf("soul and gateway instructions have incorrect authority or order: %+v", firstSystem)
 	}
 
-	if err := os.WriteFile(soulPath, []byte("You are Oswald after a manual edit."), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(filepath.Dir(soulPath), "user-1", "SOUL.md"), []byte("You are Oswald after a manual edit."), 0o600); err != nil {
 		t.Fatalf("manually edit soul fixture: %v", err)
+	}
+	if err := os.WriteFile(soulPath, []byte("You are the new default."), 0o600); err != nil {
+		t.Fatalf("change default template: %v", err)
 	}
 	if _, err := processAgent(agent, "req-2", "homeassistant", "session-2", "user-1", "Display", "second question", nil, nil); err != nil {
 		t.Fatalf("second process: %v", err)
@@ -1241,6 +1245,13 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 	secondSystem := primaryRequests(chat.requests)[1].Messages[0]
 	if secondSystem.Role != "system" || secondSystem.Content != "You are Oswald after a manual edit." {
 		t.Fatalf("manual soul edit was not reloaded as the system prompt: %+v", secondSystem)
+	}
+	if _, err := processAgent(agent, "req-3", "homeassistant", "session-3", "user-2", "Display", "third question", nil, nil); err != nil {
+		t.Fatalf("third process: %v", err)
+	}
+	thirdSystem := primaryRequests(chat.requests)[2].Messages[0]
+	if thirdSystem.Role != "system" || thirdSystem.Content != "You are the new default." {
+		t.Fatalf("new user did not get the current template: %+v", thirdSystem)
 	}
 }
 
@@ -1586,7 +1597,7 @@ func TestProcessFileWriteVisibleNowAndReadFreshNextTurn(t *testing.T) {
 		t.Fatalf("memory tool was not advertised: %+v", requests)
 	}
 	result := toolResultByID(requests[1].Messages, "write")
-	if result == nil || result.Content != "Project is Atlas." {
+	if result == nil || result.Content != "Memory updated (current/limit chars: 17/2200).\nProject is Atlas." {
 		t.Fatalf("write result not visible in current round: %+v", requests)
 	}
 	if _, err := processAgent(agent, "read-file", "homeassistant", "session", "user-1", "User", "what did I save?", nil, nil); err != nil {
