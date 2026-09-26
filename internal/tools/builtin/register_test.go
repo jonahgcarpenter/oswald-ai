@@ -87,7 +87,7 @@ func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
 	t.Fatal("time.current schema was not loaded")
 }
 
-func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
+func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -96,23 +96,23 @@ func TestRegisterIncludesTranscriptSearchTool(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatalf("register builtin handlers: %v", err)
 	}
-	if !reg.HasHandler(toolnames.SessionTranscriptSearch) {
-		t.Fatalf("%s handler was not registered", toolnames.SessionTranscriptSearch)
+	if !reg.HasHandler(toolnames.Memory) {
+		t.Fatal("memory handler was not registered")
 	}
 	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name != toolnames.SessionTranscriptSearch {
+		if tool.Function.Name != toolnames.Memory {
 			continue
 		}
 		params := tool.Function.Parameters
-		if len(params.Properties) != 2 || params.Properties["query"].Type != "string" || params.Properties["limit"].Type != "integer" || len(params.Required) != 1 || params.Required[0] != "query" {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.SessionTranscriptSearch, params)
+		if len(params.Properties) != 6 || params.Properties["target"].Type != "string" || params.Properties["operations"].Type != "array" || len(params.Required) != 1 || params.Required[0] != "target" {
+			t.Fatalf("unexpected memory parameters: %+v", params)
 		}
 		return
 	}
-	t.Fatalf("%s schema was not loaded", toolnames.SessionTranscriptSearch)
+	t.Fatal("memory schema was not loaded")
 }
 
-func TestRegisterExposesUserMemoryTools(t *testing.T) {
+func TestRegisterHidesLegacyMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -121,42 +121,11 @@ func TestRegisterExposesUserMemoryTools(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch} {
-		if _, ok := visibleTestTool(reg, name); !ok || !reg.HasHandler(name) {
-			t.Fatalf("user memory tool is unavailable: %s", name)
+	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
+		if _, ok := visibleTestTool(reg, name); ok || reg.HasHandler(name) {
+			t.Fatalf("legacy memory tool is available: %s", name)
 		}
 	}
-}
-
-func TestRegisterGlobalMemorySearchIsDefaultVisibleWithSchema(t *testing.T) {
-	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
-		t.Fatal(err)
-	}
-	foundVisible := false
-	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name == toolnames.GlobalMemorySearch {
-			foundVisible = true
-		}
-	}
-	if !foundVisible {
-		t.Fatalf("%s is not default-visible", toolnames.GlobalMemorySearch)
-	}
-	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name != toolnames.GlobalMemorySearch {
-			continue
-		}
-		params := tool.Function.Parameters
-		if len(params.Properties) != 2 || params.Properties["query"].Type != "string" || params.Properties["limit"].Type != "integer" || len(params.Required) != 1 || params.Required[0] != "query" {
-			t.Fatalf("unexpected %s parameters: %+v", toolnames.GlobalMemorySearch, params)
-		}
-		return
-	}
-	t.Fatalf("%s schema was not loaded", toolnames.GlobalMemorySearch)
 }
 
 func TestRegisterCatalogOmitsRemovedGlobalMemoryTools(t *testing.T) {
@@ -193,14 +162,10 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"web.fetch":                       true,
-		"web.search":                      true,
-		"time.current":                    true,
-		toolnames.UserMemorySearch:        true,
-		toolnames.UserMemoryList:          true,
-		toolnames.UserMemorySave:          true,
-		toolnames.GlobalMemorySearch:      true,
-		toolnames.SessionTranscriptSearch: true,
+		"web.fetch":      true,
+		"web.search":     true,
+		"time.current":   true,
+		toolnames.Memory: true,
 	}
 	got := map[string]bool{}
 	for _, tool := range reg.LLMTools() {
@@ -216,33 +181,28 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestRegisterUserMemorySavePolicyAndStrictSchema(t *testing.T) {
+func TestRegisterMemoryPolicyAndStrictSchema(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg := newTestRegistry(t, log)
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	policy, ok := reg.Policy(toolnames.UserMemorySave)
-	if !ok || policy.MaxExecutions != 2 || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
-		t.Fatalf("unexpected user memory save policy: %+v", policy)
+	policy, ok := reg.Policy(toolnames.Memory)
+	if !ok || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
+		t.Fatalf("unexpected file memory policy: %+v", policy)
 	}
-	tool, ok := visibleTestTool(reg, toolnames.UserMemorySave)
+	tool, ok := visibleTestTool(reg, toolnames.Memory)
 	if !ok {
-		t.Fatal("user memory save schema is unavailable")
+		t.Fatal("memory schema is unavailable")
 	}
-	memories := tool.Function.Parameters.Properties["memories"]
-	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || memories.MinItems == nil || *memories.MinItems != 1 || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.Items == nil || memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
-		t.Fatalf("user memory save schema is not strict: %+v", tool.Function.Parameters)
+	operations := tool.Function.Parameters.Properties["operations"]
+	if tool.Function.Parameters.AdditionalProperties == nil || *tool.Function.Parameters.AdditionalProperties || operations.MinItems == nil || *operations.MinItems != 1 || operations.MaxItems == nil || *operations.MaxItems != 20 || operations.Items == nil || operations.Items.AdditionalProperties == nil || *operations.Items.AdditionalProperties {
+		t.Fatalf("memory schema is not strict: %+v", tool.Function.Parameters)
 	}
-	for _, name := range []string{"supersedes", "evidence_type", "confidence", "reinforces_memory_id"} {
-		if _, ok := memories.Items.Properties[name]; !ok {
-			t.Fatalf("user memory save schema is missing %s", name)
+	for _, name := range []string{"action", "content", "new_text", "old_text"} {
+		if _, ok := operations.Items.Properties[name]; !ok {
+			t.Fatalf("memory schema is missing %s", name)
 		}
-	}
-	confidence := memories.Items.Properties["confidence"]
-	reinforces := memories.Items.Properties["reinforces_memory_id"]
-	if confidence.Minimum == nil || *confidence.Minimum != 0 || confidence.Maximum == nil || *confidence.Maximum != 1 || reinforces.Minimum == nil || *reinforces.Minimum != 0 {
-		t.Fatalf("user memory assessment bounds are incomplete: confidence=%+v reinforces=%+v", confidence, reinforces)
 	}
 }
 

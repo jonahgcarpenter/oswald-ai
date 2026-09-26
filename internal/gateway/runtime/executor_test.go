@@ -230,19 +230,22 @@ func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing
 	}
 }
 
-func TestExecuteEnqueuesFormationOnlyAfterResponseDelivery(t *testing.T) {
+func TestExecuteEnqueuesCompactionForPersistedTurnAfterDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
 	responder := &fakeResponder{}
-	enqueuer := &fakeFormationEnqueuer{responder: responder}
-	deps.Formation = enqueuer
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	deps.Compaction = compaction
 	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if outcome.Err != nil || !enqueuer.called || enqueuer.userID != "user" || enqueuer.source.TurnID <= 0 {
-		t.Fatalf("outcome=%+v enqueuer=%+v", outcome, enqueuer)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID <= 0 {
+		t.Fatalf("outcome=%+v response=%+v", outcome, responder.agent)
 	}
-	if !enqueuer.responseDelivered {
-		t.Fatal("formation was enqueued before response delivery")
+	if !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" ||
+		compaction.source.RequestID != "req" || compaction.source.SessionID != "session" ||
+		compaction.source.TurnID != responder.agent.SourceTurnID || compaction.source.SessionGeneration != responder.agent.SessionGeneration ||
+		compaction.source.Model != responder.agent.Model {
+		t.Fatalf("compaction bookkeeping after delivery: %+v", compaction)
 	}
 }
 
@@ -255,17 +258,17 @@ func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
 	responder := &fakeResponder{}
 	compaction := &fakeCompactionEnqueuer{responder: responder}
 	deps := Dependencies{Broker: b, Log: log, Compaction: compaction}
-	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if !compaction.enqueueCalled || !compaction.responseDelivered || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
 		t.Fatalf("compaction enqueue=%+v", compaction)
 	}
 
 	failedResponder := &fakeResponder{sendErr: errors.New("offline")}
 	failed := &fakeCompactionEnqueuer{responder: failedResponder}
 	deps.Compaction = failed
-	Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
-	if failed.enqueueCalled || !failed.failureMarked || failed.source.TurnID != 77 {
-		t.Fatalf("failed delivery bookkeeping = %+v", failed)
+	outcome = Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
+	if !errors.Is(outcome.Err, failedResponder.sendErr) || failed.enqueueCalled || !failed.failureMarked || !failed.failureAfterSend || failed.userID != "user" || failed.source.TurnID != 77 {
+		t.Fatalf("failed delivery outcome=%+v bookkeeping=%+v", outcome, failed)
 	}
 }
 
@@ -534,18 +537,11 @@ type fakeAccess struct {
 	userID string
 }
 
-type fakeFormationEnqueuer struct {
-	responder         *fakeResponder
-	called            bool
-	responseDelivered bool
-	userID            string
-	source            memory.FormationSource
-}
-
 type fakeCompactionEnqueuer struct {
 	responder         *fakeResponder
 	enqueueCalled     bool
 	failureMarked     bool
+	failureAfterSend  bool
 	responseDelivered bool
 	userID            string
 	source            memory.FormationSource
@@ -561,17 +557,10 @@ func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, sourc
 
 func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID string, turnID int64) error {
 	f.failureMarked = true
+	f.failureAfterSend = f.responder.agent != nil && f.responder.sendErr != nil
 	f.responseDelivered = false
 	f.userID = userID
 	f.source.TurnID = turnID
-	return nil
-}
-
-func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
-	f.called = true
-	f.responseDelivered = f.responder.agent != nil
-	f.userID = userID
-	f.source = source
 	return nil
 }
 

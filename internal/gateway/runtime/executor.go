@@ -461,17 +461,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
-		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
-			source := memory.FormationSource{
-				RequestID: req.RequestID, SessionID: req.SessionKey,
-				SessionGeneration: result.Response.SessionGeneration,
-				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
-				ExtractorVersion: memory.FormationExtractorVersion,
-			}
-			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
-				log.Warn("user_memory.formation.job.enqueue_failed", "failed to enqueue post-turn user-memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
-			}
-		}
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
 			source := memory.FormationSource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,

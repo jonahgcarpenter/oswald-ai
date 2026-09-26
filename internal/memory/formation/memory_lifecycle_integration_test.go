@@ -185,25 +185,22 @@ func evaluateMemoryLifecycleTenantRetrieval(t *testing.T) {
 }
 
 func evaluateMemoryLifecycleFailedDelivery(t *testing.T) {
-	store, _ := memoryLifecycleStore(t, nil, "", "user")
+	store, path := memoryLifecycleStore(t, nil, "", "user")
 	processor := &memoryLifecycleProcessor{store: store}
 	log := config.NewLogger(config.LevelError)
 	b := broker.NewBroker(processor, 1, log)
 	b.Start()
 	defer b.Shutdown()
-	extractor := &memoryLifecycleLegacyExtractor{memories: []memorypkg.MemorySaveItem{memoryLifecycleMemory("The user's failed marker is NEVER-SERVE.", "My failed marker is NEVER-SERVE.", "notes", "notes.failed_marker", "NEVER-SERVE", "user_statement", 1)}}
-	formation := NewService(store, extractor, "memoryLifecycle-model", log)
 	responder := &memoryLifecycleResponder{sendErr: errors.New("deterministic delivery failure")}
 	outcome := gatewayruntime.Execute(gatewayruntime.Request{
 		RequestID: "failed-delivery", Principal: memoryLifecyclePrincipal("user", "actor"), SessionKey: "failed-session", IsDirect: true,
 		Text: "My failed marker is NEVER-SERVE.",
-	}, gatewayruntime.Dependencies{Broker: b, Log: log, Formation: formation, Compaction: memoryLifecycleDeliveryBookkeeper{store}}, responder)
+	}, gatewayruntime.Dependencies{Broker: b, Log: log, Compaction: memoryLifecycleDeliveryBookkeeper{store}}, responder)
 	if outcome.Err == nil || processor.turnID <= 0 {
 		t.Fatalf("failed delivery outcome=%+v turn=%d", outcome, processor.turnID)
 	}
-	formation.drain(context.Background())
-	if extractor.calls != 0 {
-		t.Fatalf("failed delivery invoked extractor %d times", extractor.calls)
+	if count := memoryLifecycleRowCount(t, path, `SELECT COUNT(*) FROM durable_jobs WHERE job_kind = 'memory_formation' AND source_turn_id = ?`, processor.turnID); count != 0 {
+		t.Fatalf("failed delivery enqueued %d formation jobs", count)
 	}
 	assertMemoryLifecycleMemoryCount(t, store, "user", 0)
 	profile, err := store.ResolveSessionProfile(context.Background(), "user", "new-session", time.Hour)
@@ -424,7 +421,7 @@ func evaluateMemoryLifecycleSessionContinuity(t *testing.T) {
 	if err != nil || len(tail) != 1 || tail[0].ID != turnIDs[2] {
 		t.Fatalf("summary tail=%+v err=%v", tail, err)
 	}
-	assembled := agent.AssemblePromptContext("policy", "profile", "continue", nil, summary, 1, nil, 0, tail, nil, 100000)
+	assembled := agent.AssemblePromptContext("policy", "profile", "continue", nil, summary, 1, tail, nil, 100000)
 	if !assembled.SummaryIncluded || assembled.SelectedTurnCount != 1 || !memoryLifecycleMessagesContain(assembled.Messages, "Atlas uses Go") || !memoryLifecycleMessagesContain(assembled.Messages, "Newest tail remains verbatim") {
 		t.Fatalf("assembled summary/tail=%+v", assembled)
 	}

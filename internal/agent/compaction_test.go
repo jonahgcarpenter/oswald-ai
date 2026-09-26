@@ -17,7 +17,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -46,8 +45,9 @@ func (f *fakeForegroundCompactor) CompactForeground(_ context.Context, previous 
 func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Work completed so far."}}
 	image := llm.InputImage{MimeType: "image/png", Data: "encoded", Source: "fixture"}
+	fileContext := renderFileMemory("User prefers short answers.", "Project is Atlas.")
 	status := make([]StreamChunk, 0, 1)
-	state := newForegroundCompactionState(compactor, 100, "policy", "profile", "current request", []llm.InputImage{image}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
+	state := newForegroundCompactionState(compactor, 100, "policy", fileContext, "current request", []llm.InputImage{image}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
 		status = append(status, chunk)
 	})
 	original := []llm.ChatMessage{
@@ -67,7 +67,7 @@ func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	if len(status) != 1 || status[0].Type != ChunkStatus || status[0].Text != foregroundCompactionStatus {
 		t.Fatalf("status=%+v", status)
 	}
-	if len(rebuilt) != 4 || rebuilt[0].Content != "policy" || rebuilt[1].Content != "profile" || !strings.Contains(rebuilt[2].Content, "active_turn_summary") || rebuilt[3].Content != "current request" {
+	if len(rebuilt) != 4 || rebuilt[0].Content != "policy" || rebuilt[1].Role != "user" || rebuilt[1].Content != fileContext || !strings.Contains(rebuilt[2].Content, "active_turn_summary") || rebuilt[3].Content != "current request" {
 		t.Fatalf("rebuilt=%+v", rebuilt)
 	}
 	if len(rebuilt[3].Images) != 1 || rebuilt[3].Images[0].Data != image.Data || messagesContain(rebuilt, "old") {
@@ -351,7 +351,6 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			liveURL := "https://example.com/" + strings.Repeat("private-path", 1000)
 			first := toolCallResponse("fetch", "test.fetch", map[string]interface{}{"url": liveURL})
 			first.Message.Thinking = "private reasoning"
-			first.Message.ToolCalls = append(first.Message.ToolCalls, llm.ToolCall{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}})
 			chat := &fakeChatter{outcomes: []fakeChatOutcome{{response: first}, {response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}}
 			if mode == "overflow" {
 				chat.outcomes[1] = fakeChatOutcome{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}
@@ -365,7 +364,6 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 				t.Fatal(err)
 			}
 			a, store := newTestAgent(t, chat, nil, reg)
-			registerStagingTool(t, reg, store.Store, false)
 			a.budget.PromptLimit = 1000
 			if mode == "overflow" {
 				a.budget.PromptLimit = 100000
@@ -399,12 +397,8 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			if strings.Contains(string(encoded), "private reasoning") || strings.Contains(string(encoded), "private attachment bytes") {
 				t.Fatal("compactor received reasoning or attachment bytes")
 			}
-			artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID)
-			if err != nil || len(artifact.Candidates) != 1 {
-				t.Fatalf("artifact=%+v err=%v", artifact, err)
-			}
 			turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
-			if err != nil || len(turns) != 1 || turns[0].AssistantText != response.Response || len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 2 {
+			if err != nil || len(turns) != 1 || turns[0].AssistantText != response.Response || len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 1 {
 				t.Fatalf("turns=%+v err=%v", turns, err)
 			}
 			encoded, _ = json.Marshal(turns)

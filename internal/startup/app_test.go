@@ -20,7 +20,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -98,7 +98,7 @@ func TestRunLifecycle(t *testing.T) {
 			}
 			cause := errors.New("factory failed")
 			var userStore *memory.Store
-			var globalStore *global.Store
+			var fileStore *files.Store
 			var accountService *accounts.Service
 			var runtimeDeps gatewayruntime.Dependencies
 			started := make(chan *broker.Broker, 1)
@@ -118,8 +118,8 @@ func TestRunLifecycle(t *testing.T) {
 			}
 			deps := dependencies{
 				databasePath: filepath.Join(t.TempDir(), "oswald.db"),
-				newRegistry: func(_ *config.Config, m *memory.Store, g *global.Store, l *config.Logger) (*registry.Registry, error) {
-					userStore, globalStore = m, g
+				newRegistry: func(_ *config.Config, m *memory.Store, f *files.Store, l *config.Logger) (*registry.Registry, error) {
+					userStore, fileStore = m, f
 					if mode == "registry failure" {
 						return nil, cause
 					}
@@ -218,19 +218,17 @@ func TestRunLifecycle(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if userStore == nil || globalStore == nil {
+			if userStore == nil || fileStore == nil {
 				t.Fatal("registry did not capture stores")
 			}
 			_, userErr := userStore.ListMemories("test-user", "", "", 1)
-			_, globalErr := globalStore.List(context.Background(), 1)
 			assertStartupClosed(t, "user memory", userErr)
-			assertStartupClosed(t, "global memory", globalErr)
 			if strings.HasPrefix(mode, "registry") {
 				if accountService != nil {
 					t.Fatal("gateway factory called after registry failure/cancellation")
 				}
 			} else {
-				if accountService == nil || runtimeDeps.Broker == nil || runtimeDeps.Commands == nil || runtimeDeps.Access != accountService || runtimeDeps.Formation == nil || runtimeDeps.Compaction == nil || runtimeDeps.RuntimeInvalidationBus == nil {
+				if accountService == nil || runtimeDeps.Broker == nil || runtimeDeps.Commands == nil || runtimeDeps.Access != accountService || runtimeDeps.Compaction == nil || runtimeDeps.RuntimeInvalidationBus == nil {
 					t.Fatal("incomplete gateway dependencies")
 				}
 				_, accountErr := accountService.HasAdmin()
@@ -335,11 +333,11 @@ func (w *startupLogWriter) hasEvent(name string) bool {
 }
 
 func TestShutdownOrder(t *testing.T) {
-	names := []string{"maintenance", "broker", "formation", "compaction", "index", "mcp", "accounts", "mcpStore", "globalMemory", "userMemory"}
+	names := []string{"maintenance", "broker", "compaction", "index", "mcp", "accounts", "mcpStore", "userMemory"}
 	for _, partial := range []bool{false, true} {
 		var got, want []string
 		var s shutdown
-		slots := []*func(){&s.maintenance, &s.broker, &s.formation, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.globalMemory, &s.userMemory}
+		slots := []*func(){&s.maintenance, &s.broker, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.userMemory}
 		for i, slot := range slots {
 			if partial && i%2 == 0 {
 				continue

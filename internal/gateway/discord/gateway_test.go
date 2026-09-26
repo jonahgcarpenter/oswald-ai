@@ -93,8 +93,11 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	if len(primary) != 1 {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
+	if len(primary[0].Messages) != 2 || primary[0].Messages[0].Role != "system" || primary[0].Messages[1].Role != "user" {
+		t.Fatalf("expected system policy and current user prompt without file context, got %+v", primary[0].Messages)
+	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello discord" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
+	if last.Content != "hello discord" {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if rest.lastMessageContent() != "discord response" || len(rest.editedMessages()) != 0 {
@@ -827,8 +830,11 @@ func TestDiscordMentionedGuildMessageStripsMentionAndResolvesMentions(t *testing
 	if len(primary) != 1 {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
+	if len(primary[0].Messages) != 2 || primary[0].Messages[0].Role != "system" || primary[0].Messages[1].Role != "user" {
+		t.Fatalf("expected system policy and current user prompt without file context, got %+v", primary[0].Messages)
+	}
 	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
-	if prompt != "hello @Bob" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
+	if prompt != "hello @Bob" {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
 }

@@ -12,6 +12,7 @@ import (
 func TestBuiltinNamesMatchStableSchemaContract(t *testing.T) {
 	contracts := []struct{ name, literal string }{
 		{CurrentTime, "time.current"},
+		{Memory, "memory"},
 		{WebSearch, "web.search"},
 		{WebFetch, "web.fetch"},
 		{WebImageSearch, "web.image_search"},

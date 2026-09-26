@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
 
@@ -331,6 +333,82 @@ func TestServiceDeleteUserRemovesAccountsMemoryAndSessions(t *testing.T) {
 	}
 	if recreatedID == targetID {
 		t.Fatalf("expected deleted external account to create a new canonical user, got original %s", recreatedID)
+	}
+}
+
+func TestServiceDeleteUserRemovesPrivateFiles(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	adminID, err := links.EnsureAccount(ctx, "discord", "9001", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := links.EnsureAccount(ctx, "discord", "9002", "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "9001", Assurance: identity.AssuranceDiscordGateway}
+	claimTestAdmin(t, links, admin)
+	store := files.NewStore(filepath.Join(t.TempDir(), "files"))
+	links.SetFileMemory(store)
+	for _, id := range []string{adminID, targetID} {
+		for _, name := range []string{"user", "memory"} {
+			if _, err := store.Apply(ctx, id, name, []files.Operation{{Action: "add", Content: "private note"}}); err != nil {
+				t.Fatalf("write %s for %s: %v", name, id, err)
+			}
+		}
+	}
+	if _, err := links.DeleteUserAs(ctx, admin, targetID); err != nil {
+		t.Fatalf("delete target: %v", err)
+	}
+	user, memory, err := store.Read(ctx, targetID)
+	if err != nil || user != "" || memory != "" {
+		t.Fatalf("target files remain: user=%q memory=%q err=%v", user, memory, err)
+	}
+	user, memory, err = store.Read(ctx, adminID)
+	if err != nil || user != "private note" || memory != "private note" {
+		t.Fatalf("admin files changed: user=%q memory=%q err=%v", user, memory, err)
+	}
+}
+
+func TestServiceDeleteUserFileFailureRetainsAccount(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	adminID, err := links.EnsureAccount(ctx, "discord", "9001", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := links.EnsureAccount(ctx, "discord", "9002", "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "9001", Assurance: identity.AssuranceDiscordGateway}
+	claimTestAdmin(t, links, admin)
+	root := filepath.Join(t.TempDir(), "files")
+	store := files.NewStore(root)
+	links.SetFileMemory(store)
+	if _, err := store.Apply(ctx, targetID, "memory", []files.Operation{{Action: "add", Content: "private note"}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, targetID)
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if descriptor, err := links.DeleteUserAs(ctx, admin, targetID); err == nil || len(descriptor.ExternalIdentities) != 0 {
+		t.Fatalf("expected file failure without invalidation: descriptor=%+v err=%v", descriptor, err)
+	}
+	if _, exists, err := links.User(targetID); err != nil || !exists {
+		t.Fatalf("file failure deleted account: exists=%t err=%v", exists, err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, memory, err := store.Read(ctx, targetID)
+	if err != nil || memory != "private note" {
+		t.Fatalf("file failure changed memory: memory=%q err=%v", memory, err)
+	}
+	if _, err := links.DeleteUserAs(ctx, admin, targetID); err != nil {
+		t.Fatalf("retry deletion: %v", err)
 	}
 }
 

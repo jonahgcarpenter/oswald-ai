@@ -589,6 +589,27 @@ func (s *Store) FailIndexRevision(ctx context.Context, id int64, code string) er
 	return err
 }
 
+// RetireFactIndexRevisions removes unused fact indexes from serving and
+// abandons their unfinished shadows without touching transcript FTS.
+func (s *Store) RetireFactIndexRevisions(ctx context.Context) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.sql.ExecContext(ctx, `UPDATE derived_index_revisions SET state = CASE WHEN state = 'live' THEN 'retired' ELSE 'failed' END, updated_at = ?, last_error_code = 'indexing_disabled' WHERE index_kind IN ('memory_fts', 'memory_vector', 'global_memory_fts', 'global_memory_vector') AND state IN ('live', 'building')`, now)
+	return err
+}
+
+// ReconcileTranscriptIndexChanges recovers expired leases and backfills only
+// delivered transcript work. Canonical fact writes may still enqueue jobs;
+// the worker acknowledges those without indexing them.
+func (s *Store) ReconcileTranscriptIndexChanges(ctx context.Context) error {
+	now := formatTime(time.Now().UTC())
+	_, err := s.sql.ExecContext(ctx, `
+UPDATE durable_jobs SET state = 'retry', available_at = ?, lease_owner = '', lease_until = NULL, updated_at = ? WHERE job_kind = 'derived_index' AND state = 'running' AND lease_until <= ?;
+INSERT INTO durable_jobs(job_kind, idempotency_key, canonical_user_id, entity_kind, entity_id, operation, available_at, updated_at)
+SELECT 'derived_index', 'reconcile:turn:' || turns.id || ':' || turns.delivered_at, turns.canonical_user_id, 'session_turn', turns.id, 'upsert', ?, ? FROM session_turns turns JOIN sessions active ON active.canonical_user_id = turns.canonical_user_id AND active.session_id = turns.session_id AND active.generation = turns.session_generation WHERE turns.delivered_at IS NOT NULL AND turns.delivery_failed_at IS NULL AND active.is_active = 1 AND active.expires_at > ? AND NOT EXISTS (SELECT 1 FROM durable_jobs receipt WHERE receipt.job_kind = 'derived_index' AND receipt.state = 'succeeded' AND receipt.operation = 'upsert' AND receipt.entity_kind = 'session_turn' AND receipt.entity_id = turns.id AND receipt.canonical_user_id = turns.canonical_user_id)
+ON CONFLICT(job_kind, idempotency_key) DO NOTHING;`, now, now, now, now, now, now)
+	return err
+}
+
 // IndexMaintenanceCounts reports aggregate derived-index repair totals.
 type IndexMaintenanceCounts struct {
 	RowsDeleted       int64

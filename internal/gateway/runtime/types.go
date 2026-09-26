@@ -21,7 +21,6 @@ type Dependencies struct {
 	Commands               *commands.Service
 	Access                 AccessChecker
 	Log                    *config.Logger
-	Formation              FormationEnqueuer
 	Compaction             CompactionEnqueuer
 	RuntimeInvalidationBus *invalidation.Bus
 }
@@ -30,11 +29,6 @@ type Dependencies struct {
 type CompactionEnqueuer interface {
 	Enqueue(context.Context, string, memory.FormationSource) error
 	MarkDeliveryFailed(context.Context, string, int64) error
-}
-
-// FormationEnqueuer durably queues optional work after response delivery.
-type FormationEnqueuer interface {
-	Enqueue(context.Context, string, memory.FormationSource) error
 }
 
 // AccessChecker exposes gateway-neutral user moderation checks.

@@ -81,9 +81,9 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	if len(primary) != 1 {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
-	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello imessage" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
-		t.Fatalf("unexpected prompt %q", last.Content)
+	messages := primary[0].Messages
+	if len(messages) != 2 || messages[0].Role != "system" || !strings.Contains(messages[0].Content, "You are Oswald.") || !strings.Contains(messages[0].Content, "# Gateway Instructions") || messages[1].Role != "user" || messages[1].Content != "hello imessage" {
+		t.Fatalf("unexpected prompt: %+v", messages)
 	}
 	if bb.sentMessage() != "imessage response" {
 		t.Fatalf("unexpected sent messages: %+v", bb.sentMessages())
@@ -404,9 +404,9 @@ func TestIMessageWebhookDirectMessageRoutesAndReplies(t *testing.T) {
 		t.Fatalf("expected accepted, got %d", rec.Code)
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
-	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello from webhook" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
-		t.Fatalf("unexpected prompt %q", last.Content)
+	messages := primary[0].Messages
+	if len(messages) != 2 || messages[0].Role != "system" || !strings.Contains(messages[0].Content, "You are Oswald.") || !strings.Contains(messages[0].Content, "# Gateway Instructions") || messages[1].Role != "user" || messages[1].Content != "hello from webhook" {
+		t.Fatalf("unexpected prompt: %+v", messages)
 	}
 	if !bb.waitForSentCount(1) {
 		t.Fatalf("expected reply send, got %+v", bb.sentMessages())
@@ -428,9 +428,9 @@ func TestIMessageWebhookGroupMentionRoutesCleanedText(t *testing.T) {
 		t.Fatalf("expected accepted, got %d", rec.Code)
 	}
 	primary := waitForPrimaryIMessageRequests(t, chat, 1)
-	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
-		t.Fatalf("unexpected prompt %q", last.Content)
+	messages := primary[0].Messages
+	if len(messages) != 2 || messages[0].Role != "system" || !strings.Contains(messages[0].Content, "You are Oswald.") || !strings.Contains(messages[0].Content, "# Gateway Instructions") || messages[1].Role != "user" || messages[1].Content != "hello" {
+		t.Fatalf("unexpected prompt: %+v", messages)
 	}
 }
 

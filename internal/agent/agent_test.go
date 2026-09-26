@@ -25,12 +25,13 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/indexing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/filememory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -140,24 +141,32 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	}
 }
 
-func TestProcessPersistsStagedForegroundMemoryWithFinalTurn(t *testing.T) {
+func TestProcessDoesNotStageForegroundMemoryWithFinalTurn(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "private dark mode candidate", ToolCalls: []llm.ToolCall{{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}}}}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I will remember that."}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	agent, store := newTestAgent(t, chat, nil, reg)
-	registerStagingTool(t, reg, store.Store, false)
+	toolPolicy := testToolPolicy()
+	toolPolicy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
+	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Schema: &llm.ToolParameters{Type: "object"}}, toolPolicy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+		if requestctx.MemoryStageCollectorFromContext(ctx) != nil {
+			return governance.Result{}, errors.New("unexpected memory stage collector")
+		}
+		return productiveResult(`{"status":"saved"}`), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	response, err := processAgent(agent, "staged", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID)
-	if err != nil {
-		t.Fatal(err)
+	if response.SourceTurnID == 0 {
+		t.Fatal("session turn was not stored")
 	}
-	if len(artifact.Candidates) != 1 || artifact.Candidates[0].ClaimValue != "dark_mode" {
-		t.Fatalf("artifact=%+v", artifact)
+	if artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID); err == nil && len(artifact.Candidates) != 0 {
+		t.Fatalf("unexpected staged artifact: %+v", artifact)
 	}
 	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
 	if err != nil || len(turns) != 1 || len(turns[0].ToolHistory.Batches) != 1 {
@@ -166,25 +175,6 @@ func TestProcessPersistsStagedForegroundMemoryWithFinalTurn(t *testing.T) {
 	encodedHistory, _ := json.Marshal(turns[0].ToolHistory)
 	if bytes.Contains(encodedHistory, []byte("dark mode")) || bytes.Contains(encodedHistory, []byte("private dark mode candidate")) {
 		t.Fatalf("metadata-only tool history retained staged candidate: %s", encodedHistory)
-	}
-}
-
-func TestProcessDoesNotSilentlySucceedWhenStagedTurnIsNotPersisted(t *testing.T) {
-	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}}}}},
-		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I will remember that."}},
-	}}
-	reg := registry.New(config.NewLogger(config.LevelError))
-	agent, store := newTestAgent(t, chat, nil, reg)
-	registerStagingTool(t, reg, store.Store, true)
-	usage := requestctx.NewUsageCollector()
-	response, err := agent.Process(requestctx.WithUsageCollector(context.Background(), usage), Request{RequestID: "staged-failure", SessionKey: "session", Prompt: "I prefer dark mode.", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}})
-	if err == nil || response != nil || !strings.Contains(err.Error(), "session turn was not stored") {
-		t.Fatalf("response=%+v err=%v", response, err)
-	}
-	e := usage.ExecutionSnapshot()
-	if !e.IsComplete || e.PersistenceStatus != "failed" || e.ToolExecutionCount != 1 || e.ResponseKind != "error" {
-		t.Fatalf("lost failure execution state: %+v", e)
 	}
 }
 
@@ -404,7 +394,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	}
 }
 
-func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
+func TestProcessOffersFileMemoryTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), log)
@@ -420,7 +410,7 @@ func TestProcessOffersRetrievalOnlyMemoryTools(t *testing.T) {
 	}
 
 	request := primaryRequests(chat.requests)[0]
-	for _, name := range []string{toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
+	for _, name := range []string{toolnames.Memory} {
 		if !requestHasTool(request, name) {
 			t.Fatalf("expected tool missing from primary request: %s", name)
 		}
@@ -944,7 +934,7 @@ func TestProcessFailsWhenTenantProfileCannotBeResolved(t *testing.T) {
 	}
 }
 
-func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *testing.T) {
+func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
@@ -971,7 +961,7 @@ func TestProcessIncludesRoleCorrectSessionContextWithAutomaticRecallLookup(t *te
 		t.Fatalf("semantic recall embedded without a live vector revision: %+v", embedder.inputs)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if len(messages) != 15 || messages[2].Role != "user" || messages[2].Content != "older unrelated" || messages[3].Role != "assistant" || messages[3].Content != "old a" {
+	if len(messages) != 14 || messages[1].Role != "user" || messages[1].Content != "older unrelated" || messages[2].Role != "assistant" || messages[2].Content != "old a" {
 		t.Fatalf("history roles or chronology are wrong: %+v", messages)
 	}
 	if messages[len(messages)-1].Role != "user" || messages[len(messages)-1].Content != "follow up" {
@@ -1015,15 +1005,15 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if len(messages) != 20 || !strings.Contains(messages[2].Content, "session_history_summary") || !strings.Contains(messages[2].Content, "first two turns") {
+	if len(messages) != 19 || !strings.Contains(messages[1].Content, "session_history_summary") || !strings.Contains(messages[1].Content, "first two turns") {
 		t.Fatalf("summary context missing or malformed: %+v", messages)
 	}
-	if messages[3].Content != "turn 3 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
+	if messages[2].Content != "turn 3 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
 		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
 	}
 }
 
-func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
+func TestProcessDoesNotInjectLegacyRecallOrProfile(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "Atlas."}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	_, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{
@@ -1032,34 +1022,34 @@ func TestProcessInjectsTenantScopedRecallWithoutPersistingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.sql.Exec(`UPDATE memory_entries SET confidence = 'not-a-number' WHERE canonical_user_id = 'user-1'`); err != nil {
+		t.Fatal(err)
+	}
 	_, err = memorytest.PublishMemory(context.Background(), store.Store, "user-2", memorytest.MemoryFixture{
 		Scope: memory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := indexing.NewService(store.Store, nil, nil, "", config.NewLogger(config.LevelError)).RunOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
 	_, err = processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "What is the project codename?", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
 	current := messages[len(messages)-1]
-	if !strings.Contains(current.Content, "UNTRUSTED LOWER-AUTHORITY REFERENCE") || !strings.Contains(current.Content, "Atlas") {
-		t.Fatalf("automatic recall missing from current user turn: %+v", current)
-	}
-	if strings.Contains(current.Content, "Borealis") || strings.Contains(messages[0].Content, "Atlas") {
-		t.Fatalf("recall crossed tenant or authority boundary: %+v", messages)
+	if current.Content != "What is the project codename?" || messagesContain(messages, "Atlas.") || messagesContain(messages, "Borealis") {
+		t.Fatalf("legacy memory leaked into model context: %+v", messages)
 	}
 	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 1 || turns[0].UserText != "What is the project codename?" || strings.Contains(turns[0].UserText, "Atlas") {
-		t.Fatalf("injected recall was persisted: %+v", turns)
+		t.Fatalf("legacy memory was persisted into prompt: %+v", turns)
+	}
+	var content, sources string
+	if err := store.sql.QueryRow(`SELECT rendered_content, source_memory_ids FROM sessions WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`).Scan(&content, &sources); err != nil || content != "" || sources != "[]" {
+		t.Fatalf("legacy facts bound to active session: content=%q sources=%q err=%v", content, sources, err)
 	}
 }
 
@@ -1185,8 +1175,8 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 	if req.User != "Example User aka examplehandle" {
 		t.Fatalf("provider user = %q, want stripped speaker name", req.User)
 	}
-	if !messagesContain(req.Messages, intro) {
-		t.Fatalf("system messages no longer contain full speaker intro: %+v", req.Messages)
+	if messagesContain(req.Messages, intro) {
+		t.Fatalf("legacy speaker intro leaked into prompt: %+v", req.Messages)
 	}
 }
 
@@ -1405,20 +1395,34 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 	}
 }
 
-func TestProcessFreezesTenantProfileUntilNewSession(t *testing.T) {
+func TestProcessReadsFileMemoryFreshWithinSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "one"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "three"}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
+	fileStore := files.NewStore(t.TempDir())
+	agent.SetFileMemory(fileStore)
+	if _, err := fileStore.Apply(context.Background(), "user-1", "user", []files.Operation{{Action: "add", Content: "User is Ada."}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Project is Atlas."}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	firstProfile := tenantProfileMessage(primaryRequests(chat.requests)[0].Messages)
+	firstFiles := tenantProfileMessage(primaryRequests(chat.requests)[0].Messages)
+	if !strings.Contains(firstFiles, "USER.md:\nUser is Ada.") || !strings.Contains(firstFiles, "MEMORY.md:\nProject is Atlas.") {
+		t.Fatalf("file memory was not injected: %q", firstFiles)
+	}
+	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Replies should be concise."}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
@@ -1429,16 +1433,57 @@ func TestProcessFreezesTenantProfileUntilNewSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	frozenProfile := tenantProfileMessage(requests[1].Messages)
-	latestProfile := tenantProfileMessage(requests[2].Messages)
-	if firstProfile == "" || frozenProfile != firstProfile {
-		t.Fatalf("profile changed in active session: first=%q frozen=%q", firstProfile, frozenProfile)
+	updatedFiles := tenantProfileMessage(requests[1].Messages)
+	latestFiles := tenantProfileMessage(requests[2].Messages)
+	if firstFiles == "" || updatedFiles == firstFiles || !strings.Contains(updatedFiles, "Replies should be concise.") {
+		t.Fatalf("file memory did not refresh in active session: first=%q updated=%q", firstFiles, updatedFiles)
 	}
-	if !strings.Contains(latestProfile, "concise replies") || latestProfile == firstProfile {
-		t.Fatalf("new session did not receive latest profile: %q", latestProfile)
+	if latestFiles != updatedFiles || strings.Contains(latestFiles, "The user is Ada.") {
+		t.Fatalf("new session received stale files or legacy profile: %q", latestFiles)
 	}
-	if len(requests[0].Messages) != 3 || requests[0].Messages[1].Role != "user" || !strings.Contains(requests[1].Messages[1].Content, "authority=\"lower\"") {
-		t.Fatalf("tenant profile is not lower-authority user context: %+v", requests[0].Messages)
+	if len(requests[0].Messages) != 3 || requests[0].Messages[1].Role != "user" || !strings.Contains(updatedFiles, "lower-authority") {
+		t.Fatalf("files are not lower-authority user context: %+v", requests[0].Messages)
+	}
+}
+
+func TestProcessFileWriteVisibleNowAndReadFreshNextTurn(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("write", toolnames.Memory, map[string]interface{}{"target": "memory", "action": "add", "content": "Project is Atlas."}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "saved"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "read"}},
+	}}
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStore := files.NewStore(t.TempDir())
+	if err := reg.RegisterHandler(toolnames.Memory, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(filememory.NewHandler(fileStore))); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	agent.SetFileMemory(fileStore)
+	if _, err := processAgent(agent, "write-file", "homeassistant", "session", "user-1", "User", "remember this", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) != 2 || !requestHasTool(requests[0], toolnames.Memory) {
+		t.Fatalf("memory tool was not advertised: %+v", requests)
+	}
+	result := toolResultByID(requests[1].Messages, "write")
+	if result == nil || result.Content != "Project is Atlas." {
+		t.Fatalf("write result not visible in current round: %+v", requests)
+	}
+	if _, err := processAgent(agent, "read-file", "homeassistant", "session", "user-1", "User", "what did I save?", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	requests = primaryRequests(chat.requests)
+	if len(requests) != 3 || !strings.Contains(tenantProfileMessage(requests[2].Messages), "Project is Atlas.") {
+		t.Fatalf("next request did not read updated file: %+v", requests)
+	}
+	for _, message := range requests[2].Messages {
+		if message.Role == "tool" || len(message.ToolCalls) != 0 {
+			t.Fatalf("file write tool result replayed into next request: %+v", requests[2].Messages)
+		}
 	}
 }
 
@@ -1448,7 +1493,12 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
+	fileStore := files.NewStore(t.TempDir())
+	agent.SetFileMemory(fileStore)
 	for _, tc := range []struct{ user, statement string }{{"user-1", "The user is Alice."}, {"user-2", "The user is Bob."}} {
+		if _, err := fileStore.Apply(context.Background(), tc.user, "user", []files.Operation{{Action: "add", Content: tc.statement}}); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := memorytest.PublishMemory(context.Background(), store.Store, tc.user, memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
 			t.Fatal(err)
 		}
@@ -1551,36 +1601,6 @@ func testGlobalPolicy() governance.GlobalPolicy {
 
 func productiveResult(content string) governance.Result {
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}
-}
-
-func registerStagingTool(t *testing.T, reg *registry.Registry, store *memory.Store, resetSession bool) {
-	t.Helper()
-	toolPolicy := testToolPolicy()
-	toolPolicy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
-	err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Description: "Stage a memory", Schema: &llm.ToolParameters{Type: "object"}}, toolPolicy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
-		collector := requestctx.MemoryStageCollectorFromContext(ctx)
-		if collector == nil {
-			return governance.Result{}, errors.New("memory collector is missing")
-		}
-		candidate := policy.CandidateOutput{
-			Statement: "The user prefers dark mode.", Evidence: "I prefer dark mode.",
-			Category: policy.CategoryDurablePreferences, ClaimSlot: "durable_preferences.fact", ClaimValue: "dark mode",
-			Mode: policy.ModeAgentSave, Approval: policy.ApprovalApproved,
-		}
-		if err := collector.Stage([]requestctx.StagedMemoryCandidate{{CanonicalUserID: "user-1", Candidate: candidate}}); err != nil {
-			return governance.Result{}, err
-		}
-		if resetSession {
-			meta := requestctx.MetadataFromContext(ctx)
-			if _, err := store.ResetSession(ctx, "user-1", meta.SessionID, time.Hour); err != nil {
-				return governance.Result{}, err
-			}
-		}
-		return productiveResult(`{"status":"staged"}`), nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
 func toolResultByID(messages []llm.ChatMessage, id string) *llm.ChatMessage {
@@ -1794,10 +1814,8 @@ func messagesContain(messages []llm.ChatMessage, needle string) bool {
 
 func tenantProfileMessage(messages []llm.ChatMessage) string {
 	for _, message := range messages {
-		start := strings.Index(message.Content, "<tenant_profile")
-		end := strings.Index(message.Content, "</tenant_profile>")
-		if start >= 0 && end >= start {
-			return message.Content[start : end+len("</tenant_profile>")]
+		if strings.Contains(message.Content, "USER.md:") && strings.Contains(message.Content, "MEMORY.md:") {
+			return message.Content
 		}
 	}
 	return ""

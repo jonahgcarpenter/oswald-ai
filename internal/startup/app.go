@@ -21,9 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/extraction"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/formation"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/indexing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
@@ -52,7 +50,7 @@ func (e *Error) Unwrap() error { return e.Cause }
 
 type dependencies struct {
 	databasePath string
-	newRegistry  func(*config.Config, *memory.Store, *global.Store, *config.Logger) (*registry.Registry, error)
+	newRegistry  func(*config.Config, *memory.Store, *files.Store, *config.Logger) (*registry.Registry, error)
 	newGateways  func(*config.Config, *accounts.Service, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
 }
 
@@ -145,12 +143,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	retentionPolicy := config.DefaultRetentionPolicy()
 	userMemStore.SetRetentionPolicy(retentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", deps.databasePath))
-	globalMemStore, err := global.NewStore(deps.databasePath, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog.Server("memory.global"))
-	if err != nil {
-		return &Error{Event: "app.memory_global.init_failed", Message: "failed to initialize global memory store", Cause: err}
-	}
-	cleanup.globalMemory = func() { _ = globalMemStore.Close() }
-	log.Debug("app.memory_global.configured", "configured global memory database", config.F("path", deps.databasePath))
+	fileMemStore := files.NewStore("data")
 	mcpStore, err := mcp.NewStore(deps.databasePath, cfg.MCPConfigEncryptionKey, rootLog.Server("mcp.store"))
 	if err != nil {
 		return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize MCP config store", Cause: err}
@@ -163,6 +156,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		}
 	}
 	accountLinkService := accounts.NewService(deps.databasePath, userMemStore, mcpManager, rootLog.Server("account_link"))
+	accountLinkService.SetFileMemory(fileMemStore)
 	cleanup.accounts = func() { _ = accountLinkService.Close() }
 	if err := accountLinkService.Initialize(); err != nil {
 		return &Error{Event: "app.account_link.init_failed", Message: "failed to initialize account link store", Cause: err}
@@ -180,7 +174,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		printBootstrapInstructions(stdout, bootstrapCode)
 		log.Info("app.bootstrap.available", "generated first-administrator bootstrap code", config.F("status", "ok"))
 	}
-	indexService := indexing.NewService(userMemStore, globalMemStore, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
+	indexService := indexing.NewService(userMemStore, nil, llmClient, cfg.LLMGatewayEmbeddingModel, rootLog)
 	cleanup.index = indexService.Stop
 	// Worker lifetimes are independent of the signal context; ordered Stop calls
 	// must finish durable work before their stores close.
@@ -190,7 +184,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	maintenanceService.Start(context.Background())
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", deps.databasePath))
 
-	toolRegistry, err := deps.newRegistry(cfg, userMemStore, globalMemStore, rootLog)
+	toolRegistry, err := deps.newRegistry(cfg, userMemStore, fileMemStore, rootLog)
 	if err != nil {
 		return &Error{Event: "app.tools.init_failed", Message: "failed to initialize tools", Cause: err}
 	}
@@ -198,27 +192,12 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		return nil
 	}
 	mcpProvider := mcp.NewProvider(mcpManager, toolRegistry.Names()...)
-	formationExtractor, err := extraction.NewLLMExtractor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve)
-	if err != nil {
-		return &Error{Event: "app.memory_extractor.init_failed", Message: "failed to initialize background user-memory extractor", Cause: err}
-	}
-	formationExtractor.SetAssessmentBudget(budget)
-	formationService := formation.NewService(userMemStore, formationExtractor, cfg.LLMGatewayModel, rootLog)
-	cleanup.formation = formationService.Stop
 	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve, rootLog)
 	if err != nil {
 		return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize background session compactor", Cause: err}
 	}
 	compactionService := compaction.NewService(userMemStore, compactor, cfg.LLMGatewayModel, budget, rootLog)
 	cleanup.compaction = compactionService.Stop
-
-	if cfg.LLMGatewayEmbeddingModel != "" {
-		log.Info("app.memory_vector.enabled", "enabled semantic durable-memory retrieval",
-			config.F("embedding_model", cfg.LLMGatewayEmbeddingModel),
-		)
-	} else {
-		log.Debug("app.memory_vector.disabled", "semantic durable-memory retrieval disabled")
-	}
 
 	agentEngine := agent.NewAgent(
 		llmClient,
@@ -231,6 +210,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		rootLog,
 		mcpProvider,
 	)
+	agentEngine.SetFileMemory(fileMemStore)
 	agentEngine.SetForegroundCompactor(compactor)
 
 	// Create the broker and start its worker pool.
@@ -240,7 +220,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	cleanup.broker = requestBroker.Shutdown
 	requestBroker.Start()
 	commandService, err := commandbuiltin.NewService(commandbuiltin.Dependencies{
-		Accounts: accountLinkService, Memory: userMemStore, GlobalMemory: globalMemStore,
+		Accounts: accountLinkService, Memory: userMemStore,
 		Logger: rootLog.Server("commands"), Bootstrap: bootstrapCommand,
 		MCPStore: mcpStore, MCPManager: mcpManager, Canceler: requestBroker,
 	})
@@ -253,7 +233,6 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		Commands:               commandService,
 		Access:                 accountLinkService,
 		Log:                    rootLog,
-		Formation:              formationService,
 		Compaction:             compactionService,
 		RuntimeInvalidationBus: runtimeInvalidationBus,
 	}
@@ -274,9 +253,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	if ctx.Err() != nil {
 		return nil
 	}
-	formationService.SetLowPriorityGate(requestBroker)
 	compactionService.SetLowPriorityGate(requestBroker)
-	formationService.Start(context.Background())
 	compactionService.Start(context.Background())
 	finishPhase()
 	log.Info("app.start", "starting application")
@@ -304,15 +281,15 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 // Shutdown is deliberately not reverse acquisition order: maintenance stops
 // before broker drain, and all workers stop before MCP clients and stores close.
 type shutdown struct {
-	log                                               *config.Logger
-	maintenance, broker, formation, compaction, index func()
-	mcp, accounts, mcpStore, globalMemory, userMemory func()
+	log                                    *config.Logger
+	maintenance, broker, compaction, index func()
+	mcp, accounts, mcpStore, userMemory    func()
 }
 
 func (s *shutdown) run() {
-	names := []string{"maintenance", "broker", "formation", "compaction", "indexing", "mcp", "accounts", "mcp_store", "global_memory", "user_memory"}
-	for i, stop := range []func(){s.maintenance, s.broker, s.formation, s.compaction, s.index,
-		s.mcp, s.accounts, s.mcpStore, s.globalMemory, s.userMemory} {
+	names := []string{"maintenance", "broker", "compaction", "indexing", "mcp", "accounts", "mcp_store", "user_memory"}
+	for i, stop := range []func(){s.maintenance, s.broker, s.compaction, s.index,
+		s.mcp, s.accounts, s.mcpStore, s.userMemory} {
 		if stop != nil {
 			started := time.Now()
 			if s.log != nil {

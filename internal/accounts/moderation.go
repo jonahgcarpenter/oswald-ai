@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -281,6 +282,9 @@ func (s *Service) unbanUserLocked(ctx context.Context, data database.AccountLink
 
 // DeleteUserAs deletes a user after atomically re-resolving the authenticated actor.
 // It returns the runtime invalidation scope only after the deletion commits.
+// Files are removed first so a file failure cannot leave orphaned private files
+// after account deletion. Files and SQLite are not atomic: a later SQL failure
+// can leave an existing account without files; retrying deletion is safe.
 func (s *Service) DeleteUserAs(ctx context.Context, principal identity.Principal, targetID string) (UserDeletionDescriptor, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -305,6 +309,12 @@ func (s *Service) deleteUserLockedWithInvalidation(ctx context.Context, data dat
 	user, ok := data.Users[targetID]
 	if !ok {
 		return UserDeletionDescriptor{}, policyError("not_found", "canonical user %q not found", targetID)
+	}
+	if s.files != nil {
+		if err := s.files.Delete(ctx, targetID); err != nil {
+			s.log.With(requestctx.LogFields(ctx)...).Warn("account_link.user.file_delete_failed", "failed to delete user files", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "error"), config.ErrorField(err))
+			return UserDeletionDescriptor{}, fmt.Errorf("delete user files: %w", err)
+		}
 	}
 
 	var invalidation memory.UserDeletionScope

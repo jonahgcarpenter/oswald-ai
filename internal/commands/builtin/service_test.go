@@ -9,7 +9,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands/bootstrap"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/global"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
 
@@ -45,7 +44,6 @@ func TestNewServiceOptionalDependencies(t *testing.T) {
 		{name: "MCP", deps: Dependencies{MCPStore: &mcp.Store{}, MCPManager: &mcp.Manager{}}, want: map[string]bool{"mcp": true}},
 		{name: "canceler without MCP", deps: Dependencies{Canceler: &broker.Broker{}}, want: map[string]bool{"stop": true}},
 		{name: "bootstrap", deps: Dependencies{Bootstrap: &bootstrap.Service{}}, want: map[string]bool{"bootstrap": true}},
-		{name: "global memory", deps: Dependencies{GlobalMemory: &global.Store{}}, want: map[string]bool{"global-memory": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.deps.Memory = memories
@@ -62,7 +60,7 @@ func TestNewServiceOptionalDependencies(t *testing.T) {
 	}
 }
 
-func TestNewServiceRegistersMemories(t *testing.T) {
+func TestNewServiceDoesNotRegisterMemoryCommandsWithAccounts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
 	memory := memorytest.NewStore(t, path, log)
@@ -73,13 +71,9 @@ func TestNewServiceRegistersMemories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundMemories := false
-	for _, definition := range service.Definitions() {
-		if definition.Name == "memories" {
-			foundMemories = true
+	for _, name := range []string{"memories", "global-memory"} {
+		if _, found := service.Definition(name); found {
+			t.Errorf("command %q was registered", name)
 		}
-	}
-	if !foundMemories {
-		t.Fatal("memories command was not registered")
 	}
 }

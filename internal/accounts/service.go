@@ -10,12 +10,14 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 )
 
 // Service manages canonical user IDs and linked gateway accounts.
 type Service struct {
 	path     string
 	memories *memory.Store
+	files    *files.Store
 	log      *config.Logger
 	db       *database.DB
 	mcp      MCPUserMerger
@@ -29,6 +31,12 @@ type Service struct {
 // NewService constructs the account service; Initialize opens its SQLite database.
 func NewService(path string, memories *memory.Store, mcp MCPUserMerger, log *config.Logger) *Service {
 	return &Service{path: path, memories: memories, mcp: mcp, log: log, now: time.Now, random: rand.Reader}
+}
+
+// SetFileMemory installs the private file store before the service starts serving work.
+// Account merges do not move files; callers must link accounts before writing files.
+func (s *Service) SetFileMemory(store *files.Store) {
+	s.files = store
 }
 
 // Initialize prepares the account-link database.

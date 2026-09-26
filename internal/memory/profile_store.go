@@ -26,9 +26,72 @@ type SessionProfile struct {
 	sourceDigest    string
 }
 
+// SessionContext is the active session generation and frozen speaker introduction.
+type SessionContext struct {
+	Generation   int
+	SpeakerIntro string
+	IsNewSession bool
+}
+
+// ResolveSessionContext refreshes a session without reading or binding SQLite facts.
+func (s *Store) ResolveSessionContext(ctx context.Context, userID, sessionID string, ttl time.Duration) (SessionContext, error) {
+	if err := s.ensureAccountUser(userID); err != nil {
+		return SessionContext{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return SessionContext{}, fmt.Errorf("tenant session: session id is required")
+	}
+	ttl = s.sessionTTL(ttl)
+	now := time.Now().UTC()
+	tx, err := s.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return SessionContext{}, fmt.Errorf("begin tenant session resolution: %w", err)
+	}
+	defer tx.Rollback() // nolint:errcheck
+
+	var result SessionContext
+	var isActive int
+	var expiresRaw string
+	err = tx.QueryRowContext(ctx, `SELECT generation, is_active, expires_at, speaker_intro FROM sessions WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&result.Generation, &isActive, &expiresRaw, &result.SpeakerIntro)
+	if err != nil && err != sql.ErrNoRows {
+		return SessionContext{}, fmt.Errorf("read tenant session: %w", err)
+	}
+	if err == nil && isActive != 0 {
+		if expiresAt, parseErr := time.Parse(time.RFC3339Nano, expiresRaw); parseErr == nil && expiresAt.After(now) {
+			if _, err := tx.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ?, expires_at = ?, renderer_version = ?, source_digest = '', rendered_content = '', source_memory_ids = '[]' WHERE canonical_user_id = ? AND session_id = ?`, formatTime(now), formatTime(now.Add(ttl)), "session-context-v1", userID, sessionID); err != nil {
+				return SessionContext{}, fmt.Errorf("refresh tenant session expiry: %w", err)
+			}
+			if err := tx.Commit(); err != nil {
+				return SessionContext{}, fmt.Errorf("commit tenant session resolution: %w", err)
+			}
+			return result, nil
+		}
+	}
+	if err == nil {
+		result.Generation++
+	} else {
+		result.Generation = 1
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(session_generation), 0) + 1 FROM session_turns WHERE canonical_user_id = ? AND session_id = ?`, userID, sessionID).Scan(&result.Generation); err != nil {
+			return SessionContext{}, fmt.Errorf("resolve tenant session generation: %w", err)
+		}
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT speaker_intro FROM account_users WHERE canonical_user_id = ?`, userID).Scan(&result.SpeakerIntro); err != nil {
+		return SessionContext{}, fmt.Errorf("read tenant session intro: %w", err)
+	}
+	result.SpeakerIntro = normalizeProfileText(result.SpeakerIntro)
+	result.IsNewSession = true
+	if err := bindSessionContextTx(ctx, tx, userID, sessionID, result, now, ttl); err != nil {
+		return SessionContext{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SessionContext{}, fmt.Errorf("commit tenant session binding: %w", err)
+	}
+	return result, nil
+}
+
 // ResetSessionContext clears and refreshes one session using the standard TTL.
 func (s *Store) ResetSessionContext(ctx context.Context, userID, sessionID string) error {
-	_, err := s.ResetSession(ctx, userID, sessionID, s.sessionTTL(24*time.Hour))
+	_, err := s.resetSession(ctx, userID, sessionID, s.sessionTTL(24*time.Hour), false)
 	return err
 }
 
@@ -108,6 +171,10 @@ func (s *Store) ResolveSessionProfile(ctx context.Context, userID, sessionID str
 
 // ResetSession clears one tenant's conversation history and binds the latest profile.
 func (s *Store) ResetSession(ctx context.Context, userID, sessionID string, ttl time.Duration) (SessionProfile, error) {
+	return s.resetSession(ctx, userID, sessionID, ttl, true)
+}
+
+func (s *Store) resetSession(ctx context.Context, userID, sessionID string, ttl time.Duration, legacyProfile bool) (SessionProfile, error) {
 	if err := s.ensureAccountUser(userID); err != nil {
 		return SessionProfile{}, err
 	}
@@ -121,9 +188,18 @@ func (s *Store) ResetSession(ctx context.Context, userID, sessionID string, ttl 
 		return SessionProfile{}, fmt.Errorf("begin tenant session reset: %w", err)
 	}
 	defer tx.Rollback() // nolint:errcheck
-	current, sourceIDs, err := refreshProfileTx(ctx, tx, userID, now)
-	if err != nil {
-		return SessionProfile{}, err
+	var current SessionProfile
+	var sourceIDs []int64
+	if legacyProfile {
+		current, sourceIDs, err = refreshProfileTx(ctx, tx, userID, now)
+		if err != nil {
+			return SessionProfile{}, err
+		}
+	} else {
+		if err := tx.QueryRowContext(ctx, `SELECT speaker_intro FROM account_users WHERE canonical_user_id = ?`, userID).Scan(&current.SpeakerIntro); err != nil {
+			return SessionProfile{}, fmt.Errorf("read reset session intro: %w", err)
+		}
+		current.SpeakerIntro = normalizeProfileText(current.SpeakerIntro)
 	}
 	var generation int
 	if err := tx.QueryRowContext(ctx, `
@@ -157,7 +233,11 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 			return SessionProfile{}, err
 		}
 	}
-	if err := bindSessionProfileTx(ctx, tx, userID, sessionID, generation, current, sourceIDs, now, ttl); err != nil {
+	if legacyProfile {
+		if err := bindSessionProfileTx(ctx, tx, userID, sessionID, generation, current, sourceIDs, now, ttl); err != nil {
+			return SessionProfile{}, err
+		}
+	} else if err := bindSessionContextTx(ctx, tx, userID, sessionID, SessionContext{Generation: generation, SpeakerIntro: current.SpeakerIntro}, now, ttl); err != nil {
 		return SessionProfile{}, err
 	}
 	current.Generation = generation
@@ -170,6 +250,27 @@ SELECT COALESCE(MAX(generation), 0) + 1 FROM (
 	}
 	s.signalDerivedIndex()
 	return current, nil
+}
+
+func bindSessionContextTx(ctx context.Context, tx *sql.Tx, userID, sessionID string, session SessionContext, now time.Time, ttl time.Duration) error {
+	_, err := tx.ExecContext(ctx, `
+INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at,
+	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
+	source_memory_ids)
+VALUES (?, ?, ?, 1, ?, ?,
+	(SELECT COALESCE(MAX(profile_version_high_water), 0) + 1 FROM sessions WHERE canonical_user_id = ?),
+	(SELECT COALESCE(MAX(profile_version_high_water), 0) + 1 FROM sessions WHERE canonical_user_id = ?),
+	'session-context-v1', '', ?, '', '[]')
+ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
+	generation = excluded.generation, is_active = 1, last_seen_at = excluded.last_seen_at, expires_at = excluded.expires_at,
+	profile_version = sessions.profile_version, profile_version_high_water = sessions.profile_version_high_water,
+	renderer_version = excluded.renderer_version, source_digest = '', speaker_intro = excluded.speaker_intro,
+	rendered_content = '', source_memory_ids = '[]'`,
+		userID, sessionID, session.Generation, formatTime(now), formatTime(now.Add(ttl)), userID, userID, session.SpeakerIntro)
+	if err != nil {
+		return fmt.Errorf("bind tenant session context: %w", err)
+	}
+	return nil
 }
 
 func bindSessionProfileTx(ctx context.Context, tx *sql.Tx, userID, sessionID string, generation int, profile SessionProfile, sourceIDs []int64, now time.Time, ttl time.Duration) error {

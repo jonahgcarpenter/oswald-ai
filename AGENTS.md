@@ -35,19 +35,20 @@ Use shallow domain grouping. Separate files by responsibility within a package b
 ```text
 cmd/agent/                    Process entry, signals, final exit handling
 data/
+  <canonical_user_id>/         Private USER.md and MEMORY.md plus .lock
   memory/soul/                Operator-managed system prompt
   tools/                      Markdown builtin tool schemas
   workflows/comfyui/          Supported operator workflow templates
   database/                  Runtime database, not test fixtures
 internal/
-  accounts/                  Identity resolution, linking, moderation, merge coordination
+  accounts/                  Identity resolution, linking, moderation, deletion
   agent/                     Foreground loop, prompt assembly, streaming, tool execution
   broker/                    FIFO lanes, exclusive fences, cancellation, model priority
   commands/                  Slash-command parsing, dispatch, middleware, adapters
     builtin/                 Command composition and help
     accountlinking/          Connect/disconnect adapters, not account infrastructure
     bootstrap/               First-administrator command
-    globalmemory/ mcp/ memories/ session/ stop/ usermanagement/
+    mcp/ session/ stop/ usermanagement/ (globalmemory/ and memories/ retained, unregistered)
   compaction/                Foreground/background model compactor and durable planner
     budget/                  Token estimates, input capacity, pressure and tail policy
   config/                    Environment loading, fixed policy, logging, sanitization
@@ -62,32 +63,30 @@ internal/
   llm/                       Provider-neutral types and model gateway HTTP client
   mcp/                       Configuration, encryption, sessions, schemas, execution
   media/                     Shared image/video normalization and output attachments
-  memory/                    Transactional user-memory/session/job/index storage
-    policy/                  Pure evidence validation and activation policy
-    extraction/              Private user-memory model calls and decoding
-    formation/               Durable post-delivery formation worker
-    global/                  Administrator-curated global-memory store and retrieval
-    indexing/                Derived-index lifecycle worker
+  memory/                    SQLite session/compaction/index state and retained legacy fact APIs
+    files/                   Bounded private per-user USER.md/MEMORY.md store
+    policy/ extraction/ formation/ global/   Retained legacy fact/formation/global implementations, not started
+    indexing/                Transcript FTS lifecycle; retires fact/global indexes
     memorytest/              Shared fixtures imported only by tests
   shared/                    Directory grouping only, not a Go package
-    requestctx/              Request metadata, principal, images, exposure, staging
+    requestctx/              Request metadata, principal, images, exposure, legacy staging
     lease/                   Renewable lease heartbeat
     invalidation/            In-process authorization/gateway-cache invalidation
   soul/                      Read-only system-prompt loader
   startup/                   Application assembly, ordered cleanup, startup output
   tools/
-    names/                   All twelve stable builtin tool-name constants
+    names/                   Stable builtin names, including disabled legacy names
     exposure/                Request-local tool visibility
     governance/              Duplicate, per-tool, and request-wide limits
     registry/                Markdown schemas and builtin handler registration
-    builtin/                 Tool adapters and tool-specific provider implementations
+    builtin/                 Tool adapters (including filememory) and providers
 ```
 
 ### Dependency Rules
 
 - `internal/startup` is the composition root. It imports domain packages; domain packages must not import it. `main` should not assemble stores, workers, tools, or gateways.
-- Shared account functionality belongs in `accounts`, not `commands/accountlinking`. User/global-memory storage belongs in `memory`, not builtin tool handlers. Commands and tools adapt their respective entry points to those services.
-- Keep transaction-fenced candidate publication, job/outbox changes, account merges, and deletion together. Do not turn an atomic operation into independent service commits to achieve a directory split.
+- Shared account functionality belongs in `accounts`, not `commands/accountlinking`. Live file memory belongs in `memory/files`, not builtin tool handlers; `tools/builtin/filememory` adapts authenticated calls. Retained SQLite fact/global code remains under `memory`.
+- Preserve transaction fencing within retained SQLite candidate/job/outbox and deletion code. File writes are not part of those transactions; account merge does not move file memory.
 - Worker packages depend on stores, never the reverse. `memory` must not import `memory/formation` or `memory/indexing`; `database` must not import `database/maintenance`.
 - Token-budget policy belongs under `compaction/budget`. The agent assembles prompts using that policy; `llm` owns wire token fields and provider usage telemetry. Budget estimators depend on LLM types, so the LLM client must not import the budget package back.
 - Concrete gateways are composed by `gateway/bootstrap.go`. They use `gateway/routing` and `gateway/runtime` without importing the parent composition package. Neither `main` nor `startup` should import concrete gateways directly.
@@ -102,7 +101,7 @@ internal/
 - `agent/agent.go` owns the main loop. Its context, compaction coordination, streaming, tools, tool history, and image retries are separate files in the same package; do not fragment the state machine into unnecessary services.
 - `accounts/service.go` owns construction/lifecycle; `identity.go`, `moderation.go`, `identifiers.go`, and `challenges.go` own their named responsibilities.
 - `llm/types.go` contains provider-neutral contracts; `llm/gateway_wire.go` contains private wire representations.
-- `memory/formation_jobs.go` persists work; `memory/formation` runs it. Likewise, `memory/compaction_jobs.go` persists compaction jobs while `compaction` plans and executes them.
+- `memory/formation_jobs.go` and `memory/formation` retain legacy formation persistence/execution but are not wired at startup. `memory/compaction_jobs.go` persists active compaction jobs while `compaction` plans and executes them.
 - Names must distinguish pending versus delivered, staging versus publication, paging versus complete results, and deactivation/retirement versus deletion. Keep `Tx` suffixes where callers supply the transaction.
 - Prefer a named input struct for a multi-field write, as in `AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{...})`, rather than an expanding positional API or feature suffix chain.
 - Use descriptive test and fixture names, not issue numbers or retired production API names. Release/version names remain appropriate for actual migration and artifact compatibility tests.
@@ -133,7 +132,7 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 - Prefer channels over sleeps for lifecycle tests. Join fake goroutines, close stores, restore environment changes, and keep concurrent log captures synchronized.
 - Configuration tests must not depend on a developer's `.env` or inherited secrets. Avoid printing complete config structs in failure messages.
 - Startup tests use private per-call database-path, registry, and gateway seams. Do not start real listeners to test `startup.Run`.
-- Test both callback-present and callback-absent model calls, pending/failed/delivered turns, stale leases, account-merge fences, fallback retrieval, and disabled tools when changing those paths.
+- Test both callback-present and callback-absent model calls, pending/failed/delivered turns, stale compaction leases, file read/write/delete failures, and disabled tools when changing those paths. Retained SQLite compatibility tests still cover merge fences and legacy retrieval.
 - Retain failure and rollback coverage during refactors. Passing compilation alone does not establish SQL, wire, delivery, or authorization equivalence.
 
 ## Startup And Shutdown
@@ -143,14 +142,14 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 `startup/app.go` validates required model settings and assembles components in this order:
 
 1. LLM client, context budget, and soul loader.
-2. User-memory, global-memory, MCP, and account database handles; MCP manager and account service.
+2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `data`; MCP manager and account service. No global-memory handle is opened.
 3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
 4. Indexing and immediate-then-periodic maintenance workers.
-5. Builtin registry, MCP provider, private memory extractor, formation service, and shared compactor/compaction service.
+5. Builtin registry (including `memory`), MCP provider, and shared compactor/compaction service. No formation worker or private memory extractor is started.
 6. Agent, then broker workers, command service, invalidation bus, and enabled gateways.
-7. Formation/compaction low-priority gates and worker starts, then gateway goroutines.
+7. Compaction low-priority gate and worker start, then gateway goroutines.
 
-Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, formation, compaction, indexing, MCP clients, accounts DB, MCP DB, global-memory DB, user-memory DB**. It is intentionally not reverse acquisition order.
+Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, compaction, indexing, MCP clients, accounts DB, MCP DB, SQLite session/legacy-memory DB**. The file store has no close hook. This order is intentionally not reverse acquisition order.
 
 - Startup returns `startup.Error` with the original event, message, and cause only after cleanup. MCP close failures are warnings; database close errors are discarded here and do not replace initialization errors.
 - Startup logs build metadata and initialization/cleanup phase boundaries. `app.shutdown.complete` follows every acquired resource's cleanup callback, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
@@ -163,7 +162,7 @@ Cleanup is registered as resources are acquired and runs on both ordinary shutdo
 
 ## Requests, Routing, And Accounts
 
-Gateways normalize messages, attachments, replies, external identities, and conversation scope. `accounts` resolves canonical ownership; `identity.Principal` carries canonical user, external identity, gateway, and assurance. `shared/requestctx` propagates that principal, correlation metadata, current images, exposure state, and bounded foreground-memory staging.
+Gateways normalize messages, attachments, replies, external identities, and conversation scope. `accounts` resolves canonical ownership; `identity.Principal` carries canonical user, external identity, gateway, and assurance. `shared/requestctx` propagates that principal, correlation metadata, current images, and exposure state. Legacy staging types remain but are not used by the active memory tool.
 
 `gateway/routing.Decide` chooses ignore, command, model submission, or direct fallback. `gateway/runtime.Execute` handles the admitted operation and gateway-specific responder.
 
@@ -173,7 +172,7 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 - Shared routing checks for empty assembled input, including reply and unsupported-file notes. Home Assistant rejects blank text earlier; iMessage ignores payloads without text or attachments.
 - Runtime requires authentication and checks bans before admitted commands/model work and authenticated empty fallbacks. Banned requests are silently ignored without delivery, command/model work, or iMessage read/typing indicators; their rejected terminal summary is still logged. Uninvoked messages and unauthenticated empty fallbacks return earlier. A ban is not a universal execution-time recheck or cancellation of already-admitted work.
 - The command dispatcher validates principals but does not enforce `AdminOnly` metadata by itself. Builtin assembly installs admin middleware; `/mcp global` and `/stop all` check authorization explicitly.
-- Admin authorization re-resolves the external account. Account mutations and memory commands have additional ownership/fencing rules; do not assume every handler refreshes ownership identically. `/reset` and user MCP commands use the carried canonical ID.
+- Admin authorization re-resolves the external account. Account mutations have additional ownership/fencing rules; `/reset`, user MCP commands, and the `memory` tool use the carried canonical ID.
 
 ### Broker And Command Scheduling
 
@@ -182,42 +181,38 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 - User-exclusive command fences protect account-wide operations. Connect confirmation can fence both participants; delete-user fences its target. Fences remain held through response delivery and invalidation, not just handler execution.
 - Accepted commands use independent execution contexts and drain during shutdown. Agent work is cancelable through broker lifecycle contexts.
 - `/stop` runs out of band and cancels only the current session's active agent request, preserving queued prompts. Admin `/stop all` cancels active and queued agent work, not commands or durable background jobs.
-- Formation and compaction share one low-priority model permit. It is admitted only with no outstanding foreground work; accepted foreground work cancels its active context so the durable job can refund/defer.
+- Compaction uses the low-priority model permit. It is admitted only with no outstanding foreground work; accepted foreground work cancels its active context so the durable job can refund/defer. Formation is not started.
 
 ### Account And Command Contracts
 
-User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and `/mcp global`. See command definitions and README for exact argument syntax.
+User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, and `/mcp global`. `/memories` and `/global-memory` have retained handler source but are not registered.
 
 - Account-link challenges last ten minutes. Store hashes, expiry, and consumption/replay identity, not plaintext codes. A new outgoing challenge invalidates the user's prior active one.
-- The initiator's canonical account remains the owner after a merge; admin status is preserved if either participant is admin. Reject banned participants, conflicting accounts for the same gateway, and conflicting user MCP names. Frozen session-profile selection follows the separate generation/snapshot rules below.
-- Confirmation atomically moves accounts, memory/session state, jobs, summaries, and reencrypted MCP ownership before deleting the losing user. Verify loser-owned rows are absent before commit. Same-confirmer replay can return the prior result without another merge.
+- Account merge does not move `USER.md` or `MEMORY.md` and is unsupported for users with file memory. Link accounts before writing files. Retained SQLite merge code may still move legacy rows, sessions, jobs, summaries, and MCP ownership, but does not provide a file-memory merge contract.
 - `/disconnect` cannot remove the final account. An administrator cannot unadmin, ban, or delete themselves.
 - `/bootstrap` promotes the submitting account's currently resolved owner only while no administrator exists. Its process-local code is consumed after a successful update; restart replaces it only while no admin exists.
-- `/memories list` exports all active, unexpired memories with stated/inferred/unknown origin labels, not just the model list limit. `/memories observations` exports live temporary observations and expiry. `/memories suppress <id>`, `/memories suppressions`, and `/memories unsuppress <rule-id>` manage identified-claim suppression. All use the existing authenticated user-exclusive command path and UTF-8-safe multipart bounds; export fails rather than returning a partial list. Correction remains conversational, not a separate command.
-- `/memories forget <id>` requires a positive decimal ID and physically deletes the memory, candidates, affected profile references, and physical/queued derived-index state. Source conversation and summaries remain.
-- `/memories forget all` uses `ResetUserDataPreservingAccount`: delete learned memory, candidates, observations, suppression rules, assessment inputs/receipts, user MCP config, session turns/summaries/jobs, derived serving state, and account-link challenges; reset session generations while retaining account identity, linked accounts, moderation, speaker intro, and high-water bookkeeping.
-- `/reset` advances one tenant/session generation, deletes its turns, summaries, formation/compaction work, and binds the latest profile. Durable user facts remain.
-- Invalidation clears relevant gateway caches. Disconnect/delete-user can request closure of matching Home Assistant sockets; forget-all does not currently request connection closure.
+- `/reset` advances one tenant/session generation and clears its SQLite turns, summaries, and jobs. It does not clear either memory file; the retained SQLite profile binding is not injected as user facts.
+- `/deleteuser` removes both file-memory files under the target's lock before the SQLite deletion transaction. File deletion and DB deletion are not atomic: later SQL failure can leave an account without files; a file failure aborts DB deletion. The directory and `.lock` remain. Disconnect/delete-user invalidation can request closure of matching Home Assistant sockets.
 
 ## Agent And Context Management
 
 `Agent.Process` receives `agent.Request` and returns `agent.Response`. Prompt assembly is in `agent/context.go`; tool/catalog/history helpers, image retry, streaming, and active-loop compaction coordination are separate files in that package.
 
-1. Load the soul fresh, add trusted gateway instructions, resolve the frozen tenant profile, and retrieve tenant-scoped durable recall.
+1. Load the soul fresh, add trusted gateway instructions, resolve the SQLite session generation/speaker intro, and read the authenticated canonical user's `USER.md` and `MEMORY.md` fresh.
 2. Load the latest summary and delivered recent exchanges for the session generation. Independently query recent successful MCP names for continuity.
-3. Assemble required deployment policy, profile, current text/images, and advertised tool cost. Reserve up to two newest complete exchanges within the recent-tail allowance, then a summary if it fits, then whole recall records and additional recent exchanges.
+3. Assemble required deployment policy, lower-authority file contents (when nonempty), current text/images, and advertised tool cost. Reserve up to two newest complete exchanges within the recent-tail allowance, then a summary if it fits, then additional recent exchanges. No SQLite profile facts or fact recall enter the active prompt.
 4. Call the model; authorize calls against that iteration's exact catalog, execute allowed tools serially, append one correlated result for every declared call, and repeat.
 5. Between complete tool rounds, compact when pressure requires it. On a global tool ceiling, finish with a tools-disabled model call.
-6. Persist the final exchange, bounded native history, staged memory artifact, and pressure snapshot as pending delivery. The shared runtime activates post-delivery work only after the responder succeeds.
+6. Persist the final exchange, bounded native history, and pressure snapshot as pending delivery. The shared runtime marks successful delivery for SQLite session/compaction eligibility; file-memory edits have already committed independently.
 
 ### Budget And Authority
 
 - `compaction/budget` owns token estimation, output/safety reserves, the 70% compaction trigger, and recent-tail capacity. No model-metadata discovery is performed.
 - Default context window is 32,768 tokens; default output reserve is 8,192; safety margin is 256. Nonpositive model-limit configuration selects these fallbacks. Tools and images are estimated within each actual request, not a fixed tool reserve.
 - The recent-tail allowance is 25% of usable input, bounded to 2,000-8,000 tokens and never more than available input. This is the exchange allowance, not a combined summary-plus-tail allocation. Under pressure, a selected tail can take priority over the optional durable summary.
-- Recall records are indivisible; a non-fitting record can be skipped while later records are considered. Additional history stops at the first complete exchange that cannot fit even after native tool history is omitted.
-- Soul/gateway deployment policy is system-authority content. The profile is subordinate user-authority context; summaries, recalled facts, and historical tool results are explicitly untrusted reference data. They cannot grant authorization or tool access.
-- Current attached/replied images are not replayed into later requests or persisted as image bytes. Generated images use the separate bounded session-image lifecycle below. Stored user text uses an attachment marker; reply context and injected recall are stripped from durable conversation/query text.
+- Additional history stops at the first complete exchange that cannot fit even after native tool history is omitted. Required file context is not truncated to fit.
+- Soul/gateway deployment policy is system-authority content. File contents are user-authority, lower-authority reference data; summaries and historical tool results are untrusted reference data. They cannot grant authorization or tool access.
+- Current attached/replied images are not replayed into later requests or persisted as image bytes. Generated images use the separate bounded session-image lifecycle below. Stored user text uses an attachment marker; reply context is stripped from durable conversation text.
 - Historical exchanges replay native tool calls and correlated results only when current tool availability and history policy allow it and the trace fits. Otherwise retain the exact user/final-assistant pair.
 - Required context that exceeds input capacity is retained and logged; optional context is omitted. Provider usage is telemetry, not the compaction policy input.
 
@@ -228,50 +223,39 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memor
 - The current Ollama/Qwen tool-parser workaround retries an identical request once. Repeated recognized parser failure returns a fallback. Empty visible responses have a separate tools-disabled corrective retry.
 - A provider context-length failure can force compaction. Non-cancellation context failures use a deterministic partial-completion response that warns completed actions were not undone and retains permitted artifacts. Cancellation exits without publishing a completed turn.
 - After successful image generation, non-cancellation model failures (including parser retries, tools-disabled final calls, and empty-response corrective calls) retain selected files and finalize a deterministic partial response through ordinary pending persistence and delivery gating. Ordinary failures use `response_kind=image_partial` with degraded status; context failures keep their context fallback. No `Response.Error` is set for this deliverable partial result. With no generated outputs, existing provider-error and fallback semantics remain unchanged. Cancellation still aborts without publishing a completed turn, and image persistence failure still prevents delivery.
-- Ordinary session append failures may log and still return the answer. If a memory save or generated image was staged, unavailable or failed persistence returns an error instead of delivering an unpersisted save claim or silently selecting an older image on the next turn.
-- Pending or failed-delivery turns cannot enter durable summaries, transcript search, or background extraction. Late successful delivery can clear a timeout failure and restore eligibility.
+- File-memory tool edits commit immediately and are not rolled back by later model, SQLite append, or delivery failures. Ordinary session append failures may log and still return the answer; failed generated-image persistence prevents delivery rather than silently selecting an older image on the next turn.
+- Pending or failed-delivery turns cannot enter durable summaries or the retained transcript index. Late successful delivery can clear a timeout failure and restore eligibility. No active background memory extraction runs.
 
 ## Memory And Compaction
 
 | Layer | Canonical Location | Write Authority |
 | --- | --- | --- |
 | Soul | `data/memory/soul/soul.md` | Operator filesystem access only |
-| Global facts about Oswald | `global_memories` | Administrator commands |
-| Durable user facts | `memory_entries` and candidate evidence | Post-delivery formation |
+| Private user notes | `data/<canonical_user_id>/USER.md` and `MEMORY.md` | Authenticated `memory` tool, immediately |
 | Conversation continuity | `sessions`, `session_turns`, `session_summaries` | Agent persistence and validated compaction |
 
-### Durable User Memory
+### File-Backed Durable User Memory
 
-- Ownership is the canonical user, shared across linked accounts. Addressed group turns deliberately use the sender's private memory; groups do not create a shared memory tenant.
-- Categories are `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`.
-- `user_memory_save` stages at most five current-turn observations; it does not publish canonical memory inline. Evidence is model-assessed as a direct statement or inference with finite confidence from 0 to 1.
-- Retained `pattern-v1` extraction receives a frozen window of two to eight delivered user turns. It returns at most three patterns, each supported by two to five distinct whole-turn observations including the newest anchor. Current `assessment-v1` uses the separate frozen anchor/observation contract below. Repetition provides corroboration, not a fixed confidence increment.
-- Current formation validates structure, source membership, exact evidence, category-compatible claim identity, tenant ownership, delivery, and leases. It does not apply regex semantic rejection of credentials, directives, negations, quotations, or third-party content. Do not document those classes as categorically unsavable.
-- Confidence below 0.35 remains proposed evidence; approved evidence can publish or reinforce a canonical claim. An approved candidate without a published memory link can be blocked by a stronger conflicting claim. Sensitivity is retained independently and does not prompt conversational confirmation.
-- Stable `(claim_slot, claim_value)` identity consolidates equivalent evidence. Same-turn reconciliation does not double-count. Canonical statement, confidence, and provenance come from one selected assessment, never independent confidence/provenance maxima. Legacy `.fact` slots are multi-valued; current assessments carry explicit cardinality.
-- `provenance_type` determines serving authority: `user_statement` is user-direct, `model_inference` is model-derived, otherwise unknown. Inference is labeled possible below 0.5, likely below 0.8, and high-confidence at or above 0.8.
-- Candidate insertion/reconciliation, publication/reinforcement, supersession, profile advancement, and index outbox changes commit together under lease/source fencing. Derived FTS/vector writes are asynchronous.
+- Ownership is the authenticated canonical user, shared across linked accounts. Addressed group turns use the sender's private files; groups do not create shared memory. Files are read fresh on each request, not imported from legacy SQLite facts or profiles.
+- `USER.md` is limited to 1,375 Unicode runes and `MEMORY.md` to 2,200, including separators. Missing files are empty. Entries are separated by a standalone `§` line (`\n§\n`); entries must be nonempty UTF-8 and cannot contain a standalone separator line. File contents are lower-authority user context, never system policy.
+- The `memory` tool requires an authenticated principal and an exact `target` of `user` or `memory`. Supply either one `action` (`add`, `replace`, `remove`) with its fields or 1-20 ordered `operations`, not both. `add` requires `content`; `replace` requires `old_text` and `content` or its `new_text` alias (not both); `remove` requires `old_text` only. A nonempty `old_text` must occur in exactly one whole entry; replace changes the entire entry, remove deletes it. The tool returns the resulting file contents, not a deferred staging receipt, and uses metadata-only durable tool history.
+- All operations on one target validate and commit as one atomic file replacement under a per-user `.lock`; errors leave that target unchanged. Files and lock are private, symlinked paths/nonregular files are rejected, and writes use a synced temporary file, rename, and directory sync. There is no transaction spanning both targets, a model response, or SQLite delivery. An edit remains in effect even if the response is not delivered.
 
-### Profiles And Retrieval
+### Retained SQLite Fact Compatibility
 
-- Profiles compile eligible active, unexpired long-term facts into at most 2,000 **bytes**. Identity/communication facts need confidence at least 0.8; durable preferences/environment need at least 0.9. Other categories are not profile facts. `tenant-profile-v4` quotes each fact's nonempty assessment context alongside its statement as one indivisible budgeted record and includes context in the digest. Ordinary active sessions keep their frozen renderer/content; correction repair uses the current renderer.
-- Normal publication does not refresh an already-bound profile. New, expired, or reset sessions bind the latest version. Explicit deletion recompiles affected snapshots; this can include other newly eligible facts.
-- Account merge preserves frozen snapshots, remaps generation collisions and profile versions, and retains high-water marks. It is not an automatic refresh of every active conversation to the unified profile.
-- `sessions` stores the frozen text, digest, renderer, speaker intro, source memory IDs, and version/generation high-water. Fact count comes from the checked source-ID JSON array; byte size comes from frozen UTF-8 text.
-- Automatic recall combines lexical FTS5 and optional semantic sqlite-vec results, then applies relevance thresholds, confidence/importance/recency/authority ranking, duplicate suppression, diversity, and output limits. Failure of one channel does not relax tenant filtering.
-- `user_memory_search` uses the hybrid engine for deeper recall; `user_memory_list` lists active facts. `session_transcript_search` is lexical search over complete delivered exchanges. Private requests retain exact authenticated tenant/session/generation scope and permitted persisted tool history. Discord channel/thread and iMessage group requests search public prompts and final replies across participants in the exact gateway/chat, never hidden tool traces or enriched model input (including the caller's own). Each source session and the caller's session must be active, unexpired, and generation-matched independently. Defaults are five results, maximum ten, within a 12,000-byte result-accounting cap.
-- Group provenance and original transport user text are captured before mention, embed, reply, attachment, or model enrichment and written immutably with new turns. Empty public text stays empty; it never falls back to internal prompt text. Legacy turns remain unshared without backfill. Group excerpts contain only public user/final-assistant records and canonical speaker/turn attribution, omitting raw source session IDs. Scope comes from trusted request metadata, not tool arguments or session-key parsing. Ambient messages remain unpersisted; session history, profiles, compaction, and broker lanes remain user-scoped. Source reset/deletion/expiry removes eligibility, but cannot erase already delivered responses or copies recalled into another turn.
-- Global memory is not automatically injected. `global_memory_search` retrieves administrator-curated deployment/implementation facts and returns bounded newline-delimited JSON. Both derived channels may fall back to a bounded canonical scan. Global additions normalize/deduplicate and enforce 1,000 runes; they do not filter credentials or instruction-like content.
+The SQLite `memory_entries`, candidates, observations, suppressions, global memories, and session profile columns remain for persisted-data compatibility and maintenance, but do not feed the active file-memory prompt or tools. Active requests use `ResolveSessionContext` for generation and speaker intro without querying SQLite facts; `ResolveSessionProfile` remains for legacy compatibility. The `user_memory_save`, `user_memory_search`, `user_memory_list`, `global_memory_search`, and `session_transcript_search` builtins are disabled. Transcript FTS remains active for persisted delivered turns, but has no registered search tool. Retained code can still read legacy fact/profile/global artifacts in tests and compatibility operations; it is not a migration into `USER.md` or `MEMORY.md`.
 
-### Durable Formation
+The following formation rules describe retained code only. No formation service, extraction model call, automatic fact publication, or formation backfill is started in the live application.
 
-Current `assessment-v1` replaces new pattern jobs and covers every eligible delivered anchor, including a one-turn conversation. Storage freezes the anchor and up to seven earlier turn IDs at enqueue. Under an exact live lease it then freezes at most two recent context exchanges, up to six relevant distinct-source observations, up to twenty canonical memories with revisions, and up to twenty suppression rules. Selection ranks bounded canonical pools (100 live observations, 100 recent memories plus explicit foreground targets, 100 recent active rules) using lexical overlap and recency; publication still checks all matching rules. It excludes current/future-turn observations. Retries reuse the frozen selection. Prior assistant responses and staged foreground candidates are interpretation/deduplication context only. Trusted timestamps accompany source text; fresh evidence must be a contiguous anchor-user span (public prompt for group turns). Referenced observations may support a broader claim with a different identity, but must belong to frozen tenant membership, remain unexpired, and come from distinct sources other than the anchor. Exact attribution does not establish semantic entailment.
+### Retained Durable Formation
 
-Foreground v3 and background assessment batches use one transaction for proposals, observations, publication, retirement, evidence links, profile repair, and replay receipts. Original v2 artifacts and old extractor contracts retain their decoders. New foreground correction/retirement requires direct current evidence and a target ID/revision obtained through recall/search/list; missing metadata is retryable tool feedback, not a staged publication promise. Search/list expose canonical revision, claim identity, and assessment context. There is no extra required foreground model call, and temporary observations are not automatically injected into foreground profiles.
+Retained `assessment-v1` covers eligible delivered anchors, including a one-turn conversation, when its legacy worker is invoked. Storage freezes the anchor and up to seven earlier turn IDs at enqueue. Under an exact live lease it then freezes at most two recent context exchanges, up to six relevant distinct-source observations, up to twenty canonical memories with revisions, and up to twenty suppression rules. Selection ranks bounded canonical pools (100 live observations, 100 recent memories plus explicit foreground targets, 100 recent active rules) using lexical overlap and recency; publication still checks all matching rules. It excludes current/future-turn observations. Retries reuse the frozen selection. Prior assistant responses and staged foreground candidates are interpretation/deduplication context only. Trusted timestamps accompany source text; fresh evidence must be a contiguous anchor-user span (public prompt for group turns). Referenced observations may support a broader claim with a different identity, but must belong to frozen tenant membership, remain unexpired, and come from distinct sources other than the anchor. Exact attribution does not establish semantic entailment.
+
+Retained foreground v3 and background assessment batches use one transaction for proposals, observations, publication, retirement, evidence links, profile repair, and replay receipts. Original v2 artifacts and old extractor contracts retain their decoders. Legacy foreground correction/retirement requires direct current evidence and a target ID/revision obtained through legacy recall/search/list; missing metadata is retryable tool feedback, not a staged publication promise. Retained search/list expose canonical revision, claim identity, and assessment context. There is no extra required foreground model call, and temporary observations are not automatically injected into foreground profiles.
 
 - `memory_observations` retains at most five admitted observations per source turn, 100 live rows per owner, and 128 KiB of observation text/claim fields per owner. Default lifetime is seven days, maximum thirty, measured from the trusted source turn timestamp rather than worker execution. At capacity, evict oldest automatic observations first; automatic admissions cannot evict explicit `remember` observations. Per-turn hash receipts retain the five-admission ceiling across eviction and foreground/background writes. Admitted observations survive source-session reset and ordinary source expiry; maintenance deletes expired observations independently. Forget-all/account deletion removes them. Replay receipts retain hashes, not expired evidence text.
 - Corrections and retirements require a target ID and expected revision. Missing, inactive, or revision-stale targets reject the item rather than forcing immutable-artifact retries. Newer same-claim assessments replace one coherent tuple, including lower confidence, while preserving direct authority against automatic inference downgrades. Newer source-turn ordering prevents delayed assessments from overwriting newer canonical state. `assessment_context` persists temporal context; `retired_at` and `retirement_reason` distinguish explicit retirement, replacement, and confidence falling below serving eligibility while retaining the legacy status CHECK. Retirement never invents an opposite fact. Changed canonical assessments and inactive/deleted profile sources repair affected frozen copies.
-- `memory_suppressions` blocks exact canonical claim identities on current and retained legacy publication paths. Suppression physically deletes matching canonical entries, linked candidates, matching observations, and physical/queued derived-index artifacts through the shared hard-delete transaction routine, retaining the rule and repairing profiles. Unsuppression permits new source evidence, not old replay; inactive source cutoffs also protect correction, retirement, automatic replacement, and explicit deletion. Observation-to-memory evidence links are tenant-checked and capped at five. Account merge moves observations, receipts, frozen inputs, rules, and evidence relationships, consolidates duplicate rules, reapplies suppression, and enforces the combined observation bounds.
+- `memory_suppressions` blocks exact canonical claim identities on retained SQLite publication paths. Suppression physically deletes matching canonical entries, linked candidates, matching observations, and physical/queued derived-index artifacts through the shared hard-delete transaction routine, retaining the rule and repairing profiles. Unsuppression permits new source evidence, not old replay; inactive source cutoffs also protect correction, retirement, automatic replacement, and explicit deletion. Observation-to-memory evidence links are tenant-checked and capped at five. Legacy SQLite account merge moves observations, receipts, frozen inputs, rules, and evidence relationships, consolidates duplicate rules, reapplies suppression, and enforces the combined observation bounds; it does not move file memory.
 - `memory.assessment.applied` reports committed transaction counts without payloads; formation owns terminal job reporting. Maintenance includes committed `observation_deleted_count`, `assessment_receipt_deleted_count`, and `observation_receipt_deleted_count` in its sweep measurement and row-operation total. Hash receipts are collected in bounded batches only after the non-reusable source turn is absent and no live retained observation or nonterminal frozen observation-dependent job needs them. Rollbacks do not report receipt deletions as committed.
 
 Suppression and cutoff matching treats underscores and spaces as compatible value separators without removing other punctuation; slots still match exactly. Revision-target corrections carry the exact target ID through publication, never a legacy normalized-statement lookup. The common proposal/publication boundary also rejects retained artifacts older than an assessed canonical claim. During merge, inactive cutoffs remove stale canonical copies but preserve an explicitly retained current assessment by its trusted source turn ID; source metadata comes from the selected coherent tuple rather than an independent maximum. Unchanged reinforcement does not refresh an already-bound profile. Frozen inputs remain bounded to 1 MiB; stale targets removed during merge are rejected, not resolved through an ID-alias layer.
@@ -279,7 +263,7 @@ Suppression and cutoff matching treats underscores and spaces as compatible valu
 `memory/formation` orchestrates jobs; `memory/formation_jobs.go` and `memory/candidate_store.go` own transactional state.
 
 - Model-backed formation has **three durable provider-submission credits**, reserved immediately before invocation. Successful submissions consume credit too. Operational failures and the one invalid-output corrective retry share that budget.
-- Current extraction forces one private `user_memory_assess` call, `tool_choice = "required"`, no parallel tool calls, temperature 0, and an output cap of the lesser of 4,096 tokens and the resolved reserve. Input is bounded by 6,000 estimated tokens and the configured model's usable capacity, including prompt/schema costs. It projects contiguous source prefixes and whole optional records, flags omissions, and validates fresh output against the exact projected text/IDs. INFO `user_memory.formation.input.projected` reports safe input/omission counts. Invalid output gets at most one reason-aware corrective retry; prior raw model output is not replayed. Retained pattern jobs keep their old private tool and whole-turn contract, including the 1,000-rune evidence rejection limit.
+- Retained assessment extraction forces one private `user_memory_assess` call, `tool_choice = "required"`, no parallel tool calls, temperature 0, and an output cap of the lesser of 4,096 tokens and the resolved reserve. Input is bounded by 6,000 estimated tokens and the configured model's usable capacity, including prompt/schema costs. It projects contiguous source prefixes and whole optional records, flags omissions, and validates fresh output against the exact projected text/IDs. INFO `user_memory.formation.input.projected` reports safe input/omission counts when invoked. Invalid output gets at most one reason-aware corrective retry; prior raw model output is not replayed. Retained pattern jobs keep their old private tool and whole-turn contract, including the 1,000-rune evidence rejection limit.
 - Persist the first valid decoded artifact for idempotent replay. Replaying it does not invoke the model. Local `agent_save` jobs do not consume provider credit and retain bounded storage retry behavior.
 - Renewable exact-token leases begin at five minutes. Publication requires a live exact lease; retry/skip release paths retain exact-token ownership checks even after natural expiry.
 - Intentional foreground preemption refunds the reserved submission, restores the claimed attempt, and durably defers work regardless of remote acceptance. Startup backfill considers missing jobs only for eligible delivered turns from the preceding 24 hours.
@@ -288,7 +272,7 @@ Suppression and cutoff matching treats underscores and spaces as compatible valu
 
 `compaction.NewLLMCompactor` supplies the shared model-backed compactor. `compaction/service.go` plans/runs durable jobs; `agent/compaction.go` installs request-local checkpoints; `memory` stores jobs, summaries, and delivery state.
 
-- `AppendPendingSessionTurn(ctx, SessionTurnWrite)` writes a generation-fenced exchange and immutable history, staged memory, pressure, and outbox artifacts. Pressure requires nonnegative tokens, a positive limit, and a nonblank version. Persistence is not delivery acknowledgement.
+- `AppendPendingSessionTurn(ctx, SessionTurnWrite)` writes a generation-fenced exchange and immutable history, pressure, and outbox artifacts. Pressure requires nonnegative tokens, a positive limit, and a nonblank version. Persistence is not delivery acknowledgement.
 - At 70% estimated usable-input pressure, durable planning pins a campaign target through the newest eligible delivered exchange. Jobs cover at most 64 exchanges; successful partial checkpoints continue the campaign even if pressure falls.
 - Each job pins model/generator contracts. One queued/running/retry job per tenant/session/generation prevents overlap; failed contracts and uncompactable complete-exchange receipts suppress repeated work until the contract or scope changes.
 - `PageDeliveredSessionTurnsAfter` pages ascending IDs across pending gaps for foreground history. Advance its exclusive boundary to the last returned ID. `CompactionWindowAfter` instead respects pending-delivery barriers and reports the eligible total/newest ID independently of page size.
@@ -297,28 +281,28 @@ Suppression and cutoff matching treats underscores and spaces as compatible valu
 - Compaction uses a silent synchronous stream, one required `session_summary_save` tool call, no parallel calls, temperature 0, and the resolved output limit. Provider schema omits grammar-expensive cardinality/string-length constraints; local validation still enforces limits.
 - A summary contains narrative, open tasks, commitments, entities, decisions, topic tags, covered range, and ordered source IDs. Narrative is bounded to 8,000 runes; arrays to 50 items each, items to 1,000 runes, aggregate structured text to 16,000 runes, and encoded artifact to 40,000 bytes.
 - Foreground compaction includes delivered post-checkpoint exchanges and completed active tool rounds, using live model-visible arguments/results rather than durable-history truncation. Reasoning and attachment bytes are excluded. Install a checkpoint only after validation; keep the old context on failure.
-- Durable summaries do not delete covered transcripts or publish user memories. Active-generation transcripts remain searchable after compaction.
+- Durable summaries do not delete covered transcripts or publish user memories. Active-generation transcripts remain in the retained transcript FTS after compaction, but no transcript search tool is registered.
 
 ### Persisted Compatibility
 
-Retained `formation-v4` jobs/artifacts still use their single-turn decoder and stricter legacy evidence policy. Current pattern and foreground behavior must not be inferred from those legacy rejection rules.
+Retained `formation-v4` jobs/artifacts still use their single-turn decoder and stricter legacy evidence policy. The retained pattern and foreground implementations must not be inferred from those legacy rejection rules; none are started in the live application.
 
 New compaction output requires an empty `candidates` array. Persisted summary artifacts retain a legacy candidate field: decoding still validates structural and size bounds, but summary publication neither evaluates those candidates as new user evidence nor publishes them. Keep these decoders and the existing artifact version/JSON contracts while stored data can require them.
 
 ## SQLite, Indexing, And Retention
 
-The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, global memory, and user memory open separate handles to it. Initialization is serialized by a process schema mutex.
+The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to it; global memory is not opened at startup. Private memory files live separately under `data/<canonical_user_id>/`. Initialization is serialized by a process schema mutex.
 
 - Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.13`, fourteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
 - Accept empty databases or an exact applied prefix of that registry. Reject nonempty ledgerless/development schemas and checksum drift without modifying canonical schema/data. There is no pre-v4 importer.
 - Apply missing migrations on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled, check foreign keys before commit, and restore enforcement afterward. Never edit a released migration.
-- `durable_jobs` contains typed formation, compaction, and derived-index work. Job-kind checks and tenant/source/lease predicates are part of the persistence contract, not redundant metadata.
-- Canonical state remains authoritative when indexes are absent. Derived kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`.
-- Canonical mutations enqueue outbox work transactionally. Indexing applies it to relevant live/building revisions, validates canonical version and ownership, and retries without weakening filters.
-- Rebuild into generated shadow tables, validate physical dimension/schema/model, exact canonical and valid indexed counts, tenant joins, memory eligibility, and delivered active-generation transcript eligibility, then atomically switch the live pointer. Failed shadows do not replace working indexes.
+- `durable_jobs` retains typed formation, compaction, and derived-index work; only compaction and transcript derived-index work are started. Job-kind checks and tenant/source/lease predicates are part of the persistence contract, not redundant metadata.
+- Canonical state remains authoritative when indexes are absent. The active derived kind is `transcript_fts`; `memory_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector` remain recognized persisted kinds but their live/building revisions are retired at indexing cycles.
+- SQLite canonical mutations still enqueue outbox work transactionally. Indexing applies transcript changes to relevant live/building revisions, validates canonical version and ownership, and retries without weakening filters. Retained fact/global changes are acknowledged without populating retired indexes.
+- Transcript rebuilds use generated shadow tables, validate physical schema and eligible delivered active-generation rows, then atomically switch the live pointer. Failed shadows do not replace working indexes. Fact/global index build and vector validation code is retained for compatibility, not started.
 - Transcript FTS schema 3 adds public prompt and group provenance columns. Group matching uses only public prompt/final-answer columns plus exact canonical scope and indexed-content checks. Persisted schema-2 live indexes remain writable and privately searchable during rebuild; group search is unavailable until schema 3 is published. Public answers and provenance are immutable; legacy rows cannot be opted into sharing by later updates.
 - Generated names must match their recorded kind/revision before publication or cleanup. Retained revision metadata preserves high-water and prevents name reuse.
-- Indexing reconciles at startup and polls every 30 seconds plus mutation wakeups. During model replacement, semantic queries use the old live model until publication; that model must remain accessible. Embedding dimension is cached after the first successful probe until restart.
+- Indexing reconciles transcript changes at startup and polls every 30 seconds plus mutation wakeups. The running indexer does not request embeddings or rebuild semantic fact/global indexes; legacy semantic retrieval code remains for compatibility tests.
 
 `config.DefaultRetentionPolicy()` supplies these code-owned values; environment overrides are not supported. Tests can inject policies.
 
@@ -334,31 +318,29 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 | Minimum database optimize interval | 24 hours |
 | Rows selected per maintenance operation | 100 |
 
-- Expired user memories are hidden on reads. Maintenance marks due active rows expired, blanks their statement/claim identity, retains the canonical row and remaining metadata, and queues index deletion. Explicit forget is physical deletion; expiry is not equivalent.
+- Retained SQLite facts still undergo expiry maintenance: due active rows are marked expired, their statement/claim identity is blanked, and the canonical row and remaining metadata are retained. This does not expire or modify file-backed user memory; the unregistered legacy forget handler's physical deletion is a different operation.
 - Session-serving queries require a matching active, unexpired generation. Delivered turns remain usable for that session lifetime even if the turn's own expiry has passed. Expiry cleanup removes artifacts but retains inactive session bookkeeping/high-water rows.
 - Inactive compaction work can first be retired/skipped and detached from summaries, with terminal retention applied later. Do not equate every cleanup count with immediate row deletion.
-- Keep active-generation failed-contract compaction receipts and one newest successful upsert receipt per still-eligible canonical entity. They prevent repeated failing compaction and needless reindexing, respectively.
+- Keep active-generation failed-contract compaction receipts and one newest successful upsert receipt per still-eligible transcript entity. They prevent repeated failing compaction and needless transcript reindexing, respectively.
 - Maintenance is serialized but not one atomic sweep: expiry cleanup, further canonical retention, and derived/database hygiene have separate commit/error boundaries. Later failure does not roll back earlier committed cleanup. Batch size bounds selected rows per operation, not a whole-category or whole-sweep deletion total.
 - SQLite uses foreign keys, `secure_delete=ON`, WAL, `synchronous=NORMAL`, a five-second busy timeout, immediate write locks, and a 1,000-page automatic WAL checkpoint. Sweeps perform a passive checkpoint, `incremental_vacuum(100)` only if already in incremental-vacuum mode, and `PRAGMA optimize` when due.
 
 ### Backups And Container Paths
 
-Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
+Back up both the private `data/<canonical_user_id>/USER.md` and `MEMORY.md` files and SQLite session/account state. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
 
-The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the path actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
+The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db` and private user files to `/home/oswald-ai/data/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
 
 ## Tools And MCP
 
-Builtin names live in `tools/names/names.go`; its contract test pins all twelve strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
+Builtin names live in `tools/names/names.go`; its contract test pins the stable names and their exact correspondence with loaded Markdown schema names, including disabled legacy names. Private retained formation and active compaction tools are not builtin catalog entries.
 
 | Tool | Enablement | Execution / Failure / Unproductive Limits | Durable History |
 | --- | --- | --- | --- |
 | `time.current` | Always | 0 / 0 / 0 | Full |
-| `user_memory_save` | Always | 2 / 0 / 0 | Metadata |
-| `user_memory_search` | Always | 0 / 0 / 0 | Full |
-| `user_memory_list` | Always | 0 / 0 / 0 | Full |
-| `session_transcript_search` | Always | 0 / 0 / 0 | Full |
-| `global_memory_search` | Always | 0 / 0 / 0 | Full |
+| `memory` | Always; authenticated principal required | 0 / 0 / 0 | Metadata |
+| `user_memory_save`, `user_memory_search`, `user_memory_list` | Disabled legacy builtins | Not applicable | Not applicable |
+| `session_transcript_search`, `global_memory_search` | Disabled legacy builtins | Not applicable | Not applicable |
 | `web.search` | Brave or SearXNG configured | 0 / 2 / 2 | Full |
 | `web.fetch` | Same enablement as search | 4 / 2 / 2 | Metadata |
 | `web.image_search` | Brave configured; available on Home Assistant | 2 / 2 / 2 | Metadata |
@@ -366,13 +348,13 @@ Builtin names live in `tools/names/names.go`; its contract test pins all twelve 
 | `comfyui.text_to_image` | ComfyUI configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
 | `comfyui.image_to_image` | ComfyUI configured; hidden from Home Assistant even when an image exists | 0 / 0 / 0 | Metadata |
 
-Zero disables a per-tool guard; it does not bypass global limits. Full history is bounded and searchable; metadata-only fetch/save/image results are not persisted as full model/tool content. Default per-call durable-history bounds are 16 KiB of arguments and 16,000 result runes; the complete trace has additional aggregate bounds.
+Zero disables a per-tool guard; it does not bypass global limits. Full history is bounded and searchable; metadata-only memory/fetch/image results are not persisted as full model/tool content. Default per-call durable-history bounds are 16 KiB of arguments and 16,000 result runes; the complete trace has additional aggregate bounds.
 
 - `governance.DefaultGlobalPolicy()` caps requests at 50 actual handler executions and 30 model responses containing tool calls. There is no request-wide consecutive-failure guard.
 - Authorize against the exact catalog advertised for that iteration. Discovery cannot authorize another call in the same model-emitted batch. Complete every declared call with a correlated result, including blocked calls, before finishing with tools disabled.
 - Duplicate detection hashes the name and canonical normalized arguments. Successful/unproductive calls retain fingerprints; execution errors release them for exact retry. Per-tool exhaustion hides only that tool.
 - Image-to-image duplicate detection includes the effective source ID, explicit strength, and `create_variant` (omitted equals false). The agent resolves an omitted selector from its current default source before fingerprinting each call, so a newly generated default permits another identical edit prompt. Explicit selectors remain exact-match values and still undergo handler validation; identical prompts targeting the same source with the same strength and variant mode remain duplicates, while changed strength permits a retry. Omitted strength remains distinct from an explicit value. Text-to-image duplicate detection remains prompt-based.
-- `user_memory_save` has two executions and a five-candidate request-wide staging cap. The model is instructed to use the second call for retryable corrections; runtime does not enforce that every second call is semantically a correction.
+- `memory` applies a single action or up to 20 ordered operations atomically to one target; it has no per-tool execution/failure/unproductive limit or deferred staging cap. Global governance still applies.
 - Current time is not injected automatically: use `time.current` when needed. It accepts IANA zones/UTC and rejects host-dependent `Local`.
 - The registry loads schemas and owns builtin handlers/policies/disabled-name reservations. Invalid individual Markdown specs are logged/skipped; required handler registration can then fail startup. MCP tools are supplied separately and combined by the agent.
 
@@ -427,7 +409,7 @@ ComfyUI handlers accept positive/negative prompts, each bounded to 2,000 runes. 
 - Final delivery selects the latest successful version of each logical image produced THIS request in first-production order, preserving unrelated attachments and their relative positions. Loaded sources are not automatically delivered. A fifth logical deliverable is rejected with actionable tool feedback before provider submission; edits of selected logical images remain allowed. Failed edits leave prior successes selected. Agent tool chunks carry status but no attachments; Discord also ignores chunk attachments, sending only the authoritative final inventory through its existing retry worker.
 - Selected images are persisted in successful generation order, independently of attachment delivery order. Descending stored ordinals therefore load the most recently generated selected asset first: producing A, B, then A-v2 delivers A-v2 followed by B, but the next omitted-source edit defaults to A-v2.
 - `session_images` stores actual normalized PNG/JPEG BLOBs (not original full-resolution outputs), at most 280 KiB each, four per turn and eight per canonical-user/session across generations (at most 2,240 KiB). ONLY selected final request outputs are written atomically with the pending turn, with logical/version/parent metadata. Oldest assets are evicted on insertion and ownership moves, including pending assets in the bound; failed new deliveries can therefore displace old assets. Image bytes never enter durable tool history, summaries, or transcript indexes; metadata-only tool history also omits source IDs. Model-authored text or transient compaction evidence may still mention IDs. Prior assets are advertised as IDs, not automatically injected as vision input, and their bytes are available to the edit handler.
-- Prior outputs require a delivered, nonfailed turn in the exact owner/session/current active generation, and unexpired session and source-turn TTL (normally 24 hours from generation). Turn-linked ownership follows account merges and generation remapping, not transport IDs. Reset, forget-all, account deletion, and source-turn deletion cascade to bytes; maintenance also deletes expired image rows in bounded batches even when transcripts remain active. Ordinary memory-fact deletion does not delete session images. As with other transient artifacts, no source survives reset or becomes group-shared through transcript search. Existing backups and ComfyUI's own output files are outside this deletion boundary.
+- Prior outputs require a delivered, nonfailed turn in the exact owner/session/current active generation, and unexpired session and source-turn TTL (normally 24 hours from generation). Turn-linked ownership follows SQLite account merges and generation remapping, not transport IDs; file-memory merge is unsupported. Reset, retained legacy forget-all (when invoked), account deletion, and source-turn deletion cascade to bytes; maintenance also deletes expired image rows in bounded batches even when transcripts remain active. Ordinary legacy memory-fact deletion does not delete session images. As with other transient artifacts, no source survives reset or becomes group-shared through the retained transcript search API. Existing backups and ComfyUI's own output files are outside this deletion boundary.
 - INFO `agent.images.loaded`, `.generated`, and `.stored` report safe image counts, normalized byte sizes, load duration, and pending storage outcomes without image IDs or payloads. Generated `image_count` remains the active vision count; `selected_image_count` and `catalog_image_count` distinguish final selection from editable assets. Load/normalization/storage failures retain existing warning/tool/request outcome reporting. Maintenance reports committed direct expiry deletions as `session_image_deleted_count`; turn-cascade deletions are covered by the parent turn lifecycle, not counted again as direct image deletions.
 
 - Workflows are operator-owned templates subject to fixed graph/model validation, not arbitrary API graphs. Current templates require `dreamshaper_8.safetensors`; image-to-image pins `dpmpp_2m` and `karras`.
@@ -480,15 +462,15 @@ Source decoding precedes resizing, and animated GIF uses full animation decoding
 | --- | --- |
 | Foreground with stream callback: Discord and Home Assistant | Synchronous streaming `POST /v1/chat/completions` |
 | Foreground without progress callback: iMessage | Silent synchronous streaming `POST /v1/chat/completions`; final response only to the user |
-| Private extraction and compaction | Silent synchronous chat stream |
-| Embeddings | `POST /v1/async/embeddings`, authenticated status polling |
+| Compaction (retained private extraction code, not started) | Silent synchronous chat stream |
+| Embeddings (retained client API, not used by the live indexer) | `POST /v1/async/embeddings`, authenticated status polling |
 
 Tool rounds, retries, and final tools-disabled calls retain streaming transport. The client assembles silent streams into complete responses; iMessage does not send intermediate text, reasoning, or tool activity. Its existing typing indicators, final attachment/text delivery, reply threading, and delivery acknowledgement are unchanged. Silent streams also allow foreground priority to close the active background HTTP request immediately.
 
-- Embeddings still require the Bifrost async contract and a Logs Store configured for async routes when enabled. The low-level client retains async chat support for explicit non-streaming requests, but foreground agent calls do not use it. Polling defaults to one second; Oswald does not set a total LLM-client timeout or an overall agent generation deadline. Each model invocation creates a separate stream (or, for an explicit non-streaming client call, a separate async job); there is no shared async job spanning agent tool rounds. Streaming does not bypass upstream provider or proxy timeouts.
+- If the retained embedding API is invoked, embeddings require the Bifrost async contract and a Logs Store configured for async routes. The low-level client retains async chat support for explicit non-streaming requests, but foreground agent calls do not use it. Polling defaults to one second; Oswald does not set a total LLM-client timeout or an overall agent generation deadline. Each model invocation creates a separate stream (or, for an explicit non-streaming client call, a separate async job); there is no shared async job spanning agent tool rounds. Streaming does not bypass upstream provider or proxy timeouts.
 - Async IDs are process-local, not persisted. Cancellation/restart after submission may leave remote jobs running until completion or the provider's independently configured timeout; no async cancellation endpoint is implemented here.
 - Current-turn images use OpenAI-compatible image URL content blocks. Provider-reported thinking, content, usage, and finish reasons are mapped separately.
-- `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap. Private extraction/compaction send the resolved value as `max_tokens`.
+- `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap. Active compaction (and retained private extraction when invoked) sends the resolved value as `max_tokens`.
 
 ## Environment Configuration
 
@@ -506,7 +488,7 @@ These are the 23 application variables loaded by `config.Load`. Defaults below a
 | `MCP_CONFIG_ENCRYPTION_KEY` | Required at startup; base64-encoded or raw 32-byte AES key |
 | `LLM_GATEWAY_URL` | `http://localhost:8080` when unset |
 | `LLM_GATEWAY_MODEL` | Required nonempty route/model name |
-| `LLM_GATEWAY_EMBEDDING_MODEL` | Empty disables semantic indexing/retrieval |
+| `LLM_GATEWAY_EMBEDDING_MODEL` | Retained legacy semantic-retrieval setting; live indexing does not build fact/global vectors |
 | `LLM_GATEWAY_API_KEY` | Optional bearer authentication |
 | `LLM_GATEWAY_VIRTUAL_KEY` | Optional `x-bf-vk` routing header |
 | `MODEL_CONTEXT_WINDOW` | 0 selects budget fallback |
@@ -523,7 +505,7 @@ These are the 23 application variables loaded by `config.Load`. Defaults below a
 - Invalid/incomplete gateway settings disable that gateway; startup fails if none are configured correctly. Ports must be integers from 1 through 65535.
 - Invalid/empty integer text uses parser fallbacks. An explicitly empty/invalid/nonpositive ComfyUI duration fails config loading even if image tools are disabled. Malformed nonempty ComfyUI URLs fail config loading; malformed nonempty SearXNG URLs fail tool initialization.
 - `.env.example` currently supplies HA/BlueBubbles ports and a nonempty ComfyUI URL as deployment examples. Copying that URL opts into ComfyUI; it is not the empty code default.
-- Retention, maintenance, global tool limits, database/soul/schema paths, and per-tool limits are code-owned. Do not document retired environment overrides as supported. Standard-library environment behavior, such as proxies on default HTTP transports, is separate from this inventory.
+- Retention, maintenance, global tool limits, database/soul/file-memory/schema paths, and per-tool limits are code-owned. Do not document retired environment overrides as supported. Standard-library environment behavior, such as proxies on default HTTP transports, is separate from this inventory.
 
 ## Structured Logging
 
@@ -544,7 +526,7 @@ Production logs are single-line JSON on stderr. Ingest stderr only. Human-readab
 
 ### Measurement Boundaries
 
-`internal/llm/telemetry.go` owns one INFO `provider.gateway.chat.complete` or `provider.gateway.embed.complete` measurement per `Chat`/`Embed` invocation, including error and cancellation returns. These provider records are the authoritative observed token meter across foreground rounds, retries, formation, compaction, and indexing. Their `operation` values are `chat` and `embedding`, respectively. A call is not necessarily a submission: `is_submitted` is true only when a submission attempt is made, not during pre-submission validation/cancellation. Async status polls are not extra model submissions.
+`internal/llm/telemetry.go` owns one INFO `provider.gateway.chat.complete` or `provider.gateway.embed.complete` measurement per `Chat`/`Embed` invocation, including error and cancellation returns. These provider records are the authoritative observed token meter across active foreground rounds/retries/compaction and any explicitly invoked retained formation or embedding code; live indexing does not invoke embeddings. Their `operation` values are `chat` and `embedding`, respectively. A call is not necessarily a submission: `is_submitted` is true only when a submission attempt is made, not during pre-submission validation/cancellation. Async status polls are not extra model submissions.
 
 - `is_usage_reported` means at least one numeric usage field was reported, not that all usage is known. `is_usage_complete` requires success and available nonnegative prompt/total counts, plus completion counts for chat. `is_usage_invalid` marks observed negative usage. Only reported nonnegative token fields are logged; missing fields are not invented as zero or calculated from other fields.
 - Cancellation/error can leave observed usage partial or unknown. A later invalid negative report does not erase a previously observed valid count. `internal/shared/requestctx/telemetry.go` collects only reported valid nonnegative counts, separating chat and embedding meters. A zero aggregate without its reported/complete flags does not prove zero remote work. Missing remote usage and collector loss prevent claims of complete billing or exactly-once ingestion.
@@ -559,7 +541,9 @@ Stop can return immediately with broker result `ExecutionComplete=false`, before
 
 `internal/agent/agent.go` emits `agent.response.complete` for generation outcome and `agent.tool.complete` for each actual handler execution, with tool name/scope, operation correlation, duration, status/outcome, and bounded reason code. `agent.tool.blocked` records governance/authorization blocking separately; it is not an execution. Provider-specific tool diagnostics do not count as another tool execution. Request error rates come from terminal `gateway.request.complete` status, not the number of ERROR logs: `gateway.request.failed` is a separate diagnostic for the same failed operation.
 
-`agent.tool.transcript.searched` is one INFO measurement per transcript-handler invocation, including empty, rejected, failed, and canceled searches. It reports `is_group`, returned count, duration, status/outcome, and available request correlation without chat IDs, query text, participant lists, or transcript content. Count actual tool executions using `agent.tool.complete`, not both events.
+The retained transcript handler emits `agent.tool.transcript.searched` when invoked in compatibility tests, but it is not registered in the live tool catalog. Count live tool executions, including `memory`, using `agent.tool.complete`; do not treat this retained event as live search traffic. Do not log file contents or operation arguments/results.
+
+INFO `agent.memory.files.loaded` records safe per-file rune counts and read duration for each request with an enabled file store. Read failures emit WARN `agent.memory.files.load_failed` and stop the request before model submission. The generic `agent.tool.complete` measurement covers immediate `memory` edits; neither event contains file content.
 
 `agent.tool.web.search.complete` is one INFO measurement per text-search handler invocation, including rejection, empty/degraded results, errors, and cancellation. It reports the validated `requested_result_count` when available, actual returned `result_count`, `is_search_invoked`, duration, status/outcome, and available correlation without queries or result content. Searcher invocation does not establish remote submission; provider measurements retain their existing submission/candidate semantics. Count tool executions with `agent.tool.complete`, not both events.
 
@@ -569,9 +553,9 @@ Stop can return immediately with broker result `ExecutionComplete=false`, before
 
 `gateway.reply_lookup.complete` is one INFO measurement per iMessage reply-resolution invocation, with request correlation, duration, status/outcome, and cache, remote, direct, predecessor, not-found, rejection, and error counts. `phase` identifies `reference`, `anchor`, `direct_target`, or `predecessor`; fixed `reason_code` values distinguish missing metadata, scope/ordering/thread mismatches, non-conversational messages, ineligible bot targets, and lookup failures. Remote counts describe logical lookup/query operations, not individual HTTP attempts (a direct lookup can use query then GET fallback). It includes no message/thread/chat GUIDs, sender addresses, content, URLs, or provider error payloads. Resolution is not an admitted agent request; use the existing gateway runtime summaries for request counts. No resolver measurement is emitted for an unmentioned group command rejected without lookup.
 
-Workload values are `foreground`, `formation`, `compaction`, `indexing`, `maintenance`, and `system`. `memory_formation` is a `job_kind`, not a workload. Formation and compaction services use fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
+Active workload values are `foreground`, `compaction`, `indexing`, `maintenance`, and `system`; `formation` remains for retained legacy code, not a startup worker. `memory_formation` is a retained `job_kind`, not an active workload. Compaction (and retained formation when invoked) uses fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
 
-`internal/memory/formation/service.go` logs formation completion only after durable completion succeeds, including local saves, empty extraction, and artifact replay. Retry APIs return the successfully persisted state; `internal/compaction/service.go` uses stored submission/artifact state for retry/dead reporting rather than attempt-count guesses. Worker cancellation/preemption/refund outcomes are INFO; independent storage failures remain warnings.
+Retained `internal/memory/formation/service.go` logs completion only when explicitly invoked and durable completion succeeds; it is not started at runtime. `internal/compaction/service.go` uses stored submission/artifact state for retry/dead reporting rather than attempt-count guesses. Active compaction worker cancellation/preemption/refund outcomes are INFO; independent storage failures remain warnings.
 
 `broker.health` is an INFO snapshot at broker lifecycle boundaries and every 30 seconds, with worker, queued, active, outstanding, capacity, oldest-queued-age, accepting, and background-active fields. `internal/memory/indexing/service.go` uses its existing 30-second indexing schedule for `memory.jobs.health`, `index.availability`, and `app.health`. A busy serialized indexing cycle can delay these snapshots. Snapshot reads share a scoped five-second timeout; failed reads emit diagnostic WARNs and omit unavailable data rather than claim zero backlogs.
 
@@ -649,9 +633,9 @@ An absent rate series is not necessarily an explicit zero; a missing snapshot ma
 
 ### Tools
 
-1. Add the stable builtin name in `internal/tools/names/names.go` and its schema in `data/tools/`; extend the exact schema/name contract test. Private model tools are not builtin catalog entries.
+1. Add the stable builtin name in `internal/tools/names/names.go` and its schema in `data/tools/`; extend the exact schema/name contract test. Private model tools are not builtin catalog entries; retained legacy builtins remain disabled.
 2. Implement the handler under its builtin domain; put shared persistence in the owning domain package. Require authenticated principals for tenant-sensitive work and derive ownership from context, not model arguments.
-3. Register explicit governance, argument normalization, and durable-history policy in `internal/tools/builtin/register.go`. Update stream-status rendering if needed without exposing sensitive arguments/results.
+3. Register explicit governance, argument normalization when needed, and durable-history policy in `internal/tools/builtin/register.go`. Update stream-status rendering if needed without exposing sensitive arguments/results.
 4. Cover enablement, validation, permissions, duplicate/failure behavior, cancellation, bounded output, and advertised schema. Update the inventory here and configuration examples only if configuration changes.
 
 ### Commands And Gateways
@@ -666,5 +650,5 @@ An absent rate series is not necessarily an explicit zero; a missing snapshot ma
 1. Add exactly one new semantically named SQL migration for a schema release. Never modify released SQL or add a pre-v4 importer implicitly.
 2. Preserve tenant/source/delivery/lease checks, foreign keys, JSON references, non-reusable IDs/high-water, and atomic outbox writes. Add fresh, supported-prefix, checksum-rejection, rollback, foreign-key, concurrent-open, and reopen coverage.
 3. Version persisted artifact changes explicitly and retain decoders needed by existing v4 data. Do not rename JSON/schema/tool/log contracts as a side effect of Go cleanup.
-4. Keep profile compilation deterministic, make current and retained legacy policy distinctions explicit, and test merge/reset/deletion/replay paths with any memory change.
+4. Keep retained SQLite profile compilation deterministic; distinguish active file-memory behavior from legacy policy and test file locking, immediate edits, merge limitations, reset/deletion, and retained replay paths as applicable.
 5. Soul changes are operator filesystem edits to `data/memory/soul/soul.md`, applied on the next request; no model tool may mutate that policy.

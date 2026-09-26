@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
@@ -25,8 +26,6 @@ import (
 const (
 	sessionHistoryCandidateLimit  = 1000
 	recentToolExposureTurns       = 4
-	automaticRecallTopK           = 4
-	automaticRecallCharLimit      = 2000
 	sessionTurnTTL                = 24 * time.Hour
 	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
@@ -45,9 +44,17 @@ type Agent struct {
 	model       string
 	soul        *soul.Store
 	userMemory  *memory.Store
+	fileMemory  *files.Store
 	toolPolicy  governance.GlobalPolicy
 	compactor   ForegroundCompactor
 	log         *config.Logger
+}
+
+// SetFileMemory installs the file-backed memory store before the agent starts serving work.
+func (a *Agent) SetFileMemory(store *files.Store) {
+	if a != nil {
+		a.fileMemory = store
+	}
 }
 
 // SetForegroundCompactor installs the request-local compactor before the agent starts serving work.
@@ -162,8 +169,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
-	memoryStage := requestctx.NewMemoryStageCollector()
-	ctx = requestctx.WithMemoryStageCollector(ctx, memoryStage)
 	imageSearch := requestctx.NewImageSearchState()
 	ctx = requestctx.WithImageSearchState(ctx, imageSearch)
 	imageFailureText := imageSizeFallback
@@ -196,7 +201,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
 	}
 
-	// Keep deployment policy separate from the frozen lower-authority tenant profile.
+	// Keep deployment policy separate from lower-authority file memory.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
@@ -204,41 +209,35 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 	speakerLine := ""
-	profileContent := ""
+	fileContext := ""
 	sessionGeneration := 0
 	if a.userMemory != nil {
-		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
+		session, err := a.userMemory.ResolveSessionContext(ctx, senderID, sessionKey, sessionTurnTTL)
 		if err != nil {
-			return nil, fmt.Errorf("resolve tenant profile: %w", err)
+			return nil, fmt.Errorf("resolve tenant session: %w", err)
 		} else {
-			speakerLine = profile.SpeakerIntro
-			sessionGeneration = profile.Generation
-			profileContent = profile.Content
-			reqLog.Debug("agent.profile.loaded", "loaded frozen tenant profile",
-				config.F("profile_version", profile.Version),
-				config.F("latest_profile_version", profile.LatestVersion),
-				config.F("profile_fact_count", profile.FactCount),
-				config.F("profile_bytes", profile.Bytes),
-				config.F("session_generation", profile.Generation),
-				config.F("is_profile_new", profile.IsNewVersion),
-				config.F("is_session_new", profile.IsNewSession),
-			)
-			if profile.IsNewVersion {
-				reqLog.Info("agent.profile.version_advanced", "advanced tenant profile version",
-					config.F("profile_version", profile.LatestVersion),
-					config.F("profile_fact_count", profile.LatestFactCount),
-					config.F("profile_bytes", profile.LatestBytes),
-					config.F("status", "ok"),
-				)
-			}
-			if profile.IsNewSession {
-				reqLog.Info("agent.profile.session_bound", "bound tenant profile to session",
-					config.F("profile_version", profile.Version),
-					config.F("session_generation", profile.Generation),
+			speakerLine = session.SpeakerIntro
+			sessionGeneration = session.Generation
+			reqLog.Debug("agent.session.loaded", "loaded tenant session context",
+				config.F("session_generation", session.Generation),
+				config.F("is_session_new", session.IsNewSession))
+			if session.IsNewSession {
+				reqLog.Info("agent.session.bound", "bound tenant session context",
+					config.F("session_generation", session.Generation),
 					config.F("status", "ok"),
 				)
 			}
 		}
+	}
+	if a.fileMemory != nil {
+		filesStarted := time.Now()
+		userContent, memoryContent, err := a.fileMemory.Read(ctx, senderID)
+		if err != nil {
+			reqLog.Warn("agent.memory.files.load_failed", "failed to load private memory files", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+			return nil, fmt.Errorf("read file memory: %w", err)
+		}
+		fileContext = renderFileMemory(userContent, memoryContent)
+		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)
@@ -255,32 +254,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-	var recalledMemories []memory.RecallResult
-	if a.userMemory != nil {
-		recallQuery, _ := stripReplyContext(userPrompt)
-		recallStarted := time.Now()
-		var recallStats memory.RecallStats
-		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, memory.RecallRequest{TopK: automaticRecallTopK})
-		if recallStats.LexicalError != nil {
-			reqLog.Warn("agent.user_memory.recall.lexical_degraded", "user-memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
-		}
-		if recallStats.SemanticError != nil {
-			reqLog.Warn("agent.user_memory.recall.semantic_degraded", "user-memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
-		}
-		reqLog.Debug("agent.user_memory.recall.complete", "completed user-memory recall",
-			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
-			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
-			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
-			config.F("below_threshold_count", recallStats.BelowThresholdCount),
-			config.F("selected_memory_count", recallStats.SelectedCount),
-			config.F("min_selected_score", recallStats.MinSelectedScore),
-			config.F("max_selected_score", recallStats.MaxSelectedScore),
-			config.F("is_lexical_available", recallStats.LexicalAvailable),
-			config.F("is_vector_available", recallStats.SemanticAvailable),
-			config.F("duration_ms", time.Since(recallStarted).Milliseconds()),
-		)
-	}
-
 	var recentTurns []memory.SessionTurn
 	var recentToolNames []string
 	var sessionSummary memory.SessionSummary
@@ -332,16 +305,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, minimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, inputLimit)
-	if a.userMemory != nil {
-		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
-	}
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, fileContext, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 	messages := promptContext.Messages
 	var previousSummary *memory.SessionSummary
 	if sessionSummary.ID > 0 {
 		previousSummary = &sessionSummary
 	}
-	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, profileContent, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
 	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
 		imageContext := sessionImageContext(contextImages, nil)
@@ -357,9 +327,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	reqLog.Debug("agent.context.selected", "selected complete session exchanges",
 		config.F("selected_turn_count", promptContext.SelectedTurnCount),
 		config.F("omitted_turn_count", promptContext.OmittedTurnCount),
-		config.F("selected_memory_count", promptContext.SelectedRecallCount),
-		config.F("omitted_memory_count", promptContext.OmittedRecallCount),
-		config.F("recall_chars", promptContext.RecallChars),
 		config.F("is_summary_included", promptContext.SummaryIncluded),
 		config.F("summary_chars", promptContext.SummaryChars),
 		config.F("minimum_tail_count", promptContext.MinimumTailCount),
@@ -1069,11 +1036,6 @@ finalize:
 		messages = append(messages, lastResp.Message)
 	}
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
-	stagedMemory := memoryStage.Candidates()
-	if len(stagedMemory) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
-		persistenceStatus = "failed"
-		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
-	}
 	for i := range generatedImages {
 		generatedImages[i].VersionHighwater = imageHighwater[generatedImages[i].ImageID]
 	}
@@ -1098,17 +1060,12 @@ finalize:
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
-			if len(stagedMemory) > 0 {
-				return nil, fmt.Errorf("persist staged foreground memory: %w", err)
-			}
 			if len(generatedImages) > 0 {
 				return nil, fmt.Errorf("persist generated images: %w", err)
 			}
-		} else if len(stagedMemory) > 0 && storedTurn.ID == 0 {
-			return nil, fmt.Errorf("persist staged foreground memory: session turn was not stored")
 		}
 		if len(generatedImages) > 0 && storedTurn.ID == 0 {
 			return nil, fmt.Errorf("persist generated images: session turn was not stored")
