@@ -97,6 +97,12 @@ func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeD
 	return services, nil
 }
 
+// OpenAIEnabled reports whether the configured port can enable the loopback listener.
+func OpenAIEnabled(cfg *config.Config) bool {
+	port, err := strconv.Atoi(strings.TrimSpace(cfg.OpenAIListenPort))
+	return err == nil && port >= 1 && port <= 65535
+}
+
 func validateBlueBubblesConfig(portValue, urlValue string) (string, string, error) {
 	portNumber, err := strconv.Atoi(strings.TrimSpace(portValue))
 	if err != nil || portNumber < 1 || portNumber > 65535 {

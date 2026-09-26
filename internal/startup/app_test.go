@@ -83,6 +83,60 @@ func TestRunValidatesBeforeStorage(t *testing.T) {
 	}
 }
 
+func TestRunProvisionsLocalOpenAIAdminBeforeBootstrap(t *testing.T) {
+	for _, tc := range []struct {
+		name, port string
+		wantAdmin  bool
+	}{
+		{name: "enabled", port: "8091", wantAdmin: true},
+		{name: "invalid port", port: "invalid"},
+		{name: "disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "oswald.db")
+			log := config.NewLogger(config.LevelError)
+			log.SetOutput(io.Discard)
+			cfg := &config.Config{LLMGatewayModel: "test-model", LLMGatewayURL: "http://unused.invalid", MCPConfigEncryptionKey: "12345678901234567890123456789012", OpenAIListenPort: tc.port}
+			var output bytes.Buffer
+			deps := dependencies{
+				databasePath: path,
+				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, log *config.Logger) (*registry.Registry, error) {
+					return registry.New(log), nil
+				},
+				newGateways: func(_ *config.Config, links *accounts.Service, _ gatewayruntime.Dependencies, _ *config.Logger) ([]gateway.Service, error) {
+					_, err := links.LocalOpenAIPrincipal(ctx)
+					if tc.wantAdmin && err != nil || !tc.wantAdmin && !errors.Is(err, accounts.ErrPrincipalMismatch) {
+						t.Errorf("local principal at gateway construction: %v", err)
+					}
+					cancel()
+					return nil, nil
+				},
+			}
+			if err := run(ctx, cfg, log, &output, deps); err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantAdmin && output.Len() != 0 || !tc.wantAdmin && output.Len() == 0 {
+				t.Fatalf("unexpected bootstrap instructions: enabled=%t printed=%t", tc.wantAdmin, output.Len() > 0)
+			}
+			links := accounts.NewService(path, nil, nil, log)
+			t.Cleanup(func() { _ = links.Close() })
+			p, err := links.LocalOpenAIPrincipal(context.Background())
+			if tc.wantAdmin {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if admin, err := links.IsAdminPrincipal(p); err != nil || !admin {
+					t.Fatalf("admin=%t err=%v", admin, err)
+				}
+			} else if !errors.Is(err, accounts.ErrPrincipalMismatch) {
+				t.Fatalf("unexpected local account: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunLifecycle(t *testing.T) {
 	for _, mode := range []string{"registry failure", "registry cancellation", "gateway failure", "gateway cancellation", "success", "gateway start failure", "Home Assistant start failure", "Discord start failure", "iMessage start failure"} {
 		t.Run(mode, func(t *testing.T) {

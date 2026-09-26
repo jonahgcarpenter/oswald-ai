@@ -18,7 +18,7 @@ import (
 // EnsureAccount resolves an external account to a canonical user ID, creating one when needed.
 func (s *Service) EnsureAccount(ctx context.Context, gateway, identifier, displayName string) (string, error) {
 	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		return "", fmt.Errorf("API key identities must be issued with CreateAPIKey")
+		return "", fmt.Errorf("openai accounts are provisioned by the local listener")
 	}
 	identifier, err := NormalizeIdentifier(gateway, identifier)
 	if err != nil {
@@ -97,7 +97,7 @@ func (s *Service) ResolveAccount(gateway, identifier string) (string, bool, erro
 	}
 	var owner string
 	err = s.db.SQL().QueryRow(`SELECT canonical_user_id FROM linked_accounts WHERE gateway = ? AND identifier = ?
-		AND (gateway != 'openai' OR EXISTS (SELECT 1 FROM api_keys k WHERE k.key_id = identifier AND k.canonical_user_id = linked_accounts.canonical_user_id))`, gateway, identifier).Scan(&owner)
+		AND (gateway != 'openai' OR (identifier = 'local' AND EXISTS (SELECT 1 FROM account_users u WHERE u.canonical_user_id = linked_accounts.canonical_user_id AND u.lifecycle_state = 'active')))`, gateway, identifier).Scan(&owner)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}
@@ -145,11 +145,11 @@ func (s *Service) RunAuthenticatedCanonicalMutation(principal identity.Principal
 		return ErrPrincipalMismatch
 	}
 	if principal.Gateway == "openai" {
-		var exists int
-		if err := s.db.SQL().QueryRow(`SELECT 1 FROM api_keys WHERE key_id = ? AND canonical_user_id = ?`, identifier, owner).Scan(&exists); err == sql.ErrNoRows {
+		var active int
+		if err := s.db.SQL().QueryRow(`SELECT 1 FROM account_users WHERE canonical_user_id = ? AND lifecycle_state = 'active'`, owner).Scan(&active); err == sql.ErrNoRows {
 			return ErrPrincipalMismatch
 		} else if err != nil {
-			return fmt.Errorf("resolve API key identity: %w", err)
+			return fmt.Errorf("resolve local openai owner: %w", err)
 		}
 	}
 	return fn(owner)

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
@@ -34,8 +34,8 @@ type Gateway struct {
 	log      *config.Logger
 	broker   *broker.Broker
 	// Tests replace these seams without constructing a broker or account database.
-	authenticate func(context.Context, string) (identity.Principal, error)
-	execute      func(gatewayruntime.Request, gatewayruntime.Dependencies, gatewayruntime.Responder) gatewayruntime.Outcome
+	localPrincipal func(context.Context) (identity.Principal, error)
+	execute        func(gatewayruntime.Request, gatewayruntime.Dependencies, gatewayruntime.Responder) gatewayruntime.Outcome
 }
 
 // New validates and constructs an OpenAI-compatible gateway.
@@ -72,47 +72,28 @@ func (g *Gateway) Handler() http.Handler {
 	return mux
 }
 
-func (g *Gateway) authorize(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+func (g *Gateway) resolveLocal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
 	start := time.Now()
-	status, reason := "rejected", "invalid_header"
+	status, reason := "error", "local_user_unavailable"
 	defer func() {
 		fields := []config.Field{config.F("record_kind", "measurement"), config.F("gateway", "openai"), config.F("duration_ms", time.Since(start).Milliseconds()), config.F("status", status), config.F("reason_code", reason)}
 		log := g.log.Server("gateway.openai")
 		if status == "error" {
-			log.Warn("gateway.openai.auth.complete", "completed openai authentication", fields...)
+			log.Warn("gateway.openai.identity.complete", "resolved local openai identity", fields...)
 		} else {
-			log.Info("gateway.openai.auth.complete", "completed openai authentication", fields...)
+			log.Info("gateway.openai.identity.complete", "resolved local openai identity", fields...)
 		}
 	}()
-	headers := r.Header.Values("Authorization")
-	if len(headers) != 1 {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(w, http.StatusUnauthorized, "invalid_api_key", "A single bearer token is required.")
-		return identity.Principal{}, false
+	resolve := g.localPrincipal
+	if resolve == nil {
+		resolve = g.accounts.LocalOpenAIPrincipal
 	}
-	parts := strings.Split(headers[0], " ")
-	if len(parts) != 2 || parts[0] != "Bearer" || parts[1] == "" || strings.TrimSpace(parts[1]) != parts[1] || strings.ContainsAny(parts[1], "\t,\r\n") {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(w, http.StatusUnauthorized, "invalid_api_key", "A single bearer token is required.")
-		return identity.Principal{}, false
-	}
-	auth := g.authenticate
-	if auth == nil {
-		auth = g.accounts.AuthenticateAPIKey
-	}
-	principal, err := auth(r.Context(), parts[1])
-	if err != nil && !errors.Is(err, accounts.ErrInvalidAPIKey) {
-		status, reason = "error", "auth_unavailable"
-		writeError(w, http.StatusServiceUnavailable, "server_error", "Authentication is temporarily unavailable.")
-		return identity.Principal{}, false
-	}
+	principal, err := resolve(r.Context())
 	if err != nil || !principal.Authenticated() || principal.Gateway != "openai" {
-		reason = "invalid_key"
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(w, http.StatusUnauthorized, "invalid_api_key", "Invalid API key.")
+		writeError(w, http.StatusServiceUnavailable, "server_error", "Local account is unavailable.")
 		return identity.Principal{}, false
 	}
-	status, reason = "ok", "authenticated"
+	status, reason = "ok", "local_user"
 	return principal, true
 }
 
@@ -127,7 +108,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	if _, ok := g.authorize(w, r); !ok {
+	if _, ok := g.resolveLocal(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}}})
@@ -136,10 +117,48 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 type chatRequest struct {
 	Model    string `json:"model"`
 	Messages []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent *string         `json:"reasoning_content"`
 	} `json:"messages"`
-	Stream bool `json:"stream"`
+	Stream        bool `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
+	MaxTokens  *int              `json:"max_tokens"`
+	Tools      []json.RawMessage `json:"tools"`
+	ToolChoice string            `json:"tool_choice"`
+}
+
+func textContent(raw json.RawMessage) (string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "", false
+	}
+	if raw[0] == '"' {
+		var text string
+		return text, json.Unmarshal(raw, &text) == nil
+	}
+	if raw[0] != '[' {
+		return "", false
+	}
+	var parts []struct {
+		Type string  `json:"type"`
+		Text *string `json:"text"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&parts) != nil || len(parts) == 0 || len(parts) > 32 {
+		return "", false
+	}
+	var text strings.Builder
+	for _, part := range parts {
+		if part.Type != "text" || part.Text == nil || len(*part.Text) > (32<<10)-text.Len() {
+			return "", false
+		}
+		text.WriteString(*part.Text)
+	}
+	return text.String(), true
 }
 
 func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
@@ -148,7 +167,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	principal, ok := g.authorize(w, r)
+	principal, ok := g.resolveLocal(w, r)
 	if !ok {
 		return
 	}
@@ -173,6 +192,19 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_model", "Only model oswald is supported.")
 		return
 	}
+	// OpenCode advertises its own tools and generation preferences. Oswald
+	// executes only its independently authorized tools, so required client
+	// tool calls cannot be honored by this text-only gateway.
+	if input.MaxTokens != nil && *input.MaxTokens <= 0 || len(input.Tools) > 64 || input.ToolChoice != "" && input.ToolChoice != "auto" && input.ToolChoice != "none" {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
+		return
+	}
+	for _, tool := range input.Tools {
+		if len(tool) == 0 || tool[0] != '{' {
+			g.reject(w, http.StatusBadRequest, "unsupported_options", "Invalid client tool definition.")
+			return
+		}
+	}
 	if len(input.Messages) == 0 || len(input.Messages) > 32 {
 		g.reject(w, http.StatusBadRequest, "invalid_messages", "Messages must contain 1 to 32 turns.")
 		return
@@ -180,13 +212,17 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	history := make([]llm.ChatMessage, 0, len(input.Messages)-1)
 	total := 0
 	for i, msg := range input.Messages {
-		if msg.Role != "user" && msg.Role != "assistant" || (i == len(input.Messages)-1 && msg.Role != "user") {
-			g.reject(w, http.StatusBadRequest, "unsupported_role", "Only user and assistant messages ending in a user message are supported.")
+		if msg.Role != "user" && msg.Role != "assistant" && msg.Role != "system" && msg.Role != "developer" || (i == len(input.Messages)-1 && msg.Role != "user") {
+			g.reject(w, http.StatusBadRequest, "unsupported_role", "Text messages must end in a user message.")
 			return
 		}
-		var text string
-		if len(msg.Content) == 0 || bytes.Equal(msg.Content, []byte("null")) || json.Unmarshal(msg.Content, &text) != nil {
-			g.reject(w, http.StatusBadRequest, "unsupported_content", "Only text message content is supported; images are not supported.")
+		if msg.ReasoningContent != nil && (msg.Role != "assistant" || len(*msg.ReasoningContent) > 128<<10) {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is only supported on prior assistant messages.")
+			return
+		}
+		text, valid := textContent(msg.Content)
+		if !valid {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Only text strings or arrays of text parts are supported.")
 			return
 		}
 		total += len(text)
@@ -211,7 +247,11 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			}
 			id := config.NewRequestID()
 			responder := &responseWriter{w: w, ctx: r.Context(), id: "chatcmpl-" + id, stream: input.Stream}
-			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, Stateless: true}, deps, responder)
+			var streamFunc func(agent.StreamChunk)
+			if input.Stream {
+				streamFunc = responder.Stream
+			}
+			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, Stateless: true, StreamFunc: streamFunc}, deps, responder)
 			if !responder.sent && r.Context().Err() == nil {
 				if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 					w.WriteHeader(http.StatusNoContent)

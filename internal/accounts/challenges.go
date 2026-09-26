@@ -433,7 +433,7 @@ func accountOwnerDB(ctx context.Context, db accountOwnerQuerier, gateway, identi
 	var owner string
 	var banned bool
 	err := db.QueryRowContext(ctx, `SELECT la.canonical_user_id, au.is_banned != 0 FROM linked_accounts la JOIN account_users au ON au.canonical_user_id = la.canonical_user_id WHERE la.gateway = ? AND la.identifier = ?
-		AND (la.gateway != 'openai' OR EXISTS (SELECT 1 FROM api_keys k WHERE k.key_id = la.identifier AND k.canonical_user_id = la.canonical_user_id))`, gateway, identifier).Scan(&owner, &banned)
+		AND (la.gateway != 'openai' OR (la.identifier = 'local' AND au.lifecycle_state = 'active'))`, gateway, identifier).Scan(&owner, &banned)
 	if err == sql.ErrNoRows {
 		return "", false, ErrPrincipalMismatch
 	}

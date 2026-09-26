@@ -5,6 +5,8 @@ import (
 	"net/mail"
 	"regexp"
 	"strings"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 // GatewayOption defines how a gateway is presented in the shared account-link flow.
@@ -98,8 +100,8 @@ func NormalizeIdentifier(gateway, identifier string) (string, error) {
 		}
 		return identifier, nil
 	case "openai":
-		if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(identifier) {
-			return "", fmt.Errorf("OpenAI identifiers must be API key IDs")
+		if identifier != identity.LocalOpenAIIdentifier {
+			return "", fmt.Errorf("invalid OpenAI identifier")
 		}
 		return identifier, nil
 	default:

@@ -15,9 +15,12 @@ const (
 	// AssuranceBlueBubblesWebhook identifies an iMessage sender asserted by an
 	// authenticated BlueBubbles webhook.
 	AssuranceBlueBubblesWebhook Assurance = "bluebubbles_webhook"
-	// AssuranceAPIKey identifies a client authenticated by an issued API key.
-	AssuranceAPIKey Assurance = "api_key"
+	// AssuranceLocalLoopback identifies the process-local OpenAI HTTP listener.
+	AssuranceLocalLoopback Assurance = "local_loopback"
 )
+
+// LocalOpenAIIdentifier is the fixed account identity for the loopback listener.
+const LocalOpenAIIdentifier = "local"
 
 // Principal is the resolved actor for one request. CanonicalUserID is the only
 // field used for tenant ownership; ExternalID remains transport-facing identity.
@@ -42,7 +45,7 @@ func (p Principal) Valid() bool {
 	case "imessage":
 		return p.Assurance == AssuranceBlueBubblesWebhook
 	case "openai":
-		return p.Assurance == AssuranceAPIKey
+		return p.Assurance == AssuranceLocalLoopback && p.ExternalID == LocalOpenAIIdentifier
 	}
 	return false
 }
@@ -54,7 +57,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceAPIKey:
+	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback:
 		return true
 	default:
 		return false

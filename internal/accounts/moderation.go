@@ -145,6 +145,14 @@ func (s *Service) IsAdminPrincipal(principal identity.Principal) (bool, error) {
 		return false, nil
 	}
 	user, ok := data.Users[owner]
+	if principal.Gateway == "openai" && ok {
+		var active int
+		if err := s.db.SQL().QueryRow(`SELECT 1 FROM account_users WHERE canonical_user_id = ? AND lifecycle_state = 'active'`, owner).Scan(&active); err == sql.ErrNoRows {
+			return false, nil
+		} else if err != nil {
+			return false, fmt.Errorf("resolve local openai owner: %w", err)
+		}
+	}
 	return ok && user.IsAdmin, nil
 }
 

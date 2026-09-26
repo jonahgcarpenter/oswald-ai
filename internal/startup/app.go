@@ -164,6 +164,14 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	if ctx.Err() != nil {
 		return nil
 	}
+	if gateway.OpenAIEnabled(cfg) {
+		if err := accountLinkService.EnsureLocalOpenAIAdmin(ctx); err != nil {
+			return &Error{Event: "app.openai_account.init_failed", Message: "failed to initialize local openai administrator", Cause: err}
+		}
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	finishPhase()
 	finishPhase = phase("services")
 	bootstrapCommand, bootstrapCode, err := bootstrapcommands.New(accountLinkService)

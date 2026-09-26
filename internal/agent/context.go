@@ -18,8 +18,8 @@ func clientHistoryContext(history []llm.ChatMessage) (string, error) {
 		return "", nil
 	}
 	for _, message := range history {
-		if (message.Role != "user" && message.Role != "assistant") || len(message.Images) != 0 || message.Thinking != "" || len(message.ToolCalls) != 0 || message.ToolName != "" || message.ToolCallID != "" {
-			return "", fmt.Errorf("client history must contain only user or assistant text")
+		if (message.Role != "user" && message.Role != "assistant" && message.Role != "system" && message.Role != "developer") || len(message.Images) != 0 || message.Thinking != "" || len(message.ToolCalls) != 0 || message.ToolName != "" || message.ToolCallID != "" {
+			return "", fmt.Errorf("client history must contain only text")
 		}
 	}
 	encoded, err := json.Marshal(history)

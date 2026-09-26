@@ -88,7 +88,8 @@ func TestExecuteForwardsStatelessHistoryWithoutCompaction(t *testing.T) {
 	history := []llm.ChatMessage{{Role: "assistant", Content: "previous answer"}}
 	principal := testPrincipal("user")
 	principal.Gateway = "openai"
-	principal.Assurance = identity.AssuranceAPIKey
+	principal.ExternalID = identity.LocalOpenAIIdentifier
+	principal.Assurance = identity.AssuranceLocalLoopback
 	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "next question", Stateless: true, ClientHistory: history}, Dependencies{Broker: b, Log: log, Compaction: compaction}, responder)
 	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID != 0 || compaction.enqueueCalled || compaction.failureMarked {
 		t.Fatalf("stateless delivery outcome=%+v response=%+v compaction=%+v", outcome, responder.agent, compaction)
@@ -104,7 +105,7 @@ func TestExecuteOpenAIRejectsAgentAttachments(t *testing.T) {
 	b := broker.NewBroker(responseRuntimeProcessor{response: &agent.Response{Response: "answer", Attachments: []media.OutputAttachment{{Filename: "image.png", MIMEType: "image/png", Data: []byte("image")}}}}, 1, log)
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: "key", Assurance: identity.AssuranceAPIKey}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}
 	responder := &fakeResponder{}
 	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "draw", Stateless: true}, Dependencies{Broker: b, Log: log}, responder)
 	if outcome.Err == nil || outcome.Reason != "unsupported_attachments" || responder.agent != nil || responder.agentErr == "" {
