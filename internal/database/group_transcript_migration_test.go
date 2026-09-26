@@ -16,7 +16,7 @@ func TestGroupTranscriptMigrationPreservesUnsharedLegacyAndConstraints(t *testin
 	defer raw.Close()
 	db := &DB{path: path, db: raw}
 	registry := orderedMigrations()
-	if len(registry) != 15 || registry[14].name != "v4.0.14" {
+	if len(registry) != 16 || registry[15].name != "v4.0.15" {
 		t.Fatalf("unexpected registry: %+v", registry)
 	}
 	if err := db.runSchemaMigrations(context.Background(), registry[:10]); err != nil {

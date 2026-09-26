@@ -73,7 +73,8 @@ CREATE TEMP TABLE merge_sessions AS
 SELECT sessions.session_id, COALESCE(map.new_generation, sessions.generation) AS generation,
 	sessions.is_active, sessions.last_seen_at, sessions.expires_at,
 	sessions.profile_version, sessions.profile_version_high_water, sessions.renderer_version,
-	sessions.source_digest, sessions.speaker_intro, sessions.rendered_content, sessions.source_memory_ids
+	sessions.source_digest, sessions.speaker_intro, sessions.rendered_content, sessions.source_memory_ids,
+	sessions.file_user_snapshot, sessions.file_memory_snapshot
 FROM sessions
 LEFT JOIN merge_session_generation_map map
 	ON map.session_id = sessions.session_id AND map.old_generation = sessions.generation
@@ -306,10 +307,10 @@ DROP TABLE merge_duplicate_memory_ids`, loserID, winnerID, mergeNow, mergeNow); 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO sessions (canonical_user_id, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	source_memory_ids)
+	source_memory_ids, file_user_snapshot, file_memory_snapshot)
 SELECT ?, session_id, generation, is_active, last_seen_at, expires_at,
 	profile_version, profile_version_high_water, renderer_version, source_digest, speaker_intro, rendered_content,
-	source_memory_ids
+	source_memory_ids, file_user_snapshot, file_memory_snapshot
 FROM merge_sessions
 WHERE 1
 ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
@@ -323,7 +324,9 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	source_digest = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_digest ELSE sessions.source_digest END,
 	speaker_intro = CASE WHEN excluded.generation > sessions.generation THEN excluded.speaker_intro ELSE sessions.speaker_intro END,
 	rendered_content = CASE WHEN excluded.generation > sessions.generation THEN excluded.rendered_content ELSE sessions.rendered_content END,
-	source_memory_ids = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_memory_ids ELSE sessions.source_memory_ids END;
+	source_memory_ids = CASE WHEN excluded.generation > sessions.generation THEN excluded.source_memory_ids ELSE sessions.source_memory_ids END,
+	file_user_snapshot = CASE WHEN excluded.generation > sessions.generation THEN excluded.file_user_snapshot ELSE sessions.file_user_snapshot END,
+	file_memory_snapshot = CASE WHEN excluded.generation > sessions.generation THEN excluded.file_memory_snapshot ELSE sessions.file_memory_snapshot END;
 `, winnerID); err != nil {
 		return fmt.Errorf("restore merged sessions: %w", err)
 	}

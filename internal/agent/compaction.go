@@ -46,10 +46,10 @@ type foregroundCompactionStats struct {
 }
 
 func newForegroundCompactionState(compactor ForegroundCompactor, inputLimit int, deploymentPolicy, fileContext, currentPrompt string, currentImages []llm.InputImage, previous *memory.SessionSummary, debt []memory.SessionTurn, stream func(StreamChunk)) *foregroundCompactionState {
-	prefix := []llm.ChatMessage{{Role: "system", Content: deploymentPolicy}}
 	if fileContext != "" {
-		prefix = append(prefix, llm.ChatMessage{Role: "user", Content: fileContext})
+		deploymentPolicy += "\n\n" + fileContext
 	}
+	prefix := []llm.ChatMessage{{Role: "system", Content: deploymentPolicy}}
 	return &foregroundCompactionState{
 		compactor: compactor, inputLimit: inputLimit, prefix: prefix,
 		current:  llm.ChatMessage{Role: "user", Content: currentPrompt, Images: append([]llm.InputImage(nil), currentImages...)},

@@ -166,7 +166,7 @@ WHERE NOT EXISTS (
 		}
 	}
 
-	result, err = tx.ExecContext(ctx, `UPDATE sessions SET is_active = 0 WHERE rowid IN (SELECT rowid FROM sessions WHERE is_active = 1 AND expires_at <= ? ORDER BY expires_at, rowid LIMIT ?)`, nowText, batch)
+	result, err = tx.ExecContext(ctx, `UPDATE sessions SET is_active = 0, file_user_snapshot = NULL, file_memory_snapshot = NULL WHERE rowid IN (SELECT rowid FROM sessions WHERE is_active = 1 AND expires_at <= ? ORDER BY expires_at, rowid LIMIT ?)`, nowText, batch)
 	if err != nil {
 		return SessionCleanupCounts{}, fmt.Errorf("deactivate expired tenant sessions: %w", err)
 	}

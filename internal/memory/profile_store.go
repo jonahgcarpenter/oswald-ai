@@ -265,7 +265,7 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	generation = excluded.generation, is_active = 1, last_seen_at = excluded.last_seen_at, expires_at = excluded.expires_at,
 	profile_version = sessions.profile_version, profile_version_high_water = sessions.profile_version_high_water,
 	renderer_version = excluded.renderer_version, source_digest = '', speaker_intro = excluded.speaker_intro,
-	rendered_content = '', source_memory_ids = '[]'`,
+	rendered_content = '', source_memory_ids = '[]', file_user_snapshot = NULL, file_memory_snapshot = NULL`,
 		userID, sessionID, session.Generation, formatTime(now), formatTime(now.Add(ttl)), userID, userID, session.SpeakerIntro)
 	if err != nil {
 		return fmt.Errorf("bind tenant session context: %w", err)
@@ -290,7 +290,8 @@ ON CONFLICT(canonical_user_id, session_id) DO UPDATE SET
 	profile_version_high_water = MAX(sessions.profile_version_high_water, excluded.profile_version_high_water),
 	renderer_version = excluded.renderer_version, source_digest = excluded.source_digest,
 	speaker_intro = excluded.speaker_intro, rendered_content = excluded.rendered_content,
-	source_memory_ids = excluded.source_memory_ids
+	source_memory_ids = excluded.source_memory_ids,
+	file_user_snapshot = NULL, file_memory_snapshot = NULL
 `, userID, sessionID, generation, formatTime(now), formatTime(now.Add(ttl)),
 		profile.Version, profile.Version, ProfileRendererVersion, profile.sourceDigest, profile.SpeakerIntro,
 		profile.Content, string(encoded)); err != nil {

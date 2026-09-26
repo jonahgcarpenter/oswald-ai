@@ -69,14 +69,14 @@ func TestStatelessClientHistoryDoesNotReplayOrPersistSession(t *testing.T) {
 		t.Fatalf("stateless response=%+v err=%v", resp, err)
 	}
 	messages := chat.requests[len(chat.requests)-1].Messages
-	if len(messages) != 4 || messages[0].Role != "system" || strings.Contains(messages[0].Content, "first client message") || messages[1].Role != "user" || !strings.Contains(messages[1].Content, "file-private-marker") || messages[2].Role != "user" || messages[3].Role != "user" || messages[3].Content != "current question" || !strings.Contains(messages[2].Content, "first client message") || !strings.Contains(messages[2].Content, "prior client reply") || messagesContain(messages, "sqlite-private-marker") {
+	if len(messages) != 3 || messages[0].Role != "system" || strings.Contains(messages[0].Content, "first client message") || !strings.Contains(messages[0].Content, "file-private-marker") || messages[1].Role != "user" || messages[2].Role != "user" || messages[2].Content != "current question" || !strings.Contains(messages[1].Content, "first client message") || !strings.Contains(messages[1].Content, "prior client reply") || messagesContain(messages, "sqlite-private-marker") {
 		t.Fatalf("unexpected stateless prompt: %+v", messages)
 	}
 	last := -1
 	for _, entry := range history {
-		position := strings.Index(messages[2].Content, `"content":"`+entry.Content+`"`)
+		position := strings.Index(messages[1].Content, `"content":"`+entry.Content+`"`)
 		if position <= last {
-			t.Fatalf("client history lost order or an incomplete exchange: %s", messages[2].Content)
+			t.Fatalf("client history lost order or an incomplete exchange: %s", messages[1].Content)
 		}
 		last = position
 	}
@@ -153,8 +153,8 @@ func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T)
 		t.Fatalf("tool response=%+v err=%v model calls=%d", resp, err, len(chat.requests))
 	}
 	for _, call := range chat.requests {
-		if !messagesContain(call.Messages, "client-prior-marker") || !messagesContain(call.Messages, "file-round-marker") || call.Messages[0].Role != "system" || strings.Contains(call.Messages[0].Content, "file-round-marker") {
-			t.Fatalf("tool round lost lower-authority context: %+v", call.Messages)
+		if !messagesContain(call.Messages, "client-prior-marker") || !strings.Contains(call.Messages[0].Content, "file-round-marker") || call.Messages[0].Role != "system" {
+			t.Fatalf("tool round lost frozen system context: %+v", call.Messages)
 		}
 	}
 	if !messagesContain(chat.requests[1].Messages, "twelve") {
@@ -163,6 +163,37 @@ func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T)
 	turns, err := store.RecentSessionTurns("user-1", "session", 1, 10)
 	if err != nil || len(turns) != 0 {
 		t.Fatalf("stateless tool round persisted: %+v %v", turns, err)
+	}
+}
+
+func TestStatelessFileMemorySnapshotChangesOnlyBetweenRequests(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("edit", "test.edit_memory", map[string]interface{}{}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "saved"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "next request"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	fileStore := files.NewStore(t.TempDir())
+	agent.SetFileMemory(fileStore)
+	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "old note"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.edit_memory", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+		_, err := fileStore.Apply(ctx, "user-1", "memory", []files.Operation{{Action: "replace", OldText: "old note", Content: "new note"}})
+		return productiveResult("updated"), err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "question", Stateless: true}
+	if _, err := agent.Process(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.Process(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.requests) != 3 || !strings.Contains(chat.requests[0].Messages[0].Content, "old note") || !strings.Contains(chat.requests[1].Messages[0].Content, "old note") || strings.Contains(chat.requests[1].Messages[0].Content, "new note") || !strings.Contains(chat.requests[2].Messages[0].Content, "new note") {
+		t.Fatalf("stateless snapshots did not stay fixed within each request")
 	}
 }
 
@@ -1522,7 +1553,7 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 	}
 }
 
-func TestProcessReadsFileMemoryFreshWithinSession(t *testing.T) {
+func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "one"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
@@ -1543,8 +1574,8 @@ func TestProcessReadsFileMemoryFreshWithinSession(t *testing.T) {
 	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	firstFiles := tenantProfileMessage(primaryRequests(chat.requests)[0].Messages)
-	if !strings.Contains(firstFiles, "USER.md:\nUser is Ada.") || !strings.Contains(firstFiles, "MEMORY.md:\nProject is Atlas.") {
+	firstFiles := primaryRequests(chat.requests)[0].Messages[0].Content
+	if !strings.Contains(firstFiles, "USER PROFILE (who the user is)") || !strings.Contains(firstFiles, "User is Ada.") || !strings.Contains(firstFiles, "MEMORY (your personal notes)") || !strings.Contains(firstFiles, "Project is Atlas.") {
 		t.Fatalf("file memory was not injected: %q", firstFiles)
 	}
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Replies should be concise."}}); err != nil {
@@ -1560,24 +1591,25 @@ func TestProcessReadsFileMemoryFreshWithinSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	updatedFiles := tenantProfileMessage(requests[1].Messages)
-	latestFiles := tenantProfileMessage(requests[2].Messages)
-	if firstFiles == "" || updatedFiles == firstFiles || !strings.Contains(updatedFiles, "Replies should be concise.") {
-		t.Fatalf("file memory did not refresh in active session: first=%q updated=%q", firstFiles, updatedFiles)
+	updatedFiles := requests[1].Messages[0].Content
+	latestFiles := requests[2].Messages[0].Content
+	if updatedFiles != firstFiles || strings.Contains(updatedFiles, "Replies should be concise.") {
+		t.Fatalf("session memory snapshot changed: first=%q updated=%q", firstFiles, updatedFiles)
 	}
-	if latestFiles != updatedFiles || strings.Contains(latestFiles, "The user is Ada.") {
+	if latestFiles == firstFiles || !strings.Contains(latestFiles, "Replies should be concise.") || strings.Contains(latestFiles, "The user is Ada.") {
 		t.Fatalf("new session received stale files or legacy profile: %q", latestFiles)
 	}
-	if len(requests[0].Messages) != 3 || requests[0].Messages[1].Role != "user" || !strings.Contains(updatedFiles, "lower-authority") {
-		t.Fatalf("files are not lower-authority user context: %+v", requests[0].Messages)
+	if len(requests[0].Messages) != 2 || requests[0].Messages[0].Role != "system" {
+		t.Fatalf("files are not in system context: %+v", requests[0].Messages)
 	}
 }
 
-func TestProcessFileWriteVisibleNowAndReadFreshNextTurn(t *testing.T) {
+func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("write", toolnames.Memory, map[string]interface{}{"target": "memory", "action": "add", "content": "Project is Atlas."}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "saved"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "read"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "next session"}},
 	}}
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), config.NewLogger(config.LevelError))
 	if err != nil {
@@ -1604,13 +1636,19 @@ func TestProcessFileWriteVisibleNowAndReadFreshNextTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests = primaryRequests(chat.requests)
-	if len(requests) != 3 || !strings.Contains(tenantProfileMessage(requests[2].Messages), "Project is Atlas.") {
-		t.Fatalf("next request did not read updated file: %+v", requests)
+	if len(requests) != 3 || strings.Contains(requests[2].Messages[0].Content, "Project is Atlas.") {
+		t.Fatalf("current session snapshot changed after write: %+v", requests[2].Messages)
 	}
 	for _, message := range requests[2].Messages {
 		if message.Role == "tool" || len(message.ToolCalls) != 0 {
 			t.Fatalf("file write tool result replayed into next request: %+v", requests[2].Messages)
 		}
+	}
+	if _, err := processAgent(agent, "next-session", "homeassistant", "another-session", "user-1", "User", "what did I save?", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if requests = primaryRequests(chat.requests); len(requests) != 4 || !strings.Contains(requests[3].Messages[0].Content, "Project is Atlas.") {
+		t.Fatalf("new session did not capture updated memory")
 	}
 }
 
@@ -1637,7 +1675,7 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	if messagesContain(requests[0].Messages, "Bob") || messagesContain(requests[1].Messages, "Alice") {
+	if !strings.Contains(requests[0].Messages[0].Content, "The user is Alice.") || !strings.Contains(requests[1].Messages[0].Content, "The user is Bob.") || messagesContain(requests[0].Messages, "Bob") || messagesContain(requests[1].Messages, "Alice") {
 		t.Fatalf("cross-user profile leak: a=%+v b=%+v", requests[0].Messages, requests[1].Messages)
 	}
 }
@@ -1937,15 +1975,6 @@ func messagesContain(messages []llm.ChatMessage, needle string) bool {
 		}
 	}
 	return false
-}
-
-func tenantProfileMessage(messages []llm.ChatMessage) string {
-	for _, message := range messages {
-		if strings.Contains(message.Content, "USER.md:") && strings.Contains(message.Content, "MEMORY.md:") {
-			return message.Content
-		}
-	}
-	return ""
 }
 
 func requestHasTool(req llm.ChatRequest, name string) bool {

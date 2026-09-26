@@ -211,7 +211,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	reqLog.Info("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
 
-	// Keep deployment policy separate from lower-authority file memory.
+	// The session-bound memory snapshot joins the operator soul in the system message.
 	var promptParts []string
 	promptParts = append(promptParts, soulContent)
 	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
@@ -241,13 +241,33 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	if a.fileMemory != nil {
 		filesStarted := time.Now()
-		userContent, memoryContent, err := a.fileMemory.Read(ctx, senderID)
-		if err != nil {
-			reqLog.Warn("agent.memory.files.load_failed", "failed to load private memory files", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
-			return nil, fmt.Errorf("read file memory: %w", err)
+		var userContent, memoryContent string
+		bound := false
+		if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
+			var err error
+			userContent, memoryContent, bound, err = a.userMemory.SessionFileMemory(ctx, senderID, sessionKey, sessionGeneration)
+			if err != nil {
+				reqLog.Warn("agent.memory.files.bind_failed", "failed to load session file memory", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+				return nil, fmt.Errorf("load session file memory: %w", err)
+			}
+		}
+		if !bound {
+			var err error
+			userContent, memoryContent, err = a.fileMemory.Read(ctx, senderID)
+			if err != nil {
+				reqLog.Warn("agent.memory.files.load_failed", "failed to load private memory files", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+				return nil, fmt.Errorf("read file memory: %w", err)
+			}
+			if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
+				userContent, memoryContent, err = a.userMemory.BindSessionFileMemory(ctx, senderID, sessionKey, sessionGeneration, userContent, memoryContent)
+				if err != nil {
+					reqLog.Warn("agent.memory.files.bind_failed", "failed to bind session file memory", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+					return nil, fmt.Errorf("bind session file memory: %w", err)
+				}
+			}
 		}
 		fileContext = renderFileMemory(userContent, memoryContent)
-		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)

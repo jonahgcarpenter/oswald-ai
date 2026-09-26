@@ -22,9 +22,9 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	}
 
 	got := assembleTestPromptContext("deployment policy", "tenant profile", "current", nil, turns, nil, 100000)
-	wantRoles := []string{"system", "user", "user", "assistant", "user", "assistant", "user", "assistant", "user"}
+	wantRoles := []string{"system", "user", "assistant", "user", "assistant", "user", "assistant", "user"}
 	wantContents := []string{
-		"deployment policy", "tenant profile",
+		"deployment policy\n\ntenant profile",
 		"old user", "old assistant",
 		"middle user", "middle assistant",
 		"new user", "new assistant",
@@ -131,10 +131,10 @@ func TestAssemblePromptContextRequiredOverBudgetPreservesRequiredMessages(t *tes
 	if !got.RequiredOverBudget || got.SelectedTurnCount != 0 || got.OmittedTurnCount != 1 {
 		t.Fatalf("unexpected over-budget result: %+v", got)
 	}
-	if len(got.Messages) != 3 || got.Messages[0].Role != "system" || got.Messages[1].Role != "user" || got.Messages[2].Role != "user" {
+	if len(got.Messages) != 2 || got.Messages[0].Role != "system" || got.Messages[1].Role != "user" {
 		t.Fatalf("required messages not preserved: %#v", got.Messages)
 	}
-	if len(got.Messages[2].Images) != 2 || len(got.Messages[0].Images) != 0 || len(got.Messages[1].Images) != 0 {
+	if len(got.Messages[1].Images) != 2 || len(got.Messages[0].Images) != 0 {
 		t.Fatalf("images must remain current-turn-only: %#v", got.Messages)
 	}
 	if got.EstimatedAfter != got.RequiredEstimate || got.EstimatedBefore <= got.EstimatedAfter {
@@ -156,14 +156,28 @@ func TestAssemblePromptContextToolsAffectSelectionBudget(t *testing.T) {
 	}
 }
 
-func TestAssemblePromptContextIncludesFileMemoryAsLowerAuthorityContext(t *testing.T) {
+func TestAssemblePromptContextIncludesFileMemoryInSystemMessage(t *testing.T) {
 	files := renderFileMemory("User prefers short answers.", "Project codename is Atlas.")
 	got := AssemblePromptContext("policy", files, "What is the codename?", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
-	if roles(got.Messages) != "system,user,user" || !strings.Contains(got.Messages[1].Content, "USER.md:") || !strings.Contains(got.Messages[1].Content, "MEMORY.md:") || !strings.Contains(got.Messages[1].Content, "Atlas") || !strings.Contains(got.Messages[1].Content, "lower-authority") {
+	if roles(got.Messages) != "system,user" || got.Messages[0].Content != "policy\n\n"+files || !strings.Contains(files, "MEMORY (your personal notes)") || !strings.Contains(files, "USER PROFILE (who the user is)") {
 		t.Fatalf("file memory context missing or incorrectly placed: %+v", got.Messages)
 	}
-	if got.Messages[0].Content != "policy" || got.Messages[2].Content != "What is the codename?" {
+	if got.Messages[1].Content != "What is the codename?" {
 		t.Fatalf("file memory changed policy or current turn: %+v", got.Messages)
+	}
+}
+
+func TestRenderFileMemoryExactBlocksAndCharacterCounts(t *testing.T) {
+	const divider = "══════════════════════════════════════════════"
+	user := strings.Repeat("界", 790)
+	notes := strings.Repeat("a", 599)
+	want := divider + "\nMEMORY (your personal notes) [27% — 599/2,200 chars]\n" + divider + "\n" + notes +
+		"\n\n" + divider + "\nUSER PROFILE (who the user is) [57% — 790/1,375 chars]\n" + divider + "\n" + user
+	if got := renderFileMemory(user, notes); got != want {
+		t.Fatalf("rendered memory differs: %q", got)
+	}
+	if got := renderFileMemory("", ""); got != "" {
+		t.Fatalf("empty memory rendered: %q", got)
 	}
 }
 
@@ -174,13 +188,13 @@ func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
 	if !got.SummaryIncluded || got.SummaryChars == 0 || got.MinimumTailCount != 1 || got.SelectedTurnCount != 2 {
 		t.Fatalf("unexpected summary selection: %+v", got)
 	}
-	if roles(got.Messages) != "system,user,user,user,assistant,user,assistant,user" {
+	if roles(got.Messages) != "system,user,user,assistant,user,assistant,user" {
 		t.Fatalf("summary/tail roles=%s messages=%+v", roles(got.Messages), got.Messages)
 	}
-	if !strings.Contains(got.Messages[2].Content, "session_history_summary") || !strings.Contains(got.Messages[2].Content, "untrusted_historical_reference") || !strings.Contains(got.Messages[2].Content, "Atlas was selected") {
-		t.Fatalf("summary not safely rendered: %+v", got.Messages[2])
+	if !strings.Contains(got.Messages[1].Content, "session_history_summary") || !strings.Contains(got.Messages[1].Content, "untrusted_historical_reference") || !strings.Contains(got.Messages[1].Content, "Atlas was selected") {
+		t.Fatalf("summary not safely rendered: %+v", got.Messages[1])
 	}
-	if strings.Contains(got.Messages[0].Content, "Atlas was selected") || strings.Contains(got.Messages[1].Content, "Atlas was selected") {
+	if strings.Contains(got.Messages[0].Content, "Atlas was selected") {
 		t.Fatalf("summary gained policy/profile authority: %+v", got.Messages)
 	}
 }

@@ -67,10 +67,10 @@ func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	if len(status) != 1 || status[0].Type != ChunkStatus || status[0].Text != foregroundCompactionStatus {
 		t.Fatalf("status=%+v", status)
 	}
-	if len(rebuilt) != 4 || rebuilt[0].Content != "policy" || rebuilt[1].Role != "user" || rebuilt[1].Content != fileContext || !strings.Contains(rebuilt[2].Content, "active_turn_summary") || rebuilt[3].Content != "current request" {
+	if len(rebuilt) != 3 || rebuilt[0].Content != "policy\n\n"+fileContext || !strings.Contains(rebuilt[1].Content, "active_turn_summary") || rebuilt[2].Content != "current request" {
 		t.Fatalf("rebuilt=%+v", rebuilt)
 	}
-	if len(rebuilt[3].Images) != 1 || rebuilt[3].Images[0].Data != image.Data || messagesContain(rebuilt, "old") {
+	if len(rebuilt[2].Images) != 1 || rebuilt[2].Images[0].Data != image.Data || messagesContain(rebuilt, "old") {
 		t.Fatalf("current image or replaced history is wrong: %+v", rebuilt)
 	}
 	if state.hasDebt() {

@@ -281,6 +281,14 @@ func TestMergeUsersTxRollbackLeavesDataUnchanged(t *testing.T) {
 	if _, err := store.publishFixtureMemory(context.Background(), "loser", memoryFixture{Scope: ScopeLongTerm, Statement: "Rollback memory"}); err != nil {
 		t.Fatal(err)
 	}
+	ctx := context.Background()
+	session, err := store.ResolveSessionContext(ctx, "loser", "private", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.BindSessionFileMemory(ctx, "loser", "private", session.Generation, "loser profile", "loser notes"); err != nil {
+		t.Fatal(err)
+	}
 
 	tx, err := store.sql.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -302,6 +310,9 @@ func TestMergeUsersTxRollbackLeavesDataUnchanged(t *testing.T) {
 	}
 	if loserEntries != 1 || winnerProfiles != 0 {
 		t.Fatalf("loser entries=%d winner profiles=%d", loserEntries, winnerProfiles)
+	}
+	if user, notes, bound, err := store.SessionFileMemory(ctx, "loser", "private", session.Generation); err != nil || !bound || user != "loser profile" || notes != "loser notes" {
+		t.Fatalf("rolled-back session snapshot changed: %q %q %t %v", user, notes, bound, err)
 	}
 }
 
@@ -325,6 +336,12 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	}
 	loserProfile, err := store.ResolveSessionProfile(ctx, "loser", "shared", time.Hour)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.BindSessionFileMemory(ctx, "winner", "shared", winnerProfile.Generation, "winner profile", "winner notes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.BindSessionFileMemory(ctx, "loser", "shared", loserProfile.Generation, "loser profile", "loser notes"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -356,6 +373,9 @@ func TestMergeUsersTxPreservesProfilesAndCompactedSessionCollision(t *testing.T)
 	}
 	if activeGeneration <= winnerProfile.Generation || activeProfileID <= winnerProfile.VersionID {
 		t.Fatalf("active generation=%d profile=%d, winner generation=%d loser profile=%d", activeGeneration, activeProfileID, winnerProfile.Generation, loserProfile.VersionID)
+	}
+	if user, notes, bound, err := store.SessionFileMemory(ctx, "winner", "shared", activeGeneration); err != nil || !bound || user != "loser profile" || notes != "loser notes" {
+		t.Fatalf("merged generation lost its exact memory pair: user=%q notes=%q bound=%t err=%v", user, notes, bound, err)
 	}
 	var turnCount, summaryCount, jobCount, sessionCount int
 	for query, target := range map[string]*int{

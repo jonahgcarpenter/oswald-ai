@@ -2,7 +2,7 @@
 
 ## Description
 
-Save durable facts to persistent memory that survive across sessions. Memory is injected into every future turn, so keep entries compact and high-signal.
+Save durable facts to persistent memory that survive across sessions. Memory is captured in the system prompt once per session; edits take effect in new sessions, not in the current session's frozen prompt. Keep entries compact and high-signal.
 
 HOW: make ALL your changes in ONE call via an 'operations' array (each item: {action, content?, old_text?}). The batch applies atomically and the char limit is checked only on the FINAL result — so a single call can remove/replace stale entries to free room AND add new ones, even when an add alone would overflow. The response reports current/limit chars and confirms completion; one batch call finishes the update, so don't repeat it. Use the bare action/content/old_text fields only for a single lone change.
 

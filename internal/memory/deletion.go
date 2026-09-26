@@ -175,7 +175,7 @@ func (s *Store) ResetUserDataPreservingAccount(ctx context.Context, userID strin
 	if err := deleteDerivedRowsTx(ctx, tx, "all", nil, userID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, source_memory_ids = '[]' WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET generation = generation + 1, is_active = 0, last_seen_at = ?, expires_at = ?, source_digest = '', rendered_content = speaker_intro, source_memory_ids = '[]', file_user_snapshot = NULL, file_memory_snapshot = NULL WHERE canonical_user_id = ?`, nowText, nowText, userID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

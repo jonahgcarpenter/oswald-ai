@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
@@ -21,7 +22,8 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 		{Message: llm.ChatMessage{Role: "assistant", Content: "second"}},
 	}}
 	a, _ := newTestAgent(t, chat, nil, nil)
-	fileStore := files.NewStore(t.TempDir())
+	fileStoreRoot := t.TempDir()
+	fileStore := files.NewStore(fileStoreRoot)
 	a.SetFileMemory(fileStore)
 	userContent := "private-user-π@example.test"
 	memoryContent := "private-memory-雪"
@@ -37,6 +39,15 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 	for _, requestID := range []string{"first-request", "second-request"} {
 		if _, err := processAgent(a, requestID, "homeassistant", "session", "user-1", "private-display@example.test", "private-prompt", nil, nil); err != nil {
 			t.Fatal(err)
+		}
+		if requestID == "first-request" {
+			path := filepath.Join(fileStoreRoot, "user-1", "memories", "MEMORY.md")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("private-target-canary", path); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if len(chat.requests) != 2 {
@@ -61,7 +72,7 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 			t.Fatalf("missing request correlation: %v", record)
 		}
 		counts[requestID]++
-		if record["level"] != "info" || record["record_kind"] != "measurement" || record["status"] != "ok" || record["user_chars"] != float64(len([]rune(userContent))) || record["memory_chars"] != float64(len([]rune(memoryContent))) {
+		if record["level"] != "info" || record["record_kind"] != "measurement" || record["status"] != "ok" || record["is_session_snapshot"] != true || record["user_chars"] != float64(len([]rune(userContent))) || record["memory_chars"] != float64(len([]rune(memoryContent))) {
 			t.Fatalf("invalid file load measurement: %v", record)
 		}
 		if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
@@ -124,5 +135,26 @@ func TestProcessFileMemoryReadFailureWarnsWithoutModelSubmission(t *testing.T) {
 	}
 	if loaded != 0 || failed != 1 {
 		t.Fatalf("loaded=%d load_failed=%d, want 0 and 1", loaded, failed)
+	}
+}
+
+func TestProcessRejectsIncompleteSessionFileMemorySnapshot(t *testing.T) {
+	chat := &fakeChatter{}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.SetFileMemory(files.NewStore(t.TempDir()))
+	ctx := context.Background()
+	if _, err := store.ResolveSessionContext(ctx, "user-1", "session", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.sql.Exec(`UPDATE sessions SET file_user_snapshot='private-profile-canary' WHERE canonical_user_id='user-1' AND session_id='session'`); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	log := config.NewLogger(config.LevelInfo)
+	log.SetOutput(&output)
+	agent.log = log
+	response, err := processAgent(agent, "invalid-snapshot", "homeassistant", "session", "user-1", "User", "prompt", nil, nil)
+	if err == nil || response != nil || len(chat.requests) != 0 || !strings.Contains(output.String(), `"event":"agent.memory.files.bind_failed"`) || strings.Contains(output.String(), "private-profile-canary") {
+		t.Fatalf("invalid snapshot response=%+v err=%v calls=%d", response, err, len(chat.requests))
 	}
 }
