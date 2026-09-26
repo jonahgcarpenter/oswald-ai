@@ -488,6 +488,36 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 }
 
+func TestIMessageBannedMessageSendsNothing(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	g.Runtime.Access = bannedIMessageAccess{}
+
+	for _, text := range []string{"hello", "/help"} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: "msg-1", Text: text,
+			Handle: messageHandle{Address: "+15551234567"},
+			Chats:  []messageChat{{GUID: "direct", Style: chatStyleDirect}},
+		})
+	}
+	if len(bb.sentMessages()) != 0 || len(model.primaryRequests()) != 0 {
+		t.Fatalf("banned user received reply or model work: sent=%v requests=%d", bb.sentMessages(), len(model.primaryRequests()))
+	}
+	for _, path := range bb.paths() {
+		if strings.HasSuffix(path, "/read") || strings.HasSuffix(path, "/typing") {
+			t.Fatalf("banned user received indicator: %q", path)
+		}
+	}
+}
+
+type bannedIMessageAccess struct{}
+
+func (bannedIMessageAccess) BanStatus(string) (bool, string, error) {
+	return true, "spam", nil
+}
+
 func TestIMessageGroupPublicTextPreservesMidSentenceOswald(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()

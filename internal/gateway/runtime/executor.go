@@ -8,7 +8,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/commands/usermanagement"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
@@ -167,8 +166,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		}
 	}()
 
-	switch decision.Action {
-	case routing.ActionGatewayFallback:
+	if decision.Action == routing.ActionGatewayFallback && !req.Principal.Authenticated() {
 		err := responder.SendFallback(decision.ResponseText)
 		if err != nil {
 			log.Debug("gateway.response.failed", "failed to send gateway fallback", config.F("request_id", req.RequestID), config.ErrorField(err))
@@ -195,7 +193,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 
 	if deps.Access != nil {
-		isBanned, banReason, err := deps.Access.BanStatus(userID)
+		isBanned, _, err := deps.Access.BanStatus(userID)
 		if err != nil {
 			executionStatus = "error"
 			responseKind = "error"
@@ -206,13 +204,19 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			return Outcome{Action: decision.Action, Reason: "access_check_failed", Err: err}
 		}
 		if isBanned {
-			responseKind = "fallback"
-			err := responder.SendFallback(usermanagement.BannedMessage(banReason))
-			if err != nil {
-				log.Debug("gateway.response.failed", "failed to send banned response", config.F("request_id", req.RequestID), config.ErrorField(err))
-			}
-			return Outcome{Action: decision.Action, Reason: "user_banned", Err: err}
+			responseKind = "ignored"
+			return Outcome{Action: routing.ActionIgnore, Reason: "user_banned"}
 		}
+	}
+	if req.OnAllowed != nil {
+		req.OnAllowed()
+	}
+	if decision.Action == routing.ActionGatewayFallback {
+		err := responder.SendFallback(decision.ResponseText)
+		if err != nil {
+			log.Debug("gateway.response.failed", "failed to send gateway fallback", config.F("request_id", req.RequestID), config.ErrorField(err))
+		}
+		return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
 	}
 
 	isAdmitted = true

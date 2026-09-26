@@ -67,6 +67,8 @@ type Request struct {
 	Reply          *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
+	// OnAllowed runs after authentication and moderation checks, before fallback, command, or model work.
+	OnAllowed func()
 }
 
 // Responder performs gateway-specific delivery and response bookkeeping.
