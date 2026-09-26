@@ -280,7 +280,11 @@ func TestRejectedAdmissionHasOnlyTerminalSummary(t *testing.T) {
 				}
 				if record["event"] == "gateway.request.complete" {
 					completed++
-					if !banned {
+					if banned {
+						if record["reason_code"] != "user_banned" || record["delivery_status"] != "not_attempted" || record["response_kind"] != "ignored" {
+							t.Fatalf("banned summary = %v", record)
+						}
+					} else {
 						if _, ok := record["user_id"]; ok {
 							t.Fatalf("untrusted user field: %v", record)
 						}

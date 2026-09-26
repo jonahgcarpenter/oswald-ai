@@ -12,8 +12,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
-const bannedMessage = "You are banned from using Oswald."
-
 type handler struct {
 	definition commands.Definition
 	users      *accounts.Service
@@ -30,15 +28,6 @@ func New(users *accounts.Service) []commands.Handler {
 		&handler{users: users, definition: commands.Definition{Name: "user", Summary: "Show one canonical user.", Usage: "/user <canonical_id>", AdminOnly: true}},
 		&handler{users: users, definition: commands.Definition{Name: "users", Summary: "List canonical users.", Usage: "/users", AdminOnly: true}},
 	}
-}
-
-// BannedMessage returns the canonical response for banned users.
-func BannedMessage(reason string) string {
-	reason = strings.TrimSpace(reason)
-	if reason == "" {
-		reason = "No reason provided."
-	}
-	return bannedMessage + "\nReason: " + reason
 }
 
 // Definition describes the command handled by h.

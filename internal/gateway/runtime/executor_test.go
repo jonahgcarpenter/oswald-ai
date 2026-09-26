@@ -76,23 +76,39 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 }
 
-func TestExecuteRejectsBannedUsersBeforeCommandOrLLM(t *testing.T) {
+func TestExecuteSilentlyIgnoresBannedUsers(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
 	deps.Access = &fakeAccess{banned: true, reason: "spam"}
 
-	cmdResponder := &fakeResponder{}
-	cmd := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/ping"}, deps, cmdResponder)
-	if cmd.Reason != "user_banned" || cmdResponder.fallback != "You are banned from using Oswald.\nReason: spam" || cmdResponder.command.Text != "" {
-		t.Fatalf("unexpected banned command outcome=%+v responder=%+v", cmd, cmdResponder)
+	for _, text := range []string{"/ping", "hello", " "} {
+		t.Run(text, func(t *testing.T) {
+			responder := &fakeResponder{}
+			admitted := false
+			outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: text, OnAllowed: func() { admitted = true }}, deps, responder)
+			if outcome.Action != routing.ActionIgnore || outcome.Reason != "user_banned" || outcome.Err != nil || admitted ||
+				responder.started || responder.fallback != "" || responder.command.Text != "" || responder.agent != nil || responder.agentErr != "" {
+				t.Fatalf("unexpected banned outcome=%+v responder=%+v admitted=%t", outcome, responder, admitted)
+			}
+		})
 	}
+}
 
-	deps.Access = &fakeAccess{banned: true}
-	llmResponder := &fakeResponder{}
-	llm := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), IsMention: true, Text: "hello"}, deps, llmResponder)
-	if llm.Reason != "user_banned" || llmResponder.fallback != "You are banned from using Oswald.\nReason: No reason provided." || llmResponder.started || llmResponder.agent != nil {
-		t.Fatalf("unexpected banned llm outcome=%+v responder=%+v", llm, llmResponder)
+func TestExecuteOnAllowedRunsForCommandsAndFallbacks(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	called := 0
+	responder := &fakeResponder{}
+	outcome := Execute(Request{Principal: testPrincipal("user"), Text: "/ping", OnAllowed: func() { called++ }}, deps, responder)
+	if outcome.Action != routing.ActionCommand || called != 1 || responder.command.Text != "pong:user:/ping" {
+		t.Fatalf("unexpected command outcome=%+v responder=%+v admitted=%d", outcome, responder, called)
+	}
+	responder = &fakeResponder{}
+	outcome = Execute(Request{Principal: testPrincipal("user"), Text: " ", OnAllowed: func() { called++ }}, deps, responder)
+	if outcome.Action != routing.ActionGatewayFallback || called != 2 || responder.fallback == "" {
+		t.Fatalf("unexpected fallback outcome=%+v responder=%+v allowed=%d", outcome, responder, called)
 	}
 }
 

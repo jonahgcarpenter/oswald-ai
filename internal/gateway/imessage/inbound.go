@@ -152,7 +152,6 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		}
 	}
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
-	g.startProcessingIndicators(chat.GUID, requestID)
 
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
@@ -175,6 +174,9 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		Images:         images,
 		Unsupported:    unsupported,
 		Reply:          reply,
+		OnAllowed: func() {
+			g.startProcessingIndicators(chat.GUID, requestID)
+		},
 	}, g.runtimeDependencies(), &runtimeResponder{
 		gateway:             g,
 		requestID:           requestID,
