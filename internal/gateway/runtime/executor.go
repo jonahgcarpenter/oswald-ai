@@ -22,7 +22,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 	gateway := "unknown"
 	switch req.Principal.Gateway {
-	case "discord", "imessage", "homeassistant":
+	case "discord", "imessage", "homeassistant", "openai":
 		gateway = req.Principal.Gateway
 	}
 	log := deps.Log.Server("gateway.runtime", config.F("gateway", gateway))
@@ -368,18 +368,20 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	)
 
 	brokerReq := &broker.Request{
-		Usage:        usage,
-		Metadata:     meta,
-		RequestID:    req.RequestID,
-		ChatID:       req.ChatID,
-		Principal:    req.Principal,
-		DisplayName:  req.DisplayName,
-		SessionKey:   req.SessionKey,
-		IsDirect:     req.IsDirect,
-		Prompt:       decision.Prompt,
-		Images:       decision.Images,
-		StreamFunc:   req.StreamFunc,
-		ResponseChan: make(chan broker.Result, 1),
+		Usage:         usage,
+		Metadata:      meta,
+		RequestID:     req.RequestID,
+		ChatID:        req.ChatID,
+		Principal:     req.Principal,
+		DisplayName:   req.DisplayName,
+		SessionKey:    req.SessionKey,
+		IsDirect:      req.IsDirect,
+		Prompt:        decision.Prompt,
+		Stateless:     req.Stateless,
+		ClientHistory: req.ClientHistory,
+		Images:        decision.Images,
+		StreamFunc:    req.StreamFunc,
+		ResponseChan:  make(chan broker.Result, 1),
 	}
 	if resolver, ok := deps.Access.(interface {
 		ResolvePrincipal(identity.Principal) (string, error)
@@ -428,6 +430,11 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 
 	if result.Response != nil {
+		if req.Principal.Gateway == "openai" && len(result.Response.Attachments) != 0 {
+			err := errors.New("attachments are not supported by this gateway")
+			responder.SendAgentError(config.SafeErrorText(err))
+			return Outcome{Action: decision.Action, Reason: "unsupported_attachments", Err: err}
+		}
 		model = result.Response.Model
 		toolExecutionCount, toolBlockedCount = result.Response.ToolExecutionCount, result.Response.ToolBlockedCount
 		if result.Response.Kind != "" {

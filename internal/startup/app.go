@@ -268,6 +268,8 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 					name = "imessage"
 				case "Home Assistant", "homeassistant":
 					name = "homeassistant"
+				case "openai":
+					name = "openai"
 				}
 				log.Error("app.gateway.stopped", "gateway stopped", config.F("gateway", name), config.ErrorField(err))
 			}

@@ -51,6 +51,8 @@ type Request struct {
 	SessionKey       string
 	IsDirect         bool
 	Prompt           string
+	Stateless        bool
+	ClientHistory    []llm.ChatMessage
 	Images           []llm.InputImage
 	StreamFunc       func(agent.StreamChunk)
 	RefreshPrincipal func(identity.Principal) (identity.Principal, error)
@@ -323,7 +325,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.mu.Unlock()
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
-			SessionKey: req.SessionKey, Prompt: req.Prompt, Images: req.Images, StreamFunc: req.StreamFunc,
+			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)

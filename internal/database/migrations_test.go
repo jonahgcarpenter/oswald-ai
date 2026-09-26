@@ -547,7 +547,7 @@ func TestPermanentV400CanonicalTableInventory(t *testing.T) {
 	}
 	defer db.Close()
 	expected := []string{
-		"account_link_challenges", "account_users", "derived_index_revisions", "durable_jobs",
+		"account_link_challenges", "account_users", "api_keys", "derived_index_revisions", "durable_jobs",
 		"global_memories", "linked_accounts", "mcp_servers", "memory_assessment_inputs", "memory_assessment_receipts", "memory_candidates",
 		"memory_entries", "memory_observation_evidence", "memory_observation_receipts", "memory_observations", "memory_suppressions", "schema_migration_versions", "session_images", "session_summaries",
 		"session_turns", "sessions",
@@ -577,7 +577,7 @@ func TestPermanentV400CanonicalObjectInventory(t *testing.T) {
 	}
 	defer db.Close()
 
-	for objectType, want := range map[string]int{"table": 19, "index": 29, "trigger": 37, "view": 0} {
+	for objectType, want := range map[string]int{"table": 20, "index": 32, "trigger": 37, "view": 0} {
 		var got int
 		if err := db.SQL().QueryRow(`
 SELECT COUNT(*) FROM sqlite_master
@@ -588,6 +588,63 @@ WHERE type = ? AND name NOT LIKE 'sqlite_%'
 		if got != want {
 			t.Fatalf("canonical %s count=%d, want %d", objectType, got, want)
 		}
+	}
+}
+
+func TestAPIKeyMigrationUpgradesExistingAccounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefix.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := orderedMigrations()
+	if err := (&DB{db: raw}).runSchemaMigrations(context.Background(), registry[:len(registry)-1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO account_users(canonical_user_id) VALUES ('owner');
+INSERT INTO linked_accounts(gateway, identifier, canonical_user_id, display_name, verified) VALUES ('discord', '123', 'owner', 'Alice', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var owner, name string
+	var verified int
+	if err := db.SQL().QueryRow(`SELECT canonical_user_id, display_name, verified FROM linked_accounts WHERE gateway = 'discord' AND identifier = '123'`).Scan(&owner, &name, &verified); err != nil || owner != "owner" || name != "Alice" || verified != 1 {
+		t.Fatalf("migrated linked account owner=%q name=%q verified=%d err=%v", owner, name, verified, err)
+	}
+	for _, id := range []string{"a", "b"} {
+		if _, err := db.SQL().Exec(`INSERT INTO linked_accounts(gateway, identifier, canonical_user_id) VALUES ('openai', ?, 'owner')`, id); err != nil {
+			t.Fatalf("second API identity rejected: %v", err)
+		}
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts(gateway, identifier, canonical_user_id) VALUES ('discord', '456', 'owner')`); err == nil {
+		t.Fatal("second Discord identity accepted")
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO api_keys(key_id, canonical_user_id, secret_hash) VALUES ('a', 'missing', zeroblob(32))`); err == nil {
+		t.Fatal("unknown canonical owner accepted")
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO api_keys(key_id, canonical_user_id, secret_hash) VALUES ('a', 'owner', zeroblob(31))`); err == nil {
+		t.Fatal("invalid hash size accepted")
+	}
+	if _, err := db.SQL().Exec(`INSERT INTO api_keys(key_id, canonical_user_id, secret_hash) VALUES ('a', 'owner', zeroblob(32))`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.SQL().Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("migration introduced foreign key violation")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

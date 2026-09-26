@@ -41,8 +41,11 @@ type Request struct {
 	SessionKey  string
 	IsDirect    bool
 	Prompt      string
-	Images      []llm.InputImage
-	StreamFunc  func(StreamChunk)
+	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
+	Stateless     bool
+	ClientHistory []llm.ChatMessage
+	Images        []llm.InputImage
+	StreamFunc    func(StreamChunk)
 }
 
 // mapMetrics converts an LLM response into a model metrics summary.

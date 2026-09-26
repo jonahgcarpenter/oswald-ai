@@ -15,7 +15,7 @@ func isolateConfigEnvironment(t *testing.T) {
 	for _, key := range []string{
 		"HOME_ASSISTANT_LISTEN_PORT", "HOME_ASSISTANT_AUTH_TOKEN",
 		"BLUEBUBBLES_LISTEN_PORT", "BLUEBUBBLES_URL", "BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_DM_MENTION",
-		"MCP_CONFIG_ENCRYPTION_KEY", "DISCORD_TOKEN",
+		"MCP_CONFIG_ENCRYPTION_KEY", "DISCORD_TOKEN", "OPENAI_LISTEN_PORT",
 		"LLM_GATEWAY_URL", "LLM_GATEWAY_MODEL", "LLM_GATEWAY_EMBEDDING_MODEL",
 		"LLM_GATEWAY_API_KEY", "LLM_GATEWAY_VIRTUAL_KEY",
 		"MODEL_CONTEXT_WINDOW", "MODEL_MAX_OUTPUT_TOKENS",
@@ -113,8 +113,20 @@ func TestLoadLeavesOptionalGatewayPortsDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HomeAssistantAuthToken != "" || cfg.HomeAssistantListenPort != "" || cfg.BlueBubblesListenPort != "" {
-		t.Fatalf("unexpected gateway defaults: token_set=%t home_assistant_port=%q bluebubbles_port=%q", cfg.HomeAssistantAuthToken != "", cfg.HomeAssistantListenPort, cfg.BlueBubblesListenPort)
+	if cfg.HomeAssistantAuthToken != "" || cfg.HomeAssistantListenPort != "" || cfg.BlueBubblesListenPort != "" || cfg.OpenAIListenPort != "" {
+		t.Fatalf("unexpected gateway defaults: token_set=%t home_assistant_port=%q bluebubbles_port=%q openai_port=%q", cfg.HomeAssistantAuthToken != "", cfg.HomeAssistantListenPort, cfg.BlueBubblesListenPort, cfg.OpenAIListenPort)
+	}
+}
+
+func TestLoadOpenAIListenPort(t *testing.T) {
+	isolateConfigEnvironment(t)
+	t.Setenv("OPENAI_LISTEN_PORT", "8091")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenAIListenPort != "8091" {
+		t.Fatalf("openai port = %q", cfg.OpenAIListenPort)
 	}
 }
 

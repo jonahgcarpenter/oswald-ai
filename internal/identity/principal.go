@@ -15,6 +15,8 @@ const (
 	// AssuranceBlueBubblesWebhook identifies an iMessage sender asserted by an
 	// authenticated BlueBubbles webhook.
 	AssuranceBlueBubblesWebhook Assurance = "bluebubbles_webhook"
+	// AssuranceAPIKey identifies a client authenticated by an issued API key.
+	AssuranceAPIKey Assurance = "api_key"
 )
 
 // Principal is the resolved actor for one request. CanonicalUserID is the only
@@ -39,6 +41,8 @@ func (p Principal) Valid() bool {
 		return p.Assurance == AssuranceDiscordGateway
 	case "imessage":
 		return p.Assurance == AssuranceBlueBubblesWebhook
+	case "openai":
+		return p.Assurance == AssuranceAPIKey
 	}
 	return false
 }
@@ -50,7 +54,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook:
+	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceAPIKey:
 		return true
 	default:
 		return false

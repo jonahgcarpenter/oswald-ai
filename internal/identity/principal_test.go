@@ -17,6 +17,8 @@ func TestPrincipalValidityAndAuthentication(t *testing.T) {
 		{name: "home assistant on discord", principal: Principal{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "one", Assurance: AssuranceHomeAssistantToken}, valid: false},
 		{name: "discord", principal: Principal{CanonicalUserID: "usr_1", Gateway: "discord", ExternalID: "1", Assurance: AssuranceDiscordGateway}, valid: true, authenticated: true},
 		{name: "imessage", principal: Principal{CanonicalUserID: "usr_1", Gateway: "imessage", ExternalID: "+15551234567", Assurance: AssuranceBlueBubblesWebhook}, valid: true, authenticated: true},
+		{name: "openai", principal: Principal{CanonicalUserID: "usr_1", Gateway: "openai", ExternalID: "key", Assurance: AssuranceAPIKey}, valid: true, authenticated: true},
+		{name: "openai wrong assurance", principal: Principal{CanonicalUserID: "usr_1", Gateway: "openai", ExternalID: "key", Assurance: AssuranceSelfAsserted}, valid: false},
 	}
 
 	for _, tt := range tests {

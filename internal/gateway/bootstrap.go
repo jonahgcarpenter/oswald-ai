@@ -11,13 +11,22 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/homeassistant"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/openai"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
 func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
-	services := make([]Service, 0, 3)
+	services := make([]Service, 0, 4)
+	if strings.TrimSpace(cfg.OpenAIListenPort) != "" {
+		api, err := openai.New(cfg.OpenAIListenPort, links, runtimeDeps, cfg.LLMGatewayModel, log)
+		if err != nil {
+			gatewayLog.Warn("gateway.openai.config_invalid", "openai gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
+		} else {
+			services = append(services, api)
+		}
+	}
 	homeAssistantTokenSet := strings.TrimSpace(cfg.HomeAssistantAuthToken) != ""
 	homeAssistantPortSet := strings.TrimSpace(cfg.HomeAssistantListenPort) != ""
 	if homeAssistantTokenSet && homeAssistantPortSet {

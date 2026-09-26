@@ -107,9 +107,20 @@ func TestNewServicesFromConfigFailsWithoutValidGateway(t *testing.T) {
 		{DiscordToken: "   "},
 		{HomeAssistantListenPort: "invalid", HomeAssistantAuthToken: testHomeAssistantToken},
 		{BlueBubblesListenPort: "8090", BlueBubblesURL: "invalid", BlueBubblesPassword: "pw"},
+		{OpenAIListenPort: "invalid", LLMGatewayModel: "model"},
 	} {
 		if services, err := NewServicesFromConfig(&cfg, links, gatewayruntime.Dependencies{Log: log}, log); err == nil || len(services) != 0 {
 			t.Fatalf("services=%v err=%v", services, err)
 		}
+	}
+}
+
+func TestNewServicesFromConfigOpenAIOnly(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	dbPath := filepath.Join(t.TempDir(), "oswald.db")
+	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	services, err := NewServicesFromConfig(&config.Config{OpenAIListenPort: "8091", LLMGatewayModel: "model"}, links, gatewayruntime.Dependencies{Log: log}, log)
+	if err != nil || serviceNames(services) != "openai" {
+		t.Fatalf("openai services = %q, err = %v", serviceNames(services), err)
 	}
 }

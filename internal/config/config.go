@@ -28,6 +28,7 @@ type Config struct {
 	ModelContextWindow              int           // Optional model context window for prompt budgeting; non-positive uses the package fallback
 	ModelMaxOutputTokens            int           // Foreground output capacity reserve and private extraction/compaction max_tokens; non-positive uses the package fallback
 	DiscordToken                    string        // Optional Discord bot token
+	OpenAIListenPort                string        // Optional loopback port for the OpenAI-compatible inbound gateway
 	BraveAPIKey                     string        // Optional Brave Search API subscription token
 	SearxngURL                      string        // Optional SearXNG base URL for web search
 	ComfyUIURL                      string        // Optional ComfyUI HTTP(S) base URL; image tools are disabled if empty
@@ -103,6 +104,7 @@ func Load() (*Config, error) {
 		ModelContextWindow:              getEnvInt("MODEL_CONTEXT_WINDOW", 0),
 		ModelMaxOutputTokens:            getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:                    getEnv("DISCORD_TOKEN", ""),
+		OpenAIListenPort:                getEnv("OPENAI_LISTEN_PORT", ""),
 		BraveAPIKey:                     getEnv("BRAVE_API_KEY", ""),
 		SearxngURL:                      getEnv("SEARXNG_URL", ""),
 		ComfyUIURL:                      strings.TrimSpace(getEnv("COMFYUI_URL", "")),

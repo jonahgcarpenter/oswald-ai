@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
@@ -73,6 +74,41 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 	if !llmResponder.started || !llmResponder.cleaned {
 		t.Fatalf("expected processing cleanup, responder=%+v", llmResponder)
+	}
+}
+
+func TestExecuteForwardsStatelessHistoryWithoutCompaction(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &statelessRuntimeProcessor{requests: make(chan agent.Request, 1)}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	history := []llm.ChatMessage{{Role: "assistant", Content: "previous answer"}}
+	principal := testPrincipal("user")
+	principal.Gateway = "openai"
+	principal.Assurance = identity.AssuranceAPIKey
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "next question", Stateless: true, ClientHistory: history}, Dependencies{Broker: b, Log: log, Compaction: compaction}, responder)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID != 0 || compaction.enqueueCalled || compaction.failureMarked {
+		t.Fatalf("stateless delivery outcome=%+v response=%+v compaction=%+v", outcome, responder.agent, compaction)
+	}
+	forwarded := <-processor.requests
+	if !forwarded.Stateless || len(forwarded.ClientHistory) != 1 || forwarded.ClientHistory[0].Content != "previous answer" || forwarded.Prompt != "next question" {
+		t.Fatalf("runtime lost stateless request fields: %+v", forwarded)
+	}
+}
+
+func TestExecuteOpenAIRejectsAgentAttachments(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(responseRuntimeProcessor{response: &agent.Response{Response: "answer", Attachments: []media.OutputAttachment{{Filename: "image.png", MIMEType: "image/png", Data: []byte("image")}}}}, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: "key", Assurance: identity.AssuranceAPIKey}
+	responder := &fakeResponder{}
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "draw", Stateless: true}, Dependencies{Broker: b, Log: log}, responder)
+	if outcome.Err == nil || outcome.Reason != "unsupported_attachments" || responder.agent != nil || responder.agentErr == "" {
+		t.Fatalf("unexpected attachment delivery: outcome=%+v responder=%+v", outcome, responder)
 	}
 }
 
@@ -565,6 +601,13 @@ func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID st
 }
 
 type responseRuntimeProcessor struct{ response *agent.Response }
+
+type statelessRuntimeProcessor struct{ requests chan agent.Request }
+
+func (p *statelessRuntimeProcessor) Process(_ context.Context, req agent.Request) (*agent.Response, error) {
+	p.requests <- req
+	return &agent.Response{Response: "answer"}, nil
+}
 
 func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
 	return p.response, nil

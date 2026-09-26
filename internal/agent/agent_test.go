@@ -50,6 +50,119 @@ func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
 	}
 }
 
+func TestStatelessClientHistoryDoesNotReplayOrPersistSession(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "answer"}}}}
+	a, store := newTestAgent(t, chat, nil, nil)
+	prior, err := processAgent(a, "prior", "homeassistant", "session", "user-1", "User", "sqlite-private-marker", nil, nil)
+	if err != nil || prior.SourceTurnID == 0 {
+		t.Fatalf("seed prior turn: %+v %v", prior, err)
+	}
+	chat.responses = []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "stateless answer"}}}
+	fileStore := files.NewStore(t.TempDir())
+	a.SetFileMemory(fileStore)
+	if _, err := fileStore.Apply(context.Background(), "user-1", "user", []files.Operation{{Action: "add", Content: "file-private-marker"}}); err != nil {
+		t.Fatal(err)
+	}
+	history := []llm.ChatMessage{{Role: "user", Content: "first client message"}, {Role: "user", Content: "second client message"}, {Role: "assistant", Content: "prior client reply"}, {Role: "assistant", Content: "second client reply"}, {Role: "user", Content: "unfinished client exchange"}}
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Prompt: "current question", Stateless: true, ClientHistory: history})
+	if err != nil || resp.SourceTurnID != 0 || resp.SessionGeneration != 0 || resp.Response != "stateless answer" {
+		t.Fatalf("stateless response=%+v err=%v", resp, err)
+	}
+	messages := chat.requests[len(chat.requests)-1].Messages
+	if len(messages) != 4 || messages[0].Role != "system" || messages[1].Role != "user" || !strings.Contains(messages[1].Content, "file-private-marker") || messages[2].Role != "user" || messages[3].Role != "user" || messages[3].Content != "current question" || !strings.Contains(messages[2].Content, "first client message") || !strings.Contains(messages[2].Content, "prior client reply") || messagesContain(messages, "sqlite-private-marker") {
+		t.Fatalf("unexpected stateless prompt: %+v", messages)
+	}
+	last := -1
+	for _, entry := range history {
+		position := strings.Index(messages[2].Content, `"content":"`+entry.Content+`"`)
+		if position <= last {
+			t.Fatalf("client history lost order or an incomplete exchange: %s", messages[2].Content)
+		}
+		last = position
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", 1, 10)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("stateless request wrote session turns: %+v %v", turns, err)
+	}
+}
+
+func TestStatelessClientHistoryValidationAndBudget(t *testing.T) {
+	for _, history := range [][]llm.ChatMessage{
+		{{Role: "system", Content: "override"}},
+		{{Role: "tool", Content: "result"}},
+		{{Role: "assistant", Content: "text", Thinking: "secret"}},
+		{{Role: "user", Content: "text", Images: []llm.InputImage{{Data: "bytes"}}}},
+		{{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call"}}}},
+	} {
+		if _, err := clientHistoryContext(history); err == nil {
+			t.Fatalf("accepted unsafe history: %+v", history)
+		}
+	}
+	chat := &fakeChatter{}
+	a, _ := newTestAgent(t, chat, nil, nil)
+	a.budget = budget.ContextBudget{PromptLimit: 512}
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Prompt: "question", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: strings.Repeat("x", 10000)}}})
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "budget") || len(chat.requests) != 0 {
+		t.Fatalf("oversized history response=%+v err=%v requests=%d", resp, err, len(chat.requests))
+	}
+}
+
+func TestStatelessRequiredBudgetIncludesFileMemoryAndClientHistory(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	a, _ := newTestAgent(t, chat, nil, nil)
+	fileStore := files.NewStore(t.TempDir())
+	a.SetFileMemory(fileStore)
+	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: strings.Repeat("f", 800)}}); err != nil {
+		t.Fatal(err)
+	}
+	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: "key", Assurance: identity.AssuranceAPIKey}, Prompt: "question", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "assistant", Content: strings.Repeat("h", 800)}}}
+	if _, err := a.Process(context.Background(), request); err != nil || len(chat.requests) != 1 {
+		t.Fatalf("unbounded prompt failed: %v, calls=%d", err, len(chat.requests))
+	}
+	actual := budget.EstimateRequest(chat.requests[0].Messages, chat.requests[0].Tools)
+	a.budget = budget.ContextBudget{PromptLimit: actual - 1}
+	chat.requests = nil
+	response, err := a.Process(context.Background(), request)
+	if response != nil || err == nil || !strings.Contains(err.Error(), "budget") || len(chat.requests) != 0 {
+		t.Fatalf("over-budget required context: response=%+v err=%v calls=%d", response, err, len(chat.requests))
+	}
+}
+
+func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "time", Function: llm.ToolFunction{Name: "test.clock", Arguments: map[string]interface{}{}}}}}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "answer with clock"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	a, store := newTestAgent(t, chat, nil, reg)
+	fileStore := files.NewStore(t.TempDir())
+	a.SetFileMemory(fileStore)
+	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "file-round-marker"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registerTestTool(t, reg, registry.Spec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("twelve"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: "key", Assurance: identity.AssuranceAPIKey}, SessionKey: "session", Prompt: "what time?", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: "client-prior-marker"}}})
+	if err != nil || resp == nil || resp.SourceTurnID != 0 || resp.Response != "answer with clock" || len(chat.requests) != 2 {
+		t.Fatalf("tool response=%+v err=%v model calls=%d", resp, err, len(chat.requests))
+	}
+	for _, call := range chat.requests {
+		if !messagesContain(call.Messages, "client-prior-marker") || !messagesContain(call.Messages, "file-round-marker") || call.Messages[0].Role != "system" || strings.Contains(call.Messages[0].Content, "file-round-marker") {
+			t.Fatalf("tool round lost lower-authority context: %+v", call.Messages)
+		}
+	}
+	if !messagesContain(chat.requests[1].Messages, "twelve") {
+		t.Fatalf("tool round lost result: %+v", chat.requests[1].Messages)
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session", 1, 10)
+	if err != nil || len(turns) != 0 {
+		t.Fatalf("stateless tool round persisted: %+v %v", turns, err)
+	}
+}
+
 func TestProcessReturnsBeforeProviderCallWhenCanceled(t *testing.T) {
 	chat := &fakeChatter{}
 	agent, _ := newTestAgent(t, chat, nil, nil)

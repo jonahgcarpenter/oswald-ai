@@ -108,6 +108,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
 	}
+	if !request.Stateless && len(request.ClientHistory) != 0 {
+		return nil, fmt.Errorf("client history requires stateless mode")
+	}
+	historyContext, err := clientHistoryContext(request.ClientHistory)
+	if err != nil {
+		return nil, err
+	}
 	requestID := request.RequestID
 	gateway := request.Principal.Gateway
 	sessionKey := request.SessionKey
@@ -189,7 +196,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
-	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
+	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") || strings.EqualFold(strings.TrimSpace(gateway), "openai") {
 		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage, toolnames.WebImageSelect)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
@@ -211,7 +218,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	speakerLine := ""
 	fileContext := ""
 	sessionGeneration := 0
-	if a.userMemory != nil {
+	if a.userMemory != nil && !request.Stateless {
 		session, err := a.userMemory.ResolveSessionContext(ctx, senderID, sessionKey, sessionTurnTTL)
 		if err != nil {
 			return nil, fmt.Errorf("resolve tenant session: %w", err)
@@ -243,7 +250,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
-	if a.userMemory != nil && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
 		imagesStarted := time.Now()
 		priorImages, err := a.userMemory.SessionImages(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil {
@@ -257,7 +264,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var recentTurns []memory.SessionTurn
 	var recentToolNames []string
 	var sessionSummary memory.SessionSummary
-	if a.userMemory != nil && sessionGeneration > 0 {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
 		var err error
 		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil && err != sql.ErrNoRows {
@@ -293,7 +300,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 	var foregroundDebt []memory.SessionTurn
-	if a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
+	if !request.Stateless && a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
 		boundary := sessionSummary.CoveredThroughTurnID
 		var debtErr error
 		foregroundDebt, debtErr = loadForegroundDeliveredDebt(ctx, a.userMemory, senderID, sessionKey, sessionGeneration, boundary)
@@ -307,16 +314,34 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	promptContext := AssemblePromptContext(dynamicSystemPrompt, fileContext, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 	messages := promptContext.Messages
+	if request.Stateless {
+		if historyContext != "" {
+			messages = append(messages[:len(messages)-1], llm.ChatMessage{Role: "user", Content: historyContext}, messages[len(messages)-1])
+		}
+	}
 	var previousSummary *memory.SessionSummary
 	if sessionSummary.ID > 0 {
 		previousSummary = &sessionSummary
 	}
-	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	compactor := a.compactor
+	if request.Stateless {
+		compactor = nil
+	}
+	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
 	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
+	}
+	if request.Stateless {
+		promptContext.RequiredEstimate = tokenbudget.EstimateRequest(messages, initialCatalog.Tools)
+		promptContext.EstimatedBefore = promptContext.RequiredEstimate
+		promptContext.EstimatedAfter = promptContext.RequiredEstimate
+		promptContext.RequiredOverBudget = promptContext.RequiredEstimate > inputLimit
+		if promptContext.RequiredOverBudget {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 	}
 	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
@@ -423,6 +448,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		messages = preparedMessages
 		req.Messages = messages
+		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 		if compactionStats.Compacted {
 			reqLog.Info("agent.context.compacted", "compacted active request context",
 				config.F("iteration", iteration), config.F("compacted_unit_count", compactionStats.DebtCount),
@@ -630,80 +658,84 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
 				if execErr == nil && len(result.Attachments) > 0 {
-					candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
-					if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
-						candidate = append([]media.OutputAttachment(nil), outputAttachments...)
-						candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
-					}
-					if result.Outcome != governance.OutcomeProductive {
-						execErr = fmt.Errorf("tool returned attachments without a productive result")
-					} else if isGenerated && len(result.Attachments) != 1 {
-						execErr = fmt.Errorf("generation must return exactly one image")
-					} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
-						execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+					if gateway == "openai" {
+						execErr = fmt.Errorf("attachments are not supported by this gateway")
 					} else {
-						if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
-							for _, attachment := range result.Attachments {
-								normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
-								if err != nil {
-									execErr = fmt.Errorf("normalize generated image: %w", err)
-									break
-								}
-								image := plannedImage
-								image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
-								image.VersionHighwater = image.Version
-								var metadata map[string]json.RawMessage
-								if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
-									execErr = fmt.Errorf("invalid generated image metadata")
-									break
-								}
-								metadata["source_image_id"], _ = json.Marshal(image.ID)
-								metadata["image_id"], _ = json.Marshal(image.ImageID)
-								metadata["version"], _ = json.Marshal(image.Version)
-								metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
-								encoded, _ := json.Marshal(metadata)
-								result.Content = string(encoded)
-								visionGeneratedImages = append(visionGeneratedImages, image)
-								if len(visionGeneratedImages) > 4 {
-									visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
-								}
-								variant, _ := tc.Function.Arguments["create_variant"].(bool)
-								if !variant {
-									for i := range contextImages {
-										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
-											contextImages[i].ImageID = image.ImageID
+						candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
+						if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
+							candidate = append([]media.OutputAttachment(nil), outputAttachments...)
+							candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
+						}
+						if result.Outcome != governance.OutcomeProductive {
+							execErr = fmt.Errorf("tool returned attachments without a productive result")
+						} else if isGenerated && len(result.Attachments) != 1 {
+							execErr = fmt.Errorf("generation must return exactly one image")
+						} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
+							execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+						} else {
+							if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
+								for _, attachment := range result.Attachments {
+									normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
+									if err != nil {
+										execErr = fmt.Errorf("normalize generated image: %w", err)
+										break
+									}
+									image := plannedImage
+									image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
+									image.VersionHighwater = image.Version
+									var metadata map[string]json.RawMessage
+									if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
+										execErr = fmt.Errorf("invalid generated image metadata")
+										break
+									}
+									metadata["source_image_id"], _ = json.Marshal(image.ID)
+									metadata["image_id"], _ = json.Marshal(image.ImageID)
+									metadata["version"], _ = json.Marshal(image.Version)
+									metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
+									encoded, _ := json.Marshal(metadata)
+									result.Content = string(encoded)
+									visionGeneratedImages = append(visionGeneratedImages, image)
+									if len(visionGeneratedImages) > 4 {
+										visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
+									}
+									variant, _ := tc.Function.Arguments["create_variant"].(bool)
+									if !variant {
+										for i := range contextImages {
+											if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
+												contextImages[i].ImageID = image.ImageID
+											}
 										}
 									}
-								}
-								if selectedSlot >= 0 {
-									generatedImages[selectedSlot] = image
-								} else {
-									generatedImages = append(generatedImages, image)
-									generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
-								}
-								contextImages = append([]requestctx.InputImage{image}, contextImages...)
-								if len(contextImages) > 24 {
-									// Keep selected deliverables editable even after many retries.
-									for i := len(contextImages) - 1; i >= 0; i-- {
-										pinned := false
-										for _, selected := range generatedImages {
-											if selected.ID == contextImages[i].ID {
-												pinned = true
+									if selectedSlot >= 0 {
+										generatedImages[selectedSlot] = image
+									} else {
+										generatedImages = append(generatedImages, image)
+										generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
+									}
+									contextImages = append([]requestctx.InputImage{image}, contextImages...)
+									if len(contextImages) > 24 {
+										// Keep selected deliverables editable even after many retries.
+										for i := len(contextImages) - 1; i >= 0; i-- {
+											pinned := false
+											for _, selected := range generatedImages {
+												if selected.ID == contextImages[i].ID {
+													pinned = true
+													break
+												}
+											}
+											if !pinned {
+												contextImages = append(contextImages[:i], contextImages[i+1:]...)
 												break
 											}
 										}
-										if !pinned {
-											contextImages = append(contextImages[:i], contextImages[i+1:]...)
-											break
-										}
 									}
+									ctx = requestctx.WithInputImages(ctx, contextImages)
+									reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
 								}
-								ctx = requestctx.WithInputImages(ctx, contextImages)
-								reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
 							}
-						}
-						if execErr == nil {
-							outputAttachments = candidate
+							if execErr == nil {
+								outputAttachments = candidate
+							}
 						}
 					}
 				}
@@ -815,7 +847,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if len(historyBatch.Calls) > 0 {
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
-		foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
+		if !request.Stateless {
+			foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
+		}
 		if len(generatedImages) > 0 {
 			imageContext := sessionImageContext(contextImages, visionGeneratedImages)
 			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
@@ -852,6 +886,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		messages = preparedMessages
 		finalReq.Messages = messages
+		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 		if compactionStats.Compacted {
 			reqLog.Info("agent.context.compacted", "compacted active request context before final model call",
 				config.F("compacted_unit_count", compactionStats.DebtCount), config.F("estimated_before", compactionStats.EstimatedBefore),
@@ -951,6 +988,9 @@ finalize:
 			retryReq := req
 			retryReq.Messages = retryMessages
 			retryReq.Tools = nil
+			if request.Stateless && tokenbudget.EstimateRequest(retryReq.Messages, nil) > inputLimit {
+				return nil, fmt.Errorf("stateless request exceeds model input budget")
+			}
 
 			reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
 				config.F("thinking_chars", len(finalThinking)),
@@ -1055,7 +1095,7 @@ finalize:
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
-	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
 		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))

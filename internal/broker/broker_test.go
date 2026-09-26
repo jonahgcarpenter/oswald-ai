@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 func TestSubmitRejectsWhenQueueFull(t *testing.T) {
@@ -68,6 +69,23 @@ func TestNewBrokerUsesAtLeastOneWorker(t *testing.T) {
 	b := NewBroker(&captureProcessor{requests: make(chan agent.Request, 1)}, 0, config.NewLogger(config.LevelError))
 	if b.workerCount != 1 {
 		t.Fatalf("workerCount = %d, want 1", b.workerCount)
+	}
+}
+
+func TestBrokerForwardsStatelessClientHistory(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	history := []llm.ChatMessage{{Role: "user", Content: "earlier"}}
+	req := &Request{Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Stateless: true, ClientHistory: history, ResponseChan: make(chan Result, 1)}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	<-req.ResponseChan
+	forwarded := <-processor.requests
+	if !forwarded.Stateless || len(forwarded.ClientHistory) != 1 || forwarded.ClientHistory[0].Content != "earlier" {
+		t.Fatalf("stateless fields lost: %+v", forwarded)
 	}
 }
 

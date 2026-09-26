@@ -289,6 +289,9 @@ func (s *Service) ConfirmChallenge(ctx context.Context, principal identity.Princ
 		if _, err := tx.ExecContext(ctx, `UPDATE linked_accounts SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
 			return fmt.Errorf("move linked accounts: %w", err)
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET canonical_user_id = ? WHERE canonical_user_id = ?`, winnerID, loserID); err != nil {
+			return fmt.Errorf("move API keys: %w", err)
+		}
 		if err := markVerifiedTx(ctx, tx, challenge, principal); err != nil {
 			return err
 		}
@@ -429,7 +432,8 @@ type accountOwnerQuerier interface {
 func accountOwnerDB(ctx context.Context, db accountOwnerQuerier, gateway, identifier string) (string, bool, error) {
 	var owner string
 	var banned bool
-	err := db.QueryRowContext(ctx, `SELECT la.canonical_user_id, au.is_banned != 0 FROM linked_accounts la JOIN account_users au ON au.canonical_user_id = la.canonical_user_id WHERE la.gateway = ? AND la.identifier = ?`, gateway, identifier).Scan(&owner, &banned)
+	err := db.QueryRowContext(ctx, `SELECT la.canonical_user_id, au.is_banned != 0 FROM linked_accounts la JOIN account_users au ON au.canonical_user_id = la.canonical_user_id WHERE la.gateway = ? AND la.identifier = ?
+		AND (la.gateway != 'openai' OR EXISTS (SELECT 1 FROM api_keys k WHERE k.key_id = la.identifier AND k.canonical_user_id = la.canonical_user_id))`, gateway, identifier).Scan(&owner, &banned)
 	if err == sql.ErrNoRows {
 		return "", false, ErrPrincipalMismatch
 	}
@@ -441,7 +445,7 @@ func accountOwnerDB(ctx context.Context, db accountOwnerQuerier, gateway, identi
 
 func gatewayConflictTx(ctx context.Context, tx *sql.Tx, winnerID, loserID string) (bool, error) {
 	var gateway string
-	err := tx.QueryRowContext(ctx, `SELECT winner.gateway FROM linked_accounts winner JOIN linked_accounts loser ON loser.gateway = winner.gateway AND loser.identifier != winner.identifier WHERE winner.canonical_user_id = ? AND loser.canonical_user_id = ? LIMIT 1`, winnerID, loserID).Scan(&gateway)
+	err := tx.QueryRowContext(ctx, `SELECT winner.gateway FROM linked_accounts winner JOIN linked_accounts loser ON loser.gateway = winner.gateway AND winner.gateway != 'openai' AND loser.identifier != winner.identifier WHERE winner.canonical_user_id = ? AND loser.canonical_user_id = ? LIMIT 1`, winnerID, loserID).Scan(&gateway)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

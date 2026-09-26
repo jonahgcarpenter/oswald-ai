@@ -10,7 +10,7 @@ Do not edit `README.md` unless the user explicitly requests README changes. Feat
 
 ## Project And Verification
 
-Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, and an optional Home Assistant WebSocket gateway. Discord and iMessage accept current-turn images; Home Assistant accepts text only. There is no JavaScript, TypeScript, or frontend application in this repository.
+Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, an optional Home Assistant WebSocket gateway, and an optional loopback OpenAI-compatible HTTP gateway. Discord and iMessage accept current-turn images; Home Assistant and OpenAI clients accept text only. There is no JavaScript, TypeScript, or frontend application in this repository.
 
 The module declares Go 1.25.7. SQLite, sqlite-vec, and image decoding include native/CGO dependencies. Use a working C/C++ toolchain, CGO, and the `sqlite_fts5` build tag. Discord GIFV extraction additionally uses `ffmpeg` and `ffprobe`.
 
@@ -34,6 +34,7 @@ Use shallow domain grouping. Separate files by responsibility within a package b
 
 ```text
 cmd/agent/                    Process entry, signals, final exit handling
+cmd/apikey/                   Operator API key issuance and revocation CLI
 data/
   <canonical_user_id>/         Private USER.md and MEMORY.md plus .lock
   memory/soul/                Operator-managed system prompt
@@ -58,7 +59,7 @@ internal/
   gateway/
     routing/                 Transport-neutral admission and prompt construction
     runtime/                 Shared command/agent execution and delivery handling
-    discord/ homeassistant/ imessage/
+    discord/ homeassistant/ imessage/ openai/
   identity/                  Dependency-light authenticated-principal contracts
   llm/                       Provider-neutral types and model gateway HTTP client
   mcp/                       Configuration, encryption, sessions, schemas, execution
@@ -132,6 +133,7 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 - Prefer channels over sleeps for lifecycle tests. Join fake goroutines, close stores, restore environment changes, and keep concurrent log captures synchronized.
 - Configuration tests must not depend on a developer's `.env` or inherited secrets. Avoid printing complete config structs in failure messages.
 - Startup tests use private per-call database-path, registry, and gateway seams. Do not start real listeners to test `startup.Run`.
+- OpenAI tests use local handlers and temporary account databases: cover key issuance/authentication/revocation, no auto-provision, merge and deletion ownership, migration prefix/reopen and foreign keys, strict JSON/role/size limits, JSON/SSE delivery failures, INFO pre-runtime logs, and stateless client history without session persistence or compaction. Never use real credentials or bind the production listener.
 - Test both callback-present and callback-absent model calls, pending/failed/delivered turns, stale compaction leases, file read/write/delete failures, and disabled tools when changing those paths. Retained SQLite compatibility tests still cover merge fences and legacy retrieval.
 - Retain failure and rollback coverage during refactors. Passing compilation alone does not establish SQL, wire, delivery, or authorization equivalence.
 
@@ -146,7 +148,7 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
 4. Indexing and immediate-then-periodic maintenance workers.
 5. Builtin registry (including `memory`), MCP provider, and shared compactor/compaction service. No formation worker or private memory extractor is started.
-6. Agent, then broker workers, command service, invalidation bus, and enabled gateways.
+6. Agent, then broker workers, command service, invalidation bus, and enabled gateways (including OpenAI when configured).
 7. Compaction low-priority gate and worker start, then gateway goroutines.
 
 Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, compaction, indexing, MCP clients, accounts DB, MCP DB, SQLite session/legacy-memory DB**. The file store has no close hook. This order is intentionally not reverse acquisition order.
@@ -189,6 +191,7 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/boots
 
 - Account-link challenges last ten minutes. Store hashes, expiry, and consumption/replay identity, not plaintext codes. A new outgoing challenge invalidates the user's prior active one.
 - Account merge does not move `USER.md` or `MEMORY.md` and is unsupported for users with file memory. Link accounts before writing files. Retained SQLite merge code may still move legacy rows, sessions, jobs, summaries, and MCP ownership, but does not provide a file-memory merge contract.
+- Operator-managed OpenAI client keys are issued only for existing active canonical users via `accounts.Service.CreateAPIKey(ctx, canonicalUserID)` and revoked via `RevokeAPIKey(ctx, keyID)`. `AuthenticateAPIKey(ctx, token)` returns an authenticated `openai` principal with the key ID as external identity and `api_key` assurance. Tokens are `osk_<32 lowercase hex ID>_<64 lowercase hex secret>`; only SHA-256 secret hashes are stored. Comparison is constant-time. Neither authentication nor `EnsureAccount` auto-provisions an OpenAI user. Revocation deletes the key and linked identity, so queued principal re-resolution fails; it does not delete the canonical user. Multiple keys can belong to one user; other gateways still permit only one identity per gateway. Keys follow SQLite account merges and cascade on user deletion. Run `go run -tags sqlite_fts5 ./cmd/apikey create <canonical_user_id>` or `go run -tags sqlite_fts5 ./cmd/apikey revoke <key_id>` from the application working directory; create prints the key ID and secret token once, and neither operation requires MCP settings. Protect CLI stdout.
 - `/disconnect` cannot remove the final account. An administrator cannot unadmin, ban, or delete themselves.
 - `/bootstrap` promotes the submitting account's currently resolved owner only while no administrator exists. Its process-local code is consumed after a successful update; restart replaces it only while no admin exists.
 - `/reset` advances one tenant/session generation and clears its SQLite turns, summaries, and jobs. It does not clear either memory file; the retained SQLite profile binding is not injected as user facts.
@@ -204,6 +207,8 @@ User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/boots
 4. Call the model; authorize calls against that iteration's exact catalog, execute allowed tools serially, append one correlated result for every declared call, and repeat.
 5. Between complete tool rounds, compact when pressure requires it. On a global tool ceiling, finish with a tools-disabled model call.
 6. Persist the final exchange, bounded native history, and pressure snapshot as pending delivery. The shared runtime marks successful delivery for SQLite session/compaction eligibility; file-memory edits have already committed independently.
+
+OpenAI requests instead use stateless agent mode: read soul and private files for the key's current canonical owner, but do not resolve/read/write session turns, summaries, recent tool continuity, session images, or compaction jobs. Client-supplied prior user/assistant text is encoded as lower-authority untrusted reference context, not replayed as provider roles or durable history. The current user message and full required context must fit the model input budget; no history truncation or foreground compaction is performed. Tool execution (including immediate file-memory edits) remains possible; image generation and selection tools are hidden, and tool-produced attachments are rejected. Other gateways retain their existing session and delivery behavior.
 
 ### Budget And Authority
 
@@ -293,7 +298,8 @@ New compaction output requires an empty `candidates` array. Persisted summary ar
 
 The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to it; global memory is not opened at startup. Private memory files live separately under `data/<canonical_user_id>/`. Initialization is serialized by a process schema mutex.
 
-- Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.13`, fourteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
+- Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.14`, fifteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
+- `v4.0.14.sql` rebuilds `linked_accounts` with `idx_linked_accounts_single_gateway` (unique per owner/gateway except `openai`) and `idx_linked_accounts_owner`, then adds `api_keys` (`key_id`, `canonical_user_id`, 32-byte `secret_hash`, `created_at`) and `idx_api_keys_owner`. Both owner references cascade on deletion. OpenAI keys move with account merges without triggering the non-OpenAI gateway conflict rule; revocation removes both the key and its linked account identity.
 - Accept empty databases or an exact applied prefix of that registry. Reject nonempty ledgerless/development schemas and checksum drift without modifying canonical schema/data. There is no pre-v4 importer.
 - Apply missing migrations on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled, check foreign keys before commit, and restore enforcement afterward. Never edit a released migration.
 - `durable_jobs` retains typed formation, compaction, and derived-index work; only compaction and transcript derived-index work are started. Job-kind checks and tenant/source/lease predicates are part of the persistence contract, not redundant metadata.
@@ -327,7 +333,7 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 
 ### Backups And Container Paths
 
-Back up both the private `data/<canonical_user_id>/USER.md` and `MEMORY.md` files and SQLite session/account state. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
+Back up both the private `data/<canonical_user_id>/USER.md` and `MEMORY.md` files and SQLite session/account state, including `api_keys` and `linked_accounts` for issued client access. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately; the database contains key hashes, not recoverable OpenAI client secrets, so clients must retain their tokens or receive new keys. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion or key revocation cannot erase their copies.
 
 The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db` and private user files to `/home/oswald-ai/data/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
 
@@ -426,6 +432,7 @@ ComfyUI handlers accept positive/negative prompts, each bounded to 2,000 runes. 
 | Discord | Reconnecting Gateway WebSocket plus REST; Discord author identity | DM: `discord:dm:<author-id>`; guild/thread: `discord:<channel-id>:<author-id>` |
 | iMessage | Authenticated `/bluebubbles/webhook` and BlueBubbles REST; normalized phone/email handle | DM: `imessage:dm:<sender-id>`; group: `imessage:<chat-guid>:<sender-id>` |
 | Home Assistant | Bearer-authenticated `/homeassistant/ws`; trusted HA service asserts user ID | `homeassistant:<ha-user-id>:<conversation-id>` |
+| OpenAI-compatible | Issued bearer API key on loopback HTTP; one canonical owner per key | Fresh request-local `openai:<request-id>`; no persisted session |
 
 - Discord ignores bots, maintains heartbeat/resume/reconnection, resolves mentions, downloads attachments, and reconstructs replies. Its stream state machine displays thinking/tool/compaction activity, then cursor previews and finalized chunks under the 2,000-unit message limit. Authoritative final delivery reconciles streamed messages. Tool results remain hidden; builtin status exposes purpose-specific fields and MCP primitive arguments are bounded/secret-key-filtered.
 - Discord final answers, errors, fallbacks, and command responses share one process-local FIFO delivery worker. The head is attempted immediately; transient network/read failures, HTTP 408/429/5xx, and attempt timeouts retry with 1-second exponential backoff capped at 30 seconds. Admission is bounded to 20 pending responses including the active head and 80 MiB of retained attachment data. Every entry has an independent five-minute deadline from admission, including waiting time, and each attempt has a 15-second context bound. Later final responses cannot bypass the head. Overflow, expiry, permanent failure, and shutdown return errors through the existing responder/runtime acknowledgement; successful delivery returns normally and activates the existing post-delivery path. Agent generation is already released by the broker before delivery; scheduled commands can retain their existing lane/fences while waiting. There is no connectivity monitor, configuration override, or restart persistence.
@@ -437,6 +444,13 @@ ComfyUI handlers accept positive/negative prompts, each bounded to 2,000 runes. 
 - iMessage reply resolution has one shared five-second deadline, a 1 MiB cap per REST response, two-row query bounds, and no pagination. Results must affirmatively match the requested GUID/chat; the predecessor query also pins the incoming GUID/ROWID and validates thread scope. REST bot recognition assumes the dedicated Messages account's `isFromMe`, requires usable content and a zero error field, and rejects known corruption/retraction; delivery receipts are not required. One resolution result is reused before account creation, attachment downloads, contact enrichment, or indicators. Unmentioned group commands remain rejected without reply lookup; DMs and mentions can proceed with unavailable reply context. No new Oswald database state is introduced.
 - Home Assistant requires exactly one bearer Authorization header, rejects Origin headers, sends `ready` with protocol version 1, reads one strict JSON text request, executes it, and closes. Multiple connections per user are possible. Unknown fields, binary input, anonymous users, missing conversation IDs, and blank text are rejected.
 - HA incoming frames are bounded to 128 KiB with a 15-second first-message deadline. It streams correlated thinking/content/tool-call/tool-result frames and attempts at most one terminal result/error; disconnects/read/write failures can prevent delivery. Disconnect is not wired to foreground cancellation. Agent status chunks are suppressed; text command attachments are returned inline, while binary/image attachments are unsupported.
+
+### OpenAI-Compatible HTTP
+
+- `OPENAI_LISTEN_PORT` enables an API-only listener bound to `127.0.0.1:<port>`. A valid port is 1-65535; invalid configuration disables this gateway, and startup still requires at least one correctly configured gateway. It does not expose Discord, iMessage, or Home Assistant routes. Protect the loopback listener and any proxy placed in front of it; it has no TLS or browser-origin security layer of its own.
+- `GET /v1/models` requires exactly one `Authorization: Bearer <token>` header and lists the single public model ID `oswald` (not the configured upstream route). `POST /v1/chat/completions` uses the same authentication and requires exactly `application/json`, `model: "oswald"`, and 1-32 messages containing only string `content` and `user`/`assistant` roles, ending in `user`. The final message must be nonblank and not start with `/` after trimming; commands are not supported. No system/developer roles, images, attachments, multimodal content, or client tools are accepted. Unknown request/message fields (including generation controls), invalid or trailing JSON, and unsupported models are rejected before runtime.
+- Request bodies are capped at 256 KiB, each text message at 32 KiB, and combined message text at 128 KiB. Client history is owned and resubmitted by the client on every request; Oswald does not persist it as conversation turns. Pre-runtime validation errors return JSON errors without an admitted runtime request. Missing/invalid/revoked keys return 401, account-store failures 503; the shared runtime also checks bans and re-resolves queued identities after key revocation or account merge. Banned users receive no runtime response; the HTTP handler closes their request with an empty 204 response.
+- Completions buffer the final answer before sending: `stream: false` (or omitted) produces one JSON `chat.completion`; `stream: true` produces final-answer SSE role/content/stop chunks followed by `[DONE]`, not live provider/tool progress. Neither format exposes thinking, tool calls/results, or fabricated `usage`. Model/transport errors use JSON errors (including for requested streams) before SSE starts; unsupported output attachments are a delivery error, and partial writes/flush failures can prevent successful delivery. Stateless replies have no session turn to acknowledge or mark failed.
 
 ### Media Bounds
 
@@ -474,7 +488,7 @@ Tool rounds, retries, and final tools-disabled calls retain streaming transport.
 
 ## Environment Configuration
 
-These are the 23 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
+These are the 24 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
 
 | Variable | Default / Purpose |
 | --- | --- |
@@ -485,6 +499,7 @@ These are the 23 application variables loaded by `config.Load`. Defaults below a
 | `BLUEBUBBLES_PASSWORD` | Empty; webhook and API credential |
 | `BLUEBUBBLES_DM_MENTION` | `false`; when true, iMessage DMs require an Oswald mention |
 | `DISCORD_TOKEN` | Empty; enables Discord when nonblank |
+| `OPENAI_LISTEN_PORT` | Empty disables the loopback OpenAI-compatible API; valid port enables it |
 | `MCP_CONFIG_ENCRYPTION_KEY` | Required at startup; base64-encoded or raw 32-byte AES key |
 | `LLM_GATEWAY_URL` | `http://localhost:8080` when unset |
 | `LLM_GATEWAY_MODEL` | Required nonempty route/model name |
@@ -502,7 +517,7 @@ These are the 23 application variables loaded by `config.Load`. Defaults below a
 | `WORKER_POOL_SIZE` | 1; nonpositive values normalized to one by broker |
 | `LOG_LEVEL` | `info`; unknown values fall back to info |
 
-- Invalid/incomplete gateway settings disable that gateway; startup fails if none are configured correctly. Ports must be integers from 1 through 65535.
+- Invalid/incomplete gateway settings disable that gateway; startup fails if none are configured correctly. Ports must be integers from 1 through 65535. OpenAI is independently enabled by its valid port and serves only its API routes on loopback.
 - Invalid/empty integer text uses parser fallbacks. An explicitly empty/invalid/nonpositive ComfyUI duration fails config loading even if image tools are disabled. Malformed nonempty ComfyUI URLs fail config loading; malformed nonempty SearXNG URLs fail tool initialization.
 - `.env.example` currently supplies HA/BlueBubbles ports and a nonempty ComfyUI URL as deployment examples. Copying that URL opts into ComfyUI; it is not the empty code default.
 - Retention, maintenance, global tool limits, database/soul/file-memory/schema paths, and per-tool limits are code-owned. Do not document retired environment overrides as supported. Standard-library environment behavior, such as proxies on default HTTP transports, is separate from this inventory.
@@ -534,6 +549,8 @@ Production logs are single-line JSON on stderr. Ingest stderr only. Human-readab
 - Provider per-call tokens, gateway `request_*` aggregates, and broker `execution_*` aggregates are different views of overlapping work. Never add all three levels together. Use provider records for observed usage totals, gateway summaries for addressed-request delivery, and execution summaries for actual processor completion.
 
 `internal/gateway/runtime/executor.go` emits one INFO `gateway.request.received` after authentication and access checks admit a prompt or command, and one INFO `gateway.request.complete` per addressed runtime operation. Ignored messages do not become these request events. Pre-runtime transport/authentication rejections are separate gateway diagnostics, not admitted prompts. A runtime fallback or rejection can have a completion with `is_admitted=false` and no received record.
+
+The OpenAI listener emits INFO `gateway.listen` with its port when bound; invalid configured ports emit WARN `gateway.openai.config_invalid` and disable it. `gateway.openai.auth.complete` is one INFO measurement per attempted bearer authentication (WARN when account storage fails), with `duration_ms`, `status`, and fixed `reason_code` (`invalid_header`, `invalid_key`, `auth_unavailable`, or `authenticated`), without key or header contents. Authenticated pre-runtime request validation failures emit INFO `gateway.openai.request.rejected` with `status=rejected` and a fixed reason code; neither auth failures nor these rejections emit shared runtime request summaries. Successful key issuance/revocation emit INFO `account.api_key.created` / `account.api_key.revoked` with canonical `user_id` and `status=ok`, never tokens or key IDs. Admitted OpenAI prompts use the shared `gateway.request.received` / `gateway.request.complete`, `agent.response.complete`, tool, and provider measurements; do not count pre-runtime measurements as admitted requests.
 
 `request_kind` is `prompt`, `command`, or `fallback`. `prompt_type` is `text`, `text_image`, `image`, `unsupported`, or `empty`, classified from inbound content before generated reply/context enrichment. Completion includes `duration_ms`, `queue_wait_ms`, `agent_duration_ms`, `delivery_duration_ms`, separate `execution_status`, `delivery_status`, `persistence_status`, and request tool/model/embedding counters with usage flags. Delivery timing in `internal/gateway/runtime/telemetry.go` covers response sends, not indicators or durable post-delivery bookkeeping.
 

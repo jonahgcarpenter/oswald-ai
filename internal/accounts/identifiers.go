@@ -97,6 +97,11 @@ func NormalizeIdentifier(gateway, identifier string) (string, error) {
 			return "", fmt.Errorf("Home Assistant identifiers must be valid user IDs")
 		}
 		return identifier, nil
+	case "openai":
+		if !regexp.MustCompile(`^[a-f0-9]{32}$`).MatchString(identifier) {
+			return "", fmt.Errorf("OpenAI identifiers must be API key IDs")
+		}
+		return identifier, nil
 	default:
 		return "", fmt.Errorf("unsupported gateway %q", gateway)
 	}
