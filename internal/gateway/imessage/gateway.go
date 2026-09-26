@@ -57,6 +57,7 @@ type Gateway struct {
 	Port                string
 	BlueBubblesURL      string
 	BlueBubblesPassword string
+	DMMention           bool
 	Links               *accounts.Service
 	Runtime             gatewayruntime.Dependencies
 	Log                 *config.Logger

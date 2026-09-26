@@ -18,6 +18,7 @@ type Config struct {
 	BlueBubblesListenPort           string        // Optional HTTP port for the BlueBubbles webhook listener
 	BlueBubblesURL                  string        // BlueBubbles HTTP(S) base URL
 	BlueBubblesPassword             string        // BlueBubbles server password/token for REST API auth
+	BlueBubblesDMMention            bool          // Require an Oswald mention in iMessage DMs
 	MCPConfigEncryptionKey          string        // Key used to encrypt MCP server URLs and headers at rest
 	LLMGatewayURL                   string        // LLM gateway API base URL (default: "http://localhost:8080")
 	LLMGatewayModel                 string        // LLM gateway model name; required, startup fails if empty
@@ -82,12 +83,17 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	dmMention, err := strconv.ParseBool(strings.TrimSpace(getEnv("BLUEBUBBLES_DM_MENTION", "false")))
+	if err != nil {
+		return nil, fmt.Errorf("BLUEBUBBLES_DM_MENTION must be true or false: %w", err)
+	}
 	cfg := &Config{
 		HomeAssistantListenPort:         getEnv("HOME_ASSISTANT_LISTEN_PORT", ""),
 		HomeAssistantAuthToken:          getEnv("HOME_ASSISTANT_AUTH_TOKEN", ""),
 		BlueBubblesListenPort:           getEnv("BLUEBUBBLES_LISTEN_PORT", ""),
 		BlueBubblesURL:                  getEnv("BLUEBUBBLES_URL", ""),
 		BlueBubblesPassword:             getEnv("BLUEBUBBLES_PASSWORD", ""),
+		BlueBubblesDMMention:            dmMention,
 		MCPConfigEncryptionKey:          getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
 		LLMGatewayURL:                   getEnv("LLM_GATEWAY_URL", "http://localhost:8080"),
 		LLMGatewayModel:                 getEnv("LLM_GATEWAY_MODEL", ""),

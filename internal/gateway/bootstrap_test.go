@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
@@ -27,12 +28,15 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 		t.Fatalf("unexpected home assistant services %q", serviceNames(services))
 	}
 
-	services, err = NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken, DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}, links, runtimeDeps, log)
+	services, err = NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken, DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw", BlueBubblesDMMention: true}, links, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("configured services: %v", err)
 	}
 	if serviceNames(services) != "Home Assistant, Discord, iMessage" {
 		t.Fatalf("unexpected configured services %q", serviceNames(services))
+	}
+	if gateway, ok := services[2].(*imessage.Gateway); !ok || !gateway.DMMention {
+		t.Fatal("iMessage DM mention setting was not passed to the gateway")
 	}
 }
 

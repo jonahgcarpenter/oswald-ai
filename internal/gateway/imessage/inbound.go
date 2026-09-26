@@ -47,6 +47,11 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	}
 	mentionsBot := mentionRE.MatchString(text)
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
+	if !isGroup && g.DMMention && !dmMentionRE.MatchString(text) {
+		g.logIgnoredMessage("dm_without_mention", "new-message", msg,
+			config.F("request_id", requestID), config.F("is_group", false), config.F("message_chars", len(msg.Text)))
+		return
+	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
 	currentIsReplyToBot := false
 	var resolvedReply messageContext
@@ -214,4 +219,5 @@ func (m webhookMessage) primaryChat() messageChat {
 	return m.Chats[0]
 }
 
-var mentionRE = regexp.MustCompile(`@?Oswald\b`)
+var mentionRE = regexp.MustCompile(`<@Oswald>|@?Oswald\b`)
+var dmMentionRE = regexp.MustCompile(`(^|[^[:alnum:]_])(<@Oswald>|@?Oswald\b)`)

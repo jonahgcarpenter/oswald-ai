@@ -100,6 +100,73 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	}
 }
 
+func TestIMessageDMMentionIgnoresUnmentionedMessages(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	g.DMMention = true
+
+	for _, text := range []string{"hello", "/help", "NotOswald hello", "Oswaldian hello"} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: "msg-1", Text: text, ReplyToGUID: "missing-reply",
+			Handle:      messageHandle{Address: "+15551234567"},
+			Chats:       []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+			Attachments: []attachment{{GUID: "missing-attachment", MimeType: "image/png"}},
+		})
+	}
+	if len(model.primaryRequests()) != 0 || len(bb.sentMessages()) != 0 || len(bb.paths()) != 0 {
+		t.Fatalf("unmentioned DMs caused work: requests=%d sent=%v paths=%v", len(model.primaryRequests()), bb.sentMessages(), bb.paths())
+	}
+}
+
+func TestIMessageDMMentionAcceptsExistingForms(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	g.DMMention = true
+
+	for i, text := range []string{"<@Oswald> hello", "@Oswald hello", "Oswald hello"} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: fmt.Sprintf("msg-%d", i), Text: text,
+			Handle: messageHandle{Address: "+15551234567"},
+			Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+		})
+		requests := model.primaryRequests()
+		if len(requests) != i+1 || requests[i].Messages[len(requests[i].Messages)-1].Content != "hello" {
+			t.Fatalf("mention %q did not produce clean prompt: requests=%v", text, requests)
+		}
+	}
+	g.processIncomingMessage(webhookMessage{
+		GUID: "msg-command", Text: "<@Oswald> /help",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+	})
+	if len(model.primaryRequests()) != 3 || len(bb.sentMessages()) != 4 {
+		t.Fatalf("mentioned DMs were not delivered: requests=%d sent=%v", len(model.primaryRequests()), bb.sentMessages())
+	}
+}
+
+func TestIMessageDMMentionLeavesGroupInvocationUnchanged(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	g.DMMention = true
+
+	for _, text := range []string{"hello", "@Oswald hello"} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: "msg-1", Text: text,
+			Handle: messageHandle{Address: "+15551234567"},
+			Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+		})
+	}
+	if len(model.primaryRequests()) != 1 || len(bb.sentMessages()) != 1 {
+		t.Fatalf("group invocation changed: requests=%d sent=%v", len(model.primaryRequests()), bb.sentMessages())
+	}
+}
+
 func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
 	var filename, mimeType, chatGUID, name, tempGUID string
 	var attachmentData []byte
