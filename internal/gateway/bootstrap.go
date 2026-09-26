@@ -62,6 +62,7 @@ func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeD
 				Port:                port,
 				BlueBubblesURL:      baseURL,
 				BlueBubblesPassword: cfg.BlueBubblesPassword,
+				DMMention:           cfg.BlueBubblesDMMention,
 				Links:               links,
 				Runtime:             runtimeDeps,
 				Log:                 log,

@@ -14,7 +14,7 @@ func isolateConfigEnvironment(t *testing.T) {
 	t.Chdir(t.TempDir())
 	for _, key := range []string{
 		"HOME_ASSISTANT_LISTEN_PORT", "HOME_ASSISTANT_AUTH_TOKEN",
-		"BLUEBUBBLES_LISTEN_PORT", "BLUEBUBBLES_URL", "BLUEBUBBLES_PASSWORD",
+		"BLUEBUBBLES_LISTEN_PORT", "BLUEBUBBLES_URL", "BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_DM_MENTION",
 		"MCP_CONFIG_ENCRYPTION_KEY", "DISCORD_TOKEN",
 		"LLM_GATEWAY_URL", "LLM_GATEWAY_MODEL", "LLM_GATEWAY_EMBEDDING_MODEL",
 		"LLM_GATEWAY_API_KEY", "LLM_GATEWAY_VIRTUAL_KEY",
@@ -115,6 +115,33 @@ func TestLoadLeavesOptionalGatewayPortsDisabledByDefault(t *testing.T) {
 	}
 	if cfg.HomeAssistantAuthToken != "" || cfg.HomeAssistantListenPort != "" || cfg.BlueBubblesListenPort != "" {
 		t.Fatalf("unexpected gateway defaults: token_set=%t home_assistant_port=%q bluebubbles_port=%q", cfg.HomeAssistantAuthToken != "", cfg.HomeAssistantListenPort, cfg.BlueBubblesListenPort)
+	}
+}
+
+func TestLoadBlueBubblesDMMention(t *testing.T) {
+	isolateConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BlueBubblesDMMention {
+		t.Fatal("DM mention should be disabled by default")
+	}
+	for _, value := range []string{"true", "false"} {
+		t.Setenv("BLUEBUBBLES_DM_MENTION", value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BlueBubblesDMMention != (value == "true") {
+			t.Fatalf("DM mention setting %q = %t", value, cfg.BlueBubblesDMMention)
+		}
+	}
+	for _, value := range []string{"", "invalid"} {
+		t.Setenv("BLUEBUBBLES_DM_MENTION", value)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BLUEBUBBLES_DM_MENTION") {
+			t.Fatalf("invalid DM mention setting %q error = %v", value, err)
+		}
 	}
 }
 
