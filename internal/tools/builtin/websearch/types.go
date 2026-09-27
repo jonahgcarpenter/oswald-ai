@@ -23,9 +23,8 @@ type CandidateStats struct {
 	DuplicateCount int
 }
 
-// SearchResponse is the typed result of a search and the JSON tool envelope.
+// SearchResponse is the typed, normalized result of a provider search.
 type SearchResponse struct {
-	Notice              string         `json:"notice"`
 	Degraded            bool           `json:"degraded"`
 	UnresponsiveEngines []string       `json:"unresponsive_engines"`
 	Results             []SearchResult `json:"results"`

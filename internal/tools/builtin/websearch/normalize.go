@@ -61,7 +61,6 @@ func validateQuery(query string) error {
 
 func normalizeCandidates(candidates []searchCandidate, unresponsiveEngines []string) SearchResponse {
 	response := SearchResponse{
-		Notice:              toolNotice,
 		UnresponsiveEngines: unresponsiveEngines,
 		Results:             make([]SearchResult, 0, maxCandidates),
 		Stats: CandidateStats{

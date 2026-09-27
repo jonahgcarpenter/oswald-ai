@@ -809,9 +809,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
 			if streamCallback != nil {
+				payload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
+				if toolName == toolnames.WebSearch && payload.WebSearch != nil {
+					payload.WebSearch.IsDegraded = result.IsDegraded
+				}
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
-					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Tool: payload,
 				})
 			}
 
