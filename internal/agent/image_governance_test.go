@@ -116,14 +116,14 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 				}))
 				defer server.Close()
 				log := config.NewLogger(config.LevelError)
-				reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), log)
+				reg, err := registry.NewFromDirectory(filepath.Join("..", "..", config.DefaultDataRoot, "tools"), log)
 				if err != nil {
 					t.Fatal(err)
 				}
 				if err := builtin.Register(reg, &config.Config{
 					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json"),
-					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json"),
+					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json"),
+					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json"),
 				}, nil, nil, log); err != nil {
 					t.Fatal(err)
 				}

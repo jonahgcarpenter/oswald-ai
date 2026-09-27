@@ -13,9 +13,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
-COPY data/tools/ ./data/tools/
-COPY data/workflows/ ./data/workflows/
-COPY data/SOUL.md ./data/SOUL.md
+COPY .oswald/tools/ ./.oswald/tools/
+COPY .oswald/workflows/ ./.oswald/workflows/
+COPY .oswald/SOUL.md ./.oswald/SOUL.md
 COPY internal/ ./internal/
 
 RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-agent ./cmd/agent/main.go
@@ -42,7 +42,7 @@ COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
 
 RUN chmod +x ./oswald-agent
 
-COPY --from=builder --chown=oswald-ai:oswald-group /app/data/ ./data/
+COPY --from=builder --chown=oswald-ai:oswald-group /app/.oswald/ ./.oswald/
 
 USER oswald-ai
 

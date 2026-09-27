@@ -26,7 +26,7 @@ func TestBuiltinNamesMatchStableSchemaContract(t *testing.T) {
 		want = append(want, contract.name)
 	}
 	slices.Sort(want)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), config.NewLogger(config.LevelError))
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestBuiltinNamesMatchStableSchemaContract(t *testing.T) {
 }
 
 func TestMemorySchemaAdvertisesBatchAndAlias(t *testing.T) {
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), config.NewLogger(config.LevelError))
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}

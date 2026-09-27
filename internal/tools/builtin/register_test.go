@@ -33,7 +33,7 @@ func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {
 
 func newTestRegistry(t *testing.T, log *config.Logger) *registry.Registry {
 	t.Helper()
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func newTestRegistry(t *testing.T, log *config.Logger) *registry.Registry {
 
 func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 
 func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatalf("load tool definitions: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 
 func TestRegisterHidesTranscriptSearch(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestRegisterHidesTranscriptSearch(t *testing.T) {
 
 func TestRegisterCatalogOmitsRemovedMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestRegisterCatalogOmitsRemovedMemoryTools(t *testing.T) {
 
 func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRegisterMemoryPolicyAndBatchSchema(t *testing.T) {
 
 func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
 
 func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 
 func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
+	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", config.DefaultDataRoot, "tools"), log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,8 +375,8 @@ func TestRegisterComfyUIProviderMatrix(t *testing.T) {
 			cfg := testConfig()
 			cfg.ComfyUIURL = test.url
 			cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
-			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")
+			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")
 			if err := Register(reg, cfg, nil, nil, log); err != nil {
 				t.Fatal(err)
 			}
@@ -409,8 +409,8 @@ func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 	cfg := testConfig()
 	cfg.ComfyUIURL = "http://localhost:8188"
 	cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
-	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")
+	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")
 	if err := Register(reg, cfg, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}

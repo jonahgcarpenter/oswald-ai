@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 func workflowPath(name string) string {
-	return filepath.Join("..", "..", "..", "..", "data", "workflows", "comfyui", name)
+	return filepath.Join("..", "..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", name)
 }
 
 func TestBuildMutatesOnlyAllowedWorkflowFields(t *testing.T) {

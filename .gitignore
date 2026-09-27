@@ -4,4 +4,4 @@ tmp/
 
 # database
 *.db*
-/data/usr_*/
+usr_*/

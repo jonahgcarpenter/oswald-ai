@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -67,13 +68,8 @@ func DefaultRetentionPolicy() RetentionPolicy {
 	}
 }
 
-const (
-	DefaultSoulPath                        = "data/SOUL.md"
-	DefaultToolsConfigDir                  = "data/tools"
-	DefaultDatabasePath                    = "data/database/oswald.db"
-	DefaultComfyUITextToImageWorkflowPath  = "data/workflows/comfyui/text-to-image-basic.json"
-	DefaultComfyUIImageToImageWorkflowPath = "data/workflows/comfyui/image-to-image-basic.json"
-)
+// DefaultDataRoot is the working-directory-relative root for application data.
+const DefaultDataRoot = ".oswald"
 
 // Load reads configuration from environment variables, with .env file support.
 // Missing variables use defaults; invalid security-sensitive values return an error.
@@ -108,8 +104,8 @@ func Load() (*Config, error) {
 		BraveAPIKey:                     getEnv("BRAVE_API_KEY", ""),
 		SearxngURL:                      getEnv("SEARXNG_URL", ""),
 		ComfyUIURL:                      strings.TrimSpace(getEnv("COMFYUI_URL", "")),
-		ComfyUITextToImageWorkflowPath:  getEnv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", DefaultComfyUITextToImageWorkflowPath),
-		ComfyUIImageToImageWorkflowPath: getEnv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", DefaultComfyUIImageToImageWorkflowPath),
+		ComfyUITextToImageWorkflowPath:  getEnv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", filepath.Join(DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")),
+		ComfyUIImageToImageWorkflowPath: getEnv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", filepath.Join(DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")),
 		ComfyUIGenerationTimeout:        comfyTimeout,
 		WorkerPoolSize:                  getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                        ParseLevel(getEnv("LOG_LEVEL", "info")),

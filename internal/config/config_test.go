@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -192,7 +193,7 @@ func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ComfyUIURL != "" || cfg.ComfyUITextToImageWorkflowPath != DefaultComfyUITextToImageWorkflowPath || cfg.ComfyUIImageToImageWorkflowPath != DefaultComfyUIImageToImageWorkflowPath || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
+	if cfg.ComfyUIURL != "" || cfg.ComfyUITextToImageWorkflowPath != filepath.Join(DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json") || cfg.ComfyUIImageToImageWorkflowPath != filepath.Join(DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json") || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
 		t.Fatal("ComfyUI configuration did not use the expected defaults")
 	}
 

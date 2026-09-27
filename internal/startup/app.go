@@ -61,8 +61,8 @@ type dependencies struct {
 // have no stop contract, so Run is process-oriented, not restartable in-process.
 func Run(ctx context.Context, cfg *config.Config, log *config.Logger, stdout io.Writer) error {
 	return run(ctx, cfg, log, stdout, dependencies{
-		databasePath:   config.DefaultDatabasePath,
-		fileMemoryRoot: "data",
+		databasePath:   filepath.Join(config.DefaultDataRoot, "database", "oswald.db"),
+		fileMemoryRoot: config.DefaultDataRoot,
 		newRegistry:    tools.NewRegistryFromConfig,
 		newGateways:    gateway.NewServicesFromConfig,
 	})
@@ -131,7 +131,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 
 	// The global template seeds each canonical user's operator-managed soul.
 	soulStore := soul.NewStore(filepath.Join(deps.fileMemoryRoot, "SOUL.md"))
-	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", config.DefaultSoulPath))
+	log.Debug("app.memory_soul.configured", "configured soul file path", config.F("path", filepath.Join(deps.fileMemoryRoot, "SOUL.md")))
 
 	// The user memory store shares the account-link database and initializes its
 	// permanent schema before the other stores open their own handles.

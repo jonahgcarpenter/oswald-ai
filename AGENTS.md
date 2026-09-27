@@ -34,7 +34,7 @@ Use shallow domain grouping. Separate files by responsibility within a package b
 
 ```text
 cmd/agent/                    Process entry, signals, final exit handling
-data/
+.oswald/
   <canonical_user_id>/        Operator-managed SOUL.md
     memories/                 Private USER.md and MEMORY.md plus their .lock files
   SOUL.md                     Operator-managed default soul template
@@ -143,8 +143,8 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 
 `startup/app.go` validates required model settings and assembles components in this order:
 
-1. LLM client, context budget, and per-user soul loader rooted at `data/SOUL.md`.
-2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `data` with legacy file migration before gateways start; legacy global soul-template conflicts are checked before gateways start. MCP manager and account service. A valid enabled OpenAI loopback gateway creates its persistent local administrator here, before bootstrap. No global-memory handle is opened.
+1. LLM client, context budget, and per-user soul loader rooted at `.oswald/SOUL.md`.
+2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `.oswald` with legacy file migration before gateways start; legacy global soul-template conflicts are checked before gateways start. MCP manager and account service. A valid enabled OpenAI loopback gateway creates its persistent local administrator here, before bootstrap. No global-memory handle is opened.
 3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
 4. Indexing and immediate-then-periodic maintenance workers.
 5. Builtin registry (including `memory`), MCP provider, and shared compactor/compaction service. Formation execution and private memory extraction packages have been removed.
@@ -235,9 +235,9 @@ OpenAI requests instead use stateless agent mode: read soul and private files fo
 
 | Layer | Canonical Location | Write Authority |
 | --- | --- | --- |
-| Default soul template | `data/SOUL.md` | Operator filesystem access only |
-| Per-user soul | `data/<canonical_user_id>/SOUL.md` | Operator filesystem access only |
-| Private user notes | `data/<canonical_user_id>/memories/USER.md` and `MEMORY.md` | Authenticated `memory` tool, immediately |
+| Default soul template | `.oswald/SOUL.md` | Operator filesystem access only |
+| Per-user soul | `.oswald/<canonical_user_id>/SOUL.md` | Operator filesystem access only |
+| Private user notes | `.oswald/<canonical_user_id>/memories/USER.md` and `MEMORY.md` | Authenticated `memory` tool, immediately |
 | Conversation continuity | `sessions`, `session_turns`, `session_summaries` | Agent persistence and validated compaction |
 
 ### File-Backed Durable User Memory
@@ -246,8 +246,8 @@ OpenAI requests instead use stateless agent mode: read soul and private files fo
 - `USER.md` is limited to 1,375 Unicode runes and `MEMORY.md` to 2,200, including separators. Missing files are empty. Entries are separated by a standalone `§` line (`\n§\n`); entries must be nonempty UTF-8 and cannot contain a standalone separator line. System blocks use `MEMORY (your personal notes)` then `USER PROFILE (who the user is)` with divider lines and integer percentage plus current/limit Unicode-rune counts; empty sections are omitted. The block contains the complete file contents without truncation.
 - The `memory` tool requires an authenticated principal and an exact `target` of `user` or `memory`. Supply either one `action` (`add`, `replace`, `remove`) with its fields or 1-20 ordered `operations`, not both. `add` requires `content`; `replace` requires `old_text` and `content` or its `new_text` alias (`content` wins if both are supplied); `remove` requires `old_text` only. A nonempty `old_text` must occur in exactly one whole entry; replace changes the entire entry, remove deletes it. Successful results confirm completion, report current/limit Unicode character counts, and return the resulting file contents; capacity errors show the current entries so the model can consolidate in one batch. Edits are immediate rather than staged and use metadata-only durable tool history. The tool description mentions `skill_manage` and `session_search`, but neither tool is currently registered by this application.
 - Each target has its own stable `USER.md.lock` or `MEMORY.md.lock`. Writers re-read, validate, and commit one target as an atomic file replacement under that target's lock; competing writes to the same file serialize, while writes to different targets can proceed concurrently. Prompt reads do not acquire locks: atomic replacement prevents partial-file reads, but the two files are not a single point-in-time snapshot. Deletion acquires both locks in fixed order. Files and locks are private, symlinked paths/nonregular files are rejected, and writes use a synced temporary file, rename, and directory sync. There is no transaction spanning both targets, a model response, or SQLite delivery. An edit remains in effect even if the response is not delivered. External editors must follow the same locking protocol to avoid lost updates.
-- Before gateways start, startup moves existing private files from `data/<canonical_user_id>/` into `memories/`. The migration validates source files, refuses destination conflicts, leaves old lock files in place, and can resume after a partial move. Migration failures abort startup; do not run old and new versions simultaneously during the layout change. New requests use only the `memories/` path.
-- The global `data/SOUL.md` is a template, not an additional injected system prompt. First use creates the canonical user's private `SOUL.md` by a synced temporary file and no-overwrite hard link; concurrent first requests cannot read a partial copy or overwrite an operator edit. Existing per-user souls are read fresh, not resynchronized when the template changes. Missing/unreadable templates or unsafe per-user paths fail the request rather than running without a system prompt. Per-user soul files are regular private files (at most 1 MiB); profile directories are private, and symlinks are rejected. Startup checks the former `data/memory/soul/soul.md` template location: if only the legacy path exists it moves it; if both exist with identical contents it removes the obsolete old copy; if both differ startup fails instead of overwriting an operator edit. The shipped template is at the new path, so deployed legacy edits need operator reconciliation before restart.
+- Before gateways start, startup moves existing private files from `.oswald/<canonical_user_id>/` into `memories/`. The migration validates source files, refuses destination conflicts, leaves old lock files in place, and can resume after a partial move. Migration failures abort startup; do not run old and new versions simultaneously during the layout change. New requests use only the `memories/` path.
+- The global `.oswald/SOUL.md` is a template, not an additional injected system prompt. First use creates the canonical user's private `SOUL.md` by a synced temporary file and no-overwrite hard link; concurrent first requests cannot read a partial copy or overwrite an operator edit. Existing per-user souls are read fresh, not resynchronized when the template changes. Missing/unreadable templates or unsafe per-user paths fail the request rather than running without a system prompt. Per-user soul files are regular private files (at most 1 MiB); profile directories are private, and symlinks are rejected. Startup checks the former `.oswald/memory/soul/soul.md` template location: if only the legacy path exists it moves it; if both exist with identical contents it removes the obsolete old copy; if both differ startup fails instead of overwriting an operator edit. The shipped template is at the new path, so deployed legacy edits need operator reconciliation before restart.
 
 ### Retained SQLite Fact Compatibility
 
@@ -293,7 +293,7 @@ New compaction output requires an empty `candidates` array. Persisted summary ar
 
 ## SQLite, Indexing, And Retention
 
-The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to it; global memory is not opened at startup. Private memory files live separately under `data/<canonical_user_id>/memories/`. Initialization is serialized by a process schema mutex.
+`config.DefaultDataRoot` is `.oswald` relative to the working directory. Startup derives the canonical database path `.oswald/database/oswald.db` from it; tools load from `.oswald/tools`, and default ComfyUI workflows live under `.oswald/workflows/comfyui/`. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to the database; global memory is not opened at startup. Private memory files live under `.oswald/<canonical_user_id>/memories/`. Initialization is serialized by a process schema mutex. Startup does not migrate an existing `data/` root into `.oswald/`; operators must move their database and private files while stopped before switching versions, or the application will use a separate empty database.
 
 - Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.15`, sixteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
 - `v4.0.15.sql` adds nullable `file_user_snapshot` and `file_memory_snapshot` fields to `sessions` for frozen per-generation system memory. Existing sessions capture on their next model turn; no historical file contents can be reconstructed. Snapshot contents are private SQLite data and must be backed up and deleted with account/session state.
@@ -331,9 +331,9 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 
 ### Backups And Container Paths
 
-Back up `data/SOUL.md`, each private `data/<canonical_user_id>/SOUL.md`, both private `data/<canonical_user_id>/memories/USER.md` and `MEMORY.md` files, and SQLite session/account state, including the `openai:local` linked identity and retained historical `api_keys` rows. Before the layout migrations have run, also back up the legacy global soul and legacy memory files directly under `data/<canonical_user_id>/`. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately; no OpenAI bearer token is required. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
+Back up `.oswald/SOUL.md`, each private `.oswald/<canonical_user_id>/SOUL.md`, both private `.oswald/<canonical_user_id>/memories/USER.md` and `MEMORY.md` files, and SQLite session/account state, including the `openai:local` linked identity and retained historical `api_keys` rows. Before the root or layout migrations have run, also back up the former `data/` root and legacy memory files directly under each user's directory. Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately; no OpenAI bearer token is required. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
 
-The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`, the global soul template to `/home/oswald-ai/data/SOUL.md`, and private user files to `/home/oswald-ai/data/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
+The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/.oswald/database/oswald.db`, the global soul template to `/home/oswald-ai/.oswald/SOUL.md`, and private user files to `/home/oswald-ai/.oswald/<canonical_user_id>/`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the paths actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
 
 ## Tools And MCP
 
@@ -490,8 +490,8 @@ These are the 24 application variables loaded by `config.Load`. Defaults below a
 | `BRAVE_API_KEY` | Empty disables Brave web search; SearXNG can still provide `web_search` |
 | `SEARXNG_URL` | Empty disables SearXNG |
 | `COMFYUI_URL` | Empty disables image generation |
-| `COMFYUI_TEXT_TO_IMAGE_WORKFLOW` | `data/workflows/comfyui/text-to-image-basic.json` |
-| `COMFYUI_IMAGE_TO_IMAGE_WORKFLOW` | `data/workflows/comfyui/image-to-image-basic.json` |
+| `COMFYUI_TEXT_TO_IMAGE_WORKFLOW` | `.oswald/workflows/comfyui/text-to-image-basic.json` |
+| `COMFYUI_IMAGE_TO_IMAGE_WORKFLOW` | `.oswald/workflows/comfyui/image-to-image-basic.json` |
 | `COMFYUI_GENERATION_TIMEOUT` | Positive Go duration; default 2m |
 | `WORKER_POOL_SIZE` | 1; nonpositive values normalized to one by broker |
 | `LOG_LEVEL` | `info`; unknown values fall back to info |
@@ -627,7 +627,7 @@ An absent rate series is not necessarily an explicit zero; a missing snapshot ma
 
 ### Tools
 
-1. Add the stable builtin name in `internal/tools/names/names.go` and its schema in `data/tools/`; extend the exact schema/name contract test. Private model tools are not builtin catalog entries; removed legacy memory builtins have no active names, while transcript search retains a disabled schema/handler.
+1. Add the stable builtin name in `internal/tools/names/names.go` and its schema in `.oswald/tools/`; extend the exact schema/name contract test. Private model tools are not builtin catalog entries; removed legacy memory builtins have no active names, while transcript search retains a disabled schema/handler.
 2. Implement the handler under its builtin domain; put shared persistence in the owning domain package. Require authenticated principals for tenant-sensitive work and derive ownership from context, not model arguments.
 3. Register explicit governance, argument normalization when needed, and durable-history policy in `internal/tools/builtin/register.go`. Update stream-status rendering if needed without exposing sensitive arguments/results.
 4. Cover enablement, validation, permissions, duplicate/failure behavior, cancellation, bounded output, and advertised schema. Update the inventory here and configuration examples only if configuration changes.
@@ -645,4 +645,4 @@ An absent rate series is not necessarily an explicit zero; a missing snapshot ma
 2. Preserve tenant/source/delivery/lease checks, foreign keys, JSON references, non-reusable IDs/high-water, and atomic outbox writes. Add fresh, supported-prefix, checksum-rejection, rollback, foreign-key, concurrent-open, and reopen coverage.
 3. Version persisted artifact changes explicitly and retain decoders needed by existing v4 data. Do not rename JSON/schema/tool/log contracts as a side effect of Go cleanup.
 4. Keep retained SQLite profile compilation deterministic; distinguish active file-memory behavior from legacy policy and test file locking, immediate edits, merge limitations, reset/deletion, and retained replay paths as applicable.
-5. Soul changes are operator filesystem edits to `data/SOUL.md` for future users or to `data/<canonical_user_id>/SOUL.md` for an existing user; per-user edits apply on the next request. No model tool may mutate either policy.
+5. Soul changes are operator filesystem edits to `.oswald/SOUL.md` for future users or to `.oswald/<canonical_user_id>/SOUL.md` for an existing user; per-user edits apply on the next request. No model tool may mutate either policy.

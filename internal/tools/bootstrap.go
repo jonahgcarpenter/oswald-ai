@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -14,7 +15,7 @@ import (
 // The user memory store is created externally and shared with the tool handlers.
 func NewRegistryFromConfig(cfg *config.Config, userMemStore *memory.Store, fileStore *files.Store, log *config.Logger) (*registry.Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
-	reg, err := registry.NewFromDirectory(config.DefaultToolsConfigDir, log.Server("tool.registry"))
+	reg, err := registry.NewFromDirectory(filepath.Join(config.DefaultDataRoot, "tools"), log.Server("tool.registry"))
 	if err != nil {
 		return nil, err
 	}
