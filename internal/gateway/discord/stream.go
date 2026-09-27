@@ -462,12 +462,6 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 		return actionToolStatus(tool.Name, "Searching images for "+quoteToolDetail(query), "Searched images for "+quoteToolDetail(query), "Image search failed for "+quoteToolDetail(query))
 	case toolnames.WebImageSelect:
 		return actionToolStatus(tool.Name, "Selecting found image preview", "Selected found image preview", "Found image preview selection failed")
-	case toolnames.CurrentTime:
-		timezone := toolStringArgument(tool.Arguments, "timezone")
-		if timezone == "" {
-			timezone = "the requested timezone"
-		}
-		return actionToolStatus(tool.Name, "Checking the time in `"+sanitizeDiscordInline(timezone)+"`", "Checked the time in `"+sanitizeDiscordInline(timezone)+"`", "Time lookup failed for `"+sanitizeDiscordInline(timezone)+"`")
 	case toolnames.UserMemorySearch:
 		detail := memoryFilterDetail(tool.Arguments)
 		if query != "" {

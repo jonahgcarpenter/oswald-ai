@@ -2,7 +2,6 @@
 package names
 
 const (
-	CurrentTime    = "time.current"
 	Memory         = "memory"
 	WebSearch      = "web.search"
 	WebFetch       = "web.fetch"

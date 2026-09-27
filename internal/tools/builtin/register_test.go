@@ -61,32 +61,6 @@ func TestRegisterDoesNotExposeSoulTools(t *testing.T) {
 	}
 }
 
-func TestRegisterIncludesCurrentTimeTool(t *testing.T) {
-	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
-	if err != nil {
-		t.Fatalf("load tool definitions: %v", err)
-	}
-	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
-		t.Fatalf("register builtin handlers: %v", err)
-	}
-	if !reg.HasHandler("time.current") {
-		t.Fatal("time.current handler was not registered")
-	}
-
-	for _, tool := range reg.LLMTools() {
-		if tool.Function.Name != "time.current" {
-			continue
-		}
-		params := tool.Function.Parameters
-		if len(params.Properties) != 1 || params.Properties["timezone"].Type != "string" || len(params.Required) != 1 || params.Required[0] != "timezone" {
-			t.Fatalf("unexpected time.current parameters: %+v", params)
-		}
-		return
-	}
-	t.Fatal("time.current schema was not loaded")
-}
-
 func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
@@ -164,7 +138,6 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	want := map[string]bool{
 		"web.fetch":      true,
 		"web.search":     true,
-		"time.current":   true,
 		toolnames.Memory: true,
 	}
 	got := map[string]bool{}

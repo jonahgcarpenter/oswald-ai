@@ -4,13 +4,11 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/currenttime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/filememory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
@@ -136,11 +134,6 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", toolnames.WebFetch))
 	}
 
-	if err := reg.RegisterHandler(toolnames.CurrentTime, toolPolicy(0, normalizeTimeArgs), registry.Handler(currenttime.NewHandler(time.Now))); err != nil {
-		return fmt.Errorf("failed to initialize time.current tool: %w", err)
-	}
-	bootstrapLog.Debug("tool.bootstrap.configured", "configured current time tool", config.F("tool_name", toolnames.CurrentTime))
-
 	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
 		if err := reg.DisableBuiltin(name); err != nil {
 			return err
@@ -199,10 +192,6 @@ func normalizeComfyImageArgs(args map[string]interface{}) interface{} {
 		normalized["source_image_id"] = source
 	}
 	return normalized
-}
-
-func normalizeTimeArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{"timezone": normalizedString(args, "timezone", false)}
 }
 
 func normalizeMemorySearchArgs(defaultLimit int) governance.ArgumentNormalizer {

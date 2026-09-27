@@ -347,7 +347,6 @@ Builtin names live in `tools/names/names.go`; its contract test pins the stable 
 
 | Tool | Enablement | Execution / Failure / Unproductive Limits | Durable History |
 | --- | --- | --- | --- |
-| `time.current` | Always | 0 / 0 / 0 | Full |
 | `memory` | Always; authenticated principal required | 0 / 0 / 0 | Metadata |
 | `user_memory_save`, `user_memory_search`, `user_memory_list` | Disabled legacy builtins | Not applicable | Not applicable |
 | `session_transcript_search`, `global_memory_search` | Disabled legacy builtins | Not applicable | Not applicable |
@@ -365,7 +364,6 @@ Zero disables a per-tool guard; it does not bypass global limits. Full history i
 - Duplicate detection hashes the name and canonical normalized arguments. Successful/unproductive calls retain fingerprints; execution errors release them for exact retry. Per-tool exhaustion hides only that tool.
 - Image-to-image duplicate detection includes the effective source ID, explicit strength, and `create_variant` (omitted equals false). The agent resolves an omitted selector from its current default source before fingerprinting each call, so a newly generated default permits another identical edit prompt. Explicit selectors remain exact-match values and still undergo handler validation; identical prompts targeting the same source with the same strength and variant mode remain duplicates, while changed strength permits a retry. Omitted strength remains distinct from an explicit value. Text-to-image duplicate detection remains prompt-based.
 - `memory` applies a single action or up to 20 ordered operations atomically to one target; it has no per-tool execution/failure/unproductive limit or deferred staging cap. Global governance still applies.
-- Current time is not injected automatically: use `time.current` when needed. It accepts IANA zones/UTC and rejects host-dependent `Local`.
 - The registry loads schemas and owns builtin handlers/policies/disabled-name reservations. Invalid individual Markdown specs are logged/skipped; required handler registration can then fail startup. MCP tools are supplied separately and combined by the agent.
 
 ### MCP Configuration And Exposure

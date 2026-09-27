@@ -16,7 +16,7 @@ func assembleTestPromptContext(policy, profile, prompt string, images []llm.Inpu
 
 func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	turns := []memory.SessionTurn{
-		{ID: 3, UserText: "new user", AssistantText: "new assistant", ToolNames: []string{"web.search", "time.current"}},
+		{ID: 3, UserText: "new user", AssistantText: "new assistant", ToolNames: []string{"web.search", "memory"}},
 		{ID: 2, UserText: "middle user", AssistantText: "middle assistant", ToolNames: []string{"web.search"}},
 		{ID: 1, UserText: "old user", AssistantText: "old assistant"},
 	}
@@ -41,7 +41,7 @@ func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
 	if ids(got.SelectedTurns) != "1,2,3" {
 		t.Fatalf("selected turn order = %s, want 1,2,3", ids(got.SelectedTurns))
 	}
-	if !reflect.DeepEqual(got.SelectedToolNames, []string{"web.search", "time.current"}) {
+	if !reflect.DeepEqual(got.SelectedToolNames, []string{"web.search", "memory"}) {
 		t.Fatalf("selected tools = %#v", got.SelectedToolNames)
 	}
 	if got.SelectedTurnCount != 3 || got.OmittedTurnCount != 0 {
