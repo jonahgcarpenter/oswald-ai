@@ -41,43 +41,11 @@ import (
 
 func TestDiscordWebSearchStatusReportsDegradation(t *testing.T) {
 	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:      "web.search",
+		Name:      "web_search",
 		WebSearch: &agent.ToolStreamSearchPayload{Query: "current pricing", IsDegraded: true},
 	})
 	if status.completed != "Searched the web for \"current pricing\" with limited sources." {
 		t.Fatalf("completed status = %q", status.completed)
-	}
-}
-
-func TestDiscordWebFetchStatusDoesNotExposeURLOrContent(t *testing.T) {
-	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:       "web.fetch",
-		Arguments:  map[string]interface{}{"url": "https://example.com/private-path"},
-		ResultText: "private fetched content",
-		WebFetch:   &agent.ToolStreamFetchPayload{Title: "Untrusted title", IsDegraded: true},
-	})
-	combined := status.running + status.completed + status.failed
-	if status.completed != "Fetched the requested public page with limited extraction." {
-		t.Fatalf("completed status = %q", status.completed)
-	}
-	for _, secret := range []string{"private-path", "private fetched content", "Untrusted title"} {
-		if strings.Contains(combined, secret) {
-			t.Fatalf("web fetch status exposed %q: %s", secret, combined)
-		}
-	}
-}
-
-func TestDiscordUserMemorySaveStatusDoesNotExposeCandidateContent(t *testing.T) {
-	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:       "user_memory_save",
-		Arguments:  map[string]interface{}{"evidence": "private evidence"},
-		ResultText: "private result",
-	})
-	combined := status.running + status.completed + status.failed
-	for _, private := range []string{"private evidence", "private result"} {
-		if strings.Contains(combined, private) {
-			t.Fatalf("memory save status exposed %q: %s", private, combined)
-		}
 	}
 }
 
@@ -148,8 +116,8 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "private reasoning"})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search", Arguments: map[string]interface{}{"query": "secret query", "authorization": "Bearer private-token"}}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", ResultText: "private result", DurationMS: 420}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search", Arguments: map[string]interface{}{"query": "secret query", "authorization": "Bearer private-token"}}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", ResultText: "private result", DurationMS: 420}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "post tool reasoning"})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final streamed response is now arriving."})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
@@ -340,12 +308,12 @@ func TestDiscordStreamRemovesAbandonedContinuationBeforeToolProgress(t *testing.
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: strings.Repeat("a", 2000) + "abandoned continuation"})
 	waitForDiscordMessages(t, rest, 2)
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
 	waitForDiscordDeletion(t, rest, "sent-2")
 	waitForDiscordEdit(t, rest, "sent-1", "Searching the web for \"the requested information\"...")
 
 	const finalText = "Final answer after the tool call."
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: finalText})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: finalText}); err != nil {
 		t.Fatal(err)
@@ -471,8 +439,8 @@ func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
 	r.stream.editInterval = 5 * time.Millisecond
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "First thinking paragraph."})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 25}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", DurationMS: 25}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "Second thinking paragraph."})
 	time.Sleep(20 * time.Millisecond)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Authoritative content"})
@@ -568,8 +536,8 @@ func TestDiscordStreamRecoversFinalAnswerAfterStatusEditFailure(t *testing.T) {
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "A commentary preview that is long enough to send."})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 10}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", DurationMS: 10}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final response is long enough to preview."})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final response is long enough to preview."}); err != nil {
 		t.Fatal(err)

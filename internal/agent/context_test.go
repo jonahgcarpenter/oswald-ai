@@ -125,7 +125,7 @@ func TestAssemblePromptContextStopsAtOversizedNewestTurn(t *testing.T) {
 func TestAssemblePromptContextRequiredOverBudgetPreservesRequiredMessages(t *testing.T) {
 	images := []llm.InputImage{{MimeType: "image/png", Data: "one"}, {MimeType: "image/jpeg", Data: "two"}}
 	turns := []memory.SessionTurn{{UserText: "old user", AssistantText: "old assistant"}}
-	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "web.search", Description: strings.Repeat("schema", 100)}}}
+	tools := []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "web_search", Description: strings.Repeat("schema", 100)}}}
 
 	got := assembleTestPromptContext("policy", "profile", "current", images, turns, tools, 1)
 	if !got.RequiredOverBudget || got.SelectedTurnCount != 0 || got.OmittedTurnCount != 1 {

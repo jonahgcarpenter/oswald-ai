@@ -5,8 +5,6 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
@@ -21,7 +19,7 @@ const (
 	// ChunkContent carries tokens from the model's visible response.
 	ChunkContent StreamChunkType = "content"
 
-	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web.search]").
+	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
 	ChunkStatus StreamChunkType = "status"
 
 	// ChunkToolCall carries structured tool invocation data for frontend timelines.
@@ -31,7 +29,7 @@ const (
 	ChunkToolResult StreamChunkType = "tool_result"
 )
 
-// ToolStreamSearchResult is a UI-safe search result emitted for web.search tools.
+// ToolStreamSearchResult is a UI-safe search result emitted for web_search tools.
 type ToolStreamSearchResult struct {
 	Title       string   `json:"title,omitempty"`
 	URL         string   `json:"url,omitempty"`
@@ -42,7 +40,7 @@ type ToolStreamSearchResult struct {
 	Score       float64  `json:"score,omitempty"`
 }
 
-// ToolStreamSearchPayload contains structured web.search details for streaming UIs.
+// ToolStreamSearchPayload contains structured web_search details for streaming UIs.
 type ToolStreamSearchPayload struct {
 	Query               string                   `json:"query,omitempty"`
 	Results             []ToolStreamSearchResult `json:"results,omitempty"`
@@ -50,39 +48,14 @@ type ToolStreamSearchPayload struct {
 	UnresponsiveEngines []string                 `json:"unresponsive_engines,omitempty"`
 }
 
-// ToolStreamFetchPayload contains privacy-safe web.fetch details for streaming UIs.
-type ToolStreamFetchPayload struct {
-	Title       string `json:"title,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-	Source      string `json:"source,omitempty"`
-	IsTruncated bool   `json:"is_truncated,omitempty"`
-	IsDegraded  bool   `json:"is_degraded,omitempty"`
-}
-
 // ToolStreamPayload contains structured tool data for frontend rendering.
 type ToolStreamPayload struct {
-	Name         string                         `json:"name"`
-	Arguments    map[string]interface{}         `json:"arguments,omitempty"`
-	ResultText   string                         `json:"result_text,omitempty"`
-	DurationMS   int64                          `json:"duration_ms,omitempty"`
-	IsError      bool                           `json:"is_error,omitempty"`
-	WebSearch    *ToolStreamSearchPayload       `json:"web.search,omitempty"`
-	WebFetch     *ToolStreamFetchPayload        `json:"web.fetch,omitempty"`
-	UserMemory   *ToolStreamUserMemoryPayload   `json:"user_memory,omitempty"`
-	GlobalMemory *ToolStreamGlobalMemoryPayload `json:"global_memory,omitempty"`
-}
-
-// ToolStreamUserMemoryPayload contains structured user-memory tool details.
-type ToolStreamUserMemoryPayload struct {
-	Action   string                   `json:"action,omitempty"`
-	Category string                   `json:"category,omitempty"`
-	Content  *memory.RenderedSections `json:"content,omitempty"`
-}
-
-// ToolStreamGlobalMemoryPayload contains structured global-memory tool details.
-type ToolStreamGlobalMemoryPayload struct {
-	Action string `json:"action,omitempty"`
-	Query  string `json:"query,omitempty"`
+	Name       string                   `json:"name"`
+	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
+	ResultText string                   `json:"result_text,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	IsError    bool                     `json:"is_error,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web.search,omitempty"`
 }
 
 // StreamChunk is a single typed token event streamed to gateways during Process().
@@ -102,51 +75,12 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
 	}
-	if toolName == toolnames.WebImageSearch || toolName == toolnames.WebImageSelect {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		if toolName == toolnames.WebImageSearch {
-			if query, ok := args["query"].(string); ok {
-				payload.Arguments = map[string]interface{}{"query": strings.TrimSpace(query)}
-			}
-		}
-		return payload
-	}
-	if toolName == toolnames.UserMemorySave {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		payload.UserMemory = &ToolStreamUserMemoryPayload{Action: "save"}
-		return payload
-	}
 	if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
 		payload.Arguments = nil
 		payload.ResultText = ""
 		return payload
 	}
-	if toolName == toolnames.WebFetch {
-		payload.Arguments = nil
-		payload.ResultText = ""
-		fetchPayload := &ToolStreamFetchPayload{}
-		if !isError && result != "" {
-			if response, err := webfetch.DecodeToolResponse(result); err == nil {
-				fetchPayload.Title = response.Title
-				fetchPayload.ContentType = response.ContentType
-				fetchPayload.Source = response.Source
-				fetchPayload.IsTruncated = response.IsTruncated
-				fetchPayload.IsDegraded = response.IsDegraded
-			}
-		}
-		payload.WebFetch = fetchPayload
-		return payload
-	}
-
 	if toolName != toolnames.WebSearch {
-		switch toolName {
-		case toolnames.UserMemorySearch, toolnames.UserMemoryList:
-			payload.UserMemory = userMemoryStreamPayload(toolName, args, result, isError)
-		case toolnames.GlobalMemorySearch:
-			payload.GlobalMemory = globalMemoryStreamPayload(args)
-		}
 		return payload
 	}
 
@@ -174,42 +108,5 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		}
 	}
 	payload.WebSearch = searchPayload
-	return payload
-}
-
-func userMemoryStreamPayload(toolName string, args map[string]interface{}, result string, isError bool) *ToolStreamUserMemoryPayload {
-	payload := &ToolStreamUserMemoryPayload{Action: userMemoryToolAction(toolName)}
-	if category, ok := args["category"].(string); ok {
-		payload.Category = strings.TrimSpace(strings.ToLower(category))
-	}
-	if isError {
-		return payload
-	}
-	if payload.Action == "search" || payload.Action == "list" {
-		content := memory.ParseRenderedMarkdown(result)
-		if content.Intro != "" || len(content.Sections) > 0 {
-			payload.Content = &content
-		}
-	}
-	return payload
-}
-
-func userMemoryToolAction(toolName string) string {
-	switch toolName {
-	case toolnames.UserMemorySave:
-		return "save"
-	case toolnames.UserMemorySearch:
-		return "search"
-	case toolnames.UserMemoryList:
-		return "list"
-	}
-	return ""
-}
-
-func globalMemoryStreamPayload(args map[string]interface{}) *ToolStreamGlobalMemoryPayload {
-	payload := &ToolStreamGlobalMemoryPayload{Action: "search"}
-	if query, ok := args["query"].(string); ok {
-		payload.Query = strings.TrimSpace(query)
-	}
 	return payload
 }

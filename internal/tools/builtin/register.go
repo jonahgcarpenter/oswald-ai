@@ -2,7 +2,6 @@ package builtin
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -10,7 +9,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/filememory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/webfetch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
@@ -56,37 +54,20 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured ComfyUI image tools", config.F("tool_name", toolnames.ComfyUITextToImage+","+toolnames.ComfyUIImageToImage))
 	}
 	braveKey := strings.TrimSpace(cfg.BraveAPIKey)
-	if braveKey == "" {
-		for _, name := range []string{toolnames.WebImageSearch, toolnames.WebImageSelect} {
-			if err := reg.DisableBuiltin(name); err != nil {
-				return fmt.Errorf("disable image tool: %w", err)
-			}
-		}
-		bootstrapLog.Info("tool.bootstrap.disabled", "disabled image search tools because Brave is not configured", config.F("tool_name", toolnames.WebImageSearch+","+toolnames.WebImageSelect), config.F("status", "ok"))
-	} else {
-		policy := governance.ToolPolicy{MaxExecutions: 2, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchArgs(websearch.DefaultImageResults, websearch.MaxImageResults), History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
-		if err := reg.RegisterHandler(toolnames.WebImageSearch, policy, registry.Handler(websearch.NewImageSearchHandler(braveKey, log))); err != nil {
-			return fmt.Errorf("register image search: %w", err)
-		}
-		policy = governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
-		if err := reg.RegisterHandler(toolnames.WebImageSelect, policy, registry.Handler(websearch.NewImageSelectHandler())); err != nil {
-			return fmt.Errorf("register image selection: %w", err)
-		}
-	}
 	searxngURL := strings.TrimSpace(cfg.SearxngURL)
 	var braveClient websearch.Searcher
 	var searxngClient websearch.Searcher
 	if braveKey != "" {
 		client, err := websearch.NewBraveClient(braveKey, log.Server("tool.web.search"))
 		if err != nil {
-			return fmt.Errorf("failed to initialize Brave web.search client: %w", err)
+			return fmt.Errorf("failed to initialize Brave web_search client: %w", err)
 		}
 		braveClient = client
 	}
 	if searxngURL != "" {
 		client, err := websearch.NewSearxngClient(searxngURL, log.Server("tool.web.search"))
 		if err != nil {
-			return fmt.Errorf("failed to initialize SearXNG web.search client: %w", err)
+			return fmt.Errorf("failed to initialize SearXNG web_search client: %w", err)
 		}
 		searxngClient = client
 	}
@@ -105,39 +86,22 @@ func Register(reg *registry.Registry, cfg *config.Config, userMemStore *memory.S
 		searcher = searxngClient
 		primary = "searxng"
 	default:
-		for _, name := range []string{toolnames.WebFetch, toolnames.WebSearch} {
-			if err := reg.DisableBuiltin(name); err != nil {
-				return fmt.Errorf("failed to disable %s tool: %w", name, err)
-			}
+		if err := reg.DisableBuiltin(toolnames.WebSearch); err != nil {
+			return fmt.Errorf("failed to disable %s tool: %w", toolnames.WebSearch, err)
 		}
-		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web tools because no search provider is configured", config.F("tool_name", toolnames.WebSearch+","+toolnames.WebFetch), config.F("status", "ok"))
+		bootstrapLog.Info("tool.bootstrap.disabled", "disabled web search because no search provider is configured", config.F("tool_name", toolnames.WebSearch), config.F("status", "ok"))
 	}
 	if searcher != nil {
-		searchPolicy := toolPolicy(2, normalizeSearchArgs(websearch.DefaultWebResults, websearch.MaxWebResults))
+		searchPolicy := toolPolicy(2, normalizeWebSearchArgs)
 		searchPolicy.MaxFailures = 2
 		if err := reg.RegisterHandler(toolnames.WebSearch, searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
-			return fmt.Errorf("failed to initialize web.search tool: %w", err)
+			return fmt.Errorf("failed to initialize web_search tool: %w", err)
 		}
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", toolnames.WebSearch), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
-
-		fetchPolicy := governance.ToolPolicy{
-			MaxExecutions:   4,
-			MaxFailures:     2,
-			MaxUnproductive: 2,
-			BlockDuplicates: true,
-			NormalizeArgs:   normalizeFetchArgs,
-			History:         governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
-		}
-		if err := reg.RegisterHandler(toolnames.WebFetch, fetchPolicy, registry.Handler(webfetch.NewHandler(webfetch.NewClient(), log))); err != nil {
-			return fmt.Errorf("failed to initialize web.fetch tool: %w", err)
-		}
-		bootstrapLog.Debug("tool.bootstrap.configured", "configured direct web fetch tool", config.F("tool_name", toolnames.WebFetch))
 	}
 
-	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
-		if err := reg.DisableBuiltin(name); err != nil {
-			return err
-		}
+	if err := reg.DisableBuiltin(toolnames.SessionTranscriptSearch); err != nil {
+		return err
 	}
 	if err := reg.RegisterHandler(toolnames.Memory, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(filememory.NewHandler(fileStore))); err != nil {
 		return fmt.Errorf("register memory tool: %w", err)
@@ -155,20 +119,13 @@ func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) go
 	}
 }
 
-func normalizeSearchArgs(defaultLimit, maxLimit int) governance.ArgumentNormalizer {
-	return func(args map[string]interface{}) interface{} {
-		limit, err := websearch.ResultLimit(args, defaultLimit, maxLimit)
-		var results interface{} = limit
-		if err != nil {
-			results = map[string]interface{}{"invalid": args["results"]}
-		}
-		return map[string]interface{}{"query": normalizedString(args, "query", true), "results": results}
+func normalizeWebSearchArgs(args map[string]interface{}) interface{} {
+	limit, err := websearch.WebResultLimit(args)
+	var normalized interface{} = limit
+	if err != nil {
+		normalized = map[string]interface{}{"invalid": args["limit"]}
 	}
-}
-
-func normalizeFetchArgs(args map[string]interface{}) interface{} {
-	value, _ := args["url"].(string)
-	return map[string]interface{}{"url": webfetch.NormalizeURL(value)}
+	return map[string]interface{}{"query": normalizedString(args, "query", true), "limit": normalized}
 }
 
 func normalizeComfyArgs(args map[string]interface{}) interface{} {
@@ -194,49 +151,6 @@ func normalizeComfyImageArgs(args map[string]interface{}) interface{} {
 	return normalized
 }
 
-func normalizeMemorySearchArgs(defaultLimit int) governance.ArgumentNormalizer {
-	return func(args map[string]interface{}) interface{} {
-		var limit interface{} = defaultLimit
-		if raw, exists := args["limit"]; exists && raw != nil {
-			if value, ok := numericInt(raw); ok {
-				limit = value
-			} else {
-				limit = map[string]interface{}{"invalid": raw}
-			}
-		}
-		return map[string]interface{}{
-			"query":    normalizedString(args, "query", true),
-			"scope":    normalizedString(args, "scope", true),
-			"category": normalizedString(args, "category", true),
-			"limit":    limit,
-		}
-	}
-}
-
-func normalizeMemorySaveArgs(args map[string]interface{}) interface{} {
-	rawMemories, _ := args["memories"].([]interface{})
-	memories := make([]map[string]interface{}, 0, len(rawMemories))
-	for _, raw := range rawMemories {
-		item, _ := raw.(map[string]interface{})
-		reinforcesID := item["reinforces_memory_id"]
-		if reinforcesID == nil {
-			reinforcesID = float64(0)
-		}
-		memories = append(memories, map[string]interface{}{
-			"statement":            normalizedString(item, "statement", false),
-			"evidence":             normalizedString(item, "evidence", false),
-			"category":             normalizedString(item, "category", true),
-			"claim_slot":           normalizedString(item, "claim_slot", true),
-			"claim_value":          normalizedString(item, "claim_value", true),
-			"supersedes":           normalizedString(item, "supersedes", false),
-			"evidence_type":        normalizedString(item, "evidence_type", true),
-			"confidence":           item["confidence"],
-			"reinforces_memory_id": reinforcesID,
-		})
-	}
-	return map[string]interface{}{"memories": memories}
-}
-
 func normalizedString(args map[string]interface{}, key string, lower bool) string {
 	value, _ := args[key].(string)
 	value = strings.Join(strings.Fields(value), " ")
@@ -244,23 +158,4 @@ func normalizedString(args map[string]interface{}, key string, lower bool) strin
 		value = strings.ToLower(value)
 	}
 	return value
-}
-
-func numericInt(value interface{}) (int, bool) {
-	switch number := value.(type) {
-	case int:
-		return number, true
-	case int64:
-		return int(number), true
-	case float64:
-		if !math.IsNaN(number) && !math.IsInf(number, 0) && number == math.Trunc(number) && float64(int(number)) == number {
-			return int(number), true
-		}
-	case float32:
-		value := float64(number)
-		if !math.IsNaN(value) && !math.IsInf(value, 0) && number == float32(int(number)) {
-			return int(number), true
-		}
-	}
-	return 0, false
 }

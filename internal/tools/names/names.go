@@ -2,18 +2,10 @@
 package names
 
 const (
-	Memory         = "memory"
-	WebSearch      = "web.search"
-	WebFetch       = "web.fetch"
-	WebImageSearch = "web.image_search"
-	WebImageSelect = "web.image_select"
+	Memory    = "memory"
+	WebSearch = "web_search"
 
-	UserMemorySearch = "user_memory_search"
-	UserMemoryList   = "user_memory_list"
-	UserMemorySave   = "user_memory_save"
-
-	GlobalMemorySearch = "global_memory_search"
-
+	// Retained for the disabled transcript-search schema and compatibility tests.
 	SessionTranscriptSearch = "session_transcript_search"
 
 	ComfyUITextToImage  = "comfyui.text_to_image"

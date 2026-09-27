@@ -26,7 +26,7 @@ type Config struct {
 	LLMGatewayAPIKey                string        // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey            string        // Optional gateway routing key for LLM gateway requests
 	ModelContextWindow              int           // Optional model context window for prompt budgeting; non-positive uses the package fallback
-	ModelMaxOutputTokens            int           // Foreground output capacity reserve and private extraction/compaction max_tokens; non-positive uses the package fallback
+	ModelMaxOutputTokens            int           // Foreground output capacity reserve and compaction max_tokens; non-positive uses the package fallback
 	DiscordToken                    string        // Optional Discord bot token
 	OpenAIListenPort                string        // Optional loopback port for the OpenAI-compatible inbound gateway
 	BraveAPIKey                     string        // Optional Brave Search API subscription token

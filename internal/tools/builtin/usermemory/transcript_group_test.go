@@ -63,7 +63,7 @@ func decodeHandlerTranscript(t *testing.T, result governance.Result) []memory.Tr
 func TestTranscriptHandlerGroupPublicScopeAcrossParticipants(t *testing.T) {
 	for _, gateway := range []string{"discord", "imessage"} {
 		t.Run(gateway, func(t *testing.T) {
-			store, db := newHandlerTestStore(t, nil)
+			store, db := newHandlerTestStore(t)
 			seedHandlerUser(t, db, "caller")
 			seedHandlerUser(t, db, "participant")
 			const chat = "chat-canary-1"
@@ -80,7 +80,7 @@ func TestTranscriptHandlerGroupPublicScopeAcrossParticipants(t *testing.T) {
 			appendHandlerGroupTurn(t, store, "participant", "dm", "", "", public, true)
 			appendHandlerGroupTurn(t, store, "caller", "legacy", "", "", public, true)
 			insertTranscriptTestTurn(t, store, "caller", own.SessionID, own.Generation, "publicquerycanary privatelegacycanary", "privateanswercanary", true, time.Hour)
-			rebuildHandlerIndexes(t, store, false)
+			rebuildHandlerIndexes(t, store)
 			ctx := requestctx.WithPrincipal(context.Background(), transcriptHandlerPrincipal(gateway))
 			meta := requestctx.Metadata{SessionID: own.SessionID, SessionGeneration: own.Generation, GroupGateway: gateway, GroupChatID: chat, PublicUserText: "currentpubliccanary"}
 			ctx = requestctx.WithMetadata(ctx, meta)
@@ -140,11 +140,11 @@ func TestTranscriptHandlerGroupPublicScopeAcrossParticipants(t *testing.T) {
 }
 
 func TestTranscriptHandlerRejectsInvalidGroupScopeWithoutPrivateFallback(t *testing.T) {
-	store, db := newHandlerTestStore(t, nil)
+	store, db := newHandlerTestStore(t)
 	seedHandlerUser(t, db, "caller")
 	generation := bindTranscriptTestSession(t, store, "caller", "private-session")
 	insertTranscriptTestTurn(t, store, "caller", "private-session", generation, "privatequerycanary", "privateanswercanary", true, time.Hour)
-	rebuildHandlerIndexes(t, store, false)
+	rebuildHandlerIndexes(t, store)
 	for _, gateway := range []string{"discord", "imessage"} {
 		for _, scope := range []struct{ name, gateway, chat string }{
 			{"gateway-only", gateway, ""}, {"chat-only", "", "chat"},

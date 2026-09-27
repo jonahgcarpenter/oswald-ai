@@ -176,12 +176,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
-	imageSearch := requestctx.NewImageSearchState()
-	ctx = requestctx.WithImageSearchState(ctx, imageSearch)
-	imageFailureText := imageSizeFallback
-	if len(userImages) == 0 {
-		imageFailureText = "I couldn't process the reference images. Please try another search or try again later."
-	}
 	formationSourceText, _ := stripReplyContext(userPrompt)
 	inherited := requestctx.MetadataFromContext(ctx)
 	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, a.model, formationSourceText
@@ -197,7 +191,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") || strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage, toolnames.WebImageSelect)
+		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -423,12 +417,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var generatedImages []requestctx.InputImage
 	var visionGeneratedImages []requestctx.InputImage
 	var generatedAttachmentSlots []int
-	partialImageResponse := func() string {
-		if len(generatedImages) > 0 {
-			return generatedImagePartialResponse
-		}
-		return foundImagePartialResponse
-	}
 	imageHighwater := make(map[string]int)
 	for _, image := range contextImages {
 		if image.VersionHighwater > imageHighwater[image.ImageID] {
@@ -521,14 +509,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if err == nil {
 				// Continue with the response recovered after compaction.
 				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
-			} else if (len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0) && !llm.IsTemporaryOllamaToolParserError(err) {
-				useFallback(partialImageResponse())
+			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
+				useFallback(generatedImagePartialResponse)
 				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
-				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
+				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 				if streamCallback != nil {
-					streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 				}
 			} else if llm.IsTemporaryOllamaToolParserError(err) {
 				// Temporary workaround for an upstream Ollama/Qwen tool-markup parser
@@ -547,7 +535,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					return nil, ctxErr
 				}
 				if err == nil {
-					markSearchImagesInspected(ctx, req.Messages, req.Messages, reqLog)
 					reqLog.Info("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
@@ -562,11 +549,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						config.F("status", "error"),
 						config.ErrorField(err),
 					)
-					if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
+					if len(generatedImages) > 0 {
 						if llm.IsContextLengthExceededError(err) {
 							useFallback(contextCompactionFallback)
 						} else {
-							useFallback(partialImageResponse())
+							useFallback(generatedImagePartialResponse)
 						}
 						goto finalize
 					}
@@ -623,9 +610,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
-			if toolName == toolnames.UserMemorySave {
-				historyBatch.AssistantContent = ""
-			}
 			toolCallID := tc.ID
 			toolStartedAt := time.Now()
 
@@ -762,10 +746,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						}
 					}
 				}
-				if execErr != nil && toolName == toolnames.WebImageSelect {
-					id, _ := tc.Function.Arguments["result_id"].(string)
-					imageSearch.Unselect(id)
-				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
 				status, outcome := "ok", string(result.Outcome)
 				if result.IsDegraded {
@@ -878,11 +858,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
 			foregroundCompaction.imageContext = &imageContext
 		}
-		if refs := imageSearch.ActiveReferences(); len(refs) > 0 {
-			referenceContext := searchImageContext(refs)
-			messages = replaceSessionImageContext(messages, foregroundCompaction.searchContext, referenceContext)
-			foregroundCompaction.searchContext = &referenceContext
-		}
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
@@ -947,14 +922,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if llm.IsContextLengthExceededError(err) {
 					useFallback(contextCompactionFallback)
 					goto finalize
-				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
-					useFallback(partialImageResponse())
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
 					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
+					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 					}
 				} else {
 					errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
@@ -1001,7 +976,6 @@ finalize:
 		} else if compactionStats.Compacted {
 			messages = preparedMessages
 			retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-			retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
 		} else {
 			retryMessages = preparedMessages
 		}
@@ -1034,7 +1008,6 @@ finalize:
 					} else if recoveryStats.Compacted {
 						messages = preparedMessages
 						retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-						retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
 						retryReq.Messages = retryMessages
 						modelIterations++
 						retryResp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
@@ -1057,14 +1030,14 @@ finalize:
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
 					}
-				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
-					useFallback(partialImageResponse())
-					finalContent = partialImageResponse()
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
+					finalContent = generatedImagePartialResponse
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					finalContent = imageFailureText
+					finalContent = imageSizeFallback
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 					}
 				}
 			} else {
@@ -1142,7 +1115,7 @@ finalize:
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse {
 		responseStatus = "degraded"
 	}
 	reqLog.Debug("agent.response.detail", "completed agent response",
@@ -1170,7 +1143,7 @@ finalize:
 	if finalContent == emptyResponseFallback && !temporaryParserFallback {
 		responseKind = "empty_fallback"
 	}
-	if finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
+	if finalContent == generatedImagePartialResponse {
 		responseKind = "image_partial"
 	}
 	return &Response{

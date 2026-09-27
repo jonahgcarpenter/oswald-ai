@@ -39,6 +39,7 @@ type ChatMessage struct {
 type ToolParameterProperty struct {
 	Type                 string                           `json:"type"`
 	Description          string                           `json:"description,omitempty"`
+	Default              *int                             `json:"default,omitempty"`
 	Enum                 []string                         `json:"enum,omitempty"`
 	Properties           map[string]ToolParameterProperty `json:"properties,omitempty"`
 	Required             []string                         `json:"required,omitempty"`

@@ -80,20 +80,20 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "user_memory_save" || body.ToolChoice != ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
+		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "batch_submit" || body.ToolChoice != ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
 			t.Fatalf("unexpected forced tool request: %+v", body)
 		}
 		if body.Temperature == nil || *body.Temperature != 0 || body.MaxTokens != 2048 {
 			t.Fatalf("unexpected deterministic controls: %+v", body)
 		}
-		memories := body.Tools[0].Function.Parameters.Properties["memories"]
-		if memories.Items == nil || memories.MaxItems == nil || *memories.MaxItems != 5 || memories.AdditionalProperties != nil {
-			t.Fatalf("unexpected recursive schema: %+v", memories)
+		items := body.Tools[0].Function.Parameters.Properties["items"]
+		if items.Items == nil || items.MaxItems == nil || *items.MaxItems != 5 || items.AdditionalProperties != nil {
+			t.Fatalf("unexpected recursive schema: %+v", items)
 		}
-		if memories.Items.AdditionalProperties == nil || *memories.Items.AdditionalProperties {
-			t.Fatalf("item additionalProperties was not false: %+v", memories.Items)
+		if items.Items.AdditionalProperties == nil || *items.Items.AdditionalProperties {
+			t.Fatalf("item additionalProperties was not false: %+v", items.Items)
 		}
-		importance := memories.Items.Properties["importance"]
+		importance := items.Items.Properties["importance"]
 		if importance.Minimum == nil || importance.Maximum == nil || *importance.Minimum != 1 || *importance.Maximum != 5 {
 			t.Fatalf("importance range was not serialized: %+v", importance)
 		}
@@ -105,8 +105,8 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 	maximum := 5
 	minimumImportance, maximumImportance := 1.0, 5.0
 	additional := false
-	tool := Tool{Type: "function", Function: ToolDefinition{Name: "user_memory_save", Parameters: ToolParameters{
-		Type: "object", Properties: map[string]ToolParameterProperty{"memories": {
+	tool := Tool{Type: "function", Function: ToolDefinition{Name: "batch_submit", Parameters: ToolParameters{
+		Type: "object", Properties: map[string]ToolParameterProperty{"items": {
 			Type: "array", MaxItems: &maximum, Items: &ToolParameterProperty{Type: "object", AdditionalProperties: &additional, Properties: map[string]ToolParameterProperty{
 				"importance": {Type: "integer", Minimum: &minimumImportance, Maximum: &maximumImportance},
 			}},

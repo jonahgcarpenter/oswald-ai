@@ -8,7 +8,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const (
@@ -34,7 +33,6 @@ type foregroundCompactionState struct {
 	lastArtifact  memory.SummaryArtifact
 	hasCheckpoint bool
 	imageContext  *llm.ChatMessage
-	searchContext *llm.ChatMessage
 	log           *config.Logger
 }
 
@@ -79,7 +77,6 @@ func (s *foregroundCompactionState) hasDebt() bool {
 func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.ChatMessage, tools []llm.Tool, force bool) ([]llm.ChatMessage, foregroundCompactionStats, error) {
 	stats := foregroundCompactionStats{EstimatedBefore: budget.EstimateRequest(messages, tools)}
 	if s == nil || !s.hasDebt() || s.compactor == nil || s.inputLimit <= 0 {
-		messages = s.fitSearchImages(ctx, messages, tools)
 		stats.EstimatedAfter = budget.EstimateRequest(messages, tools)
 		return messages, stats, nil
 	}
@@ -104,14 +101,6 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	if s.imageContext != nil {
 		rebuilt = append(rebuilt, *s.imageContext)
 	}
-	if s.searchContext != nil {
-		if state := requestctx.ImageSearchStateFromContext(ctx); state != nil {
-			restored := searchImageContext(state.ActiveReferences())
-			s.searchContext = &restored
-		}
-		rebuilt = append(rebuilt, *s.searchContext)
-	}
-	rebuilt = s.fitSearchImages(ctx, rebuilt, tools)
 	s.previous = &memory.SessionSummary{
 		Narrative: artifact.Narrative, OpenTasks: artifact.OpenTasks,
 		Commitments: artifact.Commitments, Entities: artifact.Entities,

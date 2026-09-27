@@ -288,87 +288,15 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	}
 }
 
-func TestProcessDoesNotStageForegroundMemoryWithFinalTurn(t *testing.T) {
-	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "private dark mode candidate", ToolCalls: []llm.ToolCall{{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}}}}},
-		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "I will remember that."}},
-	}}
-	reg := registry.New(config.NewLogger(config.LevelError))
-	agent, store := newTestAgent(t, chat, nil, reg)
-	toolPolicy := testToolPolicy()
-	toolPolicy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
-	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.UserMemorySave, Schema: &llm.ToolParameters{Type: "object"}}, toolPolicy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
-		if requestctx.MemoryStageCollectorFromContext(ctx) != nil {
-			return governance.Result{}, errors.New("unexpected memory stage collector")
-		}
-		return productiveResult(`{"status":"saved"}`), nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	response, err := processAgent(agent, "staged", "homeassistant", "session", "user-1", "User", "I prefer dark mode.", nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.SourceTurnID == 0 {
-		t.Fatal("session turn was not stored")
-	}
-	if artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID); err == nil && len(artifact.Candidates) != 0 {
-		t.Fatalf("unexpected staged artifact: %+v", artifact)
-	}
-	turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
-	if err != nil || len(turns) != 1 || len(turns[0].ToolHistory.Batches) != 1 {
-		t.Fatalf("turns=%+v err=%v", turns, err)
-	}
-	encodedHistory, _ := json.Marshal(turns[0].ToolHistory)
-	if bytes.Contains(encodedHistory, []byte("dark mode")) || bytes.Contains(encodedHistory, []byte("private dark mode candidate")) {
-		t.Fatalf("metadata-only tool history retained staged candidate: %s", encodedHistory)
-	}
-}
-
-func TestMemoryToolStreamPayloadsUseScopeExplicitKeys(t *testing.T) {
-	userPayload := toolStreamPayload(toolnames.UserMemorySearch, map[string]interface{}{"query": "reply style"}, "No memories found.", time.Millisecond, false)
-	if userPayload.UserMemory == nil || userPayload.UserMemory.Action != "search" || userPayload.GlobalMemory != nil {
-		t.Fatalf("unexpected user memory payload: %+v", userPayload)
-	}
-	globalPayload := toolStreamPayload(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "implementation language"}, "search result", time.Millisecond, false)
-	if globalPayload.GlobalMemory == nil || globalPayload.GlobalMemory.Action != "search" || globalPayload.GlobalMemory.Query != "implementation language" || globalPayload.UserMemory != nil {
-		t.Fatalf("unexpected global memory payload: %+v", globalPayload)
-	}
-
-	for _, payload := range []*ToolStreamPayload{userPayload, globalPayload} {
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(encoded), `"memory":`) {
-			t.Fatalf("legacy memory stream key was emitted: %s", encoded)
-		}
-	}
-}
-
-func TestUserMemorySaveStreamPayloadOmitsCandidateContent(t *testing.T) {
-	payload := toolStreamPayload(toolnames.UserMemorySave, map[string]interface{}{
-		"memories": []interface{}{map[string]interface{}{"statement": "private statement", "evidence": "private evidence"}},
-	}, `{"status":"staged","message":"private result"}`, time.Millisecond, false)
-	if payload.Arguments != nil || payload.ResultText != "" || payload.UserMemory == nil || payload.UserMemory.Action != "save" {
-		t.Fatalf("unexpected save stream payload: %+v", payload)
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, private := range []string{"private statement", "private evidence", "private result"} {
-		if strings.Contains(string(encoded), private) {
-			t.Fatalf("save stream exposed %q: %s", private, encoded)
-		}
-	}
-}
-
 func TestWebSearchToolStreamPayloadDecodesStructuredResults(t *testing.T) {
 	raw := `{"notice":"untrusted","degraded":true,"unresponsive_engines":["seznam"],"results":[{"title":"Result","url":"https://example.com/page","domain":"example.com","snippet":"Snippet","engines":["yandex"],"published_at":"2026-08-28","score":2}]}`
-	payload := toolStreamPayload("web.search", map[string]interface{}{"query": " test query "}, raw, time.Millisecond, false)
+	payload := toolStreamPayload("web_search", map[string]interface{}{"query": " test query "}, raw, time.Millisecond, false)
 	if payload.WebSearch == nil || payload.WebSearch.Query != "test query" || !payload.WebSearch.IsDegraded {
 		t.Fatalf("unexpected web search payload: %+v", payload)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil || !bytes.Contains(encoded, []byte(`"web.search":`)) || !bytes.Contains(encoded, []byte(`"name":"web_search"`)) {
+		t.Fatalf("stream wire contract changed: %s (%v)", encoded, err)
 	}
 	if strings.Join(payload.WebSearch.UnresponsiveEngines, ",") != "seznam" || len(payload.WebSearch.Results) != 1 {
 		t.Fatalf("missing web search degradation/results: %+v", payload.WebSearch)
@@ -378,37 +306,14 @@ func TestWebSearchToolStreamPayloadDecodesStructuredResults(t *testing.T) {
 		t.Fatalf("unexpected streamed result: %+v", result)
 	}
 
-	malformed := toolStreamPayload("web.search", map[string]interface{}{"query": "test"}, "not-json", time.Millisecond, false)
+	malformed := toolStreamPayload("web_search", map[string]interface{}{"query": "test"}, "not-json", time.Millisecond, false)
 	if malformed.WebSearch == nil || len(malformed.WebSearch.Results) != 0 {
 		t.Fatalf("malformed result exposed structured data: %+v", malformed)
 	}
 }
 
-func TestWebFetchToolStreamPayloadOmitsURLAndContent(t *testing.T) {
-	raw := `{"notice":"untrusted","url":"https://example.com/private-path","title":"Example","content_type":"text/html","source":"direct","content":"private fetched content","is_truncated":true,"is_degraded":true}`
-	payload := toolStreamPayload("web.fetch", map[string]interface{}{"url": "https://example.com/private-path"}, raw, time.Millisecond, false)
-	if payload.WebFetch == nil || payload.WebFetch.Title != "Example" || payload.WebFetch.ContentType != "text/html" || payload.WebFetch.Source != "direct" || !payload.WebFetch.IsTruncated || !payload.WebFetch.IsDegraded {
-		t.Fatalf("unexpected web fetch payload: %+v", payload)
-	}
-	if payload.Arguments != nil || payload.ResultText != "" {
-		t.Fatalf("web fetch stream retained private data: %+v", payload)
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), "private-path") || strings.Contains(string(encoded), "private fetched content") {
-		t.Fatalf("web fetch stream exposed URL or content: %s", encoded)
-	}
-
-	malformed := toolStreamPayload("web.fetch", map[string]interface{}{"url": "https://example.com/secret"}, "not-json", time.Millisecond, false)
-	if malformed.WebFetch == nil || malformed.Arguments != nil || malformed.ResultText != "" {
-		t.Fatalf("malformed fetch result exposed data: %+v", malformed)
-	}
-}
-
 func TestPersistedMetadataToolCallOmitsArgumentsAndResult(t *testing.T) {
-	tc := llm.ToolCall{Function: llm.ToolFunction{Name: "web.fetch", Arguments: map[string]interface{}{"url": "https://example.com/private"}}}
+	tc := llm.ToolCall{Function: llm.ToolFunction{Name: "test.metadata", Arguments: map[string]interface{}{"secret": "private argument"}}}
 	policy := governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}.Effective()
 	call := persistedToolCall(tc, policy, governance.Decision{Allowed: true}, governance.Result{Outcome: governance.OutcomeProductive}, nil, "private page content", time.Now())
 	if call.HistoryMode != string(governance.HistoryMetadata) || len(call.Arguments) != 0 || call.Result != "Historical tool result omitted by policy." || !call.ArgumentsTruncated || !call.ResultTruncated || call.SearchResult {
@@ -1708,15 +1613,15 @@ func TestProcessDoesNotAutomaticallyInjectGlobalMemory(t *testing.T) {
 	}
 }
 
-func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testing.T) {
+func TestAgentKeepsDefaultVisibleMemoryAfterGlobalMCPResult(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("discover", "home.tools", nil),
 		toolCallResponse("global-call", "home.turn_on", map[string]interface{}{"entity": "light"}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.GlobalMemorySearch}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
-		return productiveResult("global memory"), nil
+	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.Memory}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("memory"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1731,8 +1636,8 @@ func TestAgentKeepsDefaultVisibleGlobalMemorySearchAfterGlobalMCPResult(t *testi
 		t.Fatalf("request count=%d", len(requests))
 	}
 	for i, request := range requests {
-		if !requestHasTool(request, toolnames.GlobalMemorySearch) {
-			t.Fatalf("global memory search missing from request %d: %+v", i, toolNames(request))
+		if !requestHasTool(request, toolnames.Memory) {
+			t.Fatalf("memory missing from request %d: %+v", i, toolNames(request))
 		}
 	}
 }

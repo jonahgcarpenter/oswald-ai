@@ -264,11 +264,6 @@ func (s *Store) ReconcilePatternFormationJobs(ctx context.Context, model string)
 	return s.reconcileWindowFormationJobs(ctx, model, PatternExtractorVersion)
 }
 
-// ReconcileAssessmentFormationJobs backfills recent delivered assessment anchors.
-func (s *Store) ReconcileAssessmentFormationJobs(ctx context.Context, model string) (int64, error) {
-	return s.reconcileWindowFormationJobs(ctx, model, AssessmentExtractorVersion)
-}
-
 func (s *Store) reconcileWindowFormationJobs(ctx context.Context, model, version string) (int64, error) {
 	rows, err := s.sql.QueryContext(ctx, `SELECT canonical_user_id, source_request_id, session_id, session_generation, id FROM session_turns WHERE created_at >= ? AND delivered_at IS NOT NULL AND delivery_failed_at IS NULL ORDER BY id`, formatTime(time.Now().UTC().Add(-24*time.Hour)))
 	if err != nil {
@@ -426,24 +421,6 @@ WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?`, job.I
 		return storedCount, ErrModelSubmissionBudgetExhausted
 	}
 	return 0, ErrStaleFormationJobLease
-}
-
-// RefundFormationModelSubmission restores the current reservation owned by
-// the exact live lease when foreground work intentionally preempts it.
-func (s *Store) RefundFormationModelSubmission(ctx context.Context, job FormationJob) error {
-	if job.Purpose == FormationPurposeAgentSave || job.ModelSubmissionCount <= 0 {
-		return fmt.Errorf("refund memory formation model submission: invalid reservation")
-	}
-	now := time.Now().UTC()
-	result, err := s.sql.ExecContext(ctx, `UPDATE durable_jobs
-SET model_submission_count = model_submission_count - 1, updated_at = ?
-WHERE id = ? AND job_kind = 'memory_formation' AND canonical_user_id = ?
-	AND formation_purpose = 'background_pattern' AND state = 'running'
-	AND lease_owner = ? AND lease_until = ? AND julianday(lease_until) > julianday(?)
-	AND model_submission_count = ? `+formationSourceFenceSQL,
-		formatTime(now), job.ID, job.UserID, job.LeaseOwner, formatTime(job.LeaseUntil),
-		formatTime(now), job.ModelSubmissionCount)
-	return requireFormationLeaseMutation(result, err)
 }
 
 // FormationJobArtifact returns the first persisted extractor result for replay.

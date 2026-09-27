@@ -90,7 +90,7 @@ func TestHandlerResultLimitDoesNotFillFromFallback(t *testing.T) {
 	for _, limit := range []int{1, MaxWebResults} {
 		primary := &countingSearcher{response: SearchResponse{Results: []SearchResult{{Title: "first"}, {Title: "second"}}}}
 		fallback := &countingSearcher{}
-		result, err := NewHandler(NewFallbackSearcher(primary, fallback, nil), config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "results": limit})
+		result, err := NewHandler(NewFallbackSearcher(primary, fallback, nil), config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "limit": limit})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,7 +105,7 @@ func TestHandlerCapsFallbackResultsAndPreservesDegradation(t *testing.T) {
 	for _, primaryErr := range []error{nil, errors.New("private provider failure")} {
 		primary := &countingSearcher{err: primaryErr}
 		fallback := &countingSearcher{response: SearchResponse{Results: make([]SearchResult, MaxWebResults)}}
-		result, err := NewHandler(NewFallbackSearcher(primary, fallback, nil), config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "results": 1})
+		result, err := NewHandler(NewFallbackSearcher(primary, fallback, nil), config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "limit": 1})
 		if err != nil {
 			t.Fatal(err)
 		}

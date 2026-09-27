@@ -86,7 +86,7 @@ func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 	t.Fatal("memory schema was not loaded")
 }
 
-func TestRegisterHidesLegacyMemoryTools(t *testing.T) {
+func TestRegisterHidesTranscriptSearch(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -95,14 +95,12 @@ func TestRegisterHidesLegacyMemoryTools(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{toolnames.UserMemorySave, toolnames.UserMemorySearch, toolnames.UserMemoryList, toolnames.SessionTranscriptSearch, toolnames.GlobalMemorySearch} {
-		if _, ok := visibleTestTool(reg, name); ok || reg.HasHandler(name) {
-			t.Fatalf("legacy memory tool is available: %s", name)
-		}
+	if _, ok := visibleTestTool(reg, toolnames.SessionTranscriptSearch); ok || reg.HasHandler(toolnames.SessionTranscriptSearch) {
+		t.Fatal("transcript search is available")
 	}
 }
 
-func TestRegisterCatalogOmitsRemovedGlobalMemoryTools(t *testing.T) {
+func TestRegisterCatalogOmitsRemovedMemoryTools(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
 	if err != nil {
@@ -119,9 +117,9 @@ func TestRegisterCatalogOmitsRemovedGlobalMemoryTools(t *testing.T) {
 	for _, name := range reg.Names() {
 		cataloged[name] = true
 	}
-	for _, name := range []string{"global_memory_save", "global_memory_list", "global_memory_forget"} {
+	for _, name := range []string{"user_memory_save", "user_memory_search", "user_memory_list", "global_memory_search", "global_memory_save", "global_memory_list", "global_memory_forget"} {
 		if advertised[name] || cataloged[name] || reg.HasHandler(name) {
-			t.Fatalf("removed global memory tool is available: %s", name)
+			t.Fatalf("removed memory tool is available: %s", name)
 		}
 	}
 }
@@ -136,8 +134,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]bool{
-		"web.fetch":      true,
-		"web.search":     true,
+		"web_search":     true,
 		toolnames.Memory: true,
 	}
 	got := map[string]bool{}
@@ -179,38 +176,6 @@ func TestRegisterMemoryPolicyAndBatchSchema(t *testing.T) {
 	}
 }
 
-func TestNormalizeMemorySaveArgsAllowsCorrectiveRetryButBlocksExactDuplicate(t *testing.T) {
-	base := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
-		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
-		"claim_slot": "preference.drink", "claim_value": "tea", "supersedes": "", "evidence_type": "direct_statement", "confidence": 0.9,
-	}}}
-	duplicate := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
-		"statement": " The user prefers tea. ", "evidence": "I prefer tea.", "category": "DURABLE_PREFERENCES",
-		"claim_slot": "PREFERENCE.DRINK", "claim_value": "TEA", "supersedes": "", "evidence_type": "DIRECT_STATEMENT", "confidence": 0.9, "reinforces_memory_id": 0,
-	}}}
-	corrected := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
-		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
-		"claim_slot": "preference.favorite_drink", "claim_value": "tea", "supersedes": "", "evidence_type": "direct_statement", "confidence": 0.9,
-	}}}
-	baseJSON, _ := json.Marshal(normalizeMemorySaveArgs(base))
-	duplicateJSON, _ := json.Marshal(normalizeMemorySaveArgs(duplicate))
-	correctedJSON, _ := json.Marshal(normalizeMemorySaveArgs(corrected))
-	if string(baseJSON) != string(duplicateJSON) {
-		t.Fatalf("semantic duplicate normalized differently: %s != %s", baseJSON, duplicateJSON)
-	}
-	if string(baseJSON) == string(correctedJSON) {
-		t.Fatalf("corrective retry normalized as duplicate: %s", correctedJSON)
-	}
-	changedAssessment := map[string]interface{}{"memories": []interface{}{map[string]interface{}{
-		"statement": "The user prefers tea.", "evidence": "I prefer tea.", "category": "durable_preferences",
-		"claim_slot": "preference.drink", "claim_value": "tea", "supersedes": "", "evidence_type": "model_inference", "confidence": 0.4, "reinforces_memory_id": 7,
-	}}}
-	changedJSON, _ := json.Marshal(normalizeMemorySaveArgs(changedAssessment))
-	if string(baseJSON) == string(changedJSON) {
-		t.Fatalf("different assessment normalized as duplicate: %s", changedJSON)
-	}
-}
-
 func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "..", "data", "tools"), log)
@@ -220,22 +185,26 @@ func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	wantParameter := map[string]string{"web.fetch": "url", "web.search": "query"}
+	wantParameter := map[string]string{"web_search": "query"}
 	for _, tool := range reg.LLMTools() {
 		parameter, exists := wantParameter[tool.Function.Name]
 		if !exists {
 			continue
 		}
 		schema := tool.Function.Parameters
-		propertyCount := 1
-		if tool.Function.Name == toolnames.WebSearch {
-			propertyCount = 2
-			results := schema.Properties["results"]
-			if results.Type != "integer" || results.Minimum == nil || *results.Minimum != 1 || results.Maximum == nil || *results.Maximum != websearch.MaxWebResults || !strings.Contains(results.Description, "defaults to 5") {
-				t.Fatalf("web.search results schema = %+v", results)
-			}
+		limit := schema.Properties["limit"]
+		if limit.Type != "integer" || limit.Minimum == nil || *limit.Minimum != 1 || limit.Maximum == nil || *limit.Maximum != websearch.MaxWebResults || limit.Default == nil || *limit.Default != websearch.DefaultWebResults || limit.Description != "Maximum number of results to return. Defaults to 5." {
+			t.Fatalf("web_search limit schema = %+v", limit)
 		}
-		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != propertyCount || len(schema.Required) != 1 || schema.Required[0] != parameter {
+		wire, err := json.Marshal(limit)
+		if err != nil || !strings.Contains(string(wire), `"default":5`) {
+			t.Fatalf("web_search limit default missing from wire schema: %s, %v", wire, err)
+		}
+		query := schema.Properties["query"]
+		if query.Type != "string" || query.Description != `The search query to look up on the web. You may include backend-supported operators such as site:example.com, filetype:pdf, intitle:word, -term, or "exact phrase".` || tool.Function.Description != `Search the web for information. Returns up to 5 results by default with titles, URLs, and descriptions. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and "exact phrase" may work when the backend supports them.` {
+			t.Fatalf("web_search query/description = %+v / %q", query, tool.Function.Description)
+		}
+		if schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Properties) != 2 || len(schema.Required) != 1 || schema.Required[0] != parameter {
 			t.Fatalf("%s schema is not strict: %+v", tool.Function.Name, schema)
 		}
 		delete(wantParameter, tool.Function.Name)
@@ -248,50 +217,48 @@ func TestRegisterAdvertisesStrictWebSchemas(t *testing.T) {
 func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	reg := newTestRegistry(t, log)
-	cfg := testConfig()
-	cfg.BraveAPIKey = "synthetic"
-	if err := Register(reg, cfg, nil, nil, log); err != nil {
+	if err := Register(reg, testConfig(), nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct {
-		name                   string
-		defaultLimit, maxLimit int
-	}{{toolnames.WebSearch, websearch.DefaultWebResults, websearch.MaxWebResults}, {toolnames.WebImageSearch, websearch.DefaultImageResults, websearch.MaxImageResults}} {
-		t.Run(test.name, func(t *testing.T) {
-			policy, ok := reg.Policy(test.name)
-			if !ok || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
-				t.Fatal("missing duplicate policy")
-			}
-			omitted, err := governance.Fingerprint(test.name, map[string]interface{}{"query": " Search   Query "}, policy.NormalizeArgs)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, raw := range []interface{}{test.defaultLimit, float64(test.defaultLimit), int64(test.defaultLimit), json.Number(strconv.Itoa(test.defaultLimit))} {
-				got, err := governance.Fingerprint(test.name, map[string]interface{}{"query": "search query", "results": raw}, policy.NormalizeArgs)
-				if err != nil || got != omitted {
-					t.Fatalf("default %v differs: %v", raw, err)
-				}
-			}
-			seen := map[string]bool{}
-			for limit := 1; limit <= test.maxLimit; limit++ {
-				got, err := governance.Fingerprint(test.name, map[string]interface{}{"query": "search query", "results": float64(limit)}, policy.NormalizeArgs)
-				if err != nil || seen[got] {
-					t.Fatalf("limit %d not distinct: %v", limit, err)
-				}
-				seen[got] = true
-			}
-			for _, raw := range []interface{}{nil, "2", 0, -1, 1.5, test.maxLimit + 1, math.Inf(1)} {
-				args := map[string]interface{}{"query": "search query", "results": raw}
-				normalized := policy.NormalizeArgs(args).(map[string]interface{})
-				if !reflect.DeepEqual(normalized["results"], map[string]interface{}{"invalid": raw}) {
-					t.Fatal("invalid value not preserved")
-				}
-				got, err := governance.Fingerprint(test.name, args, policy.NormalizeArgs)
-				if err == nil && got == omitted {
-					t.Fatal("invalid value collides with default")
-				}
-			}
-		})
+	const parameter = "limit"
+	name := toolnames.WebSearch
+	defaultLimit, maxLimit := websearch.DefaultWebResults, websearch.MaxWebResults
+	policy, ok := reg.Policy(name)
+	if !ok || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
+		t.Fatal("missing duplicate policy")
+	}
+	omitted, err := governance.Fingerprint(name, map[string]interface{}{"query": " Search   Query "}, policy.NormalizeArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []interface{}{defaultLimit, float64(defaultLimit), int64(defaultLimit), json.Number(strconv.Itoa(defaultLimit))} {
+		got, err := governance.Fingerprint(name, map[string]interface{}{"query": "search query", parameter: raw}, policy.NormalizeArgs)
+		if err != nil || got != omitted {
+			t.Fatalf("default %v differs: %v", raw, err)
+		}
+	}
+	seen := map[string]bool{}
+	for limit := 1; limit <= maxLimit; limit++ {
+		got, err := governance.Fingerprint(name, map[string]interface{}{"query": "search query", parameter: float64(limit)}, policy.NormalizeArgs)
+		if err != nil || seen[got] {
+			t.Fatalf("limit %d not distinct: %v", limit, err)
+		}
+		seen[got] = true
+	}
+	for _, raw := range []interface{}{nil, "2", 0, -1, 1.5, maxLimit + 1, math.Inf(1)} {
+		args := map[string]interface{}{"query": "search query", parameter: raw}
+		normalized := policy.NormalizeArgs(args).(map[string]interface{})
+		if !reflect.DeepEqual(normalized[parameter], map[string]interface{}{"invalid": raw}) {
+			t.Fatal("invalid value not preserved")
+		}
+		got, err := governance.Fingerprint(name, args, policy.NormalizeArgs)
+		if err == nil && got == omitted {
+			t.Fatal("invalid value collides with default")
+		}
+	}
+	legacy, err := governance.Fingerprint(name, map[string]interface{}{"query": "search query", "results": 2}, policy.NormalizeArgs)
+	if err != nil || legacy != omitted {
+		t.Fatalf("unrecognized results field changed fingerprint: %v", err)
 	}
 }
 
@@ -301,7 +268,7 @@ func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(reg, &config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web.search client") {
+	if err := Register(reg, &config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web_search client") {
 		t.Fatalf("invalid SearXNG URL registration error = %v", err)
 	}
 }
@@ -325,7 +292,7 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 			if err := Register(reg, test.cfg, nil, nil, log); err != nil {
 				t.Fatal(err)
 			}
-			for _, toolName := range []string{"web.fetch", "web.search"} {
+			for _, toolName := range []string{toolnames.WebSearch} {
 				_, shown := visibleTestTool(reg, toolName)
 				if shown != test.wantShown || reg.HasHandler(toolName) != test.wantShown {
 					t.Fatalf("%s shown=%t handler=%t", toolName, shown, reg.HasHandler(toolName))
@@ -335,11 +302,8 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 					if !ok {
 						t.Fatalf("missing %s policy", toolName)
 					}
-					if toolName == "web.search" && (policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult) {
-						t.Fatalf("web.search history policy = %+v", policy.History)
-					}
-					if toolName == "web.fetch" && (policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult) {
-						t.Fatalf("web.fetch history policy = %+v", policy.History)
+					if policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
+						t.Fatalf("web_search history policy = %+v", policy.History)
 					}
 				}
 				reserved := false
@@ -348,6 +312,16 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 				}
 				if !reserved {
 					t.Fatalf("%s name was not reserved", toolName)
+				}
+			}
+			for _, removed := range []string{"web.fetch", "web.image_search", "web.image_select"} {
+				if _, shown := visibleTestTool(reg, removed); shown || reg.HasHandler(removed) {
+					t.Fatalf("removed tool is available: %s", removed)
+				}
+				for _, name := range reg.Names() {
+					if name == removed {
+						t.Fatalf("removed tool schema is loaded: %s", removed)
+					}
 				}
 			}
 		})
@@ -372,15 +346,9 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		wantExecutions := 0
 		wantUnproductive := 0
 		wantFailures := 0
-		if name == "web.search" {
+		if name == "web_search" {
 			wantUnproductive = 2
 			wantFailures = 2
-		} else if name == "web.fetch" {
-			wantExecutions = 4
-			wantUnproductive = 2
-			wantFailures = 2
-		} else if name == toolnames.UserMemorySave {
-			wantExecutions = 2
 		}
 		if policy.MaxExecutions != wantExecutions {
 			t.Fatalf("%s max executions = %d, want %d", name, policy.MaxExecutions, wantExecutions)
@@ -480,21 +448,6 @@ func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 		if prompt.MinLength == nil || *prompt.MinLength != 1 || prompt.MaxLength == nil || *prompt.MaxLength != 2000 || negative.MaxLength == nil || *negative.MaxLength != 2000 {
 			t.Fatalf("%s prompt bounds are missing: %+v", name, schema.Properties)
 		}
-	}
-}
-
-func TestMemoryArgumentNormalizationPreservesInvalidLimitCorrection(t *testing.T) {
-	normalize := normalizeMemorySearchArgs(8)
-	invalid, err := governance.Fingerprint(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "test", "limit": "8"}, normalize)
-	if err != nil {
-		t.Fatal(err)
-	}
-	valid, err := governance.Fingerprint(toolnames.GlobalMemorySearch, map[string]interface{}{"query": "test", "limit": float64(8)}, normalize)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if invalid == valid {
-		t.Fatal("invalid limit and corrected valid limit produced the same fingerprint")
 	}
 }
 

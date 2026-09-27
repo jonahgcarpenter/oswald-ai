@@ -18,14 +18,12 @@ func TestProductionLoggingContract(t *testing.T) {
 	root := filepath.Join("..", "..")
 	fset := token.NewFileSet()
 	// Exact forwarding expressions, not blanket file exceptions. The worker
-	// wrappers' callers are checked below; the other sites select fixed literals.
+	// wrapper's callers are checked below; the other sites select fixed literals.
 	reviewedEvents := map[string]string{
 		"internal/accounts/challenges.go#ConfirmChallenge":          "event",
 		"internal/llm/telemetry.go#beginMeasurement":                "event",
 		"internal/tools/builtin/websearch/telemetry.go#beginSearch": "event",
 		"internal/compaction/service.go#warn":                       "event",
-		"internal/memory/formation/service.go#warn":                 "event",
-		"internal/memory/formation/service.go#drain":                "event",
 		"internal/memory/indexing/service.go#warn":                  "event",
 		"internal/memory/indexing/service.go#health":                "event",
 		// startup.Error.Event and Message are fixed source literals, not Cause.
@@ -110,7 +108,7 @@ func TestProductionLoggingContract(t *testing.T) {
 							}
 						}
 					}
-					wrapper := (rel == "internal/compaction/service.go" || rel == "internal/memory/formation/service.go" || rel == "internal/memory/indexing/service.go") && (sel.Sel.Name == "warn" || sel.Sel.Name == "health")
+					wrapper := (rel == "internal/compaction/service.go" || rel == "internal/memory/indexing/service.go") && (sel.Sel.Name == "warn" || sel.Sel.Name == "health")
 					if !loggerReceiver(sel.X) && !wrapper {
 						return true
 					}

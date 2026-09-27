@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	maxResults             = 8
 	maxCandidates          = 50
 	maxResponseBytes       = 2 << 20
 	maxQueryRunes          = 400
@@ -64,7 +63,7 @@ func normalizeCandidates(candidates []searchCandidate, unresponsiveEngines []str
 	response := SearchResponse{
 		Notice:              toolNotice,
 		UnresponsiveEngines: unresponsiveEngines,
-		Results:             make([]SearchResult, 0, maxResults),
+		Results:             make([]SearchResult, 0, maxCandidates),
 		Stats: CandidateStats{
 			CandidateCount: len(candidates),
 		},
@@ -88,9 +87,6 @@ func normalizeCandidates(candidates []searchCandidate, unresponsiveEngines []str
 		}
 		if hostCounts[result.Domain] >= 2 {
 			response.Stats.FilteredCount++
-			continue
-		}
-		if len(response.Results) >= maxResults {
 			continue
 		}
 		seenURLs[result.URL] = len(response.Results)

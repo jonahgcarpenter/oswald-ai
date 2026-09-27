@@ -83,9 +83,9 @@ func TestPermanentV400IsFreshAndIdempotent(t *testing.T) {
 		}
 	}
 	toolAnnotations := strings.Join([]string{
-		toolnames.UserMemorySearch,
-		toolnames.UserMemoryList,
-		toolnames.GlobalMemorySearch,
+		"user_memory_search",
+		"user_memory_list",
+		"global_memory_search",
 		toolnames.SessionTranscriptSearch,
 	}, ",")
 	if _, err := db.SQL().Exec(`

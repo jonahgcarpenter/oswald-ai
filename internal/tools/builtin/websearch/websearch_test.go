@@ -152,7 +152,7 @@ func TestClientFiltersCanonicalizesDeduplicatesAndCapsHosts(t *testing.T) {
 	}
 }
 
-func TestClientInspectsOnlyFirstFiftyAndSelectsEight(t *testing.T) {
+func TestClientInspectsOnlyFirstFifty(t *testing.T) {
 	t.Parallel()
 	var results strings.Builder
 	results.WriteString(`{"results":[`)
@@ -170,10 +170,10 @@ func TestClientInspectsOnlyFirstFiftyAndSelectsEight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Stats.CandidateCount != 55 || response.Stats.InspectedCount != 50 || len(response.Results) != 8 {
+	if response.Stats.CandidateCount != 55 || response.Stats.InspectedCount != 50 || len(response.Results) != 50 {
 		t.Fatalf("response stats/results = %+v / %d", response.Stats, len(response.Results))
 	}
-	if response.Results[7].Title != "7" {
+	if response.Results[49].Title != "49" {
 		t.Fatalf("source order not preserved: %+v", response.Results)
 	}
 }
@@ -273,7 +273,7 @@ func TestClientRejectsOversizedAndInvalidResponses(t *testing.T) {
 
 func TestHandlerProducesBoundedDecodableJSON(t *testing.T) {
 	t.Parallel()
-	results := make([]SearchResult, 8)
+	results := make([]SearchResult, maxCandidates)
 	for i := range results {
 		results[i] = SearchResult{
 			Title: strings.Repeat("t", maxTitleRunes), URL: "https://example.com/" + strings.Repeat("u", 1900),
@@ -281,7 +281,7 @@ func TestHandlerProducesBoundedDecodableJSON(t *testing.T) {
 		}
 	}
 	searcher := &fakeSearcher{response: SearchResponse{Results: results}}
-	result, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": " test "})
+	result, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": " test ", "limit": MaxWebResults})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,6 +297,9 @@ func TestHandlerProducesBoundedDecodableJSON(t *testing.T) {
 	}
 	if decoded.Notice != toolNotice || decoded.Results == nil || decoded.UnresponsiveEngines == nil || searcher.query != "test" {
 		t.Fatalf("decoded response/query = %+v / %q", decoded, searcher.query)
+	}
+	if len(decoded.Results) == 0 || len(decoded.Results) >= len(results) {
+		t.Fatalf("output cap did not retain a bounded prefix: got %d results", len(decoded.Results))
 	}
 	if _, err := DecodeToolResponse(result.Content + "{}"); err == nil {
 		t.Fatal("DecodeToolResponse accepted trailing JSON")
@@ -373,17 +376,17 @@ func TestRetryDelayCapsLargeValues(t *testing.T) {
 }
 
 func TestHandlerCapsRequestedResultsWithoutDegradation(t *testing.T) {
-	results := make([]SearchResult, MaxWebResults)
+	results := make([]SearchResult, maxCandidates)
 	for i := range results {
 		results[i] = SearchResult{Title: fmt.Sprint(i), URL: fmt.Sprintf("https://host%d.example/", i)}
 	}
-	for _, limit := range []int{0, 1, 3, MaxWebResults} {
+	for _, limit := range []int{0, 1, 3, maxCandidates, MaxWebResults} {
 		args := map[string]interface{}{"query": "test"}
-		want := limit
+		want := min(limit, len(results))
 		if limit == 0 {
 			want = DefaultWebResults
 		} else {
-			args["results"] = float64(limit)
+			args["limit"] = float64(limit)
 		}
 		searcher := &countingSearcher{response: SearchResponse{Results: results, Stats: CandidateStats{CandidateCount: 20}}}
 		result, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), args)
@@ -402,10 +405,10 @@ func TestHandlerCapsRequestedResultsWithoutDegradation(t *testing.T) {
 	}
 }
 
-func TestHandlerRejectsInvalidResultsBeforeSearch(t *testing.T) {
-	for _, raw := range []interface{}{nil, "5", true, 0, -1, 9, 1.5, math.NaN(), math.Inf(1), json.Number("bad")} {
+func TestHandlerRejectsInvalidLimitBeforeSearch(t *testing.T) {
+	for _, raw := range []interface{}{nil, "5", true, 0, -1, 101, 1.5, math.NaN(), math.Inf(1), json.Number("bad")} {
 		searcher := &countingSearcher{}
-		if _, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "results": raw}); err == nil || searcher.calls != 0 {
+		if _, err := NewHandler(searcher, config.NewLogger(config.LevelError))(context.Background(), map[string]interface{}{"query": "test", "limit": raw}); err == nil || searcher.calls != 0 {
 			t.Fatalf("invalid %v: calls=%d err=%v", raw, searcher.calls, err)
 		}
 	}
@@ -426,7 +429,7 @@ func TestHandlerTerminalResultMeasurement(t *testing.T) {
 			{name: "empty", status: "ok", outcome: "empty", invoked: true, validLimit: true},
 			{name: "degraded", status: "degraded", outcome: "degraded", invoked: true, validLimit: true, count: 1, response: SearchResponse{Results: []SearchResult{{Title: canary}}, Degraded: true}},
 			{name: "failure", status: "error", outcome: "error", invoked: true, validLimit: true, err: errors.New(canary)},
-			{name: "invalid results", status: "rejected", outcome: "rejected", args: map[string]interface{}{"query": canary, "results": canary}},
+			{name: "invalid limit", status: "rejected", outcome: "rejected", args: map[string]interface{}{"query": canary, "limit": canary}},
 			{name: "invalid query", status: "rejected", outcome: "rejected", validLimit: true, args: map[string]interface{}{"query": ""}},
 			{name: "canceled", status: "ok", outcome: "canceled", validLimit: true, canceled: true},
 		} {

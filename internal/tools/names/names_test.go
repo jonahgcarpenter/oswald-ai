@@ -13,14 +13,7 @@ import (
 func TestBuiltinNamesMatchStableSchemaContract(t *testing.T) {
 	contracts := []struct{ name, literal string }{
 		{Memory, "memory"},
-		{WebSearch, "web.search"},
-		{WebFetch, "web.fetch"},
-		{WebImageSearch, "web.image_search"},
-		{WebImageSelect, "web.image_select"},
-		{UserMemorySearch, "user_memory_search"},
-		{UserMemoryList, "user_memory_list"},
-		{UserMemorySave, "user_memory_save"},
-		{GlobalMemorySearch, "global_memory_search"},
+		{WebSearch, "web_search"},
 		{SessionTranscriptSearch, "session_transcript_search"},
 		{ComfyUITextToImage, "comfyui.text_to_image"},
 		{ComfyUIImageToImage, "comfyui.image_to_image"},

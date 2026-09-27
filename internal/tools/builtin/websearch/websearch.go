@@ -57,7 +57,7 @@ func boundToolResponse(response SearchResponse) (SearchResponse, bool, error) {
 		response.UnresponsiveEngines = []string{}
 	}
 
-	// URLs are individually bounded, but eight worst-case records can exceed
+	// URLs are individually bounded, but many records can exceed
 	// the envelope. Keep complete source-ordered records that fit.
 	allResults := response.Results
 	response.Results = make([]SearchResult, 0, len(allResults))
@@ -95,7 +95,7 @@ func NewHandler(searcher Searcher, log *config.Logger) func(ctx context.Context,
 		meta := requestctx.MetadataFromContext(ctx)
 		principal, _ := requestctx.PrincipalFromContext(ctx)
 		agentLog := log.Agent("agent.tool.web.search", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
-		limit, limitErr := ResultLimit(args, DefaultWebResults, MaxWebResults)
+		limit, limitErr := WebResultLimit(args)
 		invoked, rejected, resultCount := false, false, 0
 		defer func() {
 			status, outcome := "ok", "ok"

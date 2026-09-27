@@ -9,20 +9,15 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 )
 
-func newHandlerTestStore(t *testing.T, embedder llm.Embedder) (*memory.Store, *sql.DB) {
+func newHandlerTestStore(t *testing.T) (*memory.Store, *sql.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "oswald.db")
 	log := config.NewLogger(config.LevelError)
-	model := ""
-	if embedder != nil {
-		model = "test-embed"
-	}
-	store, err := memory.NewSQLiteStore(path, embedder, model, log)
+	store, err := memory.NewSQLiteStore(path, nil, "", log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,12 +35,6 @@ func seedHandlerUser(t *testing.T, db *sql.DB, userID string) {
 	if _, err := db.Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, userID); err != nil {
 		t.Fatal(err)
 	}
-}
-
-type fixedRecallEmbedder struct{}
-
-func (fixedRecallEmbedder) Embed(context.Context, llm.EmbedRequest) (*llm.EmbedResponse, error) {
-	return &llm.EmbedResponse{Embeddings: [][]float64{{1, 0}}}, nil
 }
 
 func bindTranscriptTestSession(t *testing.T, store *memory.Store, userID, sessionID string) int {
@@ -70,46 +59,23 @@ func insertTranscriptTestTurn(t *testing.T, store *memory.Store, userID, session
 	}
 }
 
-func rebuildHandlerIndexes(t *testing.T, store *memory.Store, vector bool) {
+func rebuildHandlerIndexes(t *testing.T, store *memory.Store) {
 	t.Helper()
 	ctx := context.Background()
-	kinds := []string{memory.IndexKindMemoryFTS, memory.IndexKindTranscriptFTS}
-	if vector {
-		kinds = append(kinds, memory.IndexKindMemoryVector)
+	revision, err := store.CreateIndexRevision(ctx, memory.IndexKindTranscriptFTS, "sqlite_fts5", "", 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, kind := range kinds {
-		provider, model, dimension := "sqlite_fts5", "", 0
-		var embedding []float64
-		if kind == memory.IndexKindMemoryVector {
-			provider, model, dimension, embedding = "llm_gateway", "test-embed", 2, []float64{1, 0}
-		}
-		revision, err := store.CreateIndexRevision(ctx, kind, provider, model, dimension)
-		if err != nil {
+	records, err := store.DeliveredTranscriptIndexRecords(ctx, 0, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if err := store.WriteTranscriptIndexRecord(ctx, revision, record); err != nil {
 			t.Fatal(err)
 		}
-		if kind == memory.IndexKindTranscriptFTS {
-			records, err := store.DeliveredTranscriptIndexRecords(ctx, 0, 10000)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, record := range records {
-				if err := store.WriteTranscriptIndexRecord(ctx, revision, record); err != nil {
-					t.Fatal(err)
-				}
-			}
-		} else {
-			records, err := store.ActiveMemoryIndexRecords(ctx, 0, 10000)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, record := range records {
-				if err := store.WriteMemoryIndexRecord(ctx, revision, record, embedding); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err != nil {
-			t.Fatal(err)
-		}
+	}
+	if _, err := store.ValidateAndPublishIndexRevision(ctx, revision.ID); err != nil {
+		t.Fatal(err)
 	}
 }

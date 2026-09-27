@@ -32,10 +32,10 @@ func TestTranscriptHandlerLogsExactlyOneSafeMeasurement(t *testing.T) {
 				{"canceled", "ok", "canceled", 0, true},
 			} {
 				t.Run(level.String()+"/"+scope+"/"+test.name, func(t *testing.T) {
-					store, db := newHandlerTestStore(t, nil)
+					store, db := newHandlerTestStore(t)
 					seedHandlerUser(t, db, "caller")
 					turn := appendHandlerGroupTurn(t, store, "caller", "sessioncanary", "discord", "chatcanary", "publicquerycanary", true)
-					rebuildHandlerIndexes(t, store, false)
+					rebuildHandlerIndexes(t, store)
 					meta := requestctx.Metadata{
 						RequestID: "req_transcript", OperationID: "op_transcript", ParentOperationID: "op_parent",
 						Workload: "foreground", Model: "test-model", SessionID: turn.SessionID, SessionGeneration: turn.Generation,

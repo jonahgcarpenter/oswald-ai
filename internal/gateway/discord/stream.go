@@ -444,40 +444,14 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 	}
 
 	switch tool.Name {
-	case toolnames.UserMemorySave:
-		return actionToolStatus(tool.Name, "Staging a memory for delivery", "Staged a memory for post-delivery validation", "Memory staging failed")
-	case toolnames.WebFetch:
-		completed := "Fetched the requested public page"
-		if tool.WebFetch != nil && tool.WebFetch.IsDegraded {
-			completed += " with limited extraction"
-		}
-		return actionToolStatus(tool.Name, "Fetching the requested public page", completed, "Public page fetch failed")
 	case toolnames.WebSearch:
 		completed := "Searched the web for " + quoteToolDetail(query)
 		if tool.WebSearch != nil && tool.WebSearch.IsDegraded {
 			completed += " with limited sources"
 		}
 		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), completed, "Web search failed for "+quoteToolDetail(query))
-	case toolnames.WebImageSearch:
-		return actionToolStatus(tool.Name, "Searching images for "+quoteToolDetail(query), "Searched images for "+quoteToolDetail(query), "Image search failed for "+quoteToolDetail(query))
-	case toolnames.WebImageSelect:
-		return actionToolStatus(tool.Name, "Selecting found image preview", "Selected found image preview", "Found image preview selection failed")
-	case toolnames.UserMemorySearch:
-		detail := memoryFilterDetail(tool.Arguments)
-		if query != "" {
-			detail = " for " + quoteToolDetail(query) + detail
-		}
-		return actionToolStatus(tool.Name, "Searching your memories"+detail, "Searched your memories"+detail, "Memory search failed"+detail)
-	case toolnames.UserMemoryList:
-		detail := memoryFilterDetail(tool.Arguments)
-		return actionToolStatus(tool.Name, "Listing your memories"+detail, "Listed your memories"+detail, "Memory listing failed"+detail)
 	case toolnames.SessionTranscriptSearch:
 		return actionToolStatus(tool.Name, "Searching this conversation for "+quoteToolDetail(query), "Searched this conversation for "+quoteToolDetail(query), "Conversation search failed for "+quoteToolDetail(query))
-	case toolnames.GlobalMemorySearch:
-		if tool.GlobalMemory != nil && tool.GlobalMemory.Query != "" {
-			query = tool.GlobalMemory.Query
-		}
-		return actionToolStatus(tool.Name, "Searching Oswald memory for "+quoteToolDetail(query), "Searched Oswald memory for "+quoteToolDetail(query), "Oswald memory search failed for "+quoteToolDetail(query))
 	default:
 		detail := formatMCPToolArguments(tool.Arguments)
 		return actionToolStatus(tool.Name, "Running `"+name+"`"+detail, "Completed `"+name+"`"+detail, "Failed `"+name+"`"+detail)
@@ -491,20 +465,6 @@ func actionToolStatus(name, running, completed, failed string) discordToolStatus
 		completed: truncateDiscordText(completed+".", discordToolStatusRenderLimit),
 		failed:    truncateDiscordText(failed+".", discordToolStatusRenderLimit),
 	}
-}
-
-func memoryFilterDetail(args map[string]interface{}) string {
-	filters := make([]string, 0, 2)
-	if scope := toolStringArgument(args, "scope"); scope != "" {
-		filters = append(filters, sanitizeDiscordInline(scope))
-	}
-	if category := toolStringArgument(args, "category"); category != "" {
-		filters = append(filters, sanitizeDiscordInline(category))
-	}
-	if len(filters) == 0 {
-		return ""
-	}
-	return " in " + strings.Join(filters, "/")
 }
 
 func toolStringArgument(args map[string]interface{}, key string) string {
