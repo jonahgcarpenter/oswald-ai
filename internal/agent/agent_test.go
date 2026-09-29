@@ -30,10 +30,10 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/filememory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	filememory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -143,7 +143,7 @@ func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T)
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "file-round-marker"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.clock", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("twelve"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestStatelessFileMemorySnapshotChangesOnlyBetweenRequests(t *testing.T) {
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "old note"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.edit_memory", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.edit_memory", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		_, err := fileStore.Apply(ctx, "user-1", "memory", []files.Operation{{Action: "replace", OldText: "old note", Content: "new note"}})
 		return productiveResult("updated"), err
 	}); err != nil {
@@ -326,7 +326,7 @@ func TestPersistedMetadataToolCallOmitsArgumentsAndResult(t *testing.T) {
 }
 
 func TestComfyUIToolStreamPayloadOmitsPromptsAndResults(t *testing.T) {
-	payload := toolStreamPayload(toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": "private prompt", "negative_prompt": "private negative"}, `{"status":"generated"}`, time.Millisecond, false)
+	payload := toolStreamPayload(imagegenerate.Name, map[string]interface{}{"prompt": "private prompt", "image_url": "private ID"}, `{"status":"generated"}`, time.Millisecond, false)
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestProcessPropagatesToolAttachmentsWithoutPersistingBytes(t *testing.T) {
 	privateBytes := []byte("private-image-bytes")
 	policy := testToolPolicy()
 	policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.image", Description: "Image"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.image", Description: "Image"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: `{"attachment_count":1}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: privateBytes}}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -392,7 +392,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "tool-backed answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup", Parameters: []registry.ParamSpec{{Name: "q", Type: "string", Required: true}}}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup", Parameters: []testToolParam{{Name: "q", Type: "string", Required: true}}}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		if args["q"] != "oswald" {
 			t.Fatalf("unexpected tool args: %+v", args)
 		}
@@ -453,11 +453,8 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 func TestProcessOffersFileMemoryTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	log := config.NewLogger(config.LevelError)
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", config.DefaultDataRoot, "tools"), log)
+	reg, err := tools.NewRegistryFromConfig(&config.Config{SearxngURL: "http://localhost:8080"}, nil, nil, log)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := builtin.Register(reg, &config.Config{SearxngURL: "http://localhost:8080"}, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
@@ -466,42 +463,49 @@ func TestProcessOffersFileMemoryTools(t *testing.T) {
 	}
 
 	request := primaryRequests(chat.requests)[0]
-	for _, name := range []string{toolnames.Memory} {
+	for _, name := range []string{filememory.Name} {
 		if !requestHasTool(request, name) {
 			t.Fatalf("expected tool missing from primary request: %s", name)
 		}
 	}
 }
 
-func TestProcessHidesComfyUIToolsOnlyForHomeAssistant(t *testing.T) {
+func TestProcessHidesImageGenerationForTextOnlyGateways(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		gateway   string
 		images    []llm.InputImage
-		wantText  bool
 		wantImage bool
 	}{
-		{name: "discord text only", gateway: "discord", wantText: true, wantImage: true},
-		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantText: true, wantImage: true},
+		{name: "discord text only", gateway: "discord", wantImage: true},
+		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantImage: true},
 		{name: "home assistant", gateway: "homeassistant", images: []llm.InputImage{testInputImage(t, 2, 2)}},
+		{name: "openai", gateway: "openai"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 			reg := registry.New(config.NewLogger(config.LevelError))
-			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-				if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
-					return productiveResult("unused"), nil
-				}); err != nil {
-					t.Fatal(err)
-				}
+			if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+				return productiveResult("unused"), nil
+			}); err != nil {
+				t.Fatal(err)
 			}
 			a, _ := newTestAgent(t, chat, nil, reg)
-			if _, err := processAgent(a, "visibility", test.gateway, "session", "user-1", "Display", "hello", test.images, nil); err != nil {
+			var err error
+			if test.gateway == "openai" {
+				_, err = a.Process(context.Background(), Request{
+					Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback},
+					Prompt:    "hello", Stateless: true,
+				})
+			} else {
+				_, err = processAgent(a, "visibility", test.gateway, "session", "user-1", "Display", "hello", test.images, nil)
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			request := primaryRequests(chat.requests)[0]
-			if requestHasTool(request, toolnames.ComfyUITextToImage) != test.wantText || requestHasTool(request, toolnames.ComfyUIImageToImage) != test.wantImage {
-				t.Fatalf("tools=%+v want text=%t image=%t", request.Tools, test.wantText, test.wantImage)
+			if requestHasTool(request, imagegenerate.Name) != test.wantImage {
+				t.Fatalf("tools=%+v want image=%t", request.Tools, test.wantImage)
 			}
 		})
 	}
@@ -516,7 +520,7 @@ func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished without tools"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.fail", Description: "Fail"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.fail", Description: "Fail"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{}, errors.New("boom")
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -556,7 +560,7 @@ func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	var invocations []string
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		invocations = append(invocations, args["q"].(string))
 		return productiveResult("result " + args["q"].(string)), nil
 	}); err != nil {
@@ -589,7 +593,7 @@ func TestProcessAllowsExactRetryAfterToolFailure(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	invocations := 0
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		invocations++
 		if invocations == 1 {
 			return governance.Result{}, errors.New("temporary failure")
@@ -620,12 +624,12 @@ func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
 	reg := registry.New(config.NewLogger(config.LevelError))
 	policy := testToolPolicy()
 	policy.MaxUnproductive = 1
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: "nothing useful", Outcome: governance.OutcomeUnproductive}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.useful", Description: "Useful"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.useful", Description: "Useful"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("useful"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -653,7 +657,7 @@ func TestProcessGlobalCapMidBatchEmitsResultForEveryCall(t *testing.T) {
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	invocations := 0
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		invocations++
 		return productiveResult("first result"), nil
 	}); err != nil {
@@ -692,7 +696,7 @@ func TestProcessNormalizesMissingToolCallIDsConsistently(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(_ context.Context, args map[string]interface{}) (governance.Result, error) {
 		return productiveResult(args["q"].(string)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -740,7 +744,7 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -818,7 +822,7 @@ func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup result"), nil
 	}); err != nil {
 		t.Fatalf("register tool: %v", err)
@@ -1500,17 +1504,14 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 
 func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		toolCallResponse("write", toolnames.Memory, map[string]interface{}{"target": "memory", "action": "add", "content": "Project is Atlas."}),
+		toolCallResponse("write", filememory.Name, map[string]interface{}{"target": "memory", "action": "add", "content": "Project is Atlas."}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "saved"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "read"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "next session"}},
 	}}
-	reg, err := registry.NewFromDirectory(filepath.Join("..", "..", config.DefaultDataRoot, "tools"), config.NewLogger(config.LevelError))
-	if err != nil {
-		t.Fatal(err)
-	}
 	fileStore := files.NewStore(t.TempDir())
-	if err := reg.RegisterHandler(toolnames.Memory, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(filememory.NewHandler(fileStore))); err != nil {
+	reg, err := tools.NewRegistryFromConfig(&config.Config{}, nil, fileStore, config.NewLogger(config.LevelError))
+	if err != nil {
 		t.Fatal(err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
@@ -1519,7 +1520,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	if len(requests) != 2 || !requestHasTool(requests[0], toolnames.Memory) {
+	if len(requests) != 2 || !requestHasTool(requests[0], filememory.Name) {
 		t.Fatalf("memory tool was not advertised: %+v", requests)
 	}
 	result := toolResultByID(requests[1].Messages, "write")
@@ -1624,7 +1625,7 @@ func TestAgentKeepsDefaultVisibleMemoryAfterGlobalMCPResult(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.Memory}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: filememory.Name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("memory"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1640,7 +1641,7 @@ func TestAgentKeepsDefaultVisibleMemoryAfterGlobalMCPResult(t *testing.T) {
 		t.Fatalf("request count=%d", len(requests))
 	}
 	for i, request := range requests {
-		if !requestHasTool(request, toolnames.Memory) {
+		if !requestHasTool(request, filememory.Name) {
 			t.Fatalf("memory missing from request %d: %+v", i, toolNames(request))
 		}
 	}
@@ -1675,6 +1676,7 @@ type fakeChatter struct {
 	responses []*llm.ChatResponse
 	outcomes  []fakeChatOutcome
 	requests  []llm.ChatRequest
+	onChat    func(llm.ChatRequest)
 }
 
 type fakeChatOutcome struct {
@@ -1684,6 +1686,9 @@ type fakeChatOutcome struct {
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {
 	f.requests = append(f.requests, req)
+	if f.onChat != nil {
+		f.onChat(req)
+	}
 	if len(f.outcomes) > 0 {
 		outcome := f.outcomes[0]
 		f.outcomes = f.outcomes[1:]

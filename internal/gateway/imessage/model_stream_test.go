@@ -134,11 +134,8 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte("# test.report\n\n## Description\n\nPrepare a report.\n\n## Parameters\n\n| Name | Type | Required | Description |\n| --- | --- | --- | --- |\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	reg, err := registry.NewFromDirectory(dir, log)
-	if err != nil {
+	reg := registry.New(log)
+	if err := reg.RegisterDefinition(llm.ToolDefinition{Name: "test.report", Description: "Prepare a report.", Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{}}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.RegisterHandler("test.report", governance.ToolPolicy{}, func(context.Context, map[string]interface{}) (governance.Result, error) {

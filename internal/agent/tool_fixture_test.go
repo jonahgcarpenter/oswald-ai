@@ -1,10 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -12,7 +8,22 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
-func registerTestTool(t *testing.T, reg *registry.Registry, spec registry.Spec, policy governance.ToolPolicy, handler registry.Handler) error {
+type testToolParam struct {
+	Name        string
+	Type        string
+	Required    bool
+	Description string
+	Enum        []string
+}
+
+type testToolSpec struct {
+	Name        string
+	Description string
+	Parameters  []testToolParam
+	Schema      *llm.ToolParameters
+}
+
+func registerTestTool(t *testing.T, reg *registry.Registry, spec testToolSpec, policy governance.ToolPolicy, handler registry.Handler) error {
 	t.Helper()
 	schema := llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{}}
 	if spec.Schema != nil {
@@ -28,20 +39,11 @@ func registerTestTool(t *testing.T, reg *registry.Registry, spec registry.Spec, 
 	if schema.Properties == nil {
 		schema.Properties = map[string]llm.ToolParameterProperty{}
 	}
-	encoded, err := json.Marshal(schema)
-	if err != nil {
-		return err
-	}
 	description := spec.Description
 	if description == "" {
 		description = spec.Name
 	}
-	definition := fmt.Sprintf("# %s\n\n## Description\n\n%s\n\n## Parameters\n\n| Name | Type | Required | Description |\n| ---- | ---- | -------- | ----------- |\n\n## Schema\n\n%s\n", spec.Name, description, encoded)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "tool.md"), []byte(definition), 0o600); err != nil {
-		return err
-	}
-	if err := reg.LoadFromDirectory(dir); err != nil {
+	if err := reg.RegisterDefinition(llm.ToolDefinition{Name: spec.Name, Description: description, Parameters: schema}); err != nil {
 		return err
 	}
 	return reg.RegisterHandler(spec.Name, policy, handler)

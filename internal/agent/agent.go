@@ -19,8 +19,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 const (
@@ -191,7 +192,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") || strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage)
+		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -267,7 +268,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
-	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(imagegenerate.Name) {
 		imagesStarted := time.Now()
 		priorImages, err := a.userMemory.SessionImages(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil {
@@ -346,7 +347,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
-	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(imagegenerate.Name) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
@@ -624,17 +625,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			policy, advertised := catalog.Policies[toolName]
 			decision := governance.Decision{ReasonCode: iterationDecision.ReasonCode}
 			if iterationDecision.Allowed {
-				fingerprintArgs := tc.Function.Arguments
-				if _, explicit := fingerprintArgs["source_image_id"]; toolName == toolnames.ComfyUIImageToImage && !explicit && len(contextImages) > 0 {
-					// Bind duplicates to the default source at this execution, without
-					// rewriting model arguments or bypassing handler source validation.
-					fingerprintArgs = make(map[string]interface{}, len(tc.Function.Arguments)+1)
-					for key, value := range tc.Function.Arguments {
-						fingerprintArgs[key] = value
-					}
-					fingerprintArgs["source_image_id"] = contextImages[0].ID
-				}
-				decision = toolGovernor.BeforeExecution(toolName, fingerprintArgs, policy, advertised)
+				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
 			}
 			if decision.Allowed {
 				toolExecutionCount++
@@ -643,11 +634,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolMeta.ParentOperationID = toolMeta.OperationID
 				toolMeta.OperationID = config.NewRequestID()
 				reqLog.Debug("agent.tool.start", "starting authorized tool execution", config.F("tool_name", toolName))
-				isGenerated := toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage
+				isGenerated := toolName == imagegenerate.Name
 				var plannedImage requestctx.InputImage
 				selectedSlot := -1
 				if isGenerated {
-					plannedImage, selectedSlot, execErr = planGeneratedImage(tc.Function.Arguments, toolName == toolnames.ComfyUIImageToImage, contextImages, generatedImages)
+					plannedImage, selectedSlot, execErr = planGeneratedImage(tc.Function.Arguments, contextImages, generatedImages)
 					if execErr == nil {
 						if plannedImage.ImageID == "" {
 							plannedImage.ImageID = config.NewRequestID()
@@ -680,7 +671,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
 							execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
 						} else {
-							if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
+							if isGenerated {
 								for _, attachment := range result.Attachments {
 									normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
 									if err != nil {
@@ -696,6 +687,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										break
 									}
 									metadata["source_image_id"], _ = json.Marshal(image.ID)
+									metadata["image"], _ = json.Marshal(image.ID)
 									metadata["image_id"], _ = json.Marshal(image.ImageID)
 									metadata["version"], _ = json.Marshal(image.Version)
 									metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
@@ -705,12 +697,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 									if len(visionGeneratedImages) > 4 {
 										visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
 									}
-									variant, _ := tc.Function.Arguments["create_variant"].(bool)
-									if !variant {
-										for i := range contextImages {
-											if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
-												contextImages[i].ImageID = image.ImageID
-											}
+									for i := range contextImages {
+										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
+											contextImages[i].ImageID = image.ImageID
 										}
 									}
 									if selectedSlot >= 0 {
@@ -810,7 +799,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			if streamCallback != nil {
 				payload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
-				if toolName == toolnames.WebSearch && payload.WebSearch != nil {
+				if toolName == websearch.Name && payload.WebSearch != nil {
 					payload.WebSearch.IsDegraded = result.IsDegraded
 				}
 				streamCallback(StreamChunk{

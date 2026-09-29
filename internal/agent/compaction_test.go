@@ -109,7 +109,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished after compaction"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult(strings.Repeat("result ", 1000)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final after recovery"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup complete"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -358,7 +358,7 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			reg := registry.New(config.NewLogger(config.LevelError))
 			policy := testToolPolicy()
 			policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
-			if err := registerTestTool(t, reg, registry.Spec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+			if err := registerTestTool(t, reg, testToolSpec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 				return governance.Result{Content: liveResult, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "result.png", MIMEType: "image/png", Data: []byte("private attachment bytes")}}}, nil
 			}); err != nil {
 				t.Fatal(err)

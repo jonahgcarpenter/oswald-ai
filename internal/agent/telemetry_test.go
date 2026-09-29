@@ -51,7 +51,7 @@ func TestToolAndGenerationTelemetryDoesNotDoubleMeter(t *testing.T) {
 		{Message: llm.ChatMessage{Role: "assistant", Content: "private-response-canary"}},
 	}}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		m := requestctx.MetadataFromContext(ctx)
 		if m.OperationID == "" || m.OperationID == "operation" || m.ParentOperationID != "operation" {
 			t.Error("tool operation correlation missing")
@@ -142,7 +142,7 @@ func TestToolCompletionPreservesActualOutcomeDuringCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			reg := registry.New(config.NewLogger(config.LevelError))
-			if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+			if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 				cancel()
 				result := productiveResult("private-result-canary")
 				result.ReasonCode = "test_result"

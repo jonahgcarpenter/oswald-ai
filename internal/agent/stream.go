@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -75,12 +75,12 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
 	}
-	if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
+	if toolName == imagegenerate.Name {
 		payload.Arguments = nil
 		payload.ResultText = ""
 		return payload
 	}
-	if toolName != toolnames.WebSearch {
+	if toolName != websearch.Name {
 		return payload
 	}
 

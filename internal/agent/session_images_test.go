@@ -17,9 +17,43 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
+
+func generatedResultID(messages []llm.ChatMessage, callID string) string {
+	result := toolResultByID(messages, callID)
+	if result == nil {
+		return ""
+	}
+	var metadata struct {
+		Image string `json:"image"`
+	}
+	if json.Unmarshal([]byte(result.Content), &metadata) != nil {
+		return ""
+	}
+	return metadata.Image
+}
+
+func TestPlanGeneratedImageRequiresExactCatalogIDForEdits(t *testing.T) {
+	sources := []requestctx.InputImage{{ID: "current-1", ImageID: "logical-1"}}
+	for _, args := range []map[string]interface{}{
+		{"image_url": ""}, {"image_url": " current-1 "}, {"image_url": "https://example.com/image.png"},
+		{"image_url": "/tmp/image.png"}, {"image_url": nil},
+	} {
+		if _, _, err := planGeneratedImage(args, sources, nil); err == nil {
+			t.Fatalf("accepted invalid selector: %v", args)
+		}
+	}
+	created, slot, err := planGeneratedImage(map[string]interface{}{}, sources, nil)
+	if err != nil || slot != -1 || created.ImageID != "" || created.ParentSourceImageID != "" {
+		t.Fatalf("omission did not create a new logical image: %+v slot=%d err=%v", created, slot, err)
+	}
+	selected, slot, err := planGeneratedImage(map[string]interface{}{"image_url": "current-1"}, sources, nil)
+	if err != nil || slot != -1 || selected.ImageID != "logical-1" || selected.ParentSourceImageID != "current-1" {
+		t.Fatalf("explicit edit did not bind its source: %+v slot=%d err=%v", selected, slot, err)
+	}
+}
 
 func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 	for _, mode := range []string{"ordinary", "parser_retry", "repeated_parser", "parser_context", "corrective", "tools_disabled"} {
@@ -36,8 +70,14 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 						policy := testToolPolicy()
 						policy.MaxExecutions = 0
 						count := 0
-						for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage, "work"} {
-							if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+						editArgs := map[string]interface{}{"prompt": "edit"}
+						chat.onChat = func(req llm.ChatRequest) {
+							if id := generatedResultID(req.Messages, "0"); id != "" {
+								editArgs["image_url"] = id
+							}
+						}
+						for _, name := range []string{imagegenerate.Name, "work"} {
+							if err := registerTestTool(t, reg, testToolSpec{Name: name, Description: name}, policy, func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 								count++
 								result := governance.Result{Content: `{}`, Outcome: governance.OutcomeProductive}
 								if generated {
@@ -50,11 +90,16 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 								t.Fatal(err)
 							}
 						}
-						for i, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
+						for i := 0; i < 2; i++ {
+							name := imagegenerate.Name
+							args := map[string]interface{}{"prompt": fmt.Sprint(i)}
+							if i == 1 && generated {
+								args = editArgs
+							}
 							if !generated {
 								name = "work"
 							}
-							chat.outcomes = append(chat.outcomes, fakeChatOutcome{response: toolCallResponse(fmt.Sprint(i), name, map[string]interface{}{"prompt": fmt.Sprint(i)})})
+							chat.outcomes = append(chat.outcomes, fakeChatOutcome{response: toolCallResponse(fmt.Sprint(i), name, args)})
 						}
 						parserErr := &llm.ChatHTTPError{StatusCode: 500, Body: "XML syntax error on line 7: unexpected EOF"}
 						var failure error = errors.New("synthetic provider failure")
@@ -155,32 +200,38 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 	}
 }
 
-func TestImageDefaultUsesProductionRecencyNotDeliveryOrder(t *testing.T) {
+func TestExplicitImageEditUsesProductionRecencyNotDeliveryOrder(t *testing.T) {
 	chat := &fakeChatter{}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, store := newTestAgent(t, chat, nil, reg)
 	editArgs := map[string]interface{}{"prompt": "edit A"}
 	var logicalA string
-	count := 0
-	for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-		if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
-			count++
-			sources := requestctx.InputImagesFromContext(ctx)
-			if count == 2 {
-				editArgs["source_image_id"] = sources[0].ID
-				logicalA = sources[0].ImageID
-			}
-			if count == 4 && (sources[0].ImageID != logicalA || sources[0].Version != 2) {
-				t.Fatal("default selected B instead of newest A-v2")
-			}
-			image := testInputImage(t, 2+count, 3+count)
-			data, _ := base64.StdEncoding.DecodeString(image.Data)
-			return governance.Result{Content: `{}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: fmt.Sprintf("image-%d.jpg", count), MIMEType: image.MimeType, Data: data}}}, nil
-		}); err != nil {
-			t.Fatal(err)
+	chat.onChat = func(req llm.ChatRequest) {
+		if id := generatedResultID(req.Messages, "A"); id != "" {
+			editArgs["image_url"] = id
 		}
 	}
-	chat.responses = []*llm.ChatResponse{toolCallResponse("A", toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": "A"}), toolCallResponse("B", toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": "B"}), toolCallResponse("A2", toolnames.ComfyUIImageToImage, editArgs), {Message: llm.ChatMessage{Role: "assistant", Content: "A and B"}}}
+	count := 0
+	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, testToolPolicy(), func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		count++
+		sources := requestctx.InputImagesFromContext(ctx)
+		if count == 2 {
+			for _, source := range sources {
+				if source.ID == editArgs["image_url"] {
+					logicalA = source.ImageID
+				}
+			}
+		}
+		if count == 4 && (sources[0].ImageID != logicalA || sources[0].Version != 2 || args["image_url"] != sources[0].ID) {
+			t.Fatal("explicit selection did not use newest A-v2")
+		}
+		image := testInputImage(t, 2+count, 3+count)
+		data, _ := base64.StdEncoding.DecodeString(image.Data)
+		return governance.Result{Content: `{}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: fmt.Sprintf("image-%d.jpg", count), MIMEType: image.MimeType, Data: data}}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chat.responses = []*llm.ChatResponse{toolCallResponse("A", imagegenerate.Name, map[string]interface{}{"prompt": "A"}), toolCallResponse("B", imagegenerate.Name, map[string]interface{}{"prompt": "B"}), toolCallResponse("A2", imagegenerate.Name, editArgs), {Message: llm.ChatMessage{Role: "assistant", Content: "A and B"}}}
 	response, err := processAgent(a, "recency", "discord", "session", "user-1", "User", "generate A B then edit A", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +243,7 @@ func TestImageDefaultUsesProductionRecencyNotDeliveryOrder(t *testing.T) {
 	if err != nil || len(images) != 2 || images[0].ImageID != logicalA || images[0].Version != 2 {
 		t.Fatal("storage lost generation recency")
 	}
-	chat.responses = []*llm.ChatResponse{toolCallResponse("next", toolnames.ComfyUIImageToImage, map[string]interface{}{"prompt": "edit newest"}), {Message: llm.ChatMessage{Role: "assistant", Content: "A-v3"}}}
+	chat.responses = []*llm.ChatResponse{toolCallResponse("next", imagegenerate.Name, map[string]interface{}{"prompt": "edit newest", "image_url": images[0].ID}), {Message: llm.ChatMessage{Role: "assistant", Content: "A-v3"}}}
 	if _, err := processAgent(a, "next", "discord", "session", "user-1", "User", "edit", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -208,16 +259,31 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 	policy := testToolPolicy()
 	policy.MaxExecutions = 0
 	policy.History.Mode = governance.HistoryMetadata
+	firstEditArgs := map[string]interface{}{"prompt": "purple"}
 	ancestorArgs := map[string]interface{}{"prompt": "retry ancestor"}
-	variantArgs := map[string]interface{}{"prompt": "blue variant", "create_variant": true}
+	variantArgs := map[string]interface{}{"prompt": "improve blue"}
+	failureArgs := map[string]interface{}{"prompt": "failed retry"}
+	chat.onChat = func(req llm.ChatRequest) {
+		for _, target := range []struct {
+			call string
+			args map[string]interface{}
+		}{{"1", firstEditArgs}, {"1", ancestorArgs}, {"4", variantArgs}, {"5", failureArgs}} {
+			if id := generatedResultID(req.Messages, target.call); id != "" {
+				target.args["image_url"] = id
+			}
+		}
+	}
 	var ancestor, originalLogical, variantLogical string
 	count := 0
 	handler := func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		count++
 		sources := requestctx.InputImagesFromContext(ctx)
 		if count == 2 {
-			ancestor, originalLogical = sources[0].ID, sources[0].ImageID
-			ancestorArgs["source_image_id"], variantArgs["source_image_id"] = ancestor, ancestor
+			for _, source := range sources {
+				if source.ID == firstEditArgs["image_url"] {
+					ancestor, originalLogical = source.ID, source.ImageID
+				}
+			}
 		}
 		if count == 4 {
 			if sources[0].Version != 3 || sources[0].ParentSourceImageID != ancestor || sources[0].ImageID != originalLogical {
@@ -226,8 +292,8 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 		}
 		if count == 5 {
 			variantLogical = sources[0].ImageID
-			if variantLogical == originalLogical || sources[0].Version != 1 || sources[0].ParentSourceImageID != ancestor {
-				t.Fatal("variant did not branch")
+			if variantLogical == originalLogical || sources[0].Version != 1 || sources[0].ParentSourceImageID != "" {
+				t.Fatal("text generation did not create a new logical image")
 			}
 		}
 		if count == 6 {
@@ -237,24 +303,22 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 		data, _ := base64.StdEncoding.DecodeString(image.Data)
 		return governance.Result{Content: `{"status":"generated"}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: fmt.Sprintf("image-%d.jpg", count), MIMEType: image.MimeType, Data: data}}}, nil
 	}
-	for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-		if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, policy, handler); err != nil {
-			t.Fatal(err)
-		}
+	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, policy, handler); err != nil {
+		t.Fatal(err)
 	}
-	if err := registerTestTool(t, reg, registry.Spec{Name: "report", Description: "report"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "report", Description: "report"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: "report", Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "report.txt", MIMEType: "text/plain", Data: []byte("report")}}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	chat.responses = []*llm.ChatResponse{
-		toolCallResponse("1", toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": "car"}),
-		toolCallResponse("2", toolnames.ComfyUIImageToImage, map[string]interface{}{"prompt": "purple"}),
-		toolCallResponse("3", toolnames.ComfyUIImageToImage, ancestorArgs),
+		toolCallResponse("1", imagegenerate.Name, map[string]interface{}{"prompt": "car"}),
+		toolCallResponse("2", imagegenerate.Name, firstEditArgs),
+		toolCallResponse("3", imagegenerate.Name, ancestorArgs),
 		toolCallResponse("report", "report", nil),
-		toolCallResponse("4", toolnames.ComfyUIImageToImage, variantArgs),
-		toolCallResponse("5", toolnames.ComfyUIImageToImage, map[string]interface{}{"prompt": "improve blue"}),
-		toolCallResponse("6", toolnames.ComfyUIImageToImage, map[string]interface{}{"prompt": "failed retry"}),
+		toolCallResponse("4", imagegenerate.Name, map[string]interface{}{"prompt": "blue alternative"}),
+		toolCallResponse("5", imagegenerate.Name, variantArgs),
+		toolCallResponse("6", imagegenerate.Name, failureArgs),
 		{Message: llm.ChatMessage{Role: "assistant", Content: "Two alternatives and report."}},
 	}
 	response, err := processAgent(a, "versions", "discord", "session", "user-1", "User", "make alternatives", nil, func(chunk StreamChunk) {
@@ -280,7 +344,7 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 	if images[0].ImageID != variantLogical || images[0].Version != 2 || images[0].VersionHighwater != 3 || images[1].ImageID != originalLogical || images[1].Version != 3 {
 		t.Fatal("wrong final metadata")
 	}
-	chat.responses = []*llm.ChatResponse{toolCallResponse("next", toolnames.ComfyUIImageToImage, map[string]interface{}{"prompt": "next turn"}), {Message: llm.ChatMessage{Role: "assistant", Content: "Updated."}}}
+	chat.responses = []*llm.ChatResponse{toolCallResponse("next", imagegenerate.Name, map[string]interface{}{"prompt": "next turn", "image_url": images[0].ID}), {Message: llm.ChatMessage{Role: "assistant", Content: "Updated."}}}
 	response, err = processAgent(a, "next", "discord", "session", "user-1", "User", "edit", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -305,14 +369,14 @@ func TestGeneratedImageCapacityRejectsBeforeProvider(t *testing.T) {
 	calls := 0
 	image := testInputImage(t, 2, 3)
 	data, _ := base64.StdEncoding.DecodeString(image.Data)
-	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.ComfyUITextToImage, Description: "generate"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name, Description: "generate"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		calls++
 		return governance.Result{Content: `{}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: fmt.Sprintf("%d.jpg", calls), MIMEType: image.MimeType, Data: data}}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		chat.responses = append(chat.responses, toolCallResponse(fmt.Sprint(i), toolnames.ComfyUITextToImage, map[string]interface{}{"prompt": fmt.Sprint(i)}))
+		chat.responses = append(chat.responses, toolCallResponse(fmt.Sprint(i), imagegenerate.Name, map[string]interface{}{"prompt": fmt.Sprint(i)}))
 	}
 	chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Four images."}})
 	response, err := processAgent(a, "capacity", "discord", "session", "user-1", "User", "generate", nil, nil)
@@ -360,17 +424,19 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 			}
 			policy := testToolPolicy()
 			policy.History.Mode = governance.HistoryMetadata
-			for _, name := range []string{toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage} {
-				if err := registerTestTool(t, reg, registry.Spec{Name: name, Description: name}, policy, handler); err != nil {
-					t.Fatal(err)
-				}
+			if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, policy, handler); err != nil {
+				t.Fatal(err)
 			}
 			for i, prompt := range []string{"generate a car", "make it blue", "make it purple"} {
-				name := toolnames.ComfyUIImageToImage
-				if i == 0 {
-					name = toolnames.ComfyUITextToImage
+				args := map[string]interface{}{"prompt": prompt}
+				if i > 0 {
+					assets, err := store.SessionImages(context.Background(), "user-1", "session", 1)
+					if err != nil || len(assets) == 0 {
+						t.Fatalf("source images=%d err=%v", len(assets), err)
+					}
+					args["image_url"] = assets[0].ID
 				}
-				chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "generate", Function: llm.ToolFunction{Name: name, Arguments: map[string]interface{}{"prompt": prompt}}}}}}, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Here it is."}})
+				chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "generate", Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: args}}}}}, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Here it is."}})
 				var callback func(StreamChunk)
 				if streaming {
 					callback = func(StreamChunk) {}
@@ -457,13 +523,13 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 	policy := testToolPolicy()
 	policy.MaxExecutions = 0
 	policy.History.Mode = governance.HistoryMetadata
-	err := registerTestTool(t, reg, registry.Spec{Name: toolnames.ComfyUIImageToImage, Description: "edit"}, policy, func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+	err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name, Description: "edit"}, policy, func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		sources := requestctx.InputImagesFromContext(ctx)
 		if len(sources) == 0 || sources[0].Data != previous {
-			t.Fatal("default source did not advance within batch")
+			t.Fatal("latest generated image missing from context within batch")
 		}
-		if count == 0 && sources[0].ID != "current-1" {
-			t.Fatal("current image has no selector")
+		if args["image_url"] != "current-1" {
+			t.Fatal("explicit current image selector changed")
 		}
 		image := testInputImage(t, 3+count, 4+count)
 		data, _ := base64.StdEncoding.DecodeString(image.Data)
@@ -480,7 +546,8 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 	}
 	var calls []llm.ToolCall
 	for i := 0; i < 6; i++ {
-		calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Function: llm.ToolFunction{Name: toolnames.ComfyUIImageToImage, Arguments: map[string]interface{}{"prompt": fmt.Sprintf("edit %d", i)}}})
+		args := map[string]interface{}{"prompt": fmt.Sprintf("edit %d", i), "image_url": "current-1"}
+		calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: args}})
 	}
 	chat.responses = []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", ToolCalls: calls}}, {Message: llm.ChatMessage{Role: "assistant", Content: "Final image."}}}
 	response, err := processAgent(a, "batch", "discord", "session", "user-1", "User", "edit repeatedly", []llm.InputImage{current}, nil)
@@ -511,12 +578,12 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 }
 
 func TestGeneratedImageCannotSucceedAfterSessionResetBeforePersistence(t *testing.T) {
-	chat := &fakeChatter{responses: []*llm.ChatResponse{toolCallResponse("generate", toolnames.ComfyUITextToImage, nil), {Message: llm.ChatMessage{Role: "assistant", Content: "Here it is."}}}}
+	chat := &fakeChatter{responses: []*llm.ChatResponse{toolCallResponse("generate", imagegenerate.Name, nil), {Message: llm.ChatMessage{Role: "assistant", Content: "Here it is."}}}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, store := newTestAgent(t, chat, nil, reg)
 	image := testInputImage(t, 2, 3)
 	data, _ := base64.StdEncoding.DecodeString(image.Data)
-	if err := registerTestTool(t, reg, registry.Spec{Name: toolnames.ComfyUITextToImage, Description: "generate"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name, Description: "generate"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		if err := store.ResetSessionContext(ctx, "user-1", "session"); err != nil {
 			t.Fatal(err)
 		}

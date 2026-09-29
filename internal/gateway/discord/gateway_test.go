@@ -710,7 +710,7 @@ func TestDiscordDefersStreamAttachmentsUntilFinalResponse(t *testing.T) {
 	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
 	streamReturned := make(chan struct{})
 	go func() {
-		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "comfyui.text_to_image"}, Attachments: []media.OutputAttachment{attachment}})
+		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "image_generate"}, Attachments: []media.OutputAttachment{attachment}})
 		close(streamReturned)
 	}()
 	<-streamReturned

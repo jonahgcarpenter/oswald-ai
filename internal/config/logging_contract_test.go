@@ -20,12 +20,12 @@ func TestProductionLoggingContract(t *testing.T) {
 	// Exact forwarding expressions, not blanket file exceptions. The worker
 	// wrapper's callers are checked below; the other sites select fixed literals.
 	reviewedEvents := map[string]string{
-		"internal/accounts/challenges.go#ConfirmChallenge":          "event",
-		"internal/llm/telemetry.go#beginMeasurement":                "event",
-		"internal/tools/builtin/websearch/telemetry.go#beginSearch": "event",
-		"internal/compaction/service.go#warn":                       "event",
-		"internal/memory/indexing/service.go#warn":                  "event",
-		"internal/memory/indexing/service.go#health":                "event",
+		"internal/accounts/challenges.go#ConfirmChallenge": "event",
+		"internal/llm/telemetry.go#beginMeasurement":       "event",
+		"internal/providers/web/telemetry.go#BeginSearch":  "event",
+		"internal/compaction/service.go#warn":              "event",
+		"internal/memory/indexing/service.go#warn":         "event",
+		"internal/memory/indexing/service.go#health":       "event",
 		// startup.Error.Event and Message are fixed source literals, not Cause.
 		"cmd/agent/main.go#main": "startupErr.Event",
 	}

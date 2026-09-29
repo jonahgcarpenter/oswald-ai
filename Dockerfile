@@ -13,7 +13,6 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
-COPY .oswald/tools/ ./.oswald/tools/
 COPY .oswald/workflows/ ./.oswald/workflows/
 COPY .oswald/SOUL.md ./.oswald/SOUL.md
 COPY internal/ ./internal/

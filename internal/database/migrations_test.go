@@ -9,8 +9,6 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
-
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 )
 
 func TestPermanentV400SQLIsExecutedDirectly(t *testing.T) {
@@ -86,7 +84,7 @@ func TestPermanentV400IsFreshAndIdempotent(t *testing.T) {
 		"user_memory_search",
 		"user_memory_list",
 		"global_memory_search",
-		toolnames.SessionTranscriptSearch,
+		"session_transcript_search",
 	}, ",")
 	if _, err := db.SQL().Exec(`
 INSERT INTO account_users(canonical_user_id) VALUES ('restart-user');
