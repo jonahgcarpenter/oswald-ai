@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
@@ -19,7 +20,7 @@ import (
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
-func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, log *config.Logger) error {
+func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, cache *imagecache.Cache, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
@@ -28,11 +29,11 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 		bootstrapLog.Info("tool.bootstrap.disabled", "disabled image generation because no server is configured", config.F("tool_name", imagegenerate.Name), config.F("status", "ok"))
 	} else {
-		textWorkflow, err := comfy_ui.LoadWorkflow(cfg.ComfyUITextToImageWorkflowPath, comfy_ui.TextToImage)
+		textWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.TextToImage, cfg.ComfyUICheckpoint)
 		if err != nil {
 			return err
 		}
-		imageWorkflow, err := comfy_ui.LoadWorkflow(cfg.ComfyUIImageToImageWorkflowPath, comfy_ui.ImageToImage)
+		imageWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.ImageToImage, cfg.ComfyUICheckpoint)
 		if err != nil {
 			return err
 		}
@@ -44,7 +45,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 			BlockDuplicates: true, NormalizeArgs: normalizeImageGenerateArgs,
 			History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
 		}
-		if err := reg.RegisterHandler(imagegenerate.Name, policy, registry.Handler(imagegenerate.NewHandler(textWorkflow, imageWorkflow, client, log))); err != nil {
+		if err := reg.RegisterHandler(imagegenerate.Name, policy, registry.Handler(imagegenerate.NewHandler(textWorkflow, imageWorkflow, client, cache, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", imagegenerate.Name, err)
 		}
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured image generation tool", config.F("tool_name", imagegenerate.Name))

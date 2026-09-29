@@ -176,7 +176,7 @@ func TestGenerateBuildsWorkflowAndReportsEffectiveParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+	workflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,16 +196,115 @@ func TestGenerateBuildsWorkflowAndReportsEffectiveParameters(t *testing.T) {
 	}
 }
 
+func TestGenerateSubmitsCompleteRuntimeGraphs(t *testing.T) {
+	for _, tc := range []struct {
+		mode    Mode
+		output  string
+		png     bool
+		classes map[string]string
+		links   map[string]map[string][]interface{}
+	}{
+		{TextToImage, "9", false,
+			map[string]string{"3": "KSampler", "4": "CheckpointLoaderSimple", "5": "EmptyLatentImage", "6": "CLIPTextEncode", "7": "CLIPTextEncode", "8": "VAEDecode", "9": "SaveImage"},
+			map[string]map[string][]interface{}{"3": {"model": {"4", float64(0)}, "positive": {"6", float64(0)}, "negative": {"7", float64(0)}, "latent_image": {"5", float64(0)}}, "6": {"clip": {"4", float64(1)}}, "7": {"clip": {"4", float64(1)}}, "8": {"samples": {"3", float64(0)}, "vae": {"4", float64(2)}}, "9": {"images": {"8", float64(0)}}}},
+		{ImageToImage, "30", true,
+			map[string]string{"23": "CheckpointLoaderSimple", "24": "CLIPTextEncode", "25": "CLIPTextEncode", "26": "KSampler", "27": "VAEDecode", "28": "VAEEncode", "29": "LoadImage", "30": "PreviewImage", "32": "ImageScale"},
+			map[string]map[string][]interface{}{"24": {"clip": {"23", float64(1)}}, "25": {"clip": {"23", float64(1)}}, "26": {"model": {"23", float64(0)}, "positive": {"24", float64(0)}, "negative": {"25", float64(0)}, "latent_image": {"28", float64(0)}}, "27": {"samples": {"26", float64(0)}, "vae": {"23", float64(2)}}, "28": {"pixels": {"32", float64(0)}, "vae": {"23", float64(2)}}, "30": {"images": {"27", float64(0)}}, "32": {"image": {"29", float64(0)}}}},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			var submitted map[string]node
+			imageData := testPNG(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/upload/image":
+					_, _ = w.Write([]byte(`{"name":"` + InputFilename + `","subfolder":"` + InputSubfolder + `","type":"input"}`))
+				case "/prompt":
+					var payload struct {
+						Prompt map[string]node `json:"prompt"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Error(err)
+					}
+					submitted = payload.Prompt
+					_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
+				case "/history/job":
+					_, _ = w.Write([]byte(`{"job":{"outputs":{"` + tc.output + `":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+				case "/view":
+					w.Header().Set("Content-Type", "image/png")
+					_, _ = w.Write(imageData)
+				case "/free":
+					w.WriteHeader(http.StatusOK)
+				default:
+					t.Errorf("unexpected endpoint %s", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			workflow, err := NewWorkflow(tc.mode, "custom.safetensors")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := NewClient(server.URL, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var input []byte
+			if tc.png {
+				input = imageData
+			}
+			result, err := client.Generate(context.Background(), nil, workflow, "prompt", "negative", nil, input, "portrait")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(submitted) != len(tc.classes) {
+				t.Fatalf("submitted %d nodes, want %d", len(submitted), len(tc.classes))
+			}
+			for id, class := range tc.classes {
+				if submitted[id].ClassType != class {
+					t.Errorf("node %s class = %q, want %q", id, submitted[id].ClassType, class)
+				}
+				for key, link := range tc.links[id] {
+					if !reflect.DeepEqual(submitted[id].Inputs[key], link) {
+						t.Errorf("node %s %s = %v, want %v", id, key, submitted[id].Inputs[key], link)
+					}
+				}
+			}
+			samID, dimensionsID, checkpointID, positiveID, negativeID := "3", "5", "4", "6", "7"
+			if tc.png {
+				samID, dimensionsID, checkpointID, positiveID, negativeID = "26", "32", "23", "24", "25"
+			}
+			for id, fields := range map[string]map[string]interface{}{
+				samID:        {"seed": float64(result.Seed), "sampler_name": "dpmpp_2m", "scheduler": "karras"},
+				dimensionsID: {"width": float64(432), "height": float64(768)},
+				checkpointID: {"ckpt_name": "custom.safetensors"},
+				positiveID:   {"text": "prompt"}, negativeID: {"text": "negative"},
+			} {
+				for key, want := range fields {
+					if got := submitted[id].Inputs[key]; got != want {
+						t.Errorf("node %s %s = %v, want %v", id, key, got, want)
+					}
+				}
+			}
+			if tc.png {
+				if submitted["29"].Inputs["image"] != InputImageReference || submitted["32"].Inputs["upscale_method"] != "lanczos" || submitted["32"].Inputs["crop"] != "center" || submitted["26"].Inputs["denoise"] != 0.45 || submitted["26"].Inputs["steps"] != float64(15) || submitted["26"].Inputs["cfg"] != float64(5) {
+					t.Fatal("image graph parameters changed")
+				}
+			} else if submitted["3"].Inputs["denoise"] != float64(1) || submitted["3"].Inputs["steps"] != float64(20) || submitted["3"].Inputs["cfg"] != float64(7) || submitted["5"].Inputs["batch_size"] != float64(1) || submitted["9"].Inputs["filename_prefix"] != "ComfyUI" {
+				t.Fatal("text graph parameters changed")
+			}
+		})
+	}
+}
+
 func TestGenerateRejectsInvalidInputsBeforeProviderWork(t *testing.T) {
 	client, err := NewClient("http://localhost:1234", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
+	text, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
-	imageWorkflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+	imageWorkflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,11 +521,11 @@ func maxOutputBytesForTest() int {
 }
 
 func generateTest(client *Client, ctx context.Context, outputNode string, png []byte) (Generation, error) {
-	mode, filename := TextToImage, "text-to-image-basic.json"
+	mode := TextToImage
 	if outputNode == "30" {
-		mode, filename = ImageToImage, "image-to-image-basic.json"
+		mode = ImageToImage
 	}
-	workflow, err := LoadWorkflow(workflowPath(filename), mode)
+	workflow, err := NewWorkflow(mode, "dreamshaper_8.safetensors")
 	if err != nil {
 		return Generation{}, err
 	}

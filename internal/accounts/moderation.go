@@ -330,6 +330,12 @@ func (s *Service) deleteUserLockedWithInvalidation(ctx context.Context, data dat
 			return UserDeletionDescriptor{}, fmt.Errorf("delete user soul: %w", err)
 		}
 	}
+	if s.imageCache != nil {
+		if err := s.imageCache.DeleteUser(ctx, targetID); err != nil {
+			s.log.With(requestctx.LogFields(ctx)...).Warn("account_link.user.image_cache_delete_failed", "failed to delete user image cache", config.F("actor_user_id", actorID), config.F("target_user_id", targetID), config.F("status", "error"), config.ErrorField(err))
+			return UserDeletionDescriptor{}, fmt.Errorf("delete user image cache: %w", err)
+		}
+	}
 
 	var invalidation memory.UserDeletionScope
 	if err := s.db.WithTx(ctx, func(tx *sql.Tx) error {

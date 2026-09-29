@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -110,7 +111,7 @@ func TestRunMigratesFileMemoryBeforeGateways(t *testing.T) {
 			deps := dependencies{
 				databasePath:   filepath.Join(t.TempDir(), "oswald.db"),
 				fileMemoryRoot: root,
-				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, log *config.Logger) (*registry.Registry, error) {
+				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, _ *imagecache.Cache, log *config.Logger) (*registry.Registry, error) {
 					return registry.New(log), nil
 				},
 				newGateways: func(_ *config.Config, _ *accounts.Service, _ gatewayruntime.Dependencies, _ *config.Logger) ([]gateway.Service, error) {
@@ -183,7 +184,7 @@ func TestRunProvisionsLocalOpenAIAdminBeforeBootstrap(t *testing.T) {
 			deps := dependencies{
 				databasePath:   path,
 				fileMemoryRoot: t.TempDir(),
-				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, log *config.Logger) (*registry.Registry, error) {
+				newRegistry: func(_ *config.Config, _ *memory.Store, _ *files.Store, _ *imagecache.Cache, log *config.Logger) (*registry.Registry, error) {
 					return registry.New(log), nil
 				},
 				newGateways: func(_ *config.Config, links *accounts.Service, _ gatewayruntime.Dependencies, _ *config.Logger) ([]gateway.Service, error) {
@@ -251,10 +252,26 @@ func TestRunLifecycle(t *testing.T) {
 			if mode == "gateway start failure" {
 				gw.name = "test"
 			}
+			cacheRoot := t.TempDir()
+			var expiredImage string
+			if mode == "success" {
+				images := filepath.Join(cacheRoot, "test-user", ".cache", "images")
+				if err := os.MkdirAll(images, 0700); err != nil {
+					t.Fatal(err)
+				}
+				expiredImage = filepath.Join(images, strings.Repeat("a", 32)+".png")
+				if err := os.WriteFile(expiredImage, []byte("fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				old := time.Now().Add(-25 * time.Hour)
+				if err := os.Chtimes(expiredImage, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
 			deps := dependencies{
 				databasePath:   filepath.Join(t.TempDir(), "oswald.db"),
-				fileMemoryRoot: t.TempDir(),
-				newRegistry: func(_ *config.Config, m *memory.Store, f *files.Store, l *config.Logger) (*registry.Registry, error) {
+				fileMemoryRoot: cacheRoot,
+				newRegistry: func(_ *config.Config, m *memory.Store, f *files.Store, _ *imagecache.Cache, l *config.Logger) (*registry.Registry, error) {
 					userStore, fileStore = m, f
 					if mode == "registry failure" {
 						return nil, cause
@@ -311,6 +328,21 @@ func TestRunLifecycle(t *testing.T) {
 					case <-logs.gatewayStopped:
 					case <-time.After(10 * time.Second):
 						t.Fatal("gateway failure was not logged")
+					}
+				}
+				if expiredImage != "" {
+					deadline := time.After(10 * time.Second)
+					for {
+						if _, err := os.Stat(expiredImage); errors.Is(err, os.ErrNotExist) {
+							break
+						} else if err != nil {
+							t.Fatal(err)
+						}
+						select {
+						case <-deadline:
+							t.Fatal("startup image cache sweep did not run")
+						case <-time.After(10 * time.Millisecond):
+						}
 					}
 				}
 				select {
@@ -388,6 +420,9 @@ func TestRunLifecycle(t *testing.T) {
 			}
 			if !logs.hasEvent("app.shutdown") || !logs.hasEvent("app.shutdown.complete") {
 				t.Fatal("missing ordered shutdown lifecycle logs")
+			}
+			if !logs.hasEvent("imagecache.sweep.complete") || !bytes.Contains(logs.snapshot(), []byte(`"phase":"image_cache"`)) {
+				t.Fatal("image cache sweep or joined cleanup missing")
 			}
 			logs.mu.Lock()
 			cleanupEnd := bytes.LastIndex(logs.buf.Bytes(), []byte(`"event":"app.cleanup.completed"`))
@@ -468,12 +503,18 @@ func (w *startupLogWriter) hasEvent(name string) bool {
 	return false
 }
 
+func (w *startupLogWriter) snapshot() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Clone(w.buf.Bytes())
+}
+
 func TestShutdownOrder(t *testing.T) {
-	names := []string{"maintenance", "broker", "compaction", "index", "mcp", "accounts", "mcpStore", "userMemory"}
+	names := []string{"maintenance", "imageCache", "broker", "compaction", "index", "mcp", "accounts", "mcpStore", "userMemory"}
 	for _, partial := range []bool{false, true} {
 		var got, want []string
 		var s shutdown
-		slots := []*func(){&s.maintenance, &s.broker, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.userMemory}
+		slots := []*func(){&s.maintenance, &s.imageCache, &s.broker, &s.compaction, &s.index, &s.mcp, &s.accounts, &s.mcpStore, &s.userMemory}
 		for i, slot := range slots {
 			if partial && i%2 == 0 {
 				continue

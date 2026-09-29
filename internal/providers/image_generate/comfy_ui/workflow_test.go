@@ -2,27 +2,19 @@ package comfy_ui
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"testing"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
-
-func workflowPath(name string) string {
-	return filepath.Join("..", "..", "..", "..", config.DefaultDataRoot, "workflows", "comfyui", name)
-}
 
 func TestBuildMutatesOnlyAllowedWorkflowFields(t *testing.T) {
 	for _, test := range []struct {
-		mode     Mode
-		filename string
+		mode Mode
 	}{
-		{mode: TextToImage, filename: "text-to-image-basic.json"},
-		{mode: ImageToImage, filename: "image-to-image-basic.json"},
+		{mode: TextToImage},
+		{mode: ImageToImage},
 	} {
 		t.Run(string(test.mode), func(t *testing.T) {
-			workflow, err := LoadWorkflow(workflowPath(test.filename), test.mode)
+			workflow, err := NewWorkflow(test.mode, "dreamshaper_8.safetensors")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -32,12 +24,12 @@ func TestBuildMutatesOnlyAllowedWorkflowFields(t *testing.T) {
 				t.Fatal(err)
 			}
 			if test.mode == TextToImage {
-				expected["5"].Inputs["width"], expected["5"].Inputs["height"] = float64(768), float64(448)
+				expected["5"].Inputs["width"], expected["5"].Inputs["height"] = float64(768), float64(432)
 				expected["6"].Inputs["text"] = "positive"
 				expected["7"].Inputs["text"] = "negative"
 				expected["3"].Inputs["seed"] = seed
 			} else {
-				expected["32"].Inputs["width"], expected["32"].Inputs["height"] = float64(768), float64(448)
+				expected["32"].Inputs["width"], expected["32"].Inputs["height"] = float64(768), float64(432)
 				expected["24"].Inputs["text"] = "positive"
 				expected["25"].Inputs["text"] = "negative"
 				expected["26"].Inputs["seed"] = seed
@@ -66,8 +58,8 @@ func cloneNodes(t *testing.T, nodes map[string]node) map[string]node {
 	return cloned
 }
 
-func TestLoadAndBuildWorkflows(t *testing.T) {
-	text, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
+func TestBuildWorkflows(t *testing.T) {
+	text, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +98,7 @@ func TestLoadAndBuildWorkflows(t *testing.T) {
 		t.Fatal("template was mutated")
 	}
 
-	image, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+	image, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +112,7 @@ func TestLoadAndBuildWorkflows(t *testing.T) {
 }
 
 func TestWorkflowValidationRejectsUnsafeBounds(t *testing.T) {
-	w, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
+	w, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,16 +120,50 @@ func TestWorkflowValidationRejectsUnsafeBounds(t *testing.T) {
 	if err := w.validate(); err == nil {
 		t.Fatal("unsafe dimensions accepted")
 	}
+	for _, size := range []float64{433, 784} {
+		w.nodes["5"].Inputs["width"] = size
+		if err := w.validate(); err == nil {
+			t.Fatalf("unsafe width %v accepted", size)
+		}
+	}
+	w.nodes["5"].Inputs["width"] = float64(768)
+	w.nodes["5"].Inputs["height"] = float64(432)
+	if err := w.validate(); err != nil {
+		t.Fatalf("exact 16:9 rejected: %v", err)
+	}
+}
+
+func TestNewWorkflowCheckpointAndMode(t *testing.T) {
+	for _, checkpoint := range []string{"", "../model.safetensors", "sub/model.safetensors", `sub\model.safetensors`, " model.safetensors", ".hidden.safetensors", "model..safetensors", "model.ckpt", "model.SAFETENSORS", "model\n.safetensors"} {
+		if _, err := NewWorkflow(TextToImage, checkpoint); err == nil {
+			t.Fatalf("accepted unsafe checkpoint %q", checkpoint)
+		}
+	}
+	if _, err := NewWorkflow("invalid", "model.safetensors"); err == nil {
+		t.Fatal("accepted invalid mode")
+	}
+	for _, mode := range []Mode{TextToImage, ImageToImage} {
+		w, err := NewWorkflow(mode, "selected-model_v2.safetensors")
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := "4"
+		if mode == ImageToImage {
+			id = "23"
+		}
+		if w.nodes[id].Inputs["ckpt_name"] != "selected-model_v2.safetensors" {
+			t.Fatal("checkpoint was not applied")
+		}
+	}
 }
 
 func TestAspectRatioBuildClonesBothWorkflowModes(t *testing.T) {
 	for _, mode := range []Mode{TextToImage, ImageToImage} {
-		filename := "text-to-image-basic.json"
 		dimensionNode := "5"
 		if mode == ImageToImage {
-			filename, dimensionNode = "image-to-image-basic.json", "32"
+			dimensionNode = "32"
 		}
-		workflow, err := LoadWorkflow(workflowPath(filename), mode)
+		workflow, err := NewWorkflow(mode, "dreamshaper_8.safetensors")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -146,7 +172,7 @@ func TestAspectRatioBuildClonesBothWorkflowModes(t *testing.T) {
 			aspect        string
 			width, height int
 		}{
-			{"landscape", 768, 448}, {"square", 512, 512}, {"portrait", 448, 768},
+			{"landscape", 768, 432}, {"square", 512, 512}, {"portrait", 432, 768},
 		} {
 			t.Run(string(mode)+"/"+tc.aspect, func(t *testing.T) {
 				built, seed, _, err := workflow.build("positive", "negative", nil, tc.aspect)

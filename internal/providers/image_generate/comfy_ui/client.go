@@ -61,7 +61,7 @@ func NewClient(rawURL string, timeout time.Duration) (*Client, error) {
 
 // Generate builds a fresh workflow, uploads an optional PNG, submits it, polls its
 // history, and downloads its first output. Cleanup runs before the call returns.
-// For image-to-image, a nil strength preserves the template's denoise value.
+// For image-to-image, a nil strength preserves the graph's default denoise value.
 func (c *Client) Generate(ctx context.Context, log *config.Logger, workflow *Workflow, prompt, negativePrompt string, strength *float64, inputPNG []byte, aspect string) (result Generation, err error) {
 	if workflow == nil {
 		return Generation{}, errors.New("ComfyUI workflow is required")

@@ -117,7 +117,9 @@ type Metadata struct {
 // InputImage is a normalized current or generated image available to this request.
 type InputImage struct {
 	// ID selects immutable source bytes; ImageID groups generated versions.
-	ID                  string
+	ID string
+	// Path is the private cache selector shown to the model; ID remains internal.
+	Path                string
 	ImageID             string
 	Version             int
 	ParentSourceImageID string

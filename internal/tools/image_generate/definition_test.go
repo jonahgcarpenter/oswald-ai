@@ -3,25 +3,43 @@ package image_generate
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
 func TestDefinition(t *testing.T) {
-	d := Definition()
-	if d.Name != Name || Name != "image_generate" || d.Parameters.Type != "object" || !reflect.DeepEqual(d.Parameters.Required, []string{"prompt"}) || d.Parameters.AdditionalProperties == nil || *d.Parameters.AdditionalProperties || len(d.Parameters.Properties) != 3 {
-		t.Fatalf("definition: %+v", d)
-	}
-	if !reflect.DeepEqual(d.Parameters.Properties["aspect_ratio"].Enum, []string{"landscape", "square", "portrait"}) || d.Parameters.Properties["aspect_ratio"].Default != "landscape" || d.Parameters.Properties["image_url"].Type != "string" {
-		t.Fatal("aspect/source schema incorrect")
-	}
-	wire, err := json.Marshal(d.Parameters)
-	if err != nil || !strings.Contains(string(wire), `"default":"landscape"`) {
-		t.Fatalf("aspect default missing from wire schema: %s, %v", wire, err)
-	}
-	for _, text := range []string{"attached", "server-owned", "source image IDs", "approximate", "default"} {
-		if !strings.Contains(d.Description, text) {
-			t.Errorf("description missing %q", text)
+	fixture := []byte(`{
+		"name":"image_generate",
+		"description":"Generate high-quality images from text prompts, or edit / transform an existing image by passing image_url. Returns the result in the ` + "`" + `image` + "`" + ` field — a URL or an absolute file path; reference it in your response using the current platform's file-delivery convention.",
+		"parameters":{"type":"object","properties":{
+			"prompt":{"type":"string","description":"The text prompt describing the desired image (text-to-image) or the edit to apply (image-to-image). Be detailed and descriptive."},
+			"aspect_ratio":{"type":"string","description":"The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.","enum":["landscape","square","portrait"],"default":"landscape"},
+			"image_url":{"type":"string","description":"Source image to edit/transform (image-to-image). A public URL or an absolute local file path from the conversation. Omit for text-to-image."}
+		},"required":["prompt"]}
+	}`)
+	assertJSON := func(label string, actual, expected []byte) {
+		t.Helper()
+		var got, want interface{}
+		if err := json.Unmarshal(actual, &got); err != nil {
+			t.Fatalf("%s decode actual: %v", label, err)
+		}
+		if err := json.Unmarshal(expected, &want); err != nil {
+			t.Fatalf("%s decode fixture: %v", label, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s mismatch: got %s, want %s", label, actual, expected)
 		}
 	}
+	definition := Definition()
+	encoded, err := json.Marshal(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSON("definition", encoded, fixture)
+	wire, err := json.Marshal(llm.Tool{Type: "function", Function: definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSON("model wire", wire, append(append([]byte(`{"type":"function","function":`), fixture...), '}'))
 }

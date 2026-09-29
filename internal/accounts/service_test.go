@@ -1,9 +1,12 @@
 package accounts
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
@@ -441,6 +445,83 @@ func TestServiceDeleteUserRemovesPrivateFiles(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(root, adminID, "SOUL.md")); err != nil || string(data) != "default" {
 		t.Fatalf("admin soul changed: %q %v", data, err)
+	}
+}
+
+func TestServiceDeleteUserImageCache(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	adminID, err := links.EnsureAccount(ctx, "discord", "9201", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := links.EnsureAccount(ctx, "discord", "9202", "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "9201", Assurance: identity.AssuranceDiscordGateway}
+	claimTestAdmin(t, links, admin)
+	root := t.TempDir()
+	cache := imagecache.New(root)
+	links.SetImageCache(cache)
+	var data bytes.Buffer
+	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	targetPath, err := cache.Save(ctx, targetID, data.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminPath, err := cache.Save(ctx, adminID, data.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(root, targetID, ".cache", "images", "note.txt")
+	if err := os.WriteFile(note, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.DeleteUserAs(ctx, admin, targetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(targetPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target image still present: %v", err)
+	}
+	for _, path := range []string{adminPath, note} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("unrelated file lost: %v", err)
+		}
+	}
+}
+
+func TestServiceDeleteUserUnsafeImageCacheRetainsAccount(t *testing.T) {
+	links := newTestService(t)
+	ctx := context.Background()
+	adminID, err := links.EnsureAccount(ctx, "discord", "9301", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, err := links.EnsureAccount(ctx, "discord", "9302", "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := identity.Principal{CanonicalUserID: adminID, Gateway: "discord", ExternalID: "9301", Assurance: identity.AssuranceDiscordGateway}
+	claimTestAdmin(t, links, admin)
+	root := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, targetID)); err != nil {
+		t.Fatal(err)
+	}
+	links.SetImageCache(imagecache.New(root))
+	if descriptor, err := links.DeleteUserAs(ctx, admin, targetID); err == nil || !strings.Contains(err.Error(), "delete user image cache") || len(descriptor.ExternalIdentities) != 0 {
+		t.Fatalf("unsafe cache deletion: %+v %v", descriptor, err)
+	}
+	if _, exists, err := links.User(targetID); err != nil || !exists {
+		t.Fatalf("account lost: %t %v", exists, err)
+	}
+	if err := os.Remove(filepath.Join(root, targetID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := links.DeleteUserAs(ctx, admin, targetID); err != nil {
+		t.Fatalf("retry: %v", err)
 	}
 }
 

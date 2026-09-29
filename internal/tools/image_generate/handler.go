@@ -3,7 +3,6 @@ package image_generate
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +10,13 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -26,12 +27,17 @@ type generator interface {
 	Generate(context.Context, *config.Logger, *comfy_ui.Workflow, string, string, *float64, []byte, string) (comfy_ui.Generation, error)
 }
 
-// NewHandler creates a handler that selects only authenticated request-owned image sources.
-func NewHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client *comfy_ui.Client, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
-	return newHandler(textWorkflow, imageWorkflow, client, log)
+type sourceCache interface {
+	ImportHTTPS(context.Context, string, string) (string, []byte, string, error)
+	Resolve(context.Context, string, string) ([]byte, string, error)
 }
 
-func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// NewHandler creates a handler that imports HTTPS images or reads only authenticated user-owned cached images.
+func NewHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client *comfy_ui.Client, cache *imagecache.Cache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return newHandler(textWorkflow, imageWorkflow, client, cache, log)
+}
+
+func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator, cache sourceCache, log *config.Logger) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		principal, ok := requestctx.PrincipalFromContext(ctx)
 		if !ok || !principal.Authenticated() {
@@ -57,22 +63,24 @@ func newHandler(textWorkflow, imageWorkflow *comfy_ui.Workflow, client generator
 		mode, workflow := comfy_ui.TextToImage, textWorkflow
 		var inputPNG []byte
 		if raw, exists := args["image_url"]; exists {
-			id, valid := raw.(string)
-			if !valid || id == "" {
-				return governance.Result{}, errors.New("image_url must be an available server-owned image ID")
+			source, valid := raw.(string)
+			if !valid || source == "" || source != strings.TrimSpace(source) || cache == nil {
+				return governance.Result{}, errors.New("image_url must be an HTTPS URL or managed image path")
 			}
-			var selected *requestctx.InputImage
-			for _, candidate := range requestctx.InputImagesFromContext(ctx) {
-				if candidate.ID == id {
-					selected = &candidate
-					break
-				}
+			var data []byte
+			var err error
+			switch {
+			case strings.HasPrefix(source, "https://"):
+				_, data, _, err = cache.ImportHTTPS(ctx, principal.CanonicalUserID, source)
+			case filepath.IsAbs(source):
+				data, _, err = cache.Resolve(ctx, principal.CanonicalUserID, source)
+			default:
+				return governance.Result{}, errors.New("image_url must be an HTTPS URL or managed image path")
 			}
-			if selected == nil {
-				return governance.Result{}, errors.New("image_url is unavailable; use a source image ID from the current request catalog")
+			if err != nil {
+				return governance.Result{}, errors.New("image_url is unavailable or invalid")
 			}
-			data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(selected.Data))
-			if err != nil || len(data) == 0 || len(data) > media.MaxImageBytes {
+			if len(data) == 0 || len(data) > media.MaxImageBytes {
 				return governance.Result{}, errors.New("source image is invalid or exceeds the input size limit")
 			}
 			decoded, _, err := image.Decode(bytes.NewReader(data))

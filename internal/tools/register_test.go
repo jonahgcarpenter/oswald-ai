@@ -3,7 +3,6 @@ package tools
 import (
 	"encoding/json"
 	"math"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -21,7 +20,7 @@ import (
 )
 
 func testConfig() *config.Config {
-	return &config.Config{SearxngURL: "http://localhost:8080"}
+	return &config.Config{SearxngURL: "http://localhost:8080", ComfyUICheckpoint: "dreamshaper_8.safetensors"}
 }
 
 func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {
@@ -310,8 +309,6 @@ func TestRegisterImageGenerateProviderMatrix(t *testing.T) {
 			cfg := testConfig()
 			cfg.ComfyUIURL = test.url
 			cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")
-			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")
 			reg := newTestRegistry(t, cfg)
 			count := 0
 			for _, tool := range reg.LLMTools() {
@@ -353,19 +350,17 @@ func TestRegisterImageGenerateSchema(t *testing.T) {
 	cfg := testConfig()
 	cfg.ComfyUIURL = "http://localhost:8188"
 	cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")
-	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")
 	reg := newTestRegistry(t, cfg)
 	tool, ok := visibleTestTool(reg, imagegenerate.Name)
 	if !ok {
 		t.Fatal("missing image_generate")
 	}
 	schema := tool.Function.Parameters
-	if len(schema.Properties) != 3 || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties == nil || *schema.AdditionalProperties {
+	if len(schema.Properties) != 3 || len(schema.Required) != 1 || schema.Required[0] != "prompt" || schema.AdditionalProperties != nil {
 		t.Fatalf("image_generate schema=%+v", schema)
 	}
 	prompt := schema.Properties["prompt"]
-	if prompt.Type != "string" || prompt.MinLength == nil || *prompt.MinLength != 1 || prompt.MaxLength == nil || *prompt.MaxLength != 2000 {
+	if prompt.Type != "string" || prompt.MinLength != nil || prompt.MaxLength != nil {
 		t.Fatalf("prompt schema=%+v", prompt)
 	}
 	if ratio := schema.Properties["aspect_ratio"]; ratio.Type != "string" || ratio.Default != "landscape" || !reflect.DeepEqual(ratio.Enum, []string{"landscape", "square", "portrait"}) {
@@ -380,8 +375,6 @@ func TestImageGenerateFingerprintScope(t *testing.T) {
 	cfg := testConfig()
 	cfg.ComfyUIURL = "http://localhost:8188"
 	cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json")
-	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json")
 	reg := newTestRegistry(t, cfg)
 	name := imagegenerate.Name
 	policy, ok := reg.Policy(name)

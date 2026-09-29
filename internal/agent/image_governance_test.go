@@ -8,13 +8,14 @@ import (
 	"image"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -59,7 +60,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 		},
 		{
 			name:    "invalid explicit selectors still reach validation",
-			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": ""}, {"image_url": " current-1 "}, {"image_url": nil}, {"image_url": 7}, {"image_url": "https://example.com/img.png"}, {"image_url": "current-2"}},
+			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": ""}, {"image_url": " current-1 "}, {"image_url": nil}, {"image_url": 7}, {"image_url": "current-2"}},
 			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)},
 		},
 	} {
@@ -116,16 +117,39 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 				}))
 				defer server.Close()
 				log := config.NewLogger(config.LevelError)
-				reg, err := tools.NewRegistryFromConfig(&config.Config{
-					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json"),
-					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", config.DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json"),
-				}, nil, nil, log)
+				cache := imagecache.New(t.TempDir())
+				reg, err := tools.NewRegistryWithImageCache(&config.Config{
+					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second, ComfyUICheckpoint: "dreamshaper_8.safetensors",
+				}, nil, nil, cache, log)
 				if err != nil {
 					t.Fatal(err)
 				}
 				chat := &fakeChatter{}
 				var calls []llm.ToolCall
+				var original []byte
+				chat.onChat = func(req llm.ChatRequest) {
+					if original != nil {
+						return
+					}
+					for _, message := range req.Messages {
+						if !strings.HasPrefix(message.Content, imageContextPrefix) {
+							continue
+						}
+						lines := strings.Split(message.Content, "\n")
+						for _, call := range calls {
+							switch call.Function.Arguments["image_url"] {
+							case "current-1":
+								call.Function.Arguments["image_url"] = strings.Split(lines[2], " (")[0]
+							case "current-2":
+								call.Function.Arguments["image_url"] = strings.Split(lines[3], " (")[0]
+							case " current-1 ":
+								call.Function.Arguments["image_url"] = " " + strings.Split(lines[2], " (")[0] + " "
+							}
+						}
+						break
+					}
+					original, _ = json.Marshal(calls)
+				}
 				for i, source := range test.args {
 					args := map[string]interface{}{"prompt": "make it blue"}
 					for key, value := range source {
@@ -133,7 +157,6 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 					}
 					calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: args}})
 				}
-				original, _ := json.Marshal(calls)
 				if batch {
 					chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: calls}})
 				} else {
@@ -143,6 +166,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 				}
 				chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Finished."}})
 				a, _ := newTestAgent(t, chat, nil, reg)
+				a.SetImageCache(cache)
 				response, err := processAgent(a, "source-governance", "discord", "session", "user-1", "User", "edit these images", []llm.InputImage{testInputImage(t, 2, 3), testInputImage(t, 4, 5)}, nil)
 				if err != nil {
 					t.Fatal(err)

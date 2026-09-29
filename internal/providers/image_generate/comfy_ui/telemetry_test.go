@@ -38,7 +38,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
+	workflow, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+			workflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
 			if err != nil {
 				t.Fatal(err)
 			}

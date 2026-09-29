@@ -2,7 +2,6 @@ package config
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +20,7 @@ func isolateConfigEnvironment(t *testing.T) {
 		"LLM_GATEWAY_API_KEY", "LLM_GATEWAY_VIRTUAL_KEY",
 		"MODEL_CONTEXT_WINDOW", "MODEL_MAX_OUTPUT_TOKENS",
 		"BRAVE_API_KEY", "SEARXNG_URL", "COMFYUI_URL",
-		"COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "COMFYUI_IMAGE_TO_IMAGE_WORKFLOW",
+		"COMFYUI_CHECKPOINT",
 		"COMFYUI_GENERATION_TIMEOUT", "WORKER_POOL_SIZE", "LOG_LEVEL",
 	} {
 		t.Setenv(key, "")
@@ -193,7 +192,7 @@ func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ComfyUIURL != "" || cfg.ComfyUITextToImageWorkflowPath != filepath.Join(DefaultDataRoot, "workflows", "comfyui", "text-to-image-basic.json") || cfg.ComfyUIImageToImageWorkflowPath != filepath.Join(DefaultDataRoot, "workflows", "comfyui", "image-to-image-basic.json") || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
+	if cfg.ComfyUIURL != "" || cfg.ComfyUICheckpoint != "dreamshaper_8.safetensors" || cfg.ComfyUIGenerationTimeout != 2*time.Minute {
 		t.Fatal("ComfyUI configuration did not use the expected defaults")
 	}
 
@@ -210,14 +209,13 @@ func TestLoadComfyUIDefaultsAndValidation(t *testing.T) {
 func TestLoadComfyUIOverrides(t *testing.T) {
 	isolateConfigEnvironment(t)
 	t.Setenv("COMFYUI_URL", " https://comfy.example/base ")
-	t.Setenv("COMFYUI_TEXT_TO_IMAGE_WORKFLOW", "text.json")
-	t.Setenv("COMFYUI_IMAGE_TO_IMAGE_WORKFLOW", "image.json")
+	t.Setenv("COMFYUI_CHECKPOINT", "custom-model.safetensors")
 	t.Setenv("COMFYUI_GENERATION_TIMEOUT", "45s")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ComfyUIURL != "https://comfy.example/base" || cfg.ComfyUITextToImageWorkflowPath != "text.json" || cfg.ComfyUIImageToImageWorkflowPath != "image.json" || cfg.ComfyUIGenerationTimeout != 45*time.Second {
+	if cfg.ComfyUIURL != "https://comfy.example/base" || cfg.ComfyUICheckpoint != "custom-model.safetensors" || cfg.ComfyUIGenerationTimeout != 45*time.Second {
 		t.Fatal("ComfyUI configuration did not match the synthetic overrides")
 	}
 }

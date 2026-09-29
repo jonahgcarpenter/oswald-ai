@@ -21,6 +21,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/indexing"
@@ -52,7 +53,7 @@ func (e *Error) Unwrap() error { return e.Cause }
 type dependencies struct {
 	databasePath   string
 	fileMemoryRoot string
-	newRegistry    func(*config.Config, *memory.Store, *files.Store, *config.Logger) (*registry.Registry, error)
+	newRegistry    func(*config.Config, *memory.Store, *files.Store, *imagecache.Cache, *config.Logger) (*registry.Registry, error)
 	newGateways    func(*config.Config, *accounts.Service, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
 }
 
@@ -63,7 +64,7 @@ func Run(ctx context.Context, cfg *config.Config, log *config.Logger, stdout io.
 	return run(ctx, cfg, log, stdout, dependencies{
 		databasePath:   filepath.Join(config.DefaultDataRoot, "database", "oswald.db"),
 		fileMemoryRoot: config.DefaultDataRoot,
-		newRegistry:    tools.NewRegistryFromConfig,
+		newRegistry:    tools.NewRegistryWithImageCache,
 		newGateways:    gateway.NewServicesFromConfig,
 	})
 }
@@ -146,6 +147,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	userMemStore.SetRetentionPolicy(retentionPolicy)
 	log.Debug("app.memory_user.configured", "configured user memory database", config.F("path", deps.databasePath))
 	fileMemStore := files.NewStore(deps.fileMemoryRoot)
+	imageCache := imagecache.New(deps.fileMemoryRoot)
 	if err := soulStore.MigrateTemplate(filepath.Join(deps.fileMemoryRoot, "memory", "soul", "soul.md")); err != nil {
 		return &Error{Event: "app.soul.migration_failed", Message: "failed to migrate soul template", Cause: err}
 	}
@@ -168,6 +170,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	accountLinkService := accounts.NewService(deps.databasePath, userMemStore, mcpManager, rootLog.Server("account_link"))
 	accountLinkService.SetFileMemory(fileMemStore)
 	accountLinkService.SetSoul(soulStore)
+	accountLinkService.SetImageCache(imageCache)
 	cleanup.accounts = func() { _ = accountLinkService.Close() }
 	if err := accountLinkService.Initialize(); err != nil {
 		return &Error{Event: "app.account_link.init_failed", Message: "failed to initialize account link store", Cause: err}
@@ -201,9 +204,12 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 	maintenanceService := maintenance.NewService(userMemStore, retentionPolicy, rootLog)
 	cleanup.maintenance = maintenanceService.Stop
 	maintenanceService.Start(context.Background())
+	imageWorker := imagecache.NewWorker(imageCache, rootLog)
+	cleanup.imageCache = imageWorker.Stop
+	imageWorker.Start()
 	log.Debug("app.account_link.configured", "configured account link database", config.F("path", deps.databasePath))
 
-	toolRegistry, err := deps.newRegistry(cfg, userMemStore, fileMemStore, rootLog)
+	toolRegistry, err := deps.newRegistry(cfg, userMemStore, fileMemStore, imageCache, rootLog)
 	if err != nil {
 		return &Error{Event: "app.tools.init_failed", Message: "failed to initialize tools", Cause: err}
 	}
@@ -230,6 +236,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		mcpProvider,
 	)
 	agentEngine.SetFileMemory(fileMemStore)
+	agentEngine.SetImageCache(imageCache)
 	agentEngine.SetForegroundCompactor(compactor)
 
 	// Create the broker and start its worker pool.
@@ -302,14 +309,14 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 // Shutdown is deliberately not reverse acquisition order: maintenance stops
 // before broker drain, and all workers stop before MCP clients and stores close.
 type shutdown struct {
-	log                                    *config.Logger
-	maintenance, broker, compaction, index func()
-	mcp, accounts, mcpStore, userMemory    func()
+	log                                                *config.Logger
+	maintenance, imageCache, broker, compaction, index func()
+	mcp, accounts, mcpStore, userMemory                func()
 }
 
 func (s *shutdown) run() {
-	names := []string{"maintenance", "broker", "compaction", "indexing", "mcp", "accounts", "mcp_store", "user_memory"}
-	for i, stop := range []func(){s.maintenance, s.broker, s.compaction, s.index,
+	names := []string{"maintenance", "image_cache", "broker", "compaction", "indexing", "mcp", "accounts", "mcp_store", "user_memory"}
+	for i, stop := range []func(){s.maintenance, s.imageCache, s.broker, s.compaction, s.index,
 		s.mcp, s.accounts, s.mcpStore, s.userMemory} {
 		if stop != nil {
 			started := time.Now()

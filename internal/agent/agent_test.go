@@ -24,6 +24,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
@@ -1852,6 +1853,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 		t.Fatalf("user store: %v", err)
 	}
 	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
+	agent.SetImageCache(imagecache.New(dir))
 	t.Cleanup(func() { _ = userStore.Close() })
 	return agent, &agentMemoryFixture{Store: userStore, sql: db.SQL()}, soulPath
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/database"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
@@ -16,18 +17,19 @@ import (
 
 // Service manages canonical user IDs and linked gateway accounts.
 type Service struct {
-	path     string
-	memories *memory.Store
-	files    *files.Store
-	soul     *soul.Store
-	log      *config.Logger
-	db       *database.DB
-	mcp      MCPUserMerger
-	now      func() time.Time
-	random   io.Reader
-	mu       sync.Mutex
-	initOnce sync.Once
-	initErr  error
+	path       string
+	memories   *memory.Store
+	files      *files.Store
+	soul       *soul.Store
+	imageCache *imagecache.Cache
+	log        *config.Logger
+	db         *database.DB
+	mcp        MCPUserMerger
+	now        func() time.Time
+	random     io.Reader
+	mu         sync.Mutex
+	initOnce   sync.Once
+	initErr    error
 }
 
 // NewService constructs the account service; Initialize opens its SQLite database.
@@ -44,6 +46,11 @@ func (s *Service) SetFileMemory(store *files.Store) {
 // SetSoul installs the private soul store for account deletion and linking.
 func (s *Service) SetSoul(store *soul.Store) {
 	s.soul = store
+}
+
+// SetImageCache installs the private image cache before serving account deletions.
+func (s *Service) SetImageCache(cache *imagecache.Cache) {
+	s.imageCache = cache
 }
 
 // Initialize prepares the account-link database.

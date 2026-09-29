@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
@@ -46,9 +48,17 @@ type Agent struct {
 	soul        *soul.Store
 	userMemory  *memory.Store
 	fileMemory  *files.Store
+	imageCache  *imagecache.Cache
 	toolPolicy  governance.GlobalPolicy
 	compactor   ForegroundCompactor
 	log         *config.Logger
+}
+
+// SetImageCache installs the private per-user image cache before requests start.
+func (a *Agent) SetImageCache(cache *imagecache.Cache) {
+	if a != nil {
+		a.imageCache = cache
+	}
 }
 
 // SetFileMemory installs the file-backed memory store before the agent starts serving work.
@@ -276,6 +286,27 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		} else {
 			contextImages = append(contextImages, priorImages...)
 			reqLog.Info("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()), config.F("status", "ok"))
+		}
+		ctx = requestctx.WithInputImages(ctx, contextImages)
+	}
+	if gateway != "homeassistant" && gateway != "openai" && a.registry.HasHandler(imagegenerate.Name) {
+		if a.imageCache == nil {
+			return nil, fmt.Errorf("image cache is unavailable")
+		}
+		for i := range contextImages {
+			data, err := base64.StdEncoding.DecodeString(contextImages[i].Data)
+			if err != nil {
+				return nil, fmt.Errorf("decode image catalog source: %w", err)
+			}
+			assetID := contextImages[i].ID
+			if contextImages[i].Source != "generated" {
+				assetID = config.NewRequestID()
+			}
+			path, err := a.imageCache.SaveAsset(ctx, senderID, assetID, data, contextImages[i].MIMEType)
+			if err != nil {
+				return nil, fmt.Errorf("cache image catalog source: %w", err)
+			}
+			contextImages[i].Path = path
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
@@ -686,11 +717,19 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										execErr = fmt.Errorf("invalid generated image metadata")
 										break
 									}
-									metadata["source_image_id"], _ = json.Marshal(image.ID)
-									metadata["image"], _ = json.Marshal(image.ID)
-									metadata["image_id"], _ = json.Marshal(image.ImageID)
-									metadata["version"], _ = json.Marshal(image.Version)
-									metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
+									if a.imageCache == nil {
+										execErr = fmt.Errorf("image cache is unavailable")
+										break
+									}
+									image.Path, err = a.imageCache.SaveAsset(ctx, senderID, image.ID, attachment.Data, attachment.MIMEType)
+									if err != nil {
+										execErr = fmt.Errorf("cache generated image: %w", err)
+										break
+									}
+									for _, key := range []string{"image", "source_image_id", "image_id", "version", "parent_source_image_id"} {
+										delete(metadata, key)
+									}
+									metadata["image"], _ = json.Marshal(image.Path)
 									encoded, _ := json.Marshal(metadata)
 									result.Content = string(encoded)
 									visionGeneratedImages = append(visionGeneratedImages, image)

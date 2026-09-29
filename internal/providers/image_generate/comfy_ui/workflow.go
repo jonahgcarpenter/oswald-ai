@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
 	"reflect"
+	"regexp"
+	"strings"
 )
 
 type node struct {
@@ -16,21 +17,47 @@ type node struct {
 	Meta      map[string]interface{} `json:"_meta,omitempty"`
 }
 
-// Workflow is an immutable validated API workflow template.
+// Workflow is an immutable, runtime-built ComfyUI API graph.
 type Workflow struct {
 	mode  Mode
 	nodes map[string]node
 }
 
-// LoadWorkflow reads and validates a supported workflow template.
-func LoadWorkflow(path string, mode Mode) (*Workflow, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read ComfyUI %s workflow: %w", mode, err)
+var checkpointName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.safetensors$`)
+
+// NewWorkflow builds a fixed graph using a safe, operator-selected checkpoint basename.
+func NewWorkflow(mode Mode, checkpoint string) (*Workflow, error) {
+	if len(checkpoint) > 128 || !checkpointName.MatchString(checkpoint) || strings.Contains(checkpoint, "..") {
+		return nil, fmt.Errorf("ComfyUI checkpoint must be a safe .safetensors basename")
 	}
+	link := func(id string, output float64) []interface{} { return []interface{}{id, output} }
+	n := func(class string, inputs map[string]interface{}) node { return node{ClassType: class, Inputs: inputs} }
 	var nodes map[string]node
-	if err := json.Unmarshal(data, &nodes); err != nil {
-		return nil, fmt.Errorf("decode ComfyUI %s workflow: %w", mode, err)
+	switch mode {
+	case TextToImage:
+		nodes = map[string]node{
+			"3": n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(20), "cfg": float64(7), "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": float64(1), "model": link("4", 0), "positive": link("6", 0), "negative": link("7", 0), "latent_image": link("5", 0)}),
+			"4": n("CheckpointLoaderSimple", map[string]interface{}{"ckpt_name": checkpoint}),
+			"5": n("EmptyLatentImage", map[string]interface{}{"width": float64(512), "height": float64(512), "batch_size": float64(1)}),
+			"6": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("4", 1)}),
+			"7": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("4", 1)}),
+			"8": n("VAEDecode", map[string]interface{}{"samples": link("3", 0), "vae": link("4", 2)}),
+			"9": n("SaveImage", map[string]interface{}{"filename_prefix": "ComfyUI", "images": link("8", 0)}),
+		}
+	case ImageToImage:
+		nodes = map[string]node{
+			"23": n("CheckpointLoaderSimple", map[string]interface{}{"ckpt_name": checkpoint}),
+			"24": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("23", 1)}),
+			"25": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("23", 1)}),
+			"26": n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(15), "cfg": float64(5), "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 0.45, "model": link("23", 0), "positive": link("24", 0), "negative": link("25", 0), "latent_image": link("28", 0)}),
+			"27": n("VAEDecode", map[string]interface{}{"samples": link("26", 0), "vae": link("23", 2)}),
+			"28": n("VAEEncode", map[string]interface{}{"pixels": link("32", 0), "vae": link("23", 2)}),
+			"29": n("LoadImage", map[string]interface{}{"image": InputImageReference}),
+			"30": n("PreviewImage", map[string]interface{}{"images": link("27", 0)}),
+			"32": n("ImageScale", map[string]interface{}{"upscale_method": "lanczos", "width": float64(512), "height": float64(512), "crop": "center", "image": link("29", 0)}),
+		}
+	default:
+		return nil, fmt.Errorf("unsupported workflow mode %q", mode)
 	}
 	w := &Workflow{mode: mode, nodes: nodes}
 	if err := w.validate(); err != nil {
@@ -40,7 +67,7 @@ func LoadWorkflow(path string, mode Mode) (*Workflow, error) {
 }
 
 // build returns a deep copy with only request-controlled fields changed.
-// A nil strength preserves template denoise; overrides are image-to-image only.
+// A nil strength preserves the default denoise; overrides are image-to-image only.
 func (w *Workflow) build(prompt, negativePrompt string, strength *float64, aspect string) (map[string]node, uint32, *float64, error) {
 	if strength != nil && (w.mode != ImageToImage || math.IsNaN(*strength) || math.IsInf(*strength, 0) || *strength < 0.1 || *strength > 0.9) {
 		return nil, 0, nil, fmt.Errorf("strength must be a finite number between 0.1 and 0.9 for image-to-image")
@@ -48,11 +75,11 @@ func (w *Workflow) build(prompt, negativePrompt string, strength *float64, aspec
 	width, height := float64(0), float64(0)
 	switch aspect {
 	case "landscape":
-		width, height = 768, 448
+		width, height = 768, 432
 	case "square":
 		width, height = 512, 512
 	case "portrait":
-		width, height = 448, 768
+		width, height = 432, 768
 	default:
 		return nil, 0, nil, fmt.Errorf("unsupported image aspect ratio")
 	}
@@ -115,9 +142,6 @@ func (w *Workflow) validate() error {
 		if err := w.requireNode("9", "SaveImage"); err != nil {
 			return err
 		}
-		if err := exactString(w.nodes["4"].Inputs, "ckpt_name", "dreamshaper_8.safetensors"); err != nil {
-			return err
-		}
 		if err := exactNumber(w.nodes["5"].Inputs, "batch_size", 1); err != nil {
 			return err
 		}
@@ -173,9 +197,6 @@ func (w *Workflow) validate() error {
 			return err
 		}
 		if err := w.requireNode("32", "ImageScale"); err != nil {
-			return err
-		}
-		if err := exactString(w.nodes["23"].Inputs, "ckpt_name", "dreamshaper_8.safetensors"); err != nil {
 			return err
 		}
 		if err := exactString(w.nodes["26"].Inputs, "sampler_name", "dpmpp_2m"); err != nil {
@@ -264,8 +285,8 @@ func dimensions(inputs map[string]interface{}) error {
 	}
 	width := int(inputs["width"].(float64))
 	height := int(inputs["height"].(float64))
-	if width%64 != 0 || height%64 != 0 {
-		return fmt.Errorf("dimensions must be multiples of 64")
+	if width%16 != 0 || height%16 != 0 {
+		return fmt.Errorf("dimensions must be multiples of 16")
 	}
 	if !((width <= 768 && height <= 512) || (width <= 512 && height <= 768)) || width*height > 393216 {
 		return fmt.Errorf("dimensions exceed the safe generation limit")
