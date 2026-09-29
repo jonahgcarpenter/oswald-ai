@@ -32,15 +32,14 @@ type Compactor interface {
 
 // LLMCompactor uses the configured model with the required session_summary_save tool.
 type LLMCompactor struct {
-	client    llm.Chatter
-	model     string
-	tool      llm.Tool
-	maxTokens int
-	log       *config.Logger
+	client llm.Chatter
+	model  string
+	tool   llm.Tool
+	log    *config.Logger
 }
 
 // NewLLMCompactor constructs a structured session compactor.
-func NewLLMCompactor(client llm.Chatter, model string, maxTokens int, log *config.Logger) (*LLMCompactor, error) {
+func NewLLMCompactor(client llm.Chatter, model string, log *config.Logger) (*LLMCompactor, error) {
 	if client == nil {
 		return nil, fmt.Errorf("session compaction LLM client is required")
 	}
@@ -48,10 +47,7 @@ func NewLLMCompactor(client llm.Chatter, model string, maxTokens int, log *confi
 	if model == "" {
 		return nil, fmt.Errorf("session compaction model is required")
 	}
-	if maxTokens <= 0 {
-		return nil, fmt.Errorf("session compaction max output tokens must be positive")
-	}
-	return &LLMCompactor{client: client, model: model, tool: sessionSummarySaveTool(), maxTokens: maxTokens, log: log}, nil
+	return &LLMCompactor{client: client, model: model, tool: sessionSummarySaveTool(), log: log}, nil
 }
 
 // Compact summarizes prior reference data plus newly covered role-correct turns.
@@ -71,7 +67,7 @@ func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSumm
 	temperature := 0.0
 	resp, err := e.client.Chat(ctx, llm.ChatRequest{
 		Model: e.model, Messages: messages, Tools: []llm.Tool{e.tool}, ToolChoice: llm.ToolChoiceRequired,
-		ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: e.maxTokens, Stream: true,
+		ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, Stream: true,
 	}, nil)
 	if err != nil {
 		if allowContextReduction && llm.IsContextLengthExceededError(err) {

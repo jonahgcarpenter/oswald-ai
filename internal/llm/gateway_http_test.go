@@ -75,15 +75,25 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 			ToolChoice        ToolChoice `json:"tool_choice"`
 			ParallelToolCalls *bool      `json:"parallel_tool_calls"`
 			Temperature       *float64   `json:"temperature"`
-			MaxTokens         int        `json:"max_tokens"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := fields["max_tokens"]; exists {
+			t.Fatal("forced tool request included max_tokens")
 		}
 		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "batch_submit" || body.ToolChoice != ToolChoiceRequired || body.ParallelToolCalls == nil || *body.ParallelToolCalls {
 			t.Fatalf("unexpected forced tool request: %+v", body)
 		}
-		if body.Temperature == nil || *body.Temperature != 0 || body.MaxTokens != 2048 {
+		if body.Temperature == nil || *body.Temperature != 0 {
 			t.Fatalf("unexpected deterministic controls: %+v", body)
 		}
 		items := body.Tools[0].Function.Parameters.Properties["items"]
@@ -115,7 +125,7 @@ func TestGatewayClientChatSerializesForcedRecursiveToolSchema(t *testing.T) {
 	client := newTestGatewayClient(server.URL, "", "", config.NewLogger(config.LevelError))
 	parallelToolCalls := false
 	temperature := 0.0
-	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature, MaxTokens: 2048}, nil)
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "model", Tools: []Tool{tool}, ToolChoice: ToolChoiceRequired, ParallelToolCalls: &parallelToolCalls, Temperature: &temperature}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,14 +478,15 @@ func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("stream path = %q", r.URL.Path)
 		}
-		var request struct {
-			Stream bool `json:"stream"`
-		}
+		var request map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if !request.Stream {
+		if string(request["stream"]) != "true" {
 			t.Fatal("streaming request did not set stream=true")
+		}
+		if _, exists := request["max_tokens"]; exists {
+			t.Fatal("streaming request included max_tokens")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"model\":\"silent-model\",\"choices\":[{\"delta\":{\"reasoning\":\"private thought\",\"content\":\"hello\"}}]}\n\n"))

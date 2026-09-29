@@ -122,11 +122,10 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 
 	llmClient := llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, rootLog)
 
-	budget := tokenbudget.NewContextBudget(cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
+	budget := tokenbudget.NewContextBudget(cfg.ModelContextWindow)
 	log.Info("app.context_budget.configured", "configured context budget",
 		config.F("model", cfg.LLMGatewayModel),
 		config.F("context_window", budget.ContextWindow),
-		config.F("max_output_tokens", budget.ResponseReserve),
 		config.F("usable_input_limit", budget.UsableInputLimit()),
 	)
 
@@ -217,7 +216,7 @@ func run(ctx context.Context, cfg *config.Config, rootLog *config.Logger, stdout
 		return nil
 	}
 	mcpProvider := mcp.NewProvider(mcpManager, toolRegistry.Names()...)
-	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, budget.ResponseReserve, rootLog)
+	compactor, err := compaction.NewLLMCompactor(llmClient, cfg.LLMGatewayModel, rootLog)
 	if err != nil {
 		return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize background session compactor", Cause: err}
 	}

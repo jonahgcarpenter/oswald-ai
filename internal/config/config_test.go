@@ -18,7 +18,7 @@ func isolateConfigEnvironment(t *testing.T) {
 		"MCP_CONFIG_ENCRYPTION_KEY", "DISCORD_TOKEN", "OPENAI_LISTEN_PORT",
 		"LLM_GATEWAY_URL", "LLM_GATEWAY_MODEL", "LLM_GATEWAY_EMBEDDING_MODEL",
 		"LLM_GATEWAY_API_KEY", "LLM_GATEWAY_VIRTUAL_KEY",
-		"MODEL_CONTEXT_WINDOW", "MODEL_MAX_OUTPUT_TOKENS",
+		"MODEL_CONTEXT_WINDOW",
 		"BRAVE_API_KEY", "SEARXNG_URL", "COMFYUI_URL",
 		"COMFYUI_CHECKPOINT",
 		"COMFYUI_GENERATION_TIMEOUT", "WORKER_POOL_SIZE", "LOG_LEVEL",
@@ -64,14 +64,13 @@ func TestEnvHelpersParseConfiguredValues(t *testing.T) {
 func TestLoadModelBudgetConfig(t *testing.T) {
 	isolateConfigEnvironment(t)
 	t.Setenv("MODEL_CONTEXT_WINDOW", "65536")
-	t.Setenv("MODEL_MAX_OUTPUT_TOKENS", "4096")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ModelContextWindow != 65536 || cfg.ModelMaxOutputTokens != 4096 {
-		t.Fatalf("unexpected model budget config: context=%d output=%d", cfg.ModelContextWindow, cfg.ModelMaxOutputTokens)
+	if cfg.ModelContextWindow != 65536 {
+		t.Fatalf("unexpected model context window: %d", cfg.ModelContextWindow)
 	}
 }
 

@@ -26,7 +26,6 @@ type Config struct {
 	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
 	LLMGatewayVirtualKey     string        // Optional gateway routing key for LLM gateway requests
 	ModelContextWindow       int           // Optional model context window for prompt budgeting; non-positive uses the package fallback
-	ModelMaxOutputTokens     int           // Foreground output capacity reserve and compaction max_tokens; non-positive uses the package fallback
 	DiscordToken             string        // Optional Discord bot token
 	OpenAIListenPort         string        // Optional loopback port for the OpenAI-compatible inbound gateway
 	BraveAPIKey              string        // Optional Brave Search API subscription token
@@ -96,7 +95,6 @@ func Load() (*Config, error) {
 		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
 		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
 		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
-		ModelMaxOutputTokens:     getEnvInt("MODEL_MAX_OUTPUT_TOKENS", 0),
 		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
 		OpenAIListenPort:         getEnv("OPENAI_LISTEN_PORT", ""),
 		BraveAPIKey:              getEnv("BRAVE_API_KEY", ""),

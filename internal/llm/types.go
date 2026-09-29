@@ -92,7 +92,6 @@ type ChatRequest struct {
 	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
 	Temperature       *float64      `json:"temperature,omitempty"`
-	MaxTokens         int           `json:"max_tokens,omitempty"`
 	Format            string        `json:"format,omitempty"`
 	Stream            bool          `json:"stream"`
 }

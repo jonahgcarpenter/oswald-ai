@@ -218,8 +218,8 @@ OpenAI requests instead use stateless agent mode: read soul and private files fo
 
 ### Budget And Authority
 
-- `compaction/budget` owns token estimation, output/safety reserves, the 70% compaction trigger, and recent-tail capacity. No model-metadata discovery is performed.
-- Default context window is 32,768 tokens; default output reserve is 8,192; safety margin is 256. Nonpositive model-limit configuration selects these fallbacks. Tools and images are estimated within each actual request, not a fixed tool reserve.
+- `compaction/budget` owns token estimation, the safety margin, the 70% compaction trigger, and recent-tail capacity. No model-metadata discovery is performed.
+- Default context window is 32,768 tokens and the safety margin is 256; nonpositive context-window configuration selects the fallback. No output capacity is reserved in the prompt budget. Tools and images are estimated within each actual request, not a fixed tool reserve. Providers can reject generation when input leaves insufficient room for output.
 - The recent-tail allowance is 25% of usable input, bounded to 2,000-8,000 tokens and never more than available input. This is the exchange allowance, not a combined summary-plus-tail allocation. Under pressure, a selected tail can take priority over the optional durable summary.
 - Additional history stops at the first complete exchange that cannot fit even after native tool history is omitted. Required file context is not truncated to fit.
 - Operator-owned per-user soul/gateway deployment policy is system-authority content. The model-editable `USER.md` and `MEMORY.md` snapshot is also included in the system-role message by operator choice. This gives editable contents system-level influence over the model; server-side authorization and tool catalog checks still apply and cannot be granted by text in memory. Summaries and historical tool results remain lower-authority untrusted reference data. No model tool edits either soul file.
@@ -286,7 +286,7 @@ Suppression and cutoff matching treats underscores and spaces as compatible valu
 - `PageDeliveredSessionTurnsAfter` pages ascending IDs across pending gaps for foreground history. Advance its exclusive boundary to the last returned ID. `CompactionWindowAfter` instead respects pending-delivery barriers and reports the eligible total/newest ID independently of page size.
 - Durable jobs have four provider submissions and up to three structured-output corrective retries within those four credits. Permanent provider 4xx failures skip immediately except 408, 425, and 429. Foreground compaction also shares four submissions across its chunks/retries.
 - Compaction artifact saves, first summary publication, and successful/skipped completion require the caller's exact live lease token, even after same-owner renewal or reclaim. The worker serializes renewal with submission reservation and carries the final renewed token into publication or preemption bookkeeping. Replaying an already-published summary remains an idempotent scope-checked read, not permission to complete a job under a stale lease.
-- Compaction uses a silent synchronous stream, one required `session_summary_save` tool call, no parallel calls, temperature 0, and the resolved output limit. Provider schema omits grammar-expensive cardinality/string-length constraints; local validation still enforces limits.
+- Compaction uses a silent synchronous stream, one required `session_summary_save` tool call, no parallel calls, and temperature 0. It does not send an output-token limit. Provider schema omits grammar-expensive cardinality/string-length constraints; local validation still enforces artifact limits.
 - A summary contains narrative, open tasks, commitments, entities, decisions, topic tags, covered range, and ordered source IDs. Narrative is bounded to 8,000 runes; arrays to 50 items each, items to 1,000 runes, aggregate structured text to 16,000 runes, and encoded artifact to 40,000 bytes.
 - Foreground compaction includes delivered post-checkpoint exchanges and completed active tool rounds, using live model-visible arguments/results rather than durable-history truncation. Reasoning and attachment bytes are excluded. Install a checkpoint only after validation; keep the old context on failure.
 - Durable summaries do not delete covered transcripts or publish user memories. Active-generation transcripts remain in the retained transcript FTS after compaction, but no transcript search tool is registered.
@@ -469,11 +469,11 @@ Tool rounds, retries, and final tools-disabled calls retain streaming transport.
 - If the retained embedding API is invoked, embeddings require the Bifrost async contract and a Logs Store configured for async routes. The low-level client retains async chat support for explicit non-streaming requests, but foreground agent calls do not use it. Polling defaults to one second; Oswald does not set a total LLM-client timeout or an overall agent generation deadline. Each model invocation creates a separate stream (or, for an explicit non-streaming client call, a separate async job); there is no shared async job spanning agent tool rounds. Streaming does not bypass upstream provider or proxy timeouts.
 - Async IDs are process-local, not persisted. Cancellation/restart after submission may leave remote jobs running until completion or the provider's independently configured timeout; no async cancellation endpoint is implemented here.
 - Current-turn images use OpenAI-compatible image URL content blocks. Provider-reported thinking, content, usage, and finish reasons are mapped separately.
-- `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap. Active compaction sends the resolved value as `max_tokens`.
+- Oswald does not send `max_tokens` on foreground, compaction, or explicit async chat requests. The inbound OpenAI-compatible `max_tokens` field is accepted for client compatibility but ignored.
 
 ## Environment Configuration
 
-These are the 23 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
+These are the 22 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
 
 | Variable | Default / Purpose |
 | --- | --- |
@@ -492,7 +492,6 @@ These are the 23 application variables loaded by `config.Load`. Defaults below a
 | `LLM_GATEWAY_API_KEY` | Optional bearer authentication |
 | `LLM_GATEWAY_VIRTUAL_KEY` | Optional `x-bf-vk` routing header |
 | `MODEL_CONTEXT_WINDOW` | 0 selects budget fallback |
-| `MODEL_MAX_OUTPUT_TOKENS` | 0 selects output-reserve/private-call fallback |
 | `BRAVE_API_KEY` | Empty disables Brave web search; SearXNG can still provide `web_search` |
 | `SEARXNG_URL` | Empty disables SearXNG |
 | `COMFYUI_URL` | Empty disables image generation |
