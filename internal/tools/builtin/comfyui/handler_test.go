@@ -30,17 +30,14 @@ func (f *fakeGenerator) Generate(_ context.Context, workflow map[string]node, ou
 }
 
 func TestHandlerUsesEmptyNegativePromptAndReturnsDegradedAttachment(t *testing.T) {
-	workflow, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
-	if err != nil {
-		t.Fatal(err)
-	}
+	workflow := mustLoadWorkflow(t, "text-image.json", TextToImage)
 	generator := &fakeGenerator{degraded: true, result: testPNG(t)}
 	handler := newHandler(TextToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage { return nil })
 	result, err := handler(authenticatedContext(), map[string]interface{}{"prompt": "a lighthouse"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if generator.output != "9" || generator.workflow["7"].Inputs["text"] != "" {
+	if generator.output != "10" || generator.workflow["5"].Inputs["text"] != "" {
 		t.Fatalf("unexpected generation: output=%s workflow=%+v", generator.output, generator.workflow)
 	}
 	if !result.IsDegraded || result.ReasonCode != "vram_cleanup_failed" || len(result.Attachments) != 1 || !strings.HasPrefix(result.Attachments[0].Filename, "oswald-text-to-image-") {
@@ -56,10 +53,7 @@ func TestHandlerUsesEmptyNegativePromptAndReturnsDegradedAttachment(t *testing.T
 }
 
 func TestImageHandlerReencodesFirstRequestImageAsFixedPNG(t *testing.T) {
-	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
-	if err != nil {
-		t.Fatal(err)
-	}
+	workflow := mustLoadWorkflow(t, "image-image.json", ImageToImage)
 	input := testPNG(t)
 	generator := &fakeGenerator{result: testPNG(t)}
 	handler := newHandler(ImageToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage {
@@ -68,7 +62,7 @@ func TestImageHandlerReencodesFirstRequestImageAsFixedPNG(t *testing.T) {
 	if _, err := handler(authenticatedContext(), map[string]interface{}{"prompt": "make it moonlit", "negative_prompt": "daylight"}); err != nil {
 		t.Fatal(err)
 	}
-	if generator.output != "30" || len(generator.input) == 0 || generator.workflow["29"].Inputs["image"] != InputImageReference {
+	if generator.output != "11" || len(generator.input) == 0 || generator.workflow["4"].Inputs["image"] != InputImageReference {
 		t.Fatalf("unexpected image generation: output=%s input=%d", generator.output, len(generator.input))
 	}
 }
@@ -80,10 +74,7 @@ func authenticatedContext() context.Context {
 }
 
 func TestImageHandlerSelectsOnlyAvailableSourceIDs(t *testing.T) {
-	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
-	if err != nil {
-		t.Fatal(err)
-	}
+	workflow := mustLoadWorkflow(t, "image-image.json", ImageToImage)
 	for _, id := range []interface{}{"generated-id", "current-2", "foreign-id", "", 42} {
 		t.Run(fmt.Sprint(id), func(t *testing.T) {
 			generator := &fakeGenerator{result: testPNG(t)}
@@ -100,12 +91,9 @@ func TestImageHandlerSelectsOnlyAvailableSourceIDs(t *testing.T) {
 }
 
 func TestImageHandlerStrengthValidationAndGraph(t *testing.T) {
-	workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
-	if err != nil {
-		t.Fatal(err)
-	}
+	workflow := mustLoadWorkflow(t, "image-image.json", ImageToImage)
 	// Use an operator value distinct from the checked-in default.
-	workflow.nodes["26"].Inputs["denoise"] = 0.37
+	workflow.nodes["9"].Inputs["denoise"] = 0.37
 	original := cloneNodes(t, workflow.nodes)
 	for _, test := range []struct {
 		name  string
@@ -144,12 +132,12 @@ func TestImageHandlerStrengthValidationAndGraph(t *testing.T) {
 			}
 			if test.valid {
 				expected := cloneNodes(t, original)
-				expected["24"].Inputs["text"] = args["prompt"]
-				expected["25"].Inputs["text"] = args["negative_prompt"]
-				expected["26"].Inputs["seed"] = generator.workflow["26"].Inputs["seed"]
-				expected["29"].Inputs["image"] = InputImageReference
+				expected["6"].Inputs["text"] = args["prompt"]
+				expected["7"].Inputs["text"] = args["negative_prompt"]
+				expected["9"].Inputs["seed"] = generator.workflow["9"].Inputs["seed"]
+				expected["4"].Inputs["image"] = InputImageReference
 				if !test.omit {
-					expected["26"].Inputs["denoise"] = test.value
+					expected["9"].Inputs["denoise"] = test.value
 				}
 				if !reflect.DeepEqual(generator.workflow, expected) {
 					t.Fatal("submitted graph differs outside approved request fields")
@@ -157,6 +145,60 @@ func TestImageHandlerStrengthValidationAndGraph(t *testing.T) {
 			}
 			if !reflect.DeepEqual(workflow.nodes, original) {
 				t.Fatal("operator template mutated")
+			}
+		})
+	}
+}
+
+func TestHandlerAppliesSamplingOverridesAndExplicitSeed(t *testing.T) {
+	workflow := mustLoadWorkflow(t, "text-image.json", TextToImage)
+	generator := &fakeGenerator{result: testPNG(t)}
+	handler := newHandler(TextToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage { return nil })
+	args := map[string]interface{}{
+		"prompt": "a lighthouse", "steps": float64(12), "cfg": float64(3.5),
+		"sampler_name": "dpmpp_2m", "scheduler": "karras", "shift": float64(4.5), "seed": float64(99),
+	}
+	result, err := handler(authenticatedContext(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generator.workflow["8"].Inputs["steps"] != 12 || generator.workflow["8"].Inputs["cfg"] != 3.5 || generator.workflow["8"].Inputs["sampler_name"] != "dpmpp_2m" || generator.workflow["8"].Inputs["scheduler"] != "karras" || generator.workflow["6"].Inputs["shift"] != 4.5 {
+		t.Fatalf("sampling overrides not applied: %+v", generator.workflow)
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["seed"] != float64(99) {
+		t.Fatalf("seed metadata = %v, want 99", metadata["seed"])
+	}
+}
+
+func TestHandlerRejectsInvalidSamplingArguments(t *testing.T) {
+	workflow := mustLoadWorkflow(t, "text-image.json", TextToImage)
+	for _, test := range []struct {
+		name string
+		args map[string]interface{}
+	}{
+		{name: "steps fractional", args: map[string]interface{}{"prompt": "x", "steps": 2.5}},
+		{name: "steps string", args: map[string]interface{}{"prompt": "x", "steps": "4"}},
+		{name: "steps range", args: map[string]interface{}{"prompt": "x", "steps": float64(51)}},
+		{name: "cfg string", args: map[string]interface{}{"prompt": "x", "cfg": "3"}},
+		{name: "cfg range", args: map[string]interface{}{"prompt": "x", "cfg": float64(11)}},
+		{name: "sampler type", args: map[string]interface{}{"prompt": "x", "sampler_name": 5}},
+		{name: "sampler unsupported", args: map[string]interface{}{"prompt": "x", "sampler_name": "nope"}},
+		{name: "scheduler unsupported", args: map[string]interface{}{"prompt": "x", "scheduler": "nope"}},
+		{name: "shift type", args: map[string]interface{}{"prompt": "x", "shift": "4"}},
+		{name: "shift range", args: map[string]interface{}{"prompt": "x", "shift": float64(0)}},
+		{name: "seed fractional", args: map[string]interface{}{"prompt": "x", "seed": 1.5}},
+		{name: "seed negative", args: map[string]interface{}{"prompt": "x", "seed": float64(-1)}},
+		{name: "seed too large", args: map[string]interface{}{"prompt": "x", "seed": float64(4294967296)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			generator := &fakeGenerator{result: testPNG(t)}
+			handler := newHandler(TextToImage, workflow, generator, config.NewLogger(config.LevelError), func(context.Context) []requestctx.InputImage { return nil })
+			if _, err := handler(authenticatedContext(), test.args); err == nil || generator.workflow != nil {
+				t.Fatalf("invalid argument accepted: %v", err)
 			}
 		})
 	}

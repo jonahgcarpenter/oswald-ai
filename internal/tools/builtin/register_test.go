@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/websearch"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
@@ -474,8 +475,8 @@ func TestRegisterComfyUIProviderMatrix(t *testing.T) {
 			cfg := testConfig()
 			cfg.ComfyUIURL = test.url
 			cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
-			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+			cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-image.json")
+			cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-image.json")
 			if err := Register(reg, cfg, nil, nil, log); err != nil {
 				t.Fatal(err)
 			}
@@ -508,8 +509,8 @@ func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 	cfg := testConfig()
 	cfg.ComfyUIURL = "http://localhost:8188"
 	cfg.ComfyUIGenerationTimeout = 2 * time.Minute
-	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json")
-	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json")
+	cfg.ComfyUITextToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "text-image.json")
+	cfg.ComfyUIImageToImageWorkflowPath = filepath.Join("..", "..", "..", "data", "workflows", "comfyui", "image-image.json")
 	if err := Register(reg, cfg, nil, nil, log); err != nil {
 		t.Fatal(err)
 	}
@@ -519,9 +520,9 @@ func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 			t.Fatalf("missing %s", name)
 		}
 		schema := tool.Function.Parameters
-		wantProperties := 2
+		wantProperties := 8
 		if name == toolnames.ComfyUIImageToImage {
-			wantProperties = 5
+			wantProperties = 11
 			if schema.Properties["create_variant"].Type != "boolean" {
 				t.Fatal("missing boolean variant selector")
 			}
@@ -546,6 +547,32 @@ func TestRegisterComfyUISchemasExposePromptsAndImageSource(t *testing.T) {
 		}
 		if prompt.MinLength == nil || *prompt.MinLength != 1 || prompt.MaxLength == nil || *prompt.MaxLength != 2000 || negative.MaxLength == nil || *negative.MaxLength != 2000 {
 			t.Fatalf("%s prompt bounds are missing: %+v", name, schema.Properties)
+		}
+		for property, want := range map[string]struct {
+			kind    string
+			minimum float64
+			maximum float64
+		}{
+			"steps": {kind: "integer", minimum: 1, maximum: 50},
+			"cfg":   {kind: "number", minimum: 0, maximum: 10},
+			"shift": {kind: "number", minimum: 0.1, maximum: 10},
+			"seed":  {kind: "integer", minimum: 0, maximum: 4294967295},
+		} {
+			got, ok := schema.Properties[property]
+			if !ok || got.Type != want.kind {
+				t.Fatalf("%s %s schema=%+v", name, property, got)
+			}
+			if got.Minimum == nil || *got.Minimum != want.minimum || got.Maximum == nil || *got.Maximum != want.maximum {
+				t.Fatalf("%s %s bounds=%+v", name, property, got)
+			}
+		}
+		sampler := schema.Properties["sampler_name"]
+		scheduler := schema.Properties["scheduler"]
+		if sampler.Type != "string" || !reflect.DeepEqual(sampler.Enum, comfyui.SamplerNames) {
+			t.Fatalf("%s sampler enum=%+v", name, sampler.Enum)
+		}
+		if scheduler.Type != "string" || !reflect.DeepEqual(scheduler.Enum, comfyui.SchedulerNames) {
+			t.Fatalf("%s scheduler enum=%+v", name, scheduler.Enum)
 		}
 	}
 }
@@ -587,6 +614,44 @@ func TestComfyStrengthFingerprintScope(t *testing.T) {
 			}
 			if (omitted == explicit) != test.wantSame {
 				t.Fatal("unexpected strength fingerprint scope")
+			}
+		})
+	}
+}
+
+func TestComfySamplingFingerprintScope(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		normalize governance.ArgumentNormalizer
+	}{
+		{toolnames.ComfyUITextToImage, normalizeComfyArgs},
+		{toolnames.ComfyUIImageToImage, normalizeComfyImageArgs},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := map[string]interface{}{"prompt": "a blue car"}
+			for _, setting := range []struct {
+				key   string
+				value interface{}
+			}{
+				{"steps", float64(12)},
+				{"cfg", float64(3.5)},
+				{"sampler_name", "dpmpp_2m"},
+				{"scheduler", "karras"},
+				{"shift", float64(4.5)},
+				{"seed", float64(99)},
+			} {
+				omitted, err := governance.Fingerprint(test.name, base, test.normalize)
+				if err != nil {
+					t.Fatal(err)
+				}
+				explicitArgs := map[string]interface{}{"prompt": "a blue car", setting.key: setting.value}
+				explicit, err := governance.Fingerprint(test.name, explicitArgs, test.normalize)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if omitted == explicit {
+					t.Fatalf("omitted and explicit %s produced the same fingerprint", setting.key)
+				}
 			}
 		})
 	}

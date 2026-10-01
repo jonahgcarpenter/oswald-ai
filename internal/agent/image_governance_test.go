@@ -103,7 +103,7 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 						submissions++
 						_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 					case "/history/job":
-						_, _ = w.Write([]byte(`{"job":{"outputs":{"30":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
+						_, _ = w.Write([]byte(`{"job":{"outputs":{"11":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
 					case "/view":
 						w.Header().Set("Content-Type", output.MimeType)
 						_, _ = w.Write(data)
@@ -122,8 +122,8 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 				}
 				if err := builtin.Register(reg, &config.Config{
 					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", "data", "workflows", "comfyui", "text-to-image-basic.json"),
-					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", "data", "workflows", "comfyui", "image-to-image-basic.json"),
+					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", "data", "workflows", "comfyui", "text-image.json"),
+					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", "data", "workflows", "comfyui", "image-image.json"),
 				}, nil, nil, log); err != nil {
 					t.Fatal(err)
 				}

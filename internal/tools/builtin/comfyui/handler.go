@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -35,33 +36,18 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 		if !ok || !principal.Authenticated() {
 			return governance.Result{}, errors.New("ComfyUI generation requires an authenticated request")
 		}
-		prompt, _ := args["prompt"].(string)
-		negative, _ := args["negative_prompt"].(string)
-		prompt = strings.TrimSpace(prompt)
-		negative = strings.TrimSpace(negative)
-		if prompt == "" {
-			return governance.Result{}, errors.New("prompt is required")
-		}
-		if utf8.RuneCountInString(prompt) > maxPromptRunes || utf8.RuneCountInString(negative) > maxPromptRunes {
-			return governance.Result{}, fmt.Errorf("prompt text must not exceed %d characters", maxPromptRunes)
-		}
-
-		var strength *float64
 		if mode == ImageToImage {
 			if raw, exists := args["create_variant"]; exists {
 				if _, ok := raw.(bool); !ok {
 					return governance.Result{}, errors.New("create_variant must be a boolean")
 				}
 			}
-			if raw, exists := args["strength"]; exists {
-				value, ok := raw.(float64)
-				if !ok {
-					return governance.Result{}, errors.New("strength must be a finite number between 0.1 and 0.9")
-				}
-				strength = &value
-			}
 		}
-		built, seed, err := workflow.Build(prompt, negative, strength)
+		build, err := buildRequest(mode, args)
+		if err != nil {
+			return governance.Result{}, err
+		}
+		built, seed, err := workflow.Build(build)
 		if err != nil {
 			return governance.Result{}, err
 		}
@@ -97,15 +83,15 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 		}
 		meta := requestctx.MetadataFromContext(ctx)
 		agentLog := log.Agent("agent.tool.comfyui", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
-		agentLog.Debug("agent.tool.comfyui.start", "starting ComfyUI generation", config.F("mode", string(mode)), config.F("prompt_chars", utf8.RuneCountInString(prompt)), config.F("negative_prompt_chars", utf8.RuneCountInString(negative)))
+		agentLog.Debug("agent.tool.comfyui.start", "starting ComfyUI generation", config.F("mode", string(mode)), config.F("prompt_chars", utf8.RuneCountInString(build.Prompt)), config.F("negative_prompt_chars", utf8.RuneCountInString(build.NegativePrompt)))
 
-		outputNode := "9"
+		outputNode := "10"
 		if mode == ImageToImage {
-			outputNode = "30"
+			outputNode = "11"
 		}
 		generationLog := log
 		if mode == ImageToImage {
-			generationLog = log.With(config.F("strength", built["26"].Inputs["denoise"]))
+			generationLog = log.With(config.F("strength", built["9"].Inputs["denoise"]))
 		}
 		generated, cleanupFailed, err := client.Generate(context.WithValue(ctx, generationLoggerKey{}, generationLog), built, outputNode, inputPNG)
 		if err != nil {
@@ -137,6 +123,76 @@ func newHandler(mode Mode, workflow *Workflow, client generator, log *config.Log
 		agentLog.Debug("agent.tool.comfyui.complete", "completed ComfyUI generation", config.F("mode", string(mode)), config.F("image_bytes", len(generated.Data)), config.F("width", generated.Size.X), config.F("height", generated.Size.Y), config.F("is_degraded", cleanupFailed), config.F("status", map[bool]string{true: "degraded", false: "ok"}[cleanupFailed]))
 		return result, nil
 	}
+}
+
+// buildRequest parses model arguments into a workflow build request. It
+// validates argument types; workflow.Build validates sampling bounds and enums.
+func buildRequest(mode Mode, args map[string]interface{}) (WorkflowBuild, error) {
+	build := WorkflowBuild{}
+	prompt, _ := args["prompt"].(string)
+	negative, _ := args["negative_prompt"].(string)
+	build.Prompt = strings.TrimSpace(prompt)
+	build.NegativePrompt = strings.TrimSpace(negative)
+	if build.Prompt == "" {
+		return build, errors.New("prompt is required")
+	}
+	if utf8.RuneCountInString(build.Prompt) > maxPromptRunes || utf8.RuneCountInString(build.NegativePrompt) > maxPromptRunes {
+		return build, fmt.Errorf("prompt text must not exceed %d characters", maxPromptRunes)
+	}
+	if raw, exists := args["steps"]; exists {
+		value, ok := raw.(float64)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) || value < math.MinInt32 || value > math.MaxInt32 {
+			return build, errors.New("steps must be an integer")
+		}
+		steps := int(value)
+		build.Steps = &steps
+	}
+	if raw, exists := args["cfg"]; exists {
+		value, ok := raw.(float64)
+		if !ok {
+			return build, errors.New("cfg must be a number")
+		}
+		build.CFG = &value
+	}
+	if raw, exists := args["sampler_name"]; exists {
+		value, ok := raw.(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return build, errors.New("sampler_name must be a supported sampler name")
+		}
+		build.SamplerName = &value
+	}
+	if raw, exists := args["scheduler"]; exists {
+		value, ok := raw.(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return build, errors.New("scheduler must be a supported scheduler name")
+		}
+		build.Scheduler = &value
+	}
+	if raw, exists := args["shift"]; exists {
+		value, ok := raw.(float64)
+		if !ok {
+			return build, errors.New("shift must be a number")
+		}
+		build.Shift = &value
+	}
+	if raw, exists := args["seed"]; exists {
+		value, ok := raw.(float64)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) || value < 0 || value > math.MaxUint32 {
+			return build, errors.New("seed must be an integer between 0 and 4294967295")
+		}
+		seed := uint32(value)
+		build.Seed = &seed
+	}
+	if mode == ImageToImage {
+		if raw, exists := args["strength"]; exists {
+			value, ok := raw.(float64)
+			if !ok {
+				return build, errors.New("strength must be a finite number between 0.1 and 0.9")
+			}
+			build.Denoise = &value
+		}
+	}
+	return build, nil
 }
 
 func outputFilename(mode Mode, seed uint32, mimeType string) (string, error) {

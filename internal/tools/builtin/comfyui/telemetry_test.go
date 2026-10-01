@@ -23,7 +23,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 		case "/prompt":
 			_, _ = io.WriteString(w, `{"prompt_id":"`+canary+`","unknown":"`+canary+`"}`)
 		case "/history/" + canary:
-			_, _ = io.WriteString(w, `{"`+canary+`":{"outputs":{"9":{"images":[{"filename":"`+canary+`.png","type":"output"}]}}}}`)
+			_, _ = io.WriteString(w, `{"`+canary+`":{"outputs":{"10":{"images":[{"filename":"`+canary+`.png","type":"output"}]}}}}`)
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(imageData)
@@ -38,7 +38,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow, err := LoadWorkflow(workflowPath("text-to-image-basic.json"), TextToImage)
+	workflow, err := LoadWorkflow(workflowPath("text-image.json"), TextToImage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			workflow, err := LoadWorkflow(workflowPath("image-to-image-basic.json"), ImageToImage)
+			workflow, err := LoadWorkflow(workflowPath("image-image.json"), ImageToImage)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,7 +112,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 			ctx := requestctx.WithMetadata(authenticatedContext(), requestctx.Metadata{RequestID: "req_strength", OperationID: "op_strength"})
 			ctx = requestctx.WithInputImages(ctx, []requestctx.InputImage{{Data: base64.StdEncoding.EncodeToString(testPNG(t))}})
 			args := map[string]interface{}{"prompt": canary}
-			want := workflow.nodes["26"].Inputs["denoise"]
+			want := workflow.nodes["9"].Inputs["denoise"]
 			if explicit {
 				args["strength"] = 0.6
 				want = 0.6

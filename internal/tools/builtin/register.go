@@ -199,10 +199,18 @@ func normalizeFetchArgs(args map[string]interface{}) interface{} {
 }
 
 func normalizeComfyArgs(args map[string]interface{}) interface{} {
-	return map[string]interface{}{
+	normalized := map[string]interface{}{
 		"prompt":          normalizedString(args, "prompt", false),
 		"negative_prompt": normalizedString(args, "negative_prompt", false),
 	}
+	// Include only explicitly provided sampling overrides so omission stays
+	// distinct from an explicit value and changed settings permit a retry.
+	for _, key := range []string{"steps", "cfg", "sampler_name", "scheduler", "shift", "seed"} {
+		if value, exists := args[key]; exists {
+			normalized[key] = value
+		}
+	}
+	return normalized
 }
 
 func normalizeComfyImageArgs(args map[string]interface{}) interface{} {

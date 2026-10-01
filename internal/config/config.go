@@ -70,8 +70,8 @@ const (
 	DefaultSoulPath                        = "data/memory/soul/soul.md"
 	DefaultToolsConfigDir                  = "data/tools"
 	DefaultDatabasePath                    = "data/database/oswald.db"
-	DefaultComfyUITextToImageWorkflowPath  = "data/workflows/comfyui/text-to-image-basic.json"
-	DefaultComfyUIImageToImageWorkflowPath = "data/workflows/comfyui/image-to-image-basic.json"
+	DefaultComfyUITextToImageWorkflowPath  = "data/workflows/comfyui/text-image.json"
+	DefaultComfyUIImageToImageWorkflowPath = "data/workflows/comfyui/image-image.json"
 )
 
 // Load reads configuration from environment variables, with .env file support.
