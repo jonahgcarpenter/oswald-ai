@@ -37,7 +37,7 @@ func TestClientPollsPendingHistoryDownloadsAndCleansUp(t *testing.T) {
 				_, _ = w.Write([]byte(`{}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"job-1":{"outputs":{"9":{"images":[{"filename":"result.png","subfolder":"","type":"output"}]}},"status":{"completed":true,"status_str":"success"}}}`))
+			_, _ = w.Write([]byte(`{"job-1":{"outputs":{"10":{"images":[{"filename":"result.png","subfolder":"","type":"output"}]}},"status":{"completed":true,"status_str":"success"}}}`))
 		case "/view":
 			if r.URL.Query().Get("filename") != "result.png" {
 				t.Errorf("unexpected view query: %s", r.URL.RawQuery)
@@ -62,7 +62,7 @@ func TestClientPollsPendingHistoryDownloadsAndCleansUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.pollInterval = time.Millisecond
-	result, err := generateTest(client, context.Background(), "9", nil)
+	result, err := generateTest(client, context.Background(), "10", nil)
 	got, degraded := result.Image, result.CleanupFailed
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestClientReturnsImageDegradedAfterCleanupRetriesFail(t *testing.T) {
 		case "/prompt":
 			_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 		case "/history/job":
-			_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+			_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(imageData)
@@ -96,7 +96,7 @@ func TestClientReturnsImageDegradedAfterCleanupRetriesFail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := generateTest(client, context.Background(), "9", nil)
+	result, err := generateTest(client, context.Background(), "10", nil)
 	degraded := result.CleanupFailed
 	if err != nil || !degraded || cleanups.Load() != 2 {
 		t.Fatalf("err=%v degraded=%t cleanups=%d", err, degraded, cleanups.Load())
@@ -127,7 +127,7 @@ func TestClientUploadsFixedPNG(t *testing.T) {
 		case "/prompt":
 			_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 		case "/history/job":
-			_, _ = w.Write([]byte(`{"job":{"outputs":{"30":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+			_, _ = w.Write([]byte(`{"job":{"outputs":{"11":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(input)
@@ -139,7 +139,7 @@ func TestClientUploadsFixedPNG(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, time.Second)
-	if _, err := generateTest(client, context.Background(), "30", input); err != nil {
+	if _, err := generateTest(client, context.Background(), "11", input); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -161,7 +161,7 @@ func TestGenerateBuildsWorkflowAndReportsEffectiveParameters(t *testing.T) {
 			submitted = payload.Prompt
 			_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 		case "/history/job":
-			_, _ = w.Write([]byte(`{"job":{"outputs":{"30":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+			_, _ = w.Write([]byte(`{"job":{"outputs":{"11":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(input)
@@ -176,7 +176,7 @@ func TestGenerateBuildsWorkflowAndReportsEffectiveParameters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
+	workflow, err := NewWorkflow(ImageToImage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,10 +188,10 @@ func TestGenerateBuildsWorkflowAndReportsEffectiveParameters(t *testing.T) {
 	if result.CleanupFailed || result.EffectiveStrength == nil || *result.EffectiveStrength != strength || result.Image.MIMEType != "image/png" {
 		t.Fatalf("generation metadata = %+v", result)
 	}
-	if submitted["26"].Inputs["denoise"] != strength || submitted["26"].Inputs["seed"] != float64(result.Seed) || submitted["24"].Inputs["text"] != "positive" || submitted["25"].Inputs["text"] != "negative" || submitted["29"].Inputs["image"] != InputImageReference {
+	if submitted["9"].Inputs["denoise"] != strength || submitted["9"].Inputs["seed"] != float64(result.Seed) || submitted["6"].Inputs["text"] != "positive" || submitted["7"].Inputs["text"] != "negative" || submitted["4"].Inputs["image"] != InputImageReference {
 		t.Fatalf("submitted workflow does not match generation metadata")
 	}
-	if workflow.nodes["26"].Inputs["denoise"] == strength {
+	if workflow.nodes["9"].Inputs["denoise"] == strength {
 		t.Fatal("template was mutated")
 	}
 }
@@ -204,12 +204,12 @@ func TestGenerateSubmitsCompleteRuntimeGraphs(t *testing.T) {
 		classes map[string]string
 		links   map[string]map[string][]interface{}
 	}{
-		{TextToImage, "9", false,
-			map[string]string{"3": "KSampler", "4": "CheckpointLoaderSimple", "5": "EmptyLatentImage", "6": "CLIPTextEncode", "7": "CLIPTextEncode", "8": "VAEDecode", "9": "SaveImage"},
-			map[string]map[string][]interface{}{"3": {"model": {"4", float64(0)}, "positive": {"6", float64(0)}, "negative": {"7", float64(0)}, "latent_image": {"5", float64(0)}}, "6": {"clip": {"4", float64(1)}}, "7": {"clip": {"4", float64(1)}}, "8": {"samples": {"3", float64(0)}, "vae": {"4", float64(2)}}, "9": {"images": {"8", float64(0)}}}},
-		{ImageToImage, "30", true,
-			map[string]string{"23": "CheckpointLoaderSimple", "24": "CLIPTextEncode", "25": "CLIPTextEncode", "26": "KSampler", "27": "VAEDecode", "28": "VAEEncode", "29": "LoadImage", "30": "PreviewImage", "32": "ImageScale"},
-			map[string]map[string][]interface{}{"24": {"clip": {"23", float64(1)}}, "25": {"clip": {"23", float64(1)}}, "26": {"model": {"23", float64(0)}, "positive": {"24", float64(0)}, "negative": {"25", float64(0)}, "latent_image": {"28", float64(0)}}, "27": {"samples": {"26", float64(0)}, "vae": {"23", float64(2)}}, "28": {"pixels": {"32", float64(0)}, "vae": {"23", float64(2)}}, "30": {"images": {"27", float64(0)}}, "32": {"image": {"29", float64(0)}}}},
+		{TextToImage, "10", false,
+			map[string]string{"1": "UnetLoaderGGUF", "2": "DualCLIPLoaderGGUF", "3": "VAELoader", "4": "CLIPTextEncode", "5": "CLIPTextEncode", "6": "ModelSamplingSD3", "7": "EmptySD3LatentImage", "8": "KSampler", "9": "VAEDecode", "10": "SaveImage"},
+			map[string]map[string][]interface{}{"4": {"clip": {"2", float64(0)}}, "5": {"clip": {"2", float64(0)}}, "6": {"model": {"1", float64(0)}}, "8": {"model": {"6", float64(0)}, "positive": {"4", float64(0)}, "negative": {"5", float64(0)}, "latent_image": {"7", float64(0)}}, "9": {"samples": {"8", float64(0)}, "vae": {"3", float64(0)}}, "10": {"images": {"9", float64(0)}}}},
+		{ImageToImage, "11", true,
+			map[string]string{"1": "UnetLoaderGGUF", "2": "DualCLIPLoaderGGUF", "3": "VAELoader", "4": "LoadImage", "5": "VAEEncode", "6": "CLIPTextEncode", "7": "CLIPTextEncode", "8": "ModelSamplingSD3", "9": "KSampler", "10": "VAEDecode", "11": "SaveImage", "12": "ImageScale"},
+			map[string]map[string][]interface{}{"5": {"pixels": {"12", float64(0)}, "vae": {"3", float64(0)}}, "6": {"clip": {"2", float64(0)}}, "7": {"clip": {"2", float64(0)}}, "8": {"model": {"1", float64(0)}}, "9": {"model": {"8", float64(0)}, "positive": {"6", float64(0)}, "negative": {"7", float64(0)}, "latent_image": {"5", float64(0)}}, "10": {"samples": {"9", float64(0)}, "vae": {"3", float64(0)}}, "11": {"images": {"10", float64(0)}}, "12": {"image": {"4", float64(0)}}}},
 	} {
 		t.Run(string(tc.mode), func(t *testing.T) {
 			var submitted map[string]node
@@ -239,7 +239,7 @@ func TestGenerateSubmitsCompleteRuntimeGraphs(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			workflow, err := NewWorkflow(tc.mode, "custom.safetensors")
+			workflow, err := NewWorkflow(tc.mode)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -268,14 +268,17 @@ func TestGenerateSubmitsCompleteRuntimeGraphs(t *testing.T) {
 					}
 				}
 			}
-			samID, dimensionsID, checkpointID, positiveID, negativeID := "3", "5", "4", "6", "7"
+			samID, dimensionsID, samplingID, positiveID, negativeID := "8", "7", "6", "4", "5"
 			if tc.png {
-				samID, dimensionsID, checkpointID, positiveID, negativeID = "26", "32", "23", "24", "25"
+				samID, dimensionsID, samplingID, positiveID, negativeID = "9", "12", "8", "6", "7"
 			}
 			for id, fields := range map[string]map[string]interface{}{
-				samID:        {"seed": float64(result.Seed), "sampler_name": "dpmpp_2m", "scheduler": "karras"},
-				dimensionsID: {"width": float64(432), "height": float64(768)},
-				checkpointID: {"ckpt_name": "custom.safetensors"},
+				samID:        {"seed": float64(result.Seed), "sampler_name": "euler", "scheduler": "sgm_uniform", "steps": float64(4), "cfg": float64(1)},
+				dimensionsID: {"width": float64(720), "height": float64(1280)},
+				samplingID:   {"shift": float64(3)},
+				"1":          {"unet_name": "sd3.5_large_turbo-Q5_0.gguf"},
+				"2":          {"clip_name1": "clip_l.safetensors", "clip_name2": "t5-v1_1-xxl-encoder-Q5_K_M.gguf", "type": "sd3"},
+				"3":          {"vae_name": "diffusion_pytorch_model.safetensors"},
 				positiveID:   {"text": "prompt"}, negativeID: {"text": "negative"},
 			} {
 				for key, want := range fields {
@@ -285,10 +288,10 @@ func TestGenerateSubmitsCompleteRuntimeGraphs(t *testing.T) {
 				}
 			}
 			if tc.png {
-				if submitted["29"].Inputs["image"] != InputImageReference || submitted["32"].Inputs["upscale_method"] != "lanczos" || submitted["32"].Inputs["crop"] != "center" || submitted["26"].Inputs["denoise"] != 0.45 || submitted["26"].Inputs["steps"] != float64(15) || submitted["26"].Inputs["cfg"] != float64(5) {
+				if submitted["4"].Inputs["image"] != InputImageReference || submitted["12"].Inputs["upscale_method"] != "lanczos" || submitted["12"].Inputs["crop"] != "center" || submitted["9"].Inputs["denoise"] != 0.75 || result.EffectiveStrength == nil || *result.EffectiveStrength != 0.75 || submitted["11"].Inputs["filename_prefix"] != "Oswald/SD35-Turbo-edit" {
 					t.Fatal("image graph parameters changed")
 				}
-			} else if submitted["3"].Inputs["denoise"] != float64(1) || submitted["3"].Inputs["steps"] != float64(20) || submitted["3"].Inputs["cfg"] != float64(7) || submitted["5"].Inputs["batch_size"] != float64(1) || submitted["9"].Inputs["filename_prefix"] != "ComfyUI" {
+			} else if submitted["8"].Inputs["denoise"] != float64(1) || result.EffectiveStrength != nil || submitted["7"].Inputs["batch_size"] != float64(1) || submitted["10"].Inputs["filename_prefix"] != "Oswald/SD35-Turbo-text" {
 				t.Fatal("text graph parameters changed")
 			}
 		})
@@ -300,11 +303,11 @@ func TestGenerateRejectsInvalidInputsBeforeProviderWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
+	text, err := NewWorkflow(TextToImage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	imageWorkflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
+	imageWorkflow, err := NewWorkflow(ImageToImage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +333,7 @@ func TestClientCleanupRunsAfterViewBeforeReturn(t *testing.T) {
 		case "/prompt":
 			_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 		case "/history/job":
-			_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+			_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(testPNG(t))
@@ -346,7 +349,7 @@ func TestClientCleanupRunsAfterViewBeforeReturn(t *testing.T) {
 	}))
 	defer server.Close()
 	client, _ := NewClient(server.URL, time.Second)
-	if _, err := generateTest(client, context.Background(), "9", nil); err != nil {
+	if _, err := generateTest(client, context.Background(), "10", nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -380,7 +383,7 @@ func TestClientCancellationStillUsesDetachedCleanupContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := generateTest(client, ctx, "9", nil)
+		_, err := generateTest(client, ctx, "10", nil)
 		done <- err
 	}()
 	<-historyStarted
@@ -401,7 +404,7 @@ func TestClientCleansUpWorkflowFailureAndUnsafeOutput(t *testing.T) {
 		history string
 	}{
 		{name: "terminal failure", history: `{"job":{"status":{"completed":true,"status_str":"error"}}}`},
-		{name: "path traversal", history: `{"job":{"outputs":{"9":{"images":[{"filename":"../secret.png","type":"output"}]}}}}`},
+		{name: "path traversal", history: `{"job":{"outputs":{"10":{"images":[{"filename":"../secret.png","type":"output"}]}}}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var cleanup atomic.Int32
@@ -418,7 +421,7 @@ func TestClientCleansUpWorkflowFailureAndUnsafeOutput(t *testing.T) {
 			}))
 			defer server.Close()
 			client, _ := NewClient(server.URL, time.Second)
-			if _, err := generateTest(client, context.Background(), "9", nil); err == nil || cleanup.Load() != 1 {
+			if _, err := generateTest(client, context.Background(), "10", nil); err == nil || cleanup.Load() != 1 {
 				t.Fatalf("err=%v cleanup=%d", err, cleanup.Load())
 			}
 		})
@@ -441,7 +444,7 @@ func TestClientRejectsInvalidAndOversizedOutputImages(t *testing.T) {
 				case "/prompt":
 					_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 				case "/history/job":
-					_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+					_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 				case "/view":
 					w.Header().Set("Content-Type", test.mime)
 					_, _ = w.Write(test.body)
@@ -452,7 +455,7 @@ func TestClientRejectsInvalidAndOversizedOutputImages(t *testing.T) {
 			}))
 			defer server.Close()
 			client, _ := NewClient(server.URL, time.Second)
-			if _, err := generateTest(client, context.Background(), "9", nil); err == nil || cleanup.Load() != 1 {
+			if _, err := generateTest(client, context.Background(), "10", nil); err == nil || cleanup.Load() != 1 {
 				t.Fatalf("err=%v cleanup=%d", err, cleanup.Load())
 			}
 		})
@@ -486,7 +489,7 @@ func TestClientSerializesGenerationsThroughCleanup(t *testing.T) {
 				}
 				<-release
 			}
-			_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
+			_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"x.png","type":"output"}]}}}}`))
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(testPNG(t))
@@ -498,9 +501,9 @@ func TestClientSerializesGenerationsThroughCleanup(t *testing.T) {
 	defer server.Close()
 	client, _ := NewClient(server.URL, 2*time.Second)
 	done := make(chan error, 2)
-	go func() { _, err := generateTest(client, context.Background(), "9", nil); done <- err }()
+	go func() { _, err := generateTest(client, context.Background(), "10", nil); done <- err }()
 	<-firstHistory
-	go func() { _, err := generateTest(client, context.Background(), "9", nil); done <- err }()
+	go func() { _, err := generateTest(client, context.Background(), "10", nil); done <- err }()
 	time.Sleep(25 * time.Millisecond)
 	if promptCalls.Load() != 1 {
 		t.Fatalf("second generation reached ComfyUI concurrently: calls=%d", promptCalls.Load())
@@ -522,10 +525,10 @@ func maxOutputBytesForTest() int {
 
 func generateTest(client *Client, ctx context.Context, outputNode string, png []byte) (Generation, error) {
 	mode := TextToImage
-	if outputNode == "30" {
+	if outputNode == "11" {
 		mode = ImageToImage
 	}
-	workflow, err := NewWorkflow(mode, "dreamshaper_8.safetensors")
+	workflow, err := NewWorkflow(mode)
 	if err != nil {
 		return Generation{}, err
 	}

@@ -9,13 +9,13 @@ const Name = "image_generate"
 func Definition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        Name,
-		Description: "Generate high-quality images from text prompts, or edit / transform an existing image by passing image_url. Returns the result in the `image` field — a URL or an absolute file path; reference it in your response using the current platform's file-delivery convention.",
+		Description: "Generate an image from a text description, or transform an existing image by supplying image_url. For transformations, describe the complete desired final image and the details to retain. Editing affects the whole image and may change faces, geometry, or other details; exact preservation and localized edits are not guaranteed. Returns the generated image as a private absolute file path in the image field, with the image delivered as an attachment.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{
-				"prompt":       {Type: "string", Description: "The text prompt describing the desired image (text-to-image) or the edit to apply (image-to-image). Be detailed and descriptive."},
-				"aspect_ratio": {Type: "string", Description: "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.", Enum: []string{"landscape", "square", "portrait"}, Default: "landscape"},
-				"image_url":    {Type: "string", Description: "Source image to edit/transform (image-to-image). A public URL or an absolute local file path from the conversation. Omit for text-to-image."},
+				"prompt":       {Type: "string", Description: "Describe the desired final image, including subject, composition, style, lighting, and colors. When editing, clearly describe the change and the existing details to retain."},
+				"aspect_ratio": {Type: "string", Description: "Output aspect ratio: landscape is 1280x720, square is 1024x1024, and portrait is 720x1280. When editing, match the source ratio where possible to avoid center cropping.", Enum: []string{"landscape", "square", "portrait"}, Default: "landscape"},
+				"image_url":    {Type: "string", Description: "Optional source image: a public HTTPS image URL or an absolute path to an unexpired image in the current user's managed image cache. Omit to generate a new image from text."},
 			},
 			Required: []string{"prompt"},
 		},

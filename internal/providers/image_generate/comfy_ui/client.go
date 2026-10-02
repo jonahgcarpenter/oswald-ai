@@ -77,9 +77,9 @@ func (c *Client) Generate(ctx context.Context, log *config.Logger, workflow *Wor
 		return Generation{}, err
 	}
 	result.Seed, result.EffectiveStrength = seed, effectiveStrength
-	outputNode := "9"
+	outputNode := "10"
 	if workflow.mode == ImageToImage {
-		outputNode = "30"
+		outputNode = "11"
 	}
 	stageLog := generationStageLogger(ctx, log, effectiveStrength)
 	phase, started := "permit", time.Now()

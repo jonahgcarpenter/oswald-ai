@@ -29,11 +29,11 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 		bootstrapLog.Info("tool.bootstrap.disabled", "disabled image generation because no server is configured", config.F("tool_name", imagegenerate.Name), config.F("status", "ok"))
 	} else {
-		textWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.TextToImage, cfg.ComfyUICheckpoint)
+		textWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.TextToImage)
 		if err != nil {
 			return err
 		}
-		imageWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.ImageToImage, cfg.ComfyUICheckpoint)
+		imageWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.ImageToImage)
 		if err != nil {
 			return err
 		}

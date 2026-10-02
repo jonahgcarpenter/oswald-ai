@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"regexp"
-	"strings"
 )
 
 type node struct {
@@ -23,39 +21,34 @@ type Workflow struct {
 	nodes map[string]node
 }
 
-var checkpointName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.safetensors$`)
-
-// NewWorkflow builds a fixed graph using a safe, operator-selected checkpoint basename.
-func NewWorkflow(mode Mode, checkpoint string) (*Workflow, error) {
-	if len(checkpoint) > 128 || !checkpointName.MatchString(checkpoint) || strings.Contains(checkpoint, "..") {
-		return nil, fmt.Errorf("ComfyUI checkpoint must be a safe .safetensors basename")
-	}
+// NewWorkflow builds a fixed SD3.5 Large Turbo graph with deployment-owned models.
+func NewWorkflow(mode Mode) (*Workflow, error) {
 	link := func(id string, output float64) []interface{} { return []interface{}{id, output} }
 	n := func(class string, inputs map[string]interface{}) node { return node{ClassType: class, Inputs: inputs} }
-	var nodes map[string]node
+	nodes := map[string]node{
+		"1": n("UnetLoaderGGUF", map[string]interface{}{"unet_name": "sd3.5_large_turbo-Q5_0.gguf"}),
+		"2": n("DualCLIPLoaderGGUF", map[string]interface{}{"clip_name1": "clip_l.safetensors", "clip_name2": "t5-v1_1-xxl-encoder-Q5_K_M.gguf", "type": "sd3"}),
+		"3": n("VAELoader", map[string]interface{}{"vae_name": "diffusion_pytorch_model.safetensors"}),
+	}
 	switch mode {
 	case TextToImage:
-		nodes = map[string]node{
-			"3": n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(20), "cfg": float64(7), "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": float64(1), "model": link("4", 0), "positive": link("6", 0), "negative": link("7", 0), "latent_image": link("5", 0)}),
-			"4": n("CheckpointLoaderSimple", map[string]interface{}{"ckpt_name": checkpoint}),
-			"5": n("EmptyLatentImage", map[string]interface{}{"width": float64(512), "height": float64(512), "batch_size": float64(1)}),
-			"6": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("4", 1)}),
-			"7": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("4", 1)}),
-			"8": n("VAEDecode", map[string]interface{}{"samples": link("3", 0), "vae": link("4", 2)}),
-			"9": n("SaveImage", map[string]interface{}{"filename_prefix": "ComfyUI", "images": link("8", 0)}),
-		}
+		nodes["4"] = n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("2", 0)})
+		nodes["5"] = n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("2", 0)})
+		nodes["6"] = n("ModelSamplingSD3", map[string]interface{}{"shift": float64(3), "model": link("1", 0)})
+		nodes["7"] = n("EmptySD3LatentImage", map[string]interface{}{"width": float64(1280), "height": float64(720), "batch_size": float64(1)})
+		nodes["8"] = n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(4), "cfg": float64(1), "sampler_name": "euler", "scheduler": "sgm_uniform", "denoise": float64(1), "model": link("6", 0), "positive": link("4", 0), "negative": link("5", 0), "latent_image": link("7", 0)})
+		nodes["9"] = n("VAEDecode", map[string]interface{}{"samples": link("8", 0), "vae": link("3", 0)})
+		nodes["10"] = n("SaveImage", map[string]interface{}{"filename_prefix": "Oswald/SD35-Turbo-text", "images": link("9", 0)})
 	case ImageToImage:
-		nodes = map[string]node{
-			"23": n("CheckpointLoaderSimple", map[string]interface{}{"ckpt_name": checkpoint}),
-			"24": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("23", 1)}),
-			"25": n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("23", 1)}),
-			"26": n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(15), "cfg": float64(5), "sampler_name": "dpmpp_2m", "scheduler": "karras", "denoise": 0.45, "model": link("23", 0), "positive": link("24", 0), "negative": link("25", 0), "latent_image": link("28", 0)}),
-			"27": n("VAEDecode", map[string]interface{}{"samples": link("26", 0), "vae": link("23", 2)}),
-			"28": n("VAEEncode", map[string]interface{}{"pixels": link("32", 0), "vae": link("23", 2)}),
-			"29": n("LoadImage", map[string]interface{}{"image": InputImageReference}),
-			"30": n("PreviewImage", map[string]interface{}{"images": link("27", 0)}),
-			"32": n("ImageScale", map[string]interface{}{"upscale_method": "lanczos", "width": float64(512), "height": float64(512), "crop": "center", "image": link("29", 0)}),
-		}
+		nodes["4"] = n("LoadImage", map[string]interface{}{"image": InputImageReference})
+		nodes["5"] = n("VAEEncode", map[string]interface{}{"pixels": link("12", 0), "vae": link("3", 0)})
+		nodes["6"] = n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("2", 0)})
+		nodes["7"] = n("CLIPTextEncode", map[string]interface{}{"text": "", "clip": link("2", 0)})
+		nodes["8"] = n("ModelSamplingSD3", map[string]interface{}{"shift": float64(3), "model": link("1", 0)})
+		nodes["9"] = n("KSampler", map[string]interface{}{"seed": float64(0), "steps": float64(4), "cfg": float64(1), "sampler_name": "euler", "scheduler": "sgm_uniform", "denoise": 0.75, "model": link("8", 0), "positive": link("6", 0), "negative": link("7", 0), "latent_image": link("5", 0)})
+		nodes["10"] = n("VAEDecode", map[string]interface{}{"samples": link("9", 0), "vae": link("3", 0)})
+		nodes["11"] = n("SaveImage", map[string]interface{}{"filename_prefix": "Oswald/SD35-Turbo-edit", "images": link("10", 0)})
+		nodes["12"] = n("ImageScale", map[string]interface{}{"upscale_method": "lanczos", "width": float64(1280), "height": float64(720), "crop": "center", "image": link("4", 0)})
 	default:
 		return nil, fmt.Errorf("unsupported workflow mode %q", mode)
 	}
@@ -75,11 +68,11 @@ func (w *Workflow) build(prompt, negativePrompt string, strength *float64, aspec
 	width, height := float64(0), float64(0)
 	switch aspect {
 	case "landscape":
-		width, height = 768, 432
+		width, height = 1280, 720
 	case "square":
-		width, height = 512, 512
+		width, height = 1024, 1024
 	case "portrait":
-		width, height = 432, 768
+		width, height = 720, 1280
 	default:
 		return nil, 0, nil, fmt.Errorf("unsupported image aspect ratio")
 	}
@@ -97,146 +90,109 @@ func (w *Workflow) build(prompt, negativePrompt string, strength *float64, aspec
 	}
 	seed := binary.BigEndian.Uint32(seedBytes[:])
 	if w.mode == TextToImage {
-		nodes["5"].Inputs["width"], nodes["5"].Inputs["height"] = width, height
+		nodes["7"].Inputs["width"], nodes["7"].Inputs["height"] = width, height
+		nodes["4"].Inputs["text"] = prompt
+		nodes["5"].Inputs["text"] = negativePrompt
+		nodes["8"].Inputs["seed"] = seed
+	} else {
+		nodes["12"].Inputs["width"], nodes["12"].Inputs["height"] = width, height
 		nodes["6"].Inputs["text"] = prompt
 		nodes["7"].Inputs["text"] = negativePrompt
-		nodes["3"].Inputs["seed"] = seed
-	} else {
-		nodes["32"].Inputs["width"], nodes["32"].Inputs["height"] = width, height
-		nodes["24"].Inputs["text"] = prompt
-		nodes["25"].Inputs["text"] = negativePrompt
-		nodes["26"].Inputs["seed"] = seed
+		nodes["9"].Inputs["seed"] = seed
 		if strength != nil {
-			nodes["26"].Inputs["denoise"] = *strength
+			nodes["9"].Inputs["denoise"] = *strength
 		}
-		nodes["29"].Inputs["image"] = InputImageReference
+		nodes["4"].Inputs["image"] = InputImageReference
 	}
 	if w.mode == ImageToImage {
-		value := nodes["26"].Inputs["denoise"].(float64)
+		value := nodes["9"].Inputs["denoise"].(float64)
 		return nodes, seed, &value, nil
 	}
 	return nodes, seed, nil, nil
 }
 
 func (w *Workflow) validate() error {
+	classes := map[string]string{"1": "UnetLoaderGGUF", "2": "DualCLIPLoaderGGUF", "3": "VAELoader"}
+	positive, negative, sampling, sampler, latent, decoded, output := "4", "5", "6", "8", "7", "9", "10"
+	dimension := "7"
 	switch w.mode {
 	case TextToImage:
-		if err := w.requireNode("3", "KSampler"); err != nil {
-			return err
-		}
-		if err := w.requireNode("4", "CheckpointLoaderSimple"); err != nil {
-			return err
-		}
-		if err := w.requireNode("5", "EmptyLatentImage"); err != nil {
-			return err
-		}
-		if err := w.requireNode("6", "CLIPTextEncode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("7", "CLIPTextEncode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("8", "VAEDecode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("9", "SaveImage"); err != nil {
-			return err
-		}
-		if err := exactNumber(w.nodes["5"].Inputs, "batch_size", 1); err != nil {
-			return err
-		}
-		if err := dimensions(w.nodes["5"].Inputs); err != nil {
-			return err
-		}
-		if err := stringInput(w.nodes["6"].Inputs, "text"); err != nil {
-			return err
-		}
-		if err := stringInput(w.nodes["7"].Inputs, "text"); err != nil {
-			return err
-		}
-		if err := validateConnections([]connectionCheck{
-			{w.nodes["3"].Inputs, "model", "4", 0},
-			{w.nodes["3"].Inputs, "positive", "6", 0},
-			{w.nodes["3"].Inputs, "negative", "7", 0},
-			{w.nodes["3"].Inputs, "latent_image", "5", 0},
-			{w.nodes["6"].Inputs, "clip", "4", 1},
-			{w.nodes["7"].Inputs, "clip", "4", 1},
-			{w.nodes["8"].Inputs, "samples", "3", 0},
-			{w.nodes["8"].Inputs, "vae", "4", 2},
-			{w.nodes["9"].Inputs, "images", "8", 0},
-		}); err != nil {
-			return err
-		}
-		if err := samplerBounds(w.nodes["3"].Inputs, false); err != nil {
-			return err
-		}
-		return exactNumber(w.nodes["3"].Inputs, "denoise", 1)
+		classes[latent] = "EmptySD3LatentImage"
 	case ImageToImage:
-		if err := w.requireNode("23", "CheckpointLoaderSimple"); err != nil {
-			return err
-		}
-		if err := w.requireNode("24", "CLIPTextEncode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("25", "CLIPTextEncode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("26", "KSampler"); err != nil {
-			return err
-		}
-		if err := w.requireNode("27", "VAEDecode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("28", "VAEEncode"); err != nil {
-			return err
-		}
-		if err := w.requireNode("29", "LoadImage"); err != nil {
-			return err
-		}
-		if err := w.requireNode("30", "PreviewImage"); err != nil {
-			return err
-		}
-		if err := w.requireNode("32", "ImageScale"); err != nil {
-			return err
-		}
-		if err := exactString(w.nodes["26"].Inputs, "sampler_name", "dpmpp_2m"); err != nil {
-			return err
-		}
-		if err := exactString(w.nodes["26"].Inputs, "scheduler", "karras"); err != nil {
-			return err
-		}
-		if err := dimensions(w.nodes["32"].Inputs); err != nil {
-			return err
-		}
-		if err := stringInput(w.nodes["24"].Inputs, "text"); err != nil {
-			return err
-		}
-		if err := stringInput(w.nodes["25"].Inputs, "text"); err != nil {
-			return err
-		}
-		if err := stringInput(w.nodes["29"].Inputs, "image"); err != nil {
-			return err
-		}
-		if err := validateConnections([]connectionCheck{
-			{w.nodes["26"].Inputs, "model", "23", 0},
-			{w.nodes["26"].Inputs, "positive", "24", 0},
-			{w.nodes["26"].Inputs, "negative", "25", 0},
-			{w.nodes["26"].Inputs, "latent_image", "28", 0},
-			{w.nodes["24"].Inputs, "clip", "23", 1},
-			{w.nodes["25"].Inputs, "clip", "23", 1},
-			{w.nodes["27"].Inputs, "samples", "26", 0},
-			{w.nodes["27"].Inputs, "vae", "23", 2},
-			{w.nodes["28"].Inputs, "pixels", "32", 0},
-			{w.nodes["28"].Inputs, "vae", "23", 2},
-			{w.nodes["32"].Inputs, "image", "29", 0},
-			{w.nodes["30"].Inputs, "images", "27", 0},
-		}); err != nil {
-			return err
-		}
-		return samplerBounds(w.nodes["26"].Inputs, true)
+		positive, negative, sampling, sampler, latent, decoded, output = "6", "7", "8", "9", "5", "10", "11"
+		dimension = "12"
+		classes["4"], classes[latent], classes[dimension] = "LoadImage", "VAEEncode", "ImageScale"
 	default:
 		return fmt.Errorf("unsupported workflow mode %q", w.mode)
 	}
+	classes[positive], classes[negative], classes[sampling] = "CLIPTextEncode", "CLIPTextEncode", "ModelSamplingSD3"
+	classes[sampler], classes[decoded], classes[output] = "KSampler", "VAEDecode", "SaveImage"
+	for id, class := range classes {
+		if err := w.requireNode(id, class); err != nil {
+			return err
+		}
+	}
+	for _, check := range []struct{ id, key, value string }{
+		{"1", "unet_name", "sd3.5_large_turbo-Q5_0.gguf"},
+		{"2", "clip_name1", "clip_l.safetensors"},
+		{"2", "clip_name2", "t5-v1_1-xxl-encoder-Q5_K_M.gguf"},
+		{"2", "type", "sd3"},
+		{"3", "vae_name", "diffusion_pytorch_model.safetensors"},
+	} {
+		if err := exactString(w.nodes[check.id].Inputs, check.key, check.value); err != nil {
+			return err
+		}
+	}
+	if err := dimensions(w.nodes[dimension].Inputs); err != nil {
+		return err
+	}
+	for _, id := range []string{positive, negative} {
+		if err := stringInput(w.nodes[id].Inputs, "text"); err != nil {
+			return err
+		}
+	}
+	if err := exactNumber(w.nodes[sampling].Inputs, "shift", 3); err != nil {
+		return err
+	}
+	connections := []connectionCheck{
+		{w.nodes[sampling].Inputs, "model", "1", 0},
+		{w.nodes[positive].Inputs, "clip", "2", 0},
+		{w.nodes[negative].Inputs, "clip", "2", 0},
+		{w.nodes[sampler].Inputs, "model", sampling, 0},
+		{w.nodes[sampler].Inputs, "positive", positive, 0},
+		{w.nodes[sampler].Inputs, "negative", negative, 0},
+		{w.nodes[sampler].Inputs, "latent_image", latent, 0},
+		{w.nodes[decoded].Inputs, "samples", sampler, 0},
+		{w.nodes[decoded].Inputs, "vae", "3", 0},
+		{w.nodes[output].Inputs, "images", decoded, 0},
+	}
+	if w.mode == TextToImage {
+		if err := exactNumber(w.nodes[latent].Inputs, "batch_size", 1); err != nil {
+			return err
+		}
+		if err := exactNumber(w.nodes[sampler].Inputs, "denoise", 1); err != nil {
+			return err
+		}
+	} else {
+		if err := stringInput(w.nodes["4"].Inputs, "image"); err != nil {
+			return err
+		}
+		if err := exactString(w.nodes[dimension].Inputs, "upscale_method", "lanczos"); err != nil {
+			return err
+		}
+		if err := exactString(w.nodes[dimension].Inputs, "crop", "center"); err != nil {
+			return err
+		}
+		connections = append(connections,
+			connectionCheck{w.nodes[latent].Inputs, "pixels", dimension, 0},
+			connectionCheck{w.nodes[latent].Inputs, "vae", "3", 0},
+			connectionCheck{w.nodes[dimension].Inputs, "image", "4", 0},
+		)
+	}
+	if err := validateConnections(connections); err != nil {
+		return err
+	}
+	return samplerBounds(w.nodes[sampler].Inputs, w.mode == ImageToImage)
 }
 
 func (w *Workflow) requireNode(id, class string) error {
@@ -270,17 +226,17 @@ func exactNumber(inputs map[string]interface{}, key string, want float64) error 
 
 func boundedNumber(inputs map[string]interface{}, key string, minimum, maximum float64) error {
 	got, ok := inputs[key].(float64)
-	if !ok || got < minimum || got > maximum {
+	if !ok || math.IsNaN(got) || math.IsInf(got, 0) || got < minimum || got > maximum {
 		return fmt.Errorf("%s must be between %v and %v", key, minimum, maximum)
 	}
 	return nil
 }
 
 func dimensions(inputs map[string]interface{}) error {
-	if err := boundedInteger(inputs, "width", 64, 768); err != nil {
+	if err := boundedInteger(inputs, "width", 64, 1280); err != nil {
 		return err
 	}
-	if err := boundedInteger(inputs, "height", 64, 768); err != nil {
+	if err := boundedInteger(inputs, "height", 64, 1280); err != nil {
 		return err
 	}
 	width := int(inputs["width"].(float64))
@@ -288,17 +244,23 @@ func dimensions(inputs map[string]interface{}) error {
 	if width%16 != 0 || height%16 != 0 {
 		return fmt.Errorf("dimensions must be multiples of 16")
 	}
-	if !((width <= 768 && height <= 512) || (width <= 512 && height <= 768)) || width*height > 393216 {
-		return fmt.Errorf("dimensions exceed the safe generation limit")
+	if width*height > 1024*1024 {
+		return fmt.Errorf("dimensions exceed the generation pixel limit")
 	}
 	return nil
 }
 
 func samplerBounds(inputs map[string]interface{}, imageMode bool) error {
-	if err := boundedInteger(inputs, "steps", 1, 25); err != nil {
+	if err := exactNumber(inputs, "steps", 4); err != nil {
 		return err
 	}
-	if err := boundedNumber(inputs, "cfg", 1, 10); err != nil {
+	if err := exactNumber(inputs, "cfg", 1); err != nil {
+		return err
+	}
+	if err := exactString(inputs, "sampler_name", "euler"); err != nil {
+		return err
+	}
+	if err := exactString(inputs, "scheduler", "sgm_uniform"); err != nil {
 		return err
 	}
 	if imageMode {

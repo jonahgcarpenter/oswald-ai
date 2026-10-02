@@ -31,7 +31,6 @@ type Config struct {
 	BraveAPIKey              string        // Optional Brave Search API subscription token
 	SearxngURL               string        // Optional SearXNG base URL for web search
 	ComfyUIURL               string        // Optional ComfyUI HTTP(S) base URL; image tools are disabled if empty
-	ComfyUICheckpoint        string        // Operator-selected ComfyUI checkpoint basename
 	ComfyUIGenerationTimeout time.Duration // Maximum duration of one ComfyUI generation
 	WorkerPoolSize           int           // Number of concurrent broker workers (default: 1)
 	LogLevel                 Level         // Logging verbosity (default: LevelInfo)
@@ -100,7 +99,6 @@ func Load() (*Config, error) {
 		BraveAPIKey:              getEnv("BRAVE_API_KEY", ""),
 		SearxngURL:               getEnv("SEARXNG_URL", ""),
 		ComfyUIURL:               strings.TrimSpace(getEnv("COMFYUI_URL", "")),
-		ComfyUICheckpoint:        getEnv("COMFYUI_CHECKPOINT", "dreamshaper_8.safetensors"),
 		ComfyUIGenerationTimeout: comfyTimeout,
 		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
 		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),

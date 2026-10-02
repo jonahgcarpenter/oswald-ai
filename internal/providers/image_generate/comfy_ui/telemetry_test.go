@@ -23,7 +23,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 		case "/prompt":
 			_, _ = io.WriteString(w, `{"prompt_id":"`+canary+`","unknown":"`+canary+`"}`)
 		case "/history/" + canary:
-			_, _ = io.WriteString(w, `{"`+canary+`":{"outputs":{"9":{"images":[{"filename":"`+canary+`.png","type":"output"}]}}}}`)
+			_, _ = io.WriteString(w, `{"`+canary+`":{"outputs":{"10":{"images":[{"filename":"`+canary+`.png","type":"output"}]}}}}`)
 		case "/view":
 			w.Header().Set("Content-Type", "image/png")
 			_, _ = w.Write(imageData)
@@ -38,7 +38,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workflow, err := NewWorkflow(TextToImage, "dreamshaper_8.safetensors")
+	workflow, err := NewWorkflow(TextToImage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			workflow, err := NewWorkflow(ImageToImage, "dreamshaper_8.safetensors")
+			workflow, err := NewWorkflow(ImageToImage)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -106,7 +106,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 			log := config.NewLogger(level)
 			log.SetOutput(&output)
 			ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: "req_strength", OperationID: "op_strength"})
-			want := workflow.nodes["26"].Inputs["denoise"]
+			want := interface{}(0.75)
 			var strength *float64
 			if explicit {
 				value := 0.6

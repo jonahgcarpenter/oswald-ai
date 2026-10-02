@@ -20,7 +20,7 @@ import (
 )
 
 func testConfig() *config.Config {
-	return &config.Config{SearxngURL: "http://localhost:8080", ComfyUICheckpoint: "dreamshaper_8.safetensors"}
+	return &config.Config{SearxngURL: "http://localhost:8080"}
 }
 
 func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {

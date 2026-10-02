@@ -41,7 +41,7 @@ func TestGenerateValidatesDownloadedImageBoundariesAndCleansUp(t *testing.T) {
 				case "/prompt":
 					_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 				case "/history/job":
-					_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"result.png","type":"output"}]}}}}`))
+					_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"result.png","type":"output"}]}}}}`))
 				case "/view":
 					w.Header().Set("Content-Type", test.mime)
 					_, _ = w.Write(encoded.Bytes())
@@ -61,7 +61,7 @@ func TestGenerateValidatesDownloadedImageBoundariesAndCleansUp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := generateTest(client, context.Background(), "9", nil)
+			result, err := generateTest(client, context.Background(), "10", nil)
 			got, degraded := result.Image, result.CleanupFailed
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) || !reflect.DeepEqual(got, GeneratedImage{}) {

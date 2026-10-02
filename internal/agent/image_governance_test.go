@@ -104,7 +104,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 						submissions++
 						_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 					case "/history/job":
-						_, _ = w.Write([]byte(`{"job":{"outputs":{"9":{"images":[{"filename":"result.jpg","type":"output"}]},"30":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
+						_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"result.jpg","type":"output"}]},"11":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
 					case "/view":
 						w.Header().Set("Content-Type", output.MimeType)
 						_, _ = w.Write(data)
@@ -119,7 +119,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 				log := config.NewLogger(config.LevelError)
 				cache := imagecache.New(t.TempDir())
 				reg, err := tools.NewRegistryWithImageCache(&config.Config{
-					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second, ComfyUICheckpoint: "dreamshaper_8.safetensors",
+					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
 				}, nil, nil, cache, log)
 				if err != nil {
 					t.Fatal(err)
