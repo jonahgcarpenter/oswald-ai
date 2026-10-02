@@ -4,7 +4,8 @@ tmp/
 
 # database
 *.db*
-usr_*/
+profiles/
+config.yaml
 
 # Track profile routing source, not operator profile directories.
 !/internal/profiles/
