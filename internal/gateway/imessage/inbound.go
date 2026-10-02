@@ -66,12 +66,28 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		IsReplyToBot: currentIsReplyToBot,
 		Text:         textWithoutMention,
 	})
+	routingReason := preflight.Reason
+	if preflight.Action != routing.ActionIgnore {
+		routingReason = "preflight_allowed"
+	}
+	log.Debug("gateway.message.routing", "evaluated imessage invocation",
+		config.F("reason_code", routingReason),
+		config.F("is_ignored", preflight.Action == routing.ActionIgnore),
+		config.F("is_group", isGroup), config.F("is_mention", mentionsBot),
+		config.F("is_command", currentIsCommandAttempt), config.F("is_reply", replyGUID != ""),
+		config.F("is_reply_found", replyFound), config.F("is_reply_to_bot", currentIsReplyToBot),
+		config.F("has_reply_to_guid", msg.ReplyToGUID != ""),
+		config.F("has_thread_originator_guid", msg.ThreadOriginatorGUID != ""),
+		config.F("has_thread_originator_part", msg.ThreadOriginatorPart != ""),
+		config.F("is_reply_lookup_attempted", replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt)))
 	if preflight.Action == routing.ActionIgnore {
 		g.logIgnoredMessage(preflight.Reason, "new-message", msg,
 			config.F("request_id", requestID),
 			config.F("is_group", isGroup),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", replyGUID != ""),
+			config.F("is_reply_found", replyFound),
+			config.F("is_reply_to_bot", currentIsReplyToBot),
 			config.F("is_command", currentIsCommandAttempt),
 			config.F("message_chars", len(msg.Text)),
 		)
