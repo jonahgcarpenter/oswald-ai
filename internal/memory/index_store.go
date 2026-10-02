@@ -447,6 +447,21 @@ func (s *Store) DeleteGlobalMemoryIndexRecord(ctx context.Context, revision Deri
 	return err
 }
 
+// RetireVectorIndexRevisions removes live and building vector revisions from
+// serving and writes when embeddings are disabled. Physical tables and revision
+// high-water marks remain for ordinary retention cleanup; re-enabling embeddings
+// must rebuild from canonical data, including writes completed while disabled.
+func (s *Store) RetireVectorIndexRevisions(ctx context.Context) (int64, error) {
+	result, err := s.sql.ExecContext(ctx, `UPDATE derived_index_revisions
+SET state = 'retired', updated_at = ?, last_error_code = 'embeddings_disabled'
+WHERE index_kind IN (?, ?) AND state IN ('live', 'building')`,
+		formatTime(time.Now().UTC()), IndexKindMemoryVector, IndexKindGlobalMemoryVector)
+	if err != nil {
+		return 0, fmt.Errorf("retire disabled vector revisions: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 // WritableIndexRevisions returns live and building targets for a canonical kind.
 func (s *Store) WritableIndexRevisions(ctx context.Context, entityKind string) ([]DerivedIndexRevision, error) {
 	kinds := []string{IndexKindTranscriptFTS}

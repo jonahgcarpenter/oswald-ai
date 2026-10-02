@@ -320,6 +320,8 @@ The canonical database is `config.DefaultDatabasePath`, currently `data/database
 - Generated names must match their recorded kind/revision before publication or cleanup. Retained revision metadata preserves high-water and prevents name reuse.
 - Indexing reconciles at startup and polls every 30 seconds plus mutation wakeups. During model replacement, semantic queries use the old live model until publication; that model must remain accessible. Embedding dimension is cached after the first successful probe until restart.
 
+An unset, empty, or whitespace-only `LLM_GATEWAY_EMBEDDING_MODEL` disables all embedding submissions, including updates to previously persisted vector indexes. The indexing worker retires live/building user/global vector revisions while continuing lexical indexing and acknowledging queued changes. Tables remain subject to ordinary retired-index retention; re-enabling embeddings rebuilds from current canonical data rather than reusing potentially stale vectors. INFO `index.vector.disabled` reports committed retired revision counts and duration only when revisions change; storage failure emits WARN `index.vector.disable_failed`. No retirement measurement is synthesized after a failed update.
+
 `config.DefaultRetentionPolicy()` supplies these code-owned values; environment overrides are not supported. Tests can inject policies.
 
 | Policy | Value |
