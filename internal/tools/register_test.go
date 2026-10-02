@@ -15,7 +15,6 @@ import (
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/transcriptsearch"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -75,7 +74,7 @@ func TestRegisterIncludesFileMemoryTool(t *testing.T) {
 
 func TestRegisterHidesTranscriptSearch(t *testing.T) {
 	reg := newTestRegistry(t, testConfig())
-	if _, ok := visibleTestTool(reg, transcriptsearch.Name); ok || reg.HasHandler(transcriptsearch.Name) {
+	if _, ok := visibleTestTool(reg, "session_transcript_search"); ok || reg.HasHandler("session_transcript_search") {
 		t.Fatal("transcript search is available")
 	}
 }

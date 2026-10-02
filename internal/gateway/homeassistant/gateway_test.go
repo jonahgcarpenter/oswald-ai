@@ -5,19 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"
@@ -144,13 +144,13 @@ func TestGatewayAuthenticatesAndProcessesOneConversation(t *testing.T) {
 	if processed.SessionKey != "homeassistant:ha-user-1:conversation-1" || processed.Prompt != "hello" {
 		t.Fatalf("request=%+v", processed)
 	}
-	owner, ok, err := links.ResolveAccount("homeassistant", request.UserID)
-	if err != nil || !ok || owner != processed.Principal.CanonicalUserID {
-		t.Fatalf("owner=%q ok=%t err=%v", owner, ok, err)
+	owner, err := links.Resolve("homeassistant", request.UserID, true)
+	if err != nil || owner.CanonicalUserID != processed.Principal.CanonicalUserID {
+		t.Fatalf("incorrect profile ownership: %v", err)
 	}
 }
 
-func TestGatewayRejectsAuthenticationBeforeCreatingAccount(t *testing.T) {
+func TestGatewayRejectsAuthenticationBeforeProfileResolution(t *testing.T) {
 	links, log := testLinks(t)
 	gateway, err := New("8000", testToken, links, gatewayDependencies(log), log)
 	if err != nil {
@@ -165,12 +165,12 @@ func TestGatewayRejectsAuthenticationBeforeCreatingAccount(t *testing.T) {
 	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("err=%v response=%v", err, response)
 	}
-	if _, ok, err := links.ResolveAccount("homeassistant", "ha-user-1"); err != nil || ok {
-		t.Fatalf("unexpected account ok=%t err=%v", ok, err)
+	if links.calls.Load() != 0 {
+		t.Fatal("unauthenticated request resolved a profile")
 	}
 }
 
-func TestGatewayRejectsInvalidRequestBeforeCreatingAccount(t *testing.T) {
+func TestGatewayRejectsInvalidRequestBeforeProfileResolution(t *testing.T) {
 	links, log := testLinks(t)
 	gateway, err := New("8000", testToken, links, gatewayDependencies(log), log)
 	if err != nil {
@@ -194,8 +194,8 @@ func TestGatewayRejectsInvalidRequestBeforeCreatingAccount(t *testing.T) {
 	if message.Type != "error" || message.Code != "invalid_request" {
 		t.Fatalf("message=%+v", message)
 	}
-	if _, ok, err := links.ResolveAccount("homeassistant", "ha-user-1"); err != nil || ok {
-		t.Fatalf("unexpected account ok=%t err=%v", ok, err)
+	if links.calls.Load() != 0 {
+		t.Fatal("invalid request resolved a profile")
 	}
 }
 
@@ -213,18 +213,24 @@ func readProtocolMessage(t *testing.T, connection *gorilla.Conn) protocolMessage
 	return message
 }
 
-func testLinks(t *testing.T) (*accounts.Service, *config.Logger) {
+type testProfileResolver struct {
+	*profiles.Directory
+	calls atomic.Int32
+}
+
+func (r *testProfileResolver) Resolve(platform, id string, direct bool) (identity.Principal, error) {
+	r.calls.Add(1)
+	return r.Directory.Resolve(platform, id, direct)
+}
+
+func testLinks(t *testing.T) (*testProfileResolver, *config.Logger) {
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
-	path := filepath.Join(t.TempDir(), "oswald.db")
-	memory := memorytest.NewStore(t, path, log)
-	t.Cleanup(func() { _ = memory.Close() })
-	links := accounts.NewService(path, memory, nil, log)
-	if err := links.Initialize(); err != nil {
+	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", HomeAssistantListenPort: "8000", ProfileRoutes: []config.ProfileRoute{{Platform: "homeassistant", UserID: "ha-user-1", Profile: "default"}}}, log)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = links.Close() })
-	return links, log
+	return &testProfileResolver{Directory: directory}, log
 }
 
 func gatewayDependencies(log *config.Logger) gatewayruntime.Dependencies {

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
@@ -359,7 +358,7 @@ func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID strin
 		ctx.SenderID, ctx.DisplayName = "imessage:self", "Oswald"
 	} else {
 		ctx.SenderID = strings.TrimSpace(data.Handle.Address)
-		if normalized, err := accounts.NormalizeIdentifier("imessage", ctx.SenderID); err == nil {
+		if normalized, err := config.NormalizeGatewayIdentifier("imessage", ctx.SenderID); err == nil {
 			ctx.SenderID = normalized
 		}
 		ctx.DisplayName = ctx.SenderID

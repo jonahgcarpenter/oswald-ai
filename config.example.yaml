@@ -1,0 +1,51 @@
+# Copy to .oswald/config.yaml only after manually provisioning the profiles.
+# No .env files are loaded. *_env references read the process environment.
+providers:
+  gateway:
+    api: http://127.0.0.1:8080/v1
+    # key_env: MODEL_GATEWAY_API_KEY
+model:
+  provider: custom:gateway
+  default: your/provider-model
+  context_length: 32768
+runtime:
+  worker_pool_size: 1
+  log_level: info
+gateway:
+  multiplex_profiles: true
+  profile_routes: []
+  # Add explicit routes; unmapped transport identities are rejected.
+  # - name: example-discord
+  #   platform: discord
+  #   user_id: "123456789"
+  #   profile: example
+platforms:
+  api:
+    enabled: true
+    extra:
+      api_host: 127.0.0.1
+      api_port: 8081
+  discord:
+    enabled: false
+    extra:
+      token_env: DISCORD_TOKEN
+      dm_policy: allowlist
+      allow_from: []
+      guild_require_mention: true
+  bluebubbles:
+    enabled: false
+    extra:
+      server_url: http://127.0.0.1:1234
+      server_password_env: BLUEBUBBLES_PASSWORD
+      webhook_host: 0.0.0.0
+      webhook_port: 8645
+      dm_policy: allowlist
+      allow_from: []
+      group_require_mention: true
+tools:
+  web_search:
+    # brave_key_env: BRAVE_API_KEY
+    searxng_url: ""
+  image_generate:
+    url: ""
+    generation_timeout: 2m

@@ -19,12 +19,20 @@ var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // Store owns the global template and per-user system prompts.
 type Store struct {
-	path string
+	path        string
+	profileRoot string
+	profile     string
 }
 
 // NewStore uses path as the default template and its directory as the user root.
 func NewStore(path string) *Store {
 	return &Store{path: path}
+}
+
+// NewProfileStore reads an operator-owned profile soul, falling back to the
+// default soul without copying or creating operator files.
+func NewProfileStore(root, profile, defaultSoul string) *Store {
+	return &Store{path: defaultSoul, profileRoot: root, profile: profile}
 }
 
 // MigrateTemplate preserves an operator-managed template at the old path.
@@ -62,6 +70,22 @@ func (s *Store) MigrateTemplate(legacy string) error {
 // Read returns a user's operator-owned SOUL.md, creating it from the current
 // template only if missing. Concurrent first reads never observe a partial copy.
 func (s *Store) Read(ctx context.Context, userID string) (string, error) {
+	if s != nil && s.profileRoot != "" {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if userID != s.profile || !safeID.MatchString(userID) {
+			return "", errors.New("soul profile mismatch")
+		}
+		if err := validateProfileRoot(s.profileRoot); err != nil {
+			return "", err
+		}
+		content, err := readSoul(filepath.Join(s.profileRoot, "SOUL.md"), true)
+		if errors.Is(err, os.ErrNotExist) {
+			return readSoul(s.path, false)
+		}
+		return content, err
+	}
 	dir, err := s.userDir(ctx, userID, true)
 	if err != nil {
 		return "", err
@@ -109,6 +133,28 @@ func (s *Store) Read(ctx context.Context, userID string) (string, error) {
 		return "", err
 	}
 	return readSoul(path, true)
+}
+
+func validateProfileRoot(root string) error {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	path := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(abs, path), path) {
+		if part == "" {
+			continue
+		}
+		path = filepath.Join(path, part)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (path == abs && info.Mode().Perm()&0077 != 0) {
+			return errors.New("unsafe profile soul directory")
+		}
+	}
+	return nil
 }
 
 // Delete removes only the user's private SOUL.md; it does not remove the

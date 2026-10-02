@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
@@ -41,11 +40,18 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	text := strings.TrimSpace(msg.Text)
 	replyGUID := msg.replyTargetGUID()
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
+	principal, err := g.Links.Resolve("imessage", msg.Handle.Address, !isGroup)
+	if err != nil {
+		return
+	}
 	selectedMessageGUID := ""
 	if isGroup {
 		selectedMessageGUID = msg.GUID
 	}
 	mentionsBot := mentionRE.MatchString(text)
+	if isGroup && !g.Links.RequiresMention("imessage") {
+		mentionsBot = true
+	}
 	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
 	if !isGroup && g.DMMention && !dmMentionRE.MatchString(text) {
 		g.logIgnoredMessage("dm_without_mention", "new-message", msg,
@@ -99,11 +105,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		return
 	}
 
-	normalizedSenderID, err := accounts.NormalizeIdentifier("imessage", msg.Handle.Address)
-	if err != nil {
-		log.Error("gateway.account.normalize_failed", "failed to normalize imessage account", config.F("request_id", requestID), config.ErrorField(err))
-		return
-	}
+	normalizedSenderID := principal.ExternalID
 	displayName := normalizedSenderID
 	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID, log); err != nil {
 		log.Debug("gateway.contact_lookup.failed", "imessage contact lookup failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
@@ -111,11 +113,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		displayName = resolvedName
 	}
 
-	canonicalUserID, err := g.Links.EnsureAccount(ctx, "imessage", normalizedSenderID, displayName)
-	if err != nil {
-		log.Error("gateway.account.resolve_failed", "failed to resolve imessage account", config.F("request_id", requestID), config.ErrorField(err))
-		return
-	}
+	canonicalUserID := principal.CanonicalUserID
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
 	log = log.With(config.F("user_id", canonicalUserID))

@@ -10,10 +10,10 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
@@ -22,7 +22,7 @@ const protocolVersion = 1
 // Gateway serves the authenticated Home Assistant conversation protocol.
 type Gateway struct {
 	Port          string
-	Links         *accounts.Service
+	Links         identity.Resolver
 	Runtime       gatewayruntime.Dependencies
 	Log           *config.Logger
 	tokenHash     [sha256.Size]byte

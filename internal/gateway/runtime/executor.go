@@ -17,6 +17,14 @@ import (
 
 // Execute applies shared routing policy, command handling, and broker submission.
 func Execute(req Request, deps Dependencies, responder Responder) (outcome Outcome) {
+	if deps.ForProfile != nil {
+		selected, ok := deps.ForProfile(req.Principal.CanonicalUserID)
+		if !ok || !req.Principal.Authenticated() {
+			deps.Log.Server("gateway.runtime").Info("gateway.profile.rejected", "rejected unavailable profile", config.F("status", "rejected"))
+			return Outcome{Action: routing.ActionIgnore, Reason: "profile_unavailable"}
+		}
+		deps = selected
+	}
 	if req.RequestID == "" {
 		req.RequestID = config.NewRequestID()
 	}

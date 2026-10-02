@@ -32,9 +32,12 @@ func TestAttachmentAndEmbedShareOneInfoSummary(t *testing.T) {
 		_, _ = io.WriteString(w, "private-body")
 	}))
 	defer server.Close()
-	g := &Gateway{Log: log, APIBaseURL: server.URL, HTTPClient: server.Client()}
+	g, b, _ := newDiscordTestGateway(t, server.URL)
+	defer b.Shutdown()
+	g.Log = log
+	g.HTTPClient = server.Client()
 	msg := MessageCreate{ChannelID: "private-chat", Attachments: []Attachment{{Filename: "private-filename", ContentType: "application/private-mime"}}, Embeds: []Embed{{Type: "image", Image: EmbedImage{URL: server.URL + "/asset"}}}}
-	msg.Author.ID = "private-address"
+	msg.Author.ID = "123"
 	g.handleReceivedMessage(msg, "req-input-summary", time.Now())
 	data, err := os.ReadFile(file.Name())
 	if err != nil {

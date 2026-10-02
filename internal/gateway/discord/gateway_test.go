@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -31,7 +30,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
@@ -1327,14 +1327,23 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "oswald.db")
-	memories := memorytest.NewStore(t, dbPath, log)
-	links := accounts.NewService(dbPath, memories, nil, log)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := memory.NewProfileStore(context.Background(), dir, "default", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { memories.Close() })
+	links, err := profiles.NewDirectory(&config.Config{ProfileRoot: dir, ProfileName: "default", DiscordToken: "token", DiscordPolicy: config.AdmissionPolicy{Mode: "allow"}, DiscordGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "default"}}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
-	soulStore := soul.NewStore(soulPath)
+	soulStore := soul.NewProfileStore(dir, "default", soulPath)
 	chat := &discordFakeChatter{}
 	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)

@@ -46,7 +46,7 @@ type Agent struct {
 	budget      tokenbudget.ContextBudget
 	model       string
 	soul        *soul.Store
-	userMemory  *memory.Store
+	userMemory  SessionStore
 	fileMemory  *files.Store
 	imageCache  *imagecache.Cache
 	toolPolicy  governance.GlobalPolicy
@@ -83,7 +83,7 @@ func NewAgent(
 	registry *registry.Registry,
 	model string,
 	soul *soul.Store,
-	userMemory *memory.Store,
+	userMemory SessionStore,
 	budget tokenbudget.ContextBudget,
 	toolPolicy governance.GlobalPolicy,
 	log *config.Logger,

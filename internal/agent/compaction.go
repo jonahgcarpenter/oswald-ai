@@ -115,7 +115,7 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	return rebuilt, stats, nil
 }
 
-func loadForegroundDeliveredDebt(ctx context.Context, store *memory.Store, userID, sessionID string, generation int, afterTurnID int64) ([]memory.SessionTurn, error) {
+func loadForegroundDeliveredDebt(ctx context.Context, store SessionStore, userID, sessionID string, generation int, afterTurnID int64) ([]memory.SessionTurn, error) {
 	if store == nil || generation <= 0 {
 		return nil, nil
 	}

@@ -20,12 +20,8 @@ func TestProductionLoggingContract(t *testing.T) {
 	// Exact forwarding expressions, not blanket file exceptions. The worker
 	// wrapper's callers are checked below; the other sites select fixed literals.
 	reviewedEvents := map[string]string{
-		"internal/accounts/challenges.go#ConfirmChallenge": "event",
-		"internal/llm/telemetry.go#beginMeasurement":       "event",
-		"internal/providers/web/telemetry.go#BeginSearch":  "event",
-		"internal/compaction/service.go#warn":              "event",
-		"internal/memory/indexing/service.go#warn":         "event",
-		"internal/memory/indexing/service.go#health":       "event",
+		"internal/llm/telemetry.go#beginMeasurement":      "event",
+		"internal/providers/web/telemetry.go#BeginSearch": "event",
 		// startup.Error.Event and Message are fixed source literals, not Cause.
 		"cmd/agent/main.go#main": "startupErr.Event",
 	}
@@ -108,8 +104,7 @@ func TestProductionLoggingContract(t *testing.T) {
 							}
 						}
 					}
-					wrapper := (rel == "internal/compaction/service.go" || rel == "internal/memory/indexing/service.go") && (sel.Sel.Name == "warn" || sel.Sel.Name == "health")
-					if !loggerReceiver(sel.X) && !wrapper {
+					if !loggerReceiver(sel.X) {
 						return true
 					}
 					switch sel.Sel.Name {

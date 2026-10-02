@@ -8,23 +8,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 )
 
 func testGateway(t *testing.T) *Gateway {
 	t.Helper()
-	g, err := New("12345", &accounts.Service{}, gatewayruntime.Dependencies{}, "route", config.NewLogger(config.LevelInfo))
+	log := config.NewLogger(config.LevelInfo)
+	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenPort: "12345", Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := New("12345", directory, gatewayruntime.Dependencies{}, "route", log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,27 +291,20 @@ func TestStreamRejectsAttachmentsAfterProgress(t *testing.T) {
 	}
 }
 
-func TestLocalAdminAndPreRuntimeLogging(t *testing.T) {
+func TestFixedAPIProfileAndPreRuntimeLogging(t *testing.T) {
 	var logs bytes.Buffer
 	log := config.NewLogger(config.LevelInfo)
 	log.SetOutput(&logs)
-	path := filepath.Join(t.TempDir(), "accounts.db")
-	memories, err := memory.NewSQLiteStore(path, nil, "", log)
+	svc, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenPort: "12345", Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
 	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = memories.Close() })
-	svc := accounts.NewService(path, memories, nil, log)
-	t.Cleanup(func() { _ = svc.Close() })
-	if err := svc.EnsureLocalOpenAIAdmin(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	principal, err := svc.LocalOpenAIPrincipal(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if admin, err := svc.IsAdminPrincipal(principal); err != nil || !admin {
-		t.Fatalf("local principal admin=%t err=%v", admin, err)
+	if principal.CanonicalUserID != "api" {
+		t.Fatal("API selected another profile")
 	}
 	g, err := New("12345", svc, gatewayruntime.Dependencies{}, "route", log)
 	if err != nil {
@@ -409,7 +405,7 @@ func TestModelsAndUnsupportedOutput(t *testing.T) {
 func TestLocalIdentityUnavailable(t *testing.T) {
 	g := testGateway(t)
 	g.localPrincipal = func(context.Context) (identity.Principal, error) {
-		return identity.Principal{}, accounts.ErrPrincipalMismatch
+		return identity.Principal{}, profiles.ErrUnmappedIdentity
 	}
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodGet, "/v1/models", ""},

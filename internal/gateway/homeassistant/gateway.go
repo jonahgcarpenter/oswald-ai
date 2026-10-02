@@ -17,19 +17,17 @@ import (
 
 	gorilla "github.com/gorilla/websocket"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 var protocolIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // New creates a Home Assistant gateway with a deployment-scoped service token.
-func New(port, token string, links *accounts.Service, runtime gatewayruntime.Dependencies, log *config.Logger) (*Gateway, error) {
+func New(port, token string, links identity.Resolver, runtime gatewayruntime.Dependencies, log *config.Logger) (*Gateway, error) {
 	token = strings.TrimSpace(token)
 	if len(token) < 32 {
 		return nil, fmt.Errorf("HOME_ASSISTANT_AUTH_TOKEN must contain at least 32 characters")
@@ -128,32 +126,22 @@ func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *br
 		write(protocolMessage{Type: "error", Code: "invalid_request", Message: "The request was invalid."})
 		return
 	}
-	userID, err := accounts.NormalizeIdentifier("homeassistant", request.UserID)
+	userID, err := config.NormalizeGatewayIdentifier("homeassistant", request.UserID)
 	if err != nil {
 		log.Info("gateway.account.normalize_failed", "home assistant identity is invalid", config.F("reason_code", "invalid_identity"), config.F("status", "rejected"))
 		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "user_required", Message: "An authenticated Home Assistant user is required."})
 		return
 	}
-	ctx := requestctx.WithMetadata(r.Context(), requestctx.Metadata{RequestID: internalRequestID})
-	canonicalUserID, err := g.Links.EnsureAccount(ctx, "homeassistant", userID, strings.TrimSpace(request.DisplayName))
+	principal, err := g.Links.Resolve("homeassistant", userID, true)
 	if err != nil {
 		log.Error("gateway.account.resolve_failed", "failed to resolve home assistant account", config.F("status", "error"), config.ErrorField(err))
 		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "Oswald could not resolve the Home Assistant user."})
 		return
 	}
+	canonicalUserID := principal.CanonicalUserID
 	log = log.With(config.F("user_id", canonicalUserID))
 	g.track(userID, tracked)
 	defer g.untrack(userID, tracked)
-	currentOwner, ownerExists, err := g.Links.ResolveAccount("homeassistant", userID)
-	if err != nil || !ownerExists || currentOwner != canonicalUserID {
-		if err != nil {
-			log.Error("gateway.account.resolve_failed", "failed to recheck home assistant account", config.F("status", "error"), config.ErrorField(err))
-		} else {
-			log.Info("gateway.request.rejected", "home assistant account owner changed", config.F("reason_code", "principal_mismatch"), config.F("status", "rejected"))
-		}
-		write(protocolMessage{Type: "error", RequestID: request.RequestID, Code: "service_unavailable", Message: "The Home Assistant user is no longer available."})
-		return
-	}
 
 	sessionKey := "homeassistant:" + userID + ":" + request.ConversationID
 	firstChunk := true
@@ -167,7 +155,6 @@ func (g *Gateway) handleConnection(w http.ResponseWriter, r *http.Request, b *br
 		}
 		write(protocolMessage{Type: string(chunk.Type), RequestID: request.RequestID, Text: chunk.Text, Tool: chunk.Tool})
 	}
-	principal := identity.Principal{CanonicalUserID: canonicalUserID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
 		RequestID:  internalRequestID, ChatID: sessionKey, Principal: principal,
@@ -218,7 +205,9 @@ func (g *Gateway) runtimeDependencies(b *broker.Broker) gatewayruntime.Dependenc
 	dependencies := g.Runtime
 	dependencies.Broker = b
 	if dependencies.Access == nil {
-		dependencies.Access = g.Links
+		if access, ok := g.Links.(gatewayruntime.AccessChecker); ok {
+			dependencies.Access = access
+		}
 	}
 	if dependencies.Log == nil {
 		dependencies.Log = g.Log

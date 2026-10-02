@@ -42,12 +42,18 @@ type Counts struct {
 
 // Cache owns only files in root/<user>/.cache/images.
 type Cache struct {
-	root string
-	now  func() time.Time
+	root    string
+	profile string
+	now     func() time.Time
 }
 
 // New constructs a cache at root; use config.DefaultDataRoot for the application cache.
 func New(root string) *Cache { return &Cache{root: root, now: time.Now} }
+
+// NewProfileCache owns images directly below one manually provisioned profile.
+func NewProfileCache(root, profile string) *Cache {
+	return &Cache{root: root, profile: profile, now: time.Now}
+}
 
 func (c *Cache) rootPath() (string, error) {
 	if c == nil || c.root == "" {
@@ -67,6 +73,17 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 		return -1, "", err
 	}
 	path := filepath.Join(root, user, ".cache", "images")
+	if c.profile != "" {
+		if user != c.profile {
+			return -1, "", errors.New("image cache profile mismatch")
+		}
+		profileFD, err := openDirectory(ctx, root, false, 1)
+		if err != nil {
+			return -1, "", err
+		}
+		unix.Close(profileFD)
+		path = filepath.Join(root, ".cache", "images")
+	}
 	fd, err := openDirectory(ctx, path, create, 3)
 	return fd, path, err
 }
@@ -348,6 +365,20 @@ func (c *Cache) Resolve(ctx context.Context, userID, path string) ([]byte, strin
 // into other directories or removes files not matching cache image names.
 func (c *Cache) Sweep(ctx context.Context, now time.Time) (Counts, error) {
 	var counts Counts
+	if c != nil && c.profile != "" {
+		err := c.walkImages(ctx, c.profile, func(fd int, name string, stat unix.Stat_t) error {
+			if now.Sub(time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)) < lifetime {
+				return nil
+			}
+			if err := unix.Unlinkat(fd, name, 0); err != nil {
+				return err
+			}
+			counts.RemovedFiles++
+			counts.RemovedBytes += stat.Size
+			return nil
+		})
+		return counts, err
+	}
 	root, err := c.rootPath()
 	if err != nil {
 		return counts, err

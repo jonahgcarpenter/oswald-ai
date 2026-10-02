@@ -1,23 +1,28 @@
 package gateway
 
 import (
-	"path/filepath"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 )
 
 const testHomeAssistantToken = "0123456789abcdef0123456789abcdef"
 
+func testProfileDirectory(t *testing.T, log *config.Logger) *profiles.Directory {
+	t.Helper()
+	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
 func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "oswald.db")
-	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	links := testProfileDirectory(t, log)
 
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
 	services, err := NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken}, links, runtimeDeps, log)
@@ -42,9 +47,7 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 
 func TestNewServicesFromConfigSkipsInvalidHomeAssistantConfiguration(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "oswald.db")
-	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	links := testProfileDirectory(t, log)
 
 	for _, test := range []struct {
 		name   string
@@ -69,8 +72,7 @@ func TestNewServicesFromConfigSkipsInvalidHomeAssistantConfiguration(t *testing.
 
 func TestNewServicesFromConfigValidatesBlueBubblesConfiguration(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	dbPath := filepath.Join(t.TempDir(), "oswald.db")
-	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	links := testProfileDirectory(t, log)
 	runtimeDeps := gatewayruntime.Dependencies{Log: log}
 
 	services, err := NewServicesFromConfig(&config.Config{BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bluebubbles.local", BlueBubblesPassword: "password"}, links, runtimeDeps, log)
@@ -100,8 +102,7 @@ func TestNewServicesFromConfigValidatesBlueBubblesConfiguration(t *testing.T) {
 
 func TestNewServicesFromConfigFailsWithoutValidGateway(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	dbPath := filepath.Join(t.TempDir(), "oswald.db")
-	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	links := testProfileDirectory(t, log)
 	for _, cfg := range []config.Config{
 		{},
 		{DiscordToken: "   "},
@@ -117,8 +118,7 @@ func TestNewServicesFromConfigFailsWithoutValidGateway(t *testing.T) {
 
 func TestNewServicesFromConfigOpenAIOnly(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	dbPath := filepath.Join(t.TempDir(), "oswald.db")
-	links := accounts.NewService(dbPath, memorytest.NewStore(t, dbPath, log), nil, log)
+	links := testProfileDirectory(t, log)
 	services, err := NewServicesFromConfig(&config.Config{OpenAIListenPort: "8091", LLMGatewayModel: "model"}, links, gatewayruntime.Dependencies{Log: log}, log)
 	if err != nil || serviceNames(services) != "openai" {
 		t.Fatalf("openai services = %q, err = %v", serviceNames(services), err)

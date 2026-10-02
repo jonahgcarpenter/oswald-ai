@@ -15,7 +15,6 @@ import (
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/transcriptsearch"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -97,9 +96,6 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		bootstrapLog.Debug("tool.bootstrap.configured", "configured web search tool", config.F("tool_name", websearch.Name), config.F("primary_provider", primary), config.F("fallback_provider", fallback))
 	}
 
-	if err := reg.DisableBuiltin(transcriptsearch.Name); err != nil {
-		return err
-	}
 	if err := reg.RegisterHandler(toolmemory.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolmemory.NewHandler(fileStore))); err != nil {
 		return fmt.Errorf("register memory tool: %w", err)
 	}

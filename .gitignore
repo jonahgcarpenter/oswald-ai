@@ -5,3 +5,6 @@ tmp/
 # database
 *.db*
 usr_*/
+
+# Track profile routing source, not operator profile directories.
+!/internal/profiles/

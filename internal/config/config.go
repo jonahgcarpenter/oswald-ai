@@ -1,42 +1,39 @@
 package config
 
-import (
-	"fmt"
-	"net/url"
-	"os"
-	"strconv"
-	"strings"
-	"time"
+import "time"
 
-	"github.com/joho/godotenv"
-)
-
-// Config holds all runtime configuration loaded from environment variables.
+// Config holds validated effective profile settings and shared gateway policy.
 type Config struct {
-	HomeAssistantListenPort  string        // Optional HTTP port for the Home Assistant gateway
-	HomeAssistantAuthToken   string        // Optional shared bearer token; gateway disabled if empty
-	BlueBubblesListenPort    string        // Optional HTTP port for the BlueBubbles webhook listener
-	BlueBubblesURL           string        // BlueBubbles HTTP(S) base URL
-	BlueBubblesPassword      string        // BlueBubbles server password/token for REST API auth
-	BlueBubblesDMMention     bool          // Require an Oswald mention in iMessage DMs
-	MCPConfigEncryptionKey   string        // Key used to encrypt MCP server URLs and headers at rest
-	LLMGatewayURL            string        // LLM gateway API base URL (default: "http://localhost:8080")
-	LLMGatewayModel          string        // LLM gateway model name; required, startup fails if empty
-	LLMGatewayEmbeddingModel string        // Optional LLM gateway embedding model used for semantic durable-memory retrieval
-	LLMGatewayAPIKey         string        // Optional bearer token for LLM gateway requests
-	LLMGatewayVirtualKey     string        // Optional gateway routing key for LLM gateway requests
-	ModelContextWindow       int           // Optional model context window for prompt budgeting; non-positive uses the package fallback
-	DiscordToken             string        // Optional Discord bot token
-	OpenAIListenPort         string        // Optional loopback port for the OpenAI-compatible inbound gateway
-	BraveAPIKey              string        // Optional Brave Search API subscription token
-	SearxngURL               string        // Optional SearXNG base URL for web search
-	ComfyUIURL               string        // Optional ComfyUI HTTP(S) base URL; image tools are disabled if empty
-	ComfyUIGenerationTimeout time.Duration // Maximum duration of one ComfyUI generation
-	WorkerPoolSize           int           // Number of concurrent broker workers (default: 1)
-	LogLevel                 Level         // Logging verbosity (default: LevelInfo)
+	ProfileRoot                    string
+	ProfileName                    string
+	Profiles                       map[string]*Config
+	ProfileRoutes                  []ProfileRoute
+	DiscordPolicy                  AdmissionPolicy
+	BlueBubblesPolicy              AdmissionPolicy
+	DiscordGroupRequireMention     bool
+	BlueBubblesGroupRequireMention bool
+	HomeAssistantListenPort        string
+	HomeAssistantAuthToken         string
+	BlueBubblesListenPort          string
+	BlueBubblesURL                 string
+	BlueBubblesPassword            string
+	BlueBubblesDMMention           bool
+	DiscordToken                   string
+	OpenAIListenPort               string
+	LLMGatewayURL                  string
+	LLMGatewayModel                string
+	LLMGatewayAPIKey               string
+	LLMGatewayVirtualKey           string
+	ModelContextWindow             int
+	BraveAPIKey                    string
+	SearxngURL                     string
+	ComfyUIURL                     string
+	ComfyUIGenerationTimeout       time.Duration
+	WorkerPoolSize                 int
+	LogLevel                       Level
 }
 
-// RetentionPolicy controls content expiry and periodic memory maintenance.
+// RetentionPolicy supplies code-owned worker bounds.
 type RetentionPolicy struct {
 	RetiredIndexRetention    time.Duration
 	SessionInactivity        time.Duration
@@ -49,100 +46,13 @@ type RetentionPolicy struct {
 	BatchSize                int
 }
 
-// DefaultRetentionPolicy returns the code-owned memory retention and maintenance policy.
+// DefaultRetentionPolicy returns fixed retention and maintenance bounds.
 func DefaultRetentionPolicy() RetentionPolicy {
-	return RetentionPolicy{
-		RetiredIndexRetention:    168 * time.Hour,
-		SessionInactivity:        24 * time.Hour,
-		PendingDeliveryTimeout:   15 * time.Minute,
-		SuccessfulJobRetention:   168 * time.Hour,
-		DeadJobRetention:         720 * time.Hour,
-		AccountChallengeGrace:    24 * time.Hour,
-		MaintenanceInterval:      time.Hour,
-		DatabaseOptimizeInterval: 24 * time.Hour,
-		BatchSize:                100,
-	}
+	return RetentionPolicy{RetiredIndexRetention: 168 * time.Hour, SessionInactivity: 24 * time.Hour, PendingDeliveryTimeout: 15 * time.Minute, SuccessfulJobRetention: 168 * time.Hour, DeadJobRetention: 720 * time.Hour, AccountChallengeGrace: 24 * time.Hour, MaintenanceInterval: time.Hour, DatabaseOptimizeInterval: 24 * time.Hour, BatchSize: 100}
 }
 
-// DefaultDataRoot is the working-directory-relative root for application data.
+// DefaultDataRoot is the default profile and global configuration directory.
 const DefaultDataRoot = ".oswald"
 
-// Load reads configuration from environment variables, with .env file support.
-// Missing variables use defaults; invalid security-sensitive values return an error.
-func Load() (*Config, error) {
-	// Silently ignore missing .env — production environments use real env vars
-	godotenv.Load() // nolint: errcheck
-	comfyTimeout, err := getEnvPositiveDuration("COMFYUI_GENERATION_TIMEOUT", 2*time.Minute)
-	if err != nil {
-		return nil, err
-	}
-	dmMention, err := strconv.ParseBool(strings.TrimSpace(getEnv("BLUEBUBBLES_DM_MENTION", "false")))
-	if err != nil {
-		return nil, fmt.Errorf("BLUEBUBBLES_DM_MENTION must be true or false: %w", err)
-	}
-	cfg := &Config{
-		HomeAssistantListenPort:  getEnv("HOME_ASSISTANT_LISTEN_PORT", ""),
-		HomeAssistantAuthToken:   getEnv("HOME_ASSISTANT_AUTH_TOKEN", ""),
-		BlueBubblesListenPort:    getEnv("BLUEBUBBLES_LISTEN_PORT", ""),
-		BlueBubblesURL:           getEnv("BLUEBUBBLES_URL", ""),
-		BlueBubblesPassword:      getEnv("BLUEBUBBLES_PASSWORD", ""),
-		BlueBubblesDMMention:     dmMention,
-		MCPConfigEncryptionKey:   getEnv("MCP_CONFIG_ENCRYPTION_KEY", ""),
-		LLMGatewayURL:            getEnv("LLM_GATEWAY_URL", "http://localhost:8080"),
-		LLMGatewayModel:          getEnv("LLM_GATEWAY_MODEL", ""),
-		LLMGatewayEmbeddingModel: getEnv("LLM_GATEWAY_EMBEDDING_MODEL", ""),
-		LLMGatewayAPIKey:         getEnv("LLM_GATEWAY_API_KEY", ""),
-		LLMGatewayVirtualKey:     getEnv("LLM_GATEWAY_VIRTUAL_KEY", ""),
-		ModelContextWindow:       getEnvInt("MODEL_CONTEXT_WINDOW", 0),
-		DiscordToken:             getEnv("DISCORD_TOKEN", ""),
-		OpenAIListenPort:         getEnv("OPENAI_LISTEN_PORT", ""),
-		BraveAPIKey:              getEnv("BRAVE_API_KEY", ""),
-		SearxngURL:               getEnv("SEARXNG_URL", ""),
-		ComfyUIURL:               strings.TrimSpace(getEnv("COMFYUI_URL", "")),
-		ComfyUIGenerationTimeout: comfyTimeout,
-		WorkerPoolSize:           getEnvInt("WORKER_POOL_SIZE", 1),
-		LogLevel:                 ParseLevel(getEnv("LOG_LEVEL", "info")),
-	}
-	if cfg.ComfyUIURL != "" {
-		parsed, err := url.Parse(cfg.ComfyUIURL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return nil, fmt.Errorf("COMFYUI_URL must be an HTTP(S) URL with a host and without userinfo, query, or fragment")
-		}
-	}
-	return cfg, nil
-}
-
-// getEnv retrieves an environment variable with a fallback to the default value
-// if the variable is not set.
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
-}
-
-// getEnvInt retrieves an environment variable as an integer with a fallback default.
-// Returns the default if the variable is missing or cannot be parsed as an integer.
-func getEnvInt(key string, defaultValue int) int {
-	value, exists := os.LookupEnv(key)
-	if !exists || value == "" {
-		return defaultValue
-	}
-	n, err := strconv.Atoi(value)
-	if err != nil {
-		return defaultValue
-	}
-	return n
-}
-
-func getEnvPositiveDuration(key string, defaultValue time.Duration) (time.Duration, error) {
-	value, exists := os.LookupEnv(key)
-	if !exists {
-		return defaultValue, nil
-	}
-	d, err := time.ParseDuration(value)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("%s must be a positive Go duration", key)
-	}
-	return d, nil
-}
+// Load reads global/profile YAML and never loads dotenv files.
+func Load() (*Config, error) { return LoadProfiles(DefaultDataRoot) }

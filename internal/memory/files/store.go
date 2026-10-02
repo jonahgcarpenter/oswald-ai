@@ -29,10 +29,14 @@ type Operation struct {
 }
 
 // Store owns per-user files below root/<userID>/memories.
-type Store struct{ root string }
+type Store struct{ root, profile string }
 
 // NewStore creates a store rooted at the supplied data directory.
 func NewStore(root string) *Store { return &Store{root: root} }
+
+// NewProfileStore binds private memory directly to one existing profile root.
+// Every operation must carry the same trusted profile identity.
+func NewProfileStore(root, profile string) *Store { return &Store{root: root, profile: profile} }
 
 // Read returns the private USER.md and MEMORY.md contents; missing files are empty.
 // Each file is read independently without a lock because writes replace files atomically.
@@ -282,6 +286,16 @@ func (s *Store) withDir(ctx context.Context, userID string, create bool, fn func
 		return err
 	}
 	dir := filepath.Join(root, userID, "memories")
+	if s.profile != "" {
+		if userID != s.profile {
+			return errors.New("file memory profile mismatch")
+		}
+		info, err := os.Lstat(root)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("profile root is unavailable or unsafe")
+		}
+		dir = filepath.Join(root, "memories")
+	}
 	// Reject symlinks at every ancestor, including a configured root symlink.
 	path := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(dir, path), path) {

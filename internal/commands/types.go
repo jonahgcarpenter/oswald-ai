@@ -24,7 +24,6 @@ type Definition struct {
 	Aliases       []string
 	Summary       string
 	Usage         string
-	AdminOnly     bool
 	UserExclusive bool
 	OutOfBand     bool
 }
@@ -124,18 +123,4 @@ type Middleware func(Handler) Handler
 type Command struct {
 	Handler    Handler
 	Middleware []Middleware
-}
-
-// PrincipalAuthorizer re-resolves an authenticated external account before
-// checking permissions.
-type PrincipalAuthorizer interface {
-	IsAdminPrincipal(principal identity.Principal) (bool, error)
-}
-
-// IsPrincipalAdmin requires account-bound authorization for permission checks.
-func IsPrincipalAdmin(auth PrincipalAuthorizer, principal identity.Principal) (bool, error) {
-	if auth == nil || !principal.Authenticated() {
-		return false, nil
-	}
-	return auth.IsAdminPrincipal(principal)
 }

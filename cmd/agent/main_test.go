@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,15 +16,34 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 		main()
 		return
 	}
-	for _, tc := range []struct{ name, env, message string }{
-		{"config loading", "COMFYUI_GENERATION_TIMEOUT=0s", "invalid runtime configuration"},
-		{"startup validation", "LLM_GATEWAY_MODEL=", "missing required LLM_GATEWAY_MODEL environment variable"},
+	for _, tc := range []struct{ name, event, message string }{
+		{"config loading", "app.config.invalid", "invalid runtime configuration"},
+		{"startup validation", "app.profile_storage.init_failed", "failed to open profile state"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestNonInteractiveStartupOmitsBanner$")
 			cmd.Dir = t.TempDir()
+			if tc.name == "startup validation" {
+				root := filepath.Join(cmd.Dir, ".oswald")
+				if err := os.MkdirAll(filepath.Join(root, "profiles", "api"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				text := "providers:\n  fake:\n    api: http://127.0.0.1:9999/v1\nmodel:\n  provider: custom:fake\n  default: synthetic/model\nplatforms:\n  api:\n    enabled: true\n    extra:\n      api_port: 12345\n"
+				if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
+				db, err := sql.Open("sqlite3", filepath.Join(root, "state.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE TABLE incompatible_fixture(value TEXT)`); err != nil {
+					db.Close()
+					t.Fatal(err)
+				}
+				db.Close()
+			}
 			// Both isolated cases fail before any storage or network work.
-			cmd.Env = []string{"OSWALD_STARTUP_TEST_HELPER=1", tc.env}
+			cmd.Env = []string{"OSWALD_STARTUP_TEST_HELPER=1"}
 			if testing.CoverMode() != "" {
 				// Let the instrumented child record coverage without inheriting the parent environment.
 				cmd.Env = append(cmd.Env, "GOCOVERDIR="+t.TempDir())
@@ -53,7 +74,7 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 					}
 				}
 			}
-			if failureCount != 1 || event["event"] != "app.config.invalid" || event["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
+			if failureCount != 1 || event["event"] != tc.event || event["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
 				t.Fatalf("unexpected startup log: %q", stderr.String())
 			}
 		})

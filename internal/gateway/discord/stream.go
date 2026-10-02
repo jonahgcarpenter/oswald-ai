@@ -15,7 +15,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/transcriptsearch"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -451,8 +450,6 @@ func discordToolStatusFor(tool *agent.ToolStreamPayload) discordToolStatus {
 			completed += " with limited sources"
 		}
 		return actionToolStatus(tool.Name, "Searching the web for "+quoteToolDetail(query), completed, "Web search failed for "+quoteToolDetail(query))
-	case transcriptsearch.Name:
-		return actionToolStatus(tool.Name, "Searching this conversation for "+quoteToolDetail(query), "Searched this conversation for "+quoteToolDetail(query), "Conversation search failed for "+quoteToolDetail(query))
 	default:
 		detail := formatMCPToolArguments(tool.Arguments)
 		return actionToolStatus(tool.Name, "Running `"+name+"`"+detail, "Completed `"+name+"`"+detail, "Failed `"+name+"`"+detail)

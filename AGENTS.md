@@ -1,6 +1,6 @@
 # AGENTS.md - Oswald AI Developer Reference
 
-This is the implementation and contributor reference for the current codebase. `README.md` describes the product and user commands. `.env.example` is the canonical application environment-variable inventory; sample values are not necessarily runtime defaults. Source code, permanent migrations, and tests define behavior when documentation disagrees.
+This is the implementation and contributor reference for the current codebase. `README.md` describes the product and user commands. `config.example.yaml` is the application configuration example; credential references read process environment variables only. Source code, approved schema DDL, and tests define behavior when documentation disagrees.
 
 Keep this document current when changing architecture, authorization, persistence, provider contracts, or operational limits. Describe implemented behavior, not planned features. Preserve documentation of compatibility paths that still read persisted data; do not maintain a history of removed features here.
 
@@ -147,28 +147,26 @@ Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, B
 
 `cmd/agent/main.go` loads config, calls the terminal-gated banner, creates the logger, registers interrupt/SIGTERM handling, and calls `startup.Run(ctx, cfg, log, stdout)`. It releases signal registration before final fatal logging.
 
-`startup/app.go` validates required model settings and assembles components in this order:
+`startup/profiles.go` assembles the profile runtime in this order:
 
-1. LLM client, context budget, and per-user soul loader rooted at `.oswald/SOUL.md`.
-2. SQLite session/legacy-memory, MCP, and account database handles; private file-memory store rooted at `.oswald` with legacy file migration before gateways start; legacy global soul-template conflicts are checked before gateways start. MCP manager and account service. A valid enabled OpenAI loopback gateway creates its persistent local administrator here, before bootstrap. No global-memory handle is opened.
-3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
-4. Indexing, database maintenance, and image-cache expiry workers. The cache sweep runs immediately and hourly.
-5. Builtin registry (including `memory`), MCP provider, and shared compactor/compaction service. Formation execution and private memory extraction packages have been removed.
-6. Agent, then broker workers, command service, invalidation bus, and enabled gateways (including OpenAI when configured).
-7. Compaction low-priority gate and worker start, then gateway goroutines.
+1. Immutable configured profile directory.
+2. In sorted profile order: fresh-schema state store, maintenance worker, file/soul/cache stores, builtin registry, model client, shared foreground/background compactor, agent, and image-cache expiry worker.
+3. Shared foreground broker, profile command services, and profile compression workers behind its low-priority gate.
+4. Configured gateways and profile-local runtime dependency selection. No accounts, bootstrap, MCP, migrations, or legacy indexing are assembled.
 
-Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, image-cache worker, broker, compaction, indexing, MCP clients, accounts DB, MCP DB, SQLite session/legacy-memory DB**. The file store and cache have no close hooks. This order is intentionally not reverse acquisition order.
+Cleanup runs on ordinary shutdown and partial initialization failure: stop outbound delivery, image-cache and maintenance workers, broker, compression workers, then profile databases. File/soul/cache stores have no close hooks. Workers are joined before their databases close.
 
-- Startup returns `startup.Error` with the original event, message, and cause only after cleanup. MCP close failures are warnings; database close errors are discarded here and do not replace initialization errors.
-- Startup logs build metadata and initialization/cleanup phase boundaries. `app.shutdown.complete` follows every acquired resource's cleanup callback, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
+- Startup returns `startup.Error` with the fixed event, message, and cause only after cleanup. Database close errors do not replace initialization errors.
+- `app.profile.initialized` reports each initialized profile. `app.shutdown.complete` follows acquired-resource cleanup, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
 - Signal cancellation triggers cleanup; it is not the parent of every worker context. Worker `Stop` methods must complete before their databases close.
 - Before ordinary cleanup, startup calls the optional `StopOutbound` gateway hook. Discord cancels delivery waiters and joins its outbound worker before broker command drain. This is not a websocket/listener shutdown or a join of all runtime acknowledgement bookkeeping.
 - Pre-cancellation and explicit initialization-boundary checks return normally. Cancellation does not interrupt every initializer or override every simultaneous initialization error.
 - Gateway `Start` failures are logged asynchronously. There is no readiness handshake or graceful gateway-stop interface. Real listeners may outlive `Run` until process exit; it is not a restartable in-process application API.
 - `startup/banner.go` prints the fixed UTF-8 wordmark and URL in bright-magenta ANSI only to terminal stdout. Banner failures are ignored; the banner is not readiness.
-- `startup/bootstrap.go` prints nonempty bootstrap instructions to the supplied writer even without a terminal. Codes are never structured-log fields. Claiming from authenticated Discord, iMessage, or Home Assistant is supported.
 
-## Requests, Routing, And Accounts
+## Retained Account Runtime Reference (Not Production)
+
+The legacy SQLite and MCP APIs described below still have source and synthetic tests, but production startup does not use them. The account service package, account/admin/bootstrap/MCP commands, legacy compaction worker, global-memory store, legacy indexing worker, and transcript-search tool have been removed. The active ownership and persistence contract is under **Active Profile Runtime**. Removing the remaining old packages and replacing their dependent fixtures is still outstanding.
 
 Gateways normalize messages, attachments, replies, external identities, and conversation scope. `accounts` resolves canonical ownership; `identity.Principal` carries canonical user, external identity, gateway, and assurance. `shared/requestctx` propagates that principal, correlation metadata, current images, and exposure state. Legacy staging types remain but are not used by the active memory tool.
 
@@ -179,8 +177,7 @@ Gateways normalize messages, attachments, replies, external identities, and conv
 - Reply enrichment can include quoted text, replied-to images within remaining slots, unsupported labels, or unavailable-message markers. Incomplete Discord references can be ignored during preflight before later lookup occurs. iMessage resolves uncached references before admission and can recognize a human-rooted thread continuation through its immediately preceding conversational message; unresolved or ambiguous references do not grant mention-free invocation.
 - Shared routing checks for empty assembled input, including reply and unsupported-file notes. Home Assistant rejects blank text earlier; iMessage ignores payloads without text or attachments.
 - Runtime requires authentication and checks bans before admitted commands/model work and authenticated empty fallbacks. Banned requests are silently ignored without delivery, command/model work, or iMessage read/typing indicators; their rejected terminal summary is still logged. Uninvoked messages and unauthenticated empty fallbacks return earlier. A ban is not a universal execution-time recheck or cancellation of already-admitted work.
-- The command dispatcher validates principals but does not enforce `AdminOnly` metadata by itself. Builtin assembly installs admin middleware; `/mcp global` and `/stop all` check authorization explicitly.
-- Admin authorization re-resolves the external account. Account mutations have additional ownership/fencing rules; `/reset`, user MCP commands, and the `memory` tool use the carried canonical ID.
+- The command dispatcher validates principals; application admin roles, admin middleware, account-management commands, and MCP commands are removed. `/stop all` is rejected. Filesystem access is the administration boundary.
 
 ### Broker And Command Scheduling
 
@@ -298,6 +295,29 @@ Retained `formation-v4` jobs/artifacts still use their single-turn decoder and s
 New compaction output requires an empty `candidates` array. Persisted summary artifacts retain a legacy candidate field: decoding still validates structural and size bounds, but summary publication neither evaluates those candidates as new user evidence nor publishes them. Keep these decoders and the existing artifact version/JSON contracts while stored data can require them.
 
 ## SQLite, Indexing, And Retention
+
+### Database Change Approval
+
+Database changes require explicit user approval before implementation. This includes adding, removing, or changing tables, columns, indexes, views, triggers, constraints, schema versions, persisted JSON formats, or the meaning of stored fields. Moving runtime state between SQLite and filesystem storage also requires approval.
+
+Do not introduce migrations, automatic upgrades, compatibility schemas, or destructive database rebuilds without explicit approval. Feature work and refactoring do not imply permission to change persistence. Before proposing a database change, describe its purpose, exact schema/persistence-contract changes, data implications, and verification plan. Approval is limited to the stated change and never authorizes deleting an operator's database or modifying unrelated persisted data.
+
+The approved replacement baseline is the fresh-install profile-local `state.db` schema supplied by the operator. SQLite-generated internal tables are not separately maintained DDL. Incompatible databases must be rejected without modifying or deleting them. Tests use temporary synthetic databases, never local runtime databases.
+
+### Active Profile Runtime
+
+Production `config.Load` reads YAML and `startup.Run` assembles the profile runtime. Migration, MCP, and legacy-memory source and fixtures still remain, but are not wired into production startup. The account service, old indexing/global-memory packages, legacy compaction worker, and disabled transcript-search tool are removed. Gateway fixtures now use profile-local state and configured routes rather than account databases; shared runtime persistence fixtures use the approved schema. Remaining agent fixtures and old store removal remain outstanding.
+
+- `config.LoadProfiles(root)` reads strict global `config.yaml` and optional named-profile overrides from `profiles/<name>/config.yaml`. It does not load `.env` files. Credential references use only the process environment. Profile overrides cannot change shared listeners, admission policies, or worker settings. API configuration is loopback-only and requires the manually provisioned `api` profile. Missing routes fail closed rather than selecting the default profile.
+- `profiles.Directory` resolves configured transport identities to trusted profile ownership without account creation or administrator grants. `bluebubbles` configuration routes normalize to internal gateway `imessage`. Production gateways use this directory, enforce direct-message allowlists before attachment/reply work, and reject unmapped identities. Explicit `default` routes select `.oswald/`; only named-profile routes require multiplexing. API ownership is fixed to the manually provisioned `api` profile.
+- `database/schema.sql` contains the operator-supplied application DDL. `database.OpenState` initializes an empty profile-local `state.db` transactionally with one `schema_version` row at version 1; it does not upgrade existing databases. It compares all schema objects, including generated objects, to the baseline. Token normalization ignores SQL formatting/comments, not quoted literal values. Version drift, object drift, foreign-key violations, unsafe ancestors/files/sidecars, and pre-cancellation fail closed. No operator database is deleted or rebuilt.
+- `memory.ProfileStore` is a separate replacement store, not an account compatibility adapter. Its owner is fixed at construction. Sessions use `profile_name`, `source`, and `session_key`; `conversation_generations` supplies reset/expiry high-water fencing. `sessions.origin_json` contains version 1 generation and TTL metadata. Assistant message IDs identify exchanges; both user and assistant messages remain inactive until successful delivery. A late success can repair a failed send; a late failure cannot undo success. Legacy staged artifacts are rejected. Each profile owns its agent, model configuration, provider clients, builtin registry, soul/file stores, and workers. A shared broker dispatches to those agents by trusted profile identity and provides global foreground priority. Profile commands are only `/help`, `/reset`, and conversation-scoped `/stop`; `/stop all` is rejected.
+- Bounded version-1 `state_meta` values use `oswald:v1:files:<session-id>` for the first-writer-wins frozen file pair and `oswald:v1:turn:<session-id>:<assistant-message-id>` for correlated user message ID, bounded native history, successful tool-name inventory, prompt pressure, and pending/failed/delivered state. Reset deletes the conversation's messages and these records, ends its sessions, removes compression locks, and advances its generation; it does not modify private memory files. Snapshot contents remain private SQLite data.
+- Supplied FTS triggers index all inserted messages, including inactive pending rows. Replacement search consumers must join canonical message/session state and enforce delivered/current-generation eligibility; an FTS match alone never authorizes exposure. Reset removes message text from both FTS indexes via the supplied triggers.
+- Profile-bound constructors in `soul`, `memory/files`, and `media/imagecache` use the profile root directly, reject other owner IDs, and do not create missing operator profile directories. Soul reads fall back to the default template without copying it. Existing account-oriented constructors remain only for old source/fixtures pending cleanup.
+- Selected generated images are normalized private cache files, not SQLite BLOBs. Versioned per-exchange metadata contains at most four image references; at most eight references are retained per session, including pending outputs. Only delivered outputs in the active generation are loaded. Missing/expired files cannot be reconstructed from SQLite. Logical image high-water marks are renewed across retained metadata under the generation fence; unretained new images use the active request's counter.
+- `compaction.ProfileService` runs post-delivery and every 30 seconds behind the shared broker's low-priority gate. It bounds chunks to 64 complete delivered exchanges and the actual model input budget, respects pending-delivery barriers, and uses `compression_locks` with five-minute renewable exact tokens. Version-1 compression receipts persist four provider credits, corrective feedback, immutable validated artifacts, and completion/dead state. Retry ranges remain fixed when newer exchanges arrive. Saved artifacts can publish after restart without another provider credit. Preemption refunds a reserved attempt only before artifact save. Version-1 campaign records pin the delivered high-water target across partial checkpoints; oversized complete exchanges receive dead receipts. Publication validates the exact live lease, complete delivered source range, and source text before atomically writing the summary and completion state. Late successful delivery invalidates summaries, campaigns, and receipts that could have omitted the repaired turn. Compression health snapshots report retry, ready, dead, succeeded, and expired-lease counts; scope scans page by conversation key to avoid starvation.
+- Immediate-then-hourly profile maintenance selects at most 100 expired sessions and 100 timed-out pending exchanges per transaction. It clears expired transcript/snapshot/compression state while preserving generation bookkeeping, marks pending sends failed after fifteen minutes, and performs a separate passive WAL checkpoint. Image-cache expiry workers remain immediate-then-hourly. Maintenance, cache workers, broker, and compression workers are joined before profile stores close, including partial initialization failure. Listener lifecycle limitations remain; shutdown is not an in-process gateway restart contract.
 
 `config.DefaultDataRoot` is `.oswald` relative to the working directory. Startup derives the canonical database path `.oswald/database/oswald.db` from it; builtin tool definitions and ComfyUI graphs are compiled into Go. Accounts, MCP, and SQLite session/legacy-memory state open separate handles to the database; global memory is not opened at startup. Private memory files live under `.oswald/<canonical_user_id>/memories/`. Initialization is serialized by a process schema mutex. Startup does not migrate an existing `data/` root into `.oswald/`; operators must move their database and private files while stopped before switching versions, or the application will use a separate empty database.
 
@@ -471,7 +491,9 @@ Tool rounds, retries, and final tools-disabled calls retain streaming transport.
 - Current-turn images use OpenAI-compatible image URL content blocks. Provider-reported thinking, content, usage, and finish reasons are mapped separately.
 - Oswald does not send `max_tokens` on foreground, compaction, or explicit async chat requests. The inbound OpenAI-compatible `max_tokens` field is accepted for client compatibility but ignored.
 
-## Environment Configuration
+## Retired Environment Configuration Reference
+
+Production `config.Load` does not read this former environment inventory or any dotenv file. Use `config.example.yaml` and optional profile YAML overrides. Only explicit YAML credential references read process environment variables. The following inventory is historical context for retained tests/source, not supported deployment configuration.
 
 These are the 21 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
 

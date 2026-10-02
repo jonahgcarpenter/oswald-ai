@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
@@ -56,7 +56,9 @@ func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := dg.Runtime
 	deps.Broker = dg.Broker
 	if deps.Access == nil {
-		deps.Access = dg.Links
+		if access, ok := dg.Links.(gatewayruntime.AccessChecker); ok {
+			deps.Access = access
+		}
 	}
 	if deps.Log == nil {
 		deps.Log = dg.Log
@@ -69,7 +71,7 @@ type Gateway struct {
 	Token          string
 	BotID          string
 	Broker         *broker.Broker
-	Links          *accounts.Service
+	Links          identity.Resolver
 	Runtime        gatewayruntime.Dependencies
 	Log            *config.Logger
 	APIBaseURL     string

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -24,7 +23,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -126,10 +125,15 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "oswald.db")
-	memories := memorytest.NewStore(t, dbPath, log)
-	links := accounts.NewService(dbPath, memories, nil, log)
-	defer links.Close()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := memory.NewProfileStore(context.Background(), dir, "default", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer memories.Close()
+	links := imessageProfileDirectory(t, dir, log)
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0600); err != nil {
 		t.Fatal(err)
@@ -144,7 +148,7 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ai := agent.NewAgent(llm.NewGatewayClient(model.URL, "", "", log), reg, "test-model", soul.NewStore(soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(llm.NewGatewayClient(model.URL, "", "", log), reg, "test-model", soul.NewProfileStore(dir, "default", soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	commandService, err := commands.NewServiceWithCommands()
 	if err != nil {

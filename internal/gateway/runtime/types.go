@@ -17,6 +17,8 @@ import (
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
+	// ForProfile selects immutable profile services before any runtime work.
+	ForProfile             func(string) (Dependencies, bool)
 	Broker                 *broker.Broker
 	Commands               *commands.Service
 	Access                 AccessChecker

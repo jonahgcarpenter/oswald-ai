@@ -15,13 +15,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -68,7 +66,7 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 
 	llmResponder := &fakeResponder{}
-	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsMention: true, Text: "hello"}, deps, llmResponder)
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsMention: true, Text: "hello"}, deps, llmResponder)
 	if outcome.Action != routing.ActionLLM || llmResponder.agent == nil || llmResponder.agent.Response != "agent response" {
 		t.Fatalf("unexpected llm outcome=%+v responder=%+v", outcome, llmResponder)
 	}
@@ -274,12 +272,12 @@ func TestExecuteEnqueuesCompactionForPersistedTurnAfterDelivery(t *testing.T) {
 	responder := &fakeResponder{}
 	compaction := &fakeCompactionEnqueuer{responder: responder}
 	deps.Compaction = compaction
-	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsDirect: true, Text: "hello"}, deps, responder)
 	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID <= 0 {
 		t.Fatalf("outcome=%+v response=%+v", outcome, responder.agent)
 	}
 	if !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" ||
-		compaction.source.RequestID != "req" || compaction.source.SessionID != "session" ||
+		compaction.source.RequestID != "req" || compaction.source.SessionID != "discord:dm:123" ||
 		compaction.source.TurnID != responder.agent.SourceTurnID || compaction.source.SessionGeneration != responder.agent.SessionGeneration ||
 		compaction.source.Model != responder.agent.Model {
 		t.Fatalf("compaction bookkeeping after delivery: %+v", compaction)
@@ -668,19 +666,15 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
-	soulStore := soul.NewStore(soulPath)
-	dbPath := filepath.Join(dir, "users")
-	db, err := database.Open(dbPath, log)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	soulStore := soul.NewProfileStore(dir, "user", soulPath)
+	store, err := memory.NewProfileStore(context.Background(), dir, "user", log)
 	if err != nil {
-		t.Fatalf("open account database: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, "user"); err != nil {
-		db.Close() // nolint:errcheck
-		t.Fatalf("seed account user: %v", err)
-	}
-	db.Close() // nolint:errcheck
-	memory := memorytest.NewStore(t, dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, store, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
@@ -689,6 +683,6 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	}
 	return Dependencies{Broker: b, Commands: commandService, Log: log}, func() {
 		b.Shutdown()
-		memory.Close() // nolint:errcheck
+		store.Close() // nolint:errcheck
 	}
 }

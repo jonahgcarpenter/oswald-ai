@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -28,7 +27,7 @@ const maxBody = 256 << 10
 // Gateway serves the local OpenAI-compatible API.
 type Gateway struct {
 	port     string
-	accounts *accounts.Service
+	accounts identity.Resolver
 	deps     gatewayruntime.Dependencies
 	model    string
 	log      *config.Logger
@@ -39,7 +38,7 @@ type Gateway struct {
 }
 
 // New validates and constructs an OpenAI-compatible gateway.
-func New(port string, accounts *accounts.Service, deps gatewayruntime.Dependencies, model string, log *config.Logger) (*Gateway, error) {
+func New(port string, accounts identity.Resolver, deps gatewayruntime.Dependencies, model string, log *config.Logger) (*Gateway, error) {
 	n, err := strconv.Atoi(strings.TrimSpace(port))
 	if err != nil || n < 1 || n > 65535 {
 		return nil, fmt.Errorf("openai port must be an integer from 1 through 65535")
@@ -240,7 +239,9 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 				deps.Broker = g.broker
 			}
 			if deps.Access == nil {
-				deps.Access = g.accounts
+				if access, ok := g.accounts.(gatewayruntime.AccessChecker); ok {
+					deps.Access = access
+				}
 			}
 			if deps.Log == nil {
 				deps.Log = g.log

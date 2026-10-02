@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
@@ -44,7 +44,9 @@ func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := g.Runtime
 	deps.Broker = g.Broker
 	if deps.Access == nil {
-		deps.Access = g.Links
+		if access, ok := g.Links.(gatewayruntime.AccessChecker); ok {
+			deps.Access = access
+		}
 	}
 	if deps.Log == nil {
 		deps.Log = g.Log
@@ -58,7 +60,7 @@ type Gateway struct {
 	BlueBubblesURL      string
 	BlueBubblesPassword string
 	DMMention           bool
-	Links               *accounts.Service
+	Links               identity.Resolver
 	Runtime             gatewayruntime.Dependencies
 	Log                 *config.Logger
 	Broker              *broker.Broker
