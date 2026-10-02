@@ -204,11 +204,6 @@ func validConversationID(value string) bool {
 func (g *Gateway) runtimeDependencies(b *broker.Broker) gatewayruntime.Dependencies {
 	dependencies := g.Runtime
 	dependencies.Broker = b
-	if dependencies.Access == nil {
-		if access, ok := g.Links.(gatewayruntime.AccessChecker); ok {
-			dependencies.Access = access
-		}
-	}
 	if dependencies.Log == nil {
 		dependencies.Log = g.Log
 	}

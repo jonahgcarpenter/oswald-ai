@@ -35,9 +35,6 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 			gatewayLog.Warn("gateway.homeassistant.config_invalid", "home assistant gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
 		} else {
 			services = append(services, homeAssistantGateway)
-			if runtimeDeps.RuntimeInvalidationBus != nil {
-				runtimeDeps.RuntimeInvalidationBus.Subscribe(homeAssistantGateway.HandleRuntimeInvalidation)
-			}
 		}
 	} else {
 		gatewayLog.Debug("gateway.homeassistant.disabled", "home assistant gateway is disabled", config.F("is_token_set", homeAssistantTokenSet), config.F("is_port_set", homeAssistantPortSet))
@@ -52,9 +49,6 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 			Log:     log,
 		}
 		services = append(services, discordGateway)
-		if runtimeDeps.RuntimeInvalidationBus != nil {
-			runtimeDeps.RuntimeInvalidationBus.Subscribe(discordGateway.HandleRuntimeInvalidation)
-		}
 	} else {
 		gatewayLog.Debug("gateway.discord.disabled", "discord gateway is disabled", config.F("is_token_set", false))
 	}
@@ -77,9 +71,6 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 				Log:                 log,
 			}
 			services = append(services, iMessageGateway)
-			if runtimeDeps.RuntimeInvalidationBus != nil {
-				runtimeDeps.RuntimeInvalidationBus.Subscribe(iMessageGateway.HandleRuntimeInvalidation)
-			}
 		}
 	} else {
 		gatewayLog.Debug("gateway.imessage.disabled", "imessage gateway is disabled", config.F("is_port_set", blueBubblesPortSet), config.F("is_url_set", blueBubblesURLSet), config.F("is_password_set", blueBubblesPasswordSet))

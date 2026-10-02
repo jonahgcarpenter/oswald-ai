@@ -238,11 +238,6 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			if g.broker != nil {
 				deps.Broker = g.broker
 			}
-			if deps.Access == nil {
-				if access, ok := g.accounts.(gatewayruntime.AccessChecker); ok {
-					deps.Access = access
-				}
-			}
 			if deps.Log == nil {
 				deps.Log = g.log
 			}

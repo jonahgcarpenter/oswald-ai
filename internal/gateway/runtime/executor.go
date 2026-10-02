@@ -10,7 +10,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
@@ -200,22 +199,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		workCtx = requestctx.WithMetadata(workCtx, meta)
 	}
 
-	if deps.Access != nil {
-		isBanned, _, err := deps.Access.BanStatus(userID)
-		if err != nil {
-			executionStatus = "error"
-			responseKind = "error"
-			sendErr := responder.SendAgentError(config.SafeErrorText(err))
-			if sendErr != nil {
-				log.Debug("gateway.send.failed", "failed to send access error response", config.F("request_id", req.RequestID), config.ErrorField(sendErr))
-			}
-			return Outcome{Action: decision.Action, Reason: "access_check_failed", Err: err}
-		}
-		if isBanned {
-			responseKind = "ignored"
-			return Outcome{Action: routing.ActionIgnore, Reason: "user_banned"}
-		}
-	}
 	if req.OnAllowed != nil {
 		req.OnAllowed()
 	}
@@ -289,9 +272,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 				}
 				sendErr = responder.SendCommandResponse(response)
 				deliveryAttempted = true
-				if response.Invalidation != nil && deps.RuntimeInvalidationBus != nil {
-					deps.RuntimeInvalidationBus.Publish(*response.Invalidation)
-				}
 				return commandErr
 			}
 			if deps.Broker != nil && !definition.OutOfBand {
@@ -391,18 +371,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		StreamFunc:    req.StreamFunc,
 		ResponseChan:  make(chan broker.Result, 1),
 	}
-	if resolver, ok := deps.Access.(interface {
-		ResolvePrincipal(identity.Principal) (string, error)
-	}); ok {
-		brokerReq.RefreshPrincipal = func(principal identity.Principal) (identity.Principal, error) {
-			resolvedUserID, err := resolver.ResolvePrincipal(principal)
-			if err != nil {
-				return identity.Principal{}, err
-			}
-			principal.CanonicalUserID = resolvedUserID
-			return principal, nil
-		}
-	}
 	submitErr := deps.Broker.Submit(brokerReq)
 	if submitErr != nil {
 		executionStatus, responseKind = "rejected", "fallback"
@@ -477,7 +445,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("status", "ok"),
 		)
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
-			source := memory.FormationSource{
+			source := memory.DeliverySource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,
 				SessionGeneration: result.Response.SessionGeneration,
 				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,

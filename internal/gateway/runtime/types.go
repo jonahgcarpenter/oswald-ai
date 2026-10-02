@@ -12,30 +12,22 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
 	// ForProfile selects immutable profile services before any runtime work.
-	ForProfile             func(string) (Dependencies, bool)
-	Broker                 *broker.Broker
-	Commands               *commands.Service
-	Access                 AccessChecker
-	Log                    *config.Logger
-	Compaction             CompactionEnqueuer
-	RuntimeInvalidationBus *invalidation.Bus
+	ForProfile func(string) (Dependencies, bool)
+	Broker     *broker.Broker
+	Commands   *commands.Service
+	Log        *config.Logger
+	Compaction CompactionEnqueuer
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.
 type CompactionEnqueuer interface {
-	Enqueue(context.Context, string, memory.FormationSource) error
+	Enqueue(context.Context, string, memory.DeliverySource) error
 	MarkDeliveryFailed(context.Context, string, int64) error
-}
-
-// AccessChecker exposes gateway-neutral user moderation checks.
-type AccessChecker interface {
-	BanStatus(canonicalUserID string) (bool, string, error)
 }
 
 // Request is the gateway-neutral representation executed by the shared runtime.
@@ -66,7 +58,7 @@ type Request struct {
 	Reply         *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
-	// OnAllowed runs after authentication and moderation checks, before fallback, command, or model work.
+	// OnAllowed runs after profile authentication, before fallback, command, or model work.
 	OnAllowed func()
 }
 

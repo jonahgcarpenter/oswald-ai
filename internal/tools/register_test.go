@@ -33,7 +33,7 @@ func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {
 
 func newTestRegistry(t *testing.T, cfg *config.Config) *registry.Registry {
 	t.Helper()
-	reg, err := NewRegistryFromConfig(cfg, nil, nil, config.NewLogger(config.LevelError))
+	reg, err := NewRegistryFromConfig(cfg, nil, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
 
 func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	if _, err := NewRegistryFromConfig(&config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web_search client") {
+	if _, err := NewRegistryFromConfig(&config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web_search client") {
 		t.Fatalf("invalid SearXNG URL registration error = %v", err)
 	}
 }

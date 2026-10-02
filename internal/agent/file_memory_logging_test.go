@@ -146,7 +146,7 @@ func TestProcessRejectsIncompleteSessionFileMemorySnapshot(t *testing.T) {
 	if _, err := store.ResolveSessionContext(ctx, "user-1", "session", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`UPDATE sessions SET file_user_snapshot='private-profile-canary' WHERE canonical_user_id='user-1' AND session_id='session'`); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO state_meta(key,value) SELECT 'oswald:v1:files:'||id,'{"version":1,"user":"private-profile-canary"}' FROM sessions WHERE profile_name='user-1' AND session_key='homeassistant:session'`); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer

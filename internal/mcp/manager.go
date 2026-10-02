@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -20,85 +19,17 @@ import (
 
 // Manager owns scoped MCP client sessions and resolves tools for active users.
 type Manager struct {
-	store           *Store
-	sessions        map[string]*server
-	userGenerations map[string]uint64
-	mu              sync.Mutex
-	log             *config.Logger
+	store      configurationSource
+	resolver   hostnameResolver
+	sessions   map[string]*server
+	generation uint64
+	closed     bool
+	mu         sync.Mutex
+	log        *config.Logger
 }
 
-// NewManagerFromStore creates a DB-backed MCP manager.
-func NewManagerFromStore(store *Store, log *config.Logger) *Manager {
-	return &Manager{store: store, sessions: make(map[string]*server), userGenerations: make(map[string]uint64), log: log.Server("mcp.manager")}
-}
-
-// MergeUsersTx transfers user-scoped MCP configs in the supplied account merge transaction.
-func (m *Manager) MergeUsersTx(ctx context.Context, tx *sql.Tx, winnerID, loserID string) error {
-	if m == nil || m.store == nil {
-		return fmt.Errorf("MCP manager is not initialized")
-	}
-	return m.store.MergeUsersTx(ctx, tx, winnerID, loserID)
-}
-
-// DeleteUserTx removes user-scoped MCP configs in the supplied transaction.
-func (m *Manager) DeleteUserTx(ctx context.Context, tx *sql.Tx, userID string) error {
-	if m == nil || m.store == nil {
-		return fmt.Errorf("MCP manager is not initialized")
-	}
-	return m.store.DeleteUserTx(ctx, tx, userID)
-}
-
-// UserDeleteCommitted invalidates sessions owned by a deleted user.
-func (m *Manager) UserDeleteCommitted(userID string) {
-	if m == nil {
-		return
-	}
-	userID = strings.TrimSpace(userID)
-	prefix := ScopeUser + ":" + userID + ":"
-	var closeFns []func() error
-	m.mu.Lock()
-	m.userGenerations[userID]++
-	for key, srv := range m.sessions {
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
-		if srv != nil && srv.close != nil {
-			closeFns = append(closeFns, srv.close)
-		}
-		delete(m.sessions, key)
-	}
-	m.mu.Unlock()
-	for _, closeFn := range closeFns {
-		m.closeSession(closeFn)
-	}
-}
-
-// UserMergeCommitted invalidates sessions affected by a committed user merge.
-func (m *Manager) UserMergeCommitted(winnerID, loserID string) {
-	if m == nil {
-		return
-	}
-	winnerID = strings.TrimSpace(winnerID)
-	loserID = strings.TrimSpace(loserID)
-	winnerPrefix := ScopeUser + ":" + winnerID + ":"
-	loserPrefix := ScopeUser + ":" + loserID + ":"
-	var closeFns []func() error
-	m.mu.Lock()
-	m.userGenerations[winnerID]++
-	m.userGenerations[loserID]++
-	for key, srv := range m.sessions {
-		if !strings.HasPrefix(key, winnerPrefix) && !strings.HasPrefix(key, loserPrefix) {
-			continue
-		}
-		if srv != nil && srv.close != nil {
-			closeFns = append(closeFns, srv.close)
-		}
-		delete(m.sessions, key)
-	}
-	m.mu.Unlock()
-	for _, closeFn := range closeFns {
-		m.closeSession(closeFn)
-	}
+func newManager(store configurationSource, log *config.Logger) *Manager {
+	return &Manager{store: store, sessions: make(map[string]*server), log: log.Server("mcp.manager")}
 }
 
 // ServerInfos returns global and user-scoped MCP server metadata visible to userID.
@@ -227,6 +158,8 @@ func (m *Manager) Close() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
+	m.generation++
 	var errs []error
 	for key, srv := range m.sessions {
 		if srv.close != nil {
@@ -237,23 +170,6 @@ func (m *Manager) Close() error {
 		delete(m.sessions, key)
 	}
 	return errors.Join(errs...)
-}
-
-// Invalidate closes any cached session for a server whose config changed.
-func (m *Manager) Invalidate(scope, ownerUserID, name string) {
-	if m == nil {
-		return
-	}
-	key := scope + ":" + strings.TrimSpace(name)
-	if scope == ScopeUser {
-		key = scope + ":" + strings.TrimSpace(ownerUserID) + ":" + strings.TrimSpace(name)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if srv := m.sessions[key]; srv != nil && srv.close != nil {
-		m.closeSession(srv.close)
-	}
-	delete(m.sessions, key)
 }
 
 func (m *Manager) cached(key string) *server {
@@ -277,8 +193,12 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 	key := scopeKey(cfg)
 	m.mu.Lock()
 	srv := m.sessions[key]
-	generation := m.userGenerations[cfg.OwnerUserID]
+	generation := m.generation
+	closed := m.closed
 	m.mu.Unlock()
+	if closed {
+		return nil, errors.New("MCP manager is closed")
+	}
 	if srv != nil && srv.reason == "" {
 		return srv, nil
 	}
@@ -321,7 +241,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 		}
 		cfg = current
 	}
-	if _, err := parseAndValidateURL(ctx, cfg.URL, m.store.resolver); err != nil {
+	if _, err := parseAndValidateURL(ctx, cfg.URL, m.resolver); err != nil {
 		m.rememberError(key, cfg, generation, err)
 		return nil, err
 	}
@@ -345,7 +265,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 	}
 	srv = &server{config: cfg, tools: tools, close: closeFn}
 	m.mu.Lock()
-	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+	if m.closed || m.generation != generation {
 		m.mu.Unlock()
 		m.closeSession(closeFn)
 		return nil, fmt.Errorf("MCP server ownership changed while connecting")
@@ -377,7 +297,7 @@ func (m *Manager) closeSession(closeFn func() error) error {
 func (m *Manager) rememberError(key string, cfg ServerConfig, generation uint64, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if cfg.Scope == ScopeUser && m.userGenerations[cfg.OwnerUserID] != generation {
+	if m.closed || m.generation != generation {
 		return
 	}
 	m.sessions[key] = &server{config: cfg, reason: config.SafeErrorText(err)}

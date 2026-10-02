@@ -17,6 +17,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
@@ -60,6 +61,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	var maintenanceStops []func()
 	var requestBroker *broker.Broker
 	var gateways []gateway.Service
+	var mcpManagers []*mcp.Manager
 	defer func() {
 		started := time.Now()
 		for _, service := range gateways {
@@ -78,6 +80,11 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		for _, worker := range compressionWorkers {
 			worker.Stop()
+		}
+		for _, manager := range mcpManagers {
+			if err := manager.Close(); err != nil {
+				log.Warn("app.mcp.close_failed", "failed to close profile MCP sessions", config.ErrorField(err))
+			}
 		}
 		for _, store := range stores {
 			store.Close()
@@ -113,7 +120,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		maintenanceStops = append(maintenanceStops, store.StartMaintenance())
 		fileStore := files.NewProfileStore(profile.ProfileRoot, name)
 		cache := imagecache.NewProfileCache(profile.ProfileRoot, name)
-		registry, err := tools.NewRegistryWithImageCache(profile, nil, fileStore, cache, rootLog)
+		registry, err := tools.NewRegistryWithImageCache(profile, fileStore, cache, rootLog)
 		if err != nil {
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
 		}
@@ -123,7 +130,12 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize profile compactor", Cause: err}
 		}
 		compactors[name] = compactor
-		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog)
+		manager, err := mcp.NewProfileManager(name, profile.MCPServers, rootLog)
+		if err != nil {
+			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
+		}
+		mcpManagers = append(mcpManagers, manager)
+		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager))
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
 		engine.SetForegroundCompactor(compactor)

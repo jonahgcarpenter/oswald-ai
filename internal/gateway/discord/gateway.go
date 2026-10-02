@@ -55,11 +55,6 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := dg.Runtime
 	deps.Broker = dg.Broker
-	if deps.Access == nil {
-		if access, ok := dg.Links.(gatewayruntime.AccessChecker); ok {
-			deps.Access = access
-		}
-	}
 	if deps.Log == nil {
 		deps.Log = dg.Log
 	}

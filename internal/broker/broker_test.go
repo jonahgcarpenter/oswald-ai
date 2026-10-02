@@ -488,13 +488,12 @@ func TestBrokerUserExclusiveDoesNotOvertakeSameLaneFollower(t *testing.T) {
 	}
 }
 
-func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
+func TestBrokerRetainsConfiguredProfileFence(t *testing.T) {
 	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
 	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "homeassistant", ExternalID: "winner", Assurance: identity.AssuranceHomeAssistantToken}
-	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "homeassistant", ExternalID: "loser", Assurance: identity.AssuranceHomeAssistantToken}
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
@@ -506,12 +505,8 @@ func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
 	}()
 	<-exclusiveStarted
 	req := &Request{
-		Principal:  loser,
-		SessionKey: "session",
-		RefreshPrincipal: func(principal identity.Principal) (identity.Principal, error) {
-			principal.CanonicalUserID = "winner"
-			return principal, nil
-		},
+		Principal:    winner,
+		SessionKey:   "session",
 		ResponseChan: make(chan Result, 1),
 	}
 	if err := b.Submit(req); err != nil {
@@ -533,7 +528,7 @@ func TestBrokerTransfersRefreshedPrincipalFence(t *testing.T) {
 	}
 }
 
-func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
+func TestBrokerDoesNotTransferOwnershipToAnUnrelatedProfileFence(t *testing.T) {
 	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
@@ -550,18 +545,9 @@ func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
 		})
 	}()
 	<-exclusiveStarted
-	refreshCount := 0
 	req := &Request{
-		Principal:  loser,
-		SessionKey: "session",
-		RefreshPrincipal: func(principal identity.Principal) (identity.Principal, error) {
-			refreshCount++
-			if refreshCount == 1 {
-				principal.CanonicalUserID = "winner"
-				return principal, nil
-			}
-			return identity.Principal{}, errors.New("account erased while queued")
-		},
+		Principal:    loser,
+		SessionKey:   "session",
 		ResponseChan: make(chan Result, 1),
 	}
 	if err := b.Submit(req); err != nil {
@@ -570,16 +556,19 @@ func TestBrokerRechecksPrincipalAfterWaitingForRefreshedFence(t *testing.T) {
 	close(releaseExclusive)
 	select {
 	case result := <-req.ResponseChan:
-		if result.Err == nil {
-			t.Fatal("stale refreshed principal reached processor")
+		if result.Err != nil {
+			t.Fatal(result.Err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("stale refreshed request did not finish")
 	}
 	select {
-	case <-processor.requests:
-		t.Fatal("processor received erased principal")
-	default:
+	case processed := <-processor.requests:
+		if processed.Principal != loser {
+			t.Fatal("configured profile ownership changed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated profile did not execute")
 	}
 }
 

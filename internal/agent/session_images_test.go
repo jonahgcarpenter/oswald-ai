@@ -208,7 +208,7 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 								t.Fatalf("response=%v err=%v", response, err)
 							}
 							var turns int
-							if err := store.sql.QueryRow(`SELECT COUNT(*) FROM session_turns`).Scan(&turns); err != nil || turns != 0 {
+							if err := store.sql.QueryRow(`SELECT COUNT(*) FROM messages WHERE role='assistant'`).Scan(&turns); err != nil || turns != 0 {
 								t.Fatalf("canceled turns=%d err=%v", turns, err)
 							}
 							return
@@ -674,7 +674,7 @@ func TestGeneratedImageCannotSucceedAfterSessionResetBeforePersistence(t *testin
 		t.Fatal("unpersisted generated image reported as delivered")
 	}
 	var count int
-	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM session_images`).Scan(&count); err != nil || count != 0 {
+	if err := store.sql.QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:v1:turn:%' AND json_array_length(value,'$.images')>0`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("unfenced images=%d err=%v", count, err)
 	}
 }

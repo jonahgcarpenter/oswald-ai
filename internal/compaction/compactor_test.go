@@ -116,7 +116,7 @@ func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	if candidates.MinItems != nil || candidates.MaxItems != nil {
 		t.Fatalf("candidate schema=%+v", candidates)
 	}
-	if !strings.Contains(request.Messages[0].Content, "Candidates is always an empty array because durable memory formation is handled separately.") {
+	if !strings.Contains(request.Messages[0].Content, "Candidates is always an empty array. Durable user notes are managed only through the file-memory tool, never through compression.") {
 		t.Fatalf("compaction policy did not separate memory formation: %q", request.Messages[0].Content)
 	}
 	for _, field := range []string{"open_tasks", "commitments", "entities", "decisions", "topic_tags"} {

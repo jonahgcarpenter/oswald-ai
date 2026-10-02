@@ -281,7 +281,16 @@ func (s *ProfileStore) fileSnapshot(ctx context.Context, tx *sql.Tx, id string) 
 		return profileFileSnapshot{}, false, err
 	}
 	var snapshot profileFileSnapshot
-	if len(encoded) > 32*1024 || json.Unmarshal([]byte(encoded), &snapshot) != nil || snapshot.Version != 1 || !validFileSnapshot(snapshot.User, snapshot.Memory) {
+	var required struct {
+		Version int     `json:"version"`
+		User    *string `json:"user"`
+		Memory  *string `json:"memory"`
+	}
+	if len(encoded) > 32*1024 || json.Unmarshal([]byte(encoded), &required) != nil || required.Version != 1 || required.User == nil || required.Memory == nil {
+		return snapshot, false, errors.New("invalid profile file snapshot")
+	}
+	snapshot = profileFileSnapshot{Version: required.Version, User: *required.User, Memory: *required.Memory}
+	if !validFileSnapshot(snapshot.User, snapshot.Memory) {
 		return snapshot, false, errors.New("invalid profile file snapshot")
 	}
 	return snapshot, true, nil
@@ -340,11 +349,10 @@ func (s *ProfileStore) BindSessionFileMemory(ctx context.Context, owner, key str
 }
 
 // AppendPendingSessionTurn writes two inactive message rows and one bounded,
-// versioned delivery/history record. Generated-image metadata is not wired yet;
-// rejecting images avoids silently losing deliverables during integration.
+// versioned delivery/history record, including private cache image references.
 func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input SessionTurnWrite) (result StoredSessionTurn, resultErr error) {
 	defer s.measure("memory.profile.turn.complete", time.Now(), &resultErr)
-	if len(input.Images) > 4 || len(input.Staged) != 0 {
+	if len(input.Images) > 4 {
 		return result, errors.New("unsupported profile turn artifacts")
 	}
 	if !utf8.ValidString(input.UserText) || !utf8.ValidString(input.AssistantText) || len(input.UserText) > 128*1024 || len(input.AssistantText) > 128*1024 || strings.TrimSpace(input.AssistantText) == "" {
@@ -402,9 +410,18 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 		if err != nil || len(data) > 280*1024 || image.ImageID == "" || len(image.ImageID) > 64 || image.Version <= 0 {
 			return result, errors.New("invalid profile image")
 		}
-		path, err := s.cache.Save(ctx, s.profile, data, image.MIMEType)
-		if err != nil {
-			return result, err
+		// Preserve the model-visible selector so a later explicit edit of the
+		// delivered path retains logical identity and its version high-water.
+		path := image.Path
+		if path != "" {
+			if _, _, err := s.cache.Resolve(ctx, s.profile, path); err != nil {
+				return result, err
+			}
+		} else {
+			path, err = s.cache.Save(ctx, s.profile, data, image.MIMEType)
+			if err != nil {
+				return result, err
+			}
 		}
 		state.Images = append(state.Images, profileImage{ID: image.ID, ImageID: image.ImageID, Version: image.Version, Highwater: image.VersionHighwater, Parent: image.ParentSourceImageID, Path: path, MIMEType: image.MIMEType})
 	}

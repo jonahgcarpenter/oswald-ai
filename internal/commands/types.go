@@ -6,7 +6,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const (
@@ -49,10 +48,9 @@ type Attachment = media.OutputAttachment
 
 // Result is the user-facing command response.
 type Result struct {
-	Outcome      Outcome `json:"-"`
-	Text         string
-	Attachments  []Attachment
-	Invalidation *invalidation.Event `json:"-"`
+	Outcome     Outcome `json:"-"`
+	Text        string
+	Attachments []Attachment
 }
 
 // Outcome is bounded operational telemetry, independent of user-facing text.

@@ -20,7 +20,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -111,18 +110,18 @@ func TestExecuteOpenAIRejectsAgentAttachments(t *testing.T) {
 	}
 }
 
-func TestExecuteSilentlyIgnoresBannedUsers(t *testing.T) {
+func TestExecuteSilentlyIgnoresUnavailableProfiles(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	deps.Access = &fakeAccess{banned: true, reason: "spam"}
+	deps.ForProfile = func(string) (Dependencies, bool) { return Dependencies{}, false }
 
 	for _, text := range []string{"/ping", "hello", " "} {
 		t.Run(text, func(t *testing.T) {
 			responder := &fakeResponder{}
 			admitted := false
 			outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: text, OnAllowed: func() { admitted = true }}, deps, responder)
-			if outcome.Action != routing.ActionIgnore || outcome.Reason != "user_banned" || outcome.Err != nil || admitted ||
+			if outcome.Action != routing.ActionIgnore || outcome.Reason != "profile_unavailable" || outcome.Err != nil || admitted ||
 				responder.started || responder.fallback != "" || responder.command.Text != "" || responder.agent != nil || responder.agentErr != "" {
 				t.Fatalf("unexpected banned outcome=%+v responder=%+v admitted=%t", outcome, responder, admitted)
 			}
@@ -147,16 +146,14 @@ func TestExecuteOnAllowedRunsForCommandsAndFallbacks(t *testing.T) {
 	}
 }
 
-func TestExecuteUsesPrincipalCanonicalUserForAccess(t *testing.T) {
+func TestExecuteUsesTrustedProfileOwnerForCommands(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
-
-	Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "/ping"}, deps, &fakeResponder{})
-	if access.userID != "canonical-user" {
-		t.Fatalf("access user ID = %q, want canonical-user", access.userID)
+	responder := &fakeResponder{}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("configured-profile"), Text: "/ping"}, deps, responder)
+	if responder.command.Text != "pong:configured-profile:/ping" {
+		t.Fatal("command changed trusted profile ownership")
 	}
 }
 
@@ -234,34 +231,25 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 	}
 }
 
-func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
-	event := invalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+func TestExecuteReportsCommandDeliveryFailure(t *testing.T) {
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
-			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+			return commands.Result{Text: "completed"}, nil
 		},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bus := invalidation.NewBus()
 	responder := &fakeResponder{}
-	published := 0
-	bus.Subscribe(func(got invalidation.Event) {
-		published++
-		if responder.command.Text != "deleted" || !got.CloseConnections {
-			t.Fatalf("invalidation published before delivery or with wrong event: response=%+v event=%+v", responder.command, got)
-		}
-	})
-	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
-	if published != 1 {
-		t.Fatalf("published=%d want 1", published)
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if responder.command.Text != "completed" {
+		t.Fatal("command response was not delivered")
 	}
 	responder.sendErr = errors.New("offline")
-	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
-	if published != 2 || !errors.Is(outcome.Err, responder.sendErr) {
-		t.Fatalf("failed delivery invalidation count=%d outcome=%+v", published, outcome)
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if !errors.Is(outcome.Err, responder.sendErr) {
+		t.Fatal("command delivery failure was discarded")
 	}
 }
 
@@ -311,13 +299,11 @@ func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
 	responder := &fakeResponder{}
 
 	outcome := Execute(Request{RequestID: "req", Text: "/ping"}, deps, responder)
-	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
-		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v", outcome, responder)
 	}
 }
 
@@ -325,15 +311,13 @@ func TestExecuteRejectsUnauthenticatedPrincipalBeforeOwnedOperations(t *testing.
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
 	responder := &fakeResponder{}
 	principal := testPrincipal("user")
 	principal.Assurance = identity.AssuranceSelfAsserted
 
 	outcome := Execute(Request{RequestID: "req", Principal: principal, Text: "/ping"}, deps, responder)
-	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
-		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v", outcome, responder)
 	}
 }
 
@@ -407,7 +391,7 @@ func TestExecuteRunsOutOfBandStopAheadOfActiveLaneRequest(t *testing.T) {
 	}
 }
 
-func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing.T) {
+func TestExecuteHoldsResolvedProfileFencesThroughDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	b := broker.NewBroker(nil, 4, log)
 	b.Start()
@@ -425,16 +409,15 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	}()
 	<-activeStarted
 
-	event := invalidation.Event{SessionIDs: []string{"target-session"}}
 	commandStarted := make(chan struct{})
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
-		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
+		DefinitionValue: commands.Definition{Name: "synthetic", UserExclusive: true},
 		ResolveFenceTargetsFunc: func(_ context.Context, req commands.Request) ([]string, error) {
 			return []string{req.Args[0]}, nil
 		},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
 			close(commandStarted)
-			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+			return commands.Result{Text: "completed"}, nil
 		},
 	}})
 	if err != nil {
@@ -445,18 +428,9 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 		fakeResponder: &fakeResponder{}, broker: b, target: target,
 		laterTargetStarted: laterTargetStarted,
 	}
-	bus := invalidation.NewBus()
-	heldAtBus := false
-	bus.Subscribe(func(invalidation.Event) {
-		select {
-		case <-laterTargetStarted:
-		case <-time.After(30 * time.Millisecond):
-			heldAtBus = true
-		}
-	})
 	done := make(chan Outcome, 1)
 	go func() {
-		done <- Execute(Request{Principal: actor, SessionKey: "admin-session", Text: "/deleteuser target"}, Dependencies{Broker: b, Commands: service, Log: log, RuntimeInvalidationBus: bus}, responder)
+		done <- Execute(Request{Principal: actor, SessionKey: "synthetic-session", Text: "/synthetic target"}, Dependencies{Broker: b, Commands: service, Log: log}, responder)
 	}()
 	select {
 	case <-commandStarted:
@@ -481,8 +455,8 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("target command did not complete")
 	}
-	if !responder.heldAtSend || !heldAtBus {
-		t.Fatalf("fence held at send=%t bus=%t", responder.heldAtSend, heldAtBus)
+	if !responder.heldAtSend {
+		t.Fatal("profile fence released before delivery")
 	}
 	select {
 	case <-laterTargetStarted:
@@ -566,12 +540,6 @@ func (pingHandler) Execute(_ context.Context, req commands.Request) (commands.Re
 	return commands.Result{Text: "pong:" + req.Principal.CanonicalUserID + ":" + req.Raw}, nil
 }
 
-type fakeAccess struct {
-	banned bool
-	reason string
-	userID string
-}
-
 type fakeCompactionEnqueuer struct {
 	responder         *fakeResponder
 	enqueueCalled     bool
@@ -579,10 +547,10 @@ type fakeCompactionEnqueuer struct {
 	failureAfterSend  bool
 	responseDelivered bool
 	userID            string
-	source            memory.FormationSource
+	source            memory.DeliverySource
 }
 
-func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
+func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.DeliverySource) error {
 	f.enqueueCalled = true
 	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
 	f.userID = userID
@@ -610,11 +578,6 @@ func (p *statelessRuntimeProcessor) Process(_ context.Context, req agent.Request
 
 func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
 	return p.response, nil
-}
-
-func (a *fakeAccess) BanStatus(userID string) (bool, string, error) {
-	a.userID = userID
-	return a.banned, a.reason, nil
 }
 
 func testPrincipal(userID string) identity.Principal {

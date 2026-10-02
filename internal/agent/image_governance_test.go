@@ -15,7 +15,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -117,14 +116,16 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 				}))
 				defer server.Close()
 				log := config.NewLogger(config.LevelError)
-				cache := imagecache.New(t.TempDir())
+				chat := &fakeChatter{}
+				a, _ := newTestAgent(t, chat, nil, nil)
+				cache := a.imageCache
 				reg, err := tools.NewRegistryWithImageCache(&config.Config{
 					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-				}, nil, nil, cache, log)
+				}, nil, cache, log)
 				if err != nil {
 					t.Fatal(err)
 				}
-				chat := &fakeChatter{}
+				a.registry = reg
 				var calls []llm.ToolCall
 				var original []byte
 				chat.onChat = func(req llm.ChatRequest) {
@@ -165,7 +166,6 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 					}
 				}
 				chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Finished."}})
-				a, _ := newTestAgent(t, chat, nil, reg)
 				a.SetImageCache(cache)
 				response, err := processAgent(a, "source-governance", "discord", "session", "user-1", "User", "edit these images", []llm.InputImage{testInputImage(t, 2, 3), testInputImage(t, 4, 5)}, nil)
 				if err != nil {

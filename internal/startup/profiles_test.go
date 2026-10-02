@@ -62,6 +62,8 @@ func profileStartupFixture(t *testing.T) *config.Config {
 
 func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) {
 	cfg := profileStartupFixture(t)
+	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Description: "Synthetic API tools.", Transport: "streamable_http", Enabled: true}}
+	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Description: "Synthetic Alice tools.", Transport: "streamable_http", Enabled: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := &profileFakeModel{}
@@ -120,6 +122,18 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 	defer model.mutex.Unlock()
 	if len(model.requests) != 1 || model.requests[0].Model != "fake/api" {
 		t.Fatal("API selected another profile")
+	}
+	foundMCP := false
+	for _, tool := range model.requests[0].Tools {
+		if tool.Function.Name == "alice_tools.tools" {
+			t.Fatal("another profile's MCP tools were advertised")
+		}
+		if tool.Function.Name == "api_tools.tools" {
+			foundMCP = true
+		}
+	}
+	if !foundMCP {
+		t.Fatal("startup did not wire profile MCP discovery")
 	}
 	for _, root := range []string{cfg.ProfileRoot, cfg.Profiles["alice"].ProfileRoot, cfg.Profiles["api"].ProfileRoot} {
 		if _, err := os.Stat(filepath.Join(root, "state.db")); err != nil {

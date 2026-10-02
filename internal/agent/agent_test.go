@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
@@ -454,7 +453,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 func TestProcessOffersFileMemoryTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	log := config.NewLogger(config.LevelError)
-	reg, err := tools.NewRegistryFromConfig(&config.Config{SearxngURL: "http://localhost:8080"}, nil, nil, log)
+	reg, err := tools.NewRegistryFromConfig(&config.Config{SearxngURL: "http://localhost:8080"}, nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +998,7 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "new answer"}}}}
 	embedder := &fakeEmbedder{vectors: [][]float64{{0, 1}, {1, 0}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}}
 	agent, store := newTestAgent(t, chat, embedder, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1033,7 +1032,7 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-1", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1042,24 +1041,7 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	turns, err := store.CompactionWindowAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-1", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, memory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CompleteSessionCompactionJob(context.Background(), job, false); err != nil {
+	if err := store.publishSummary(context.Background(), "user-1", "session-1", profile.Generation, 2, memory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-summary", "homeassistant", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
@@ -1071,79 +1053,6 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	}
 	if messages[2].Content != "turn 3 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
 		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
-	}
-}
-
-func TestProcessDoesNotInjectLegacyRecallOrProfile(t *testing.T) {
-	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "Atlas."}}}}
-	agent, store := newTestAgent(t, chat, nil, nil)
-	_, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{
-		Scope: memory.ScopeLongTerm, Category: "projects", Statement: "The project codename is Atlas.", Evidence: "The user named it.", Confidence: 0.95, Importance: 4,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.sql.Exec(`UPDATE memory_entries SET confidence = 'not-a-number' WHERE canonical_user_id = 'user-1'`); err != nil {
-		t.Fatal(err)
-	}
-	_, err = memorytest.PublishMemory(context.Background(), store.Store, "user-2", memorytest.MemoryFixture{
-		Scope: memory.ScopeLongTerm, Category: "projects", Statement: "The private project codename is Borealis.", Evidence: "Another user's project.", Confidence: 1, Importance: 5,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "What is the project codename?", nil, nil)
-	if err != nil {
-		t.Fatalf("process: %v", err)
-	}
-	messages := primaryRequests(chat.requests)[0].Messages
-	current := messages[len(messages)-1]
-	if current.Content != "What is the project codename?" || messagesContain(messages, "Atlas.") || messagesContain(messages, "Borealis") {
-		t.Fatalf("legacy memory leaked into model context: %+v", messages)
-	}
-	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(turns) != 1 || turns[0].UserText != "What is the project codename?" || strings.Contains(turns[0].UserText, "Atlas") {
-		t.Fatalf("legacy memory was persisted into prompt: %+v", turns)
-	}
-	var content, sources string
-	if err := store.sql.QueryRow(`SELECT rendered_content, source_memory_ids FROM sessions WHERE canonical_user_id = 'user-1' AND session_id = 'session-1'`).Scan(&content, &sources); err != nil || content != "" || sources != "[]" {
-		t.Fatalf("legacy facts bound to active session: content=%q sources=%q err=%v", content, sources, err)
-	}
-}
-
-func TestProcessDoesNotConversationallyConfirmPendingMemory(t *testing.T) {
-	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "model response"}}}}
-	agent, store := newTestAgent(t, chat, nil, nil)
-	output, err := policy.Evaluate(policy.CandidateInput{
-		SourceUserText: "My phone is 555-0100", Statement: "The user's phone is 555-0100.", Evidence: "My phone is 555-0100",
-		Provenance: policy.ProvenanceUserStatement, ClaimedAuthority: policy.AuthorityUserDirect,
-		Sensitivity: policy.SensitivityIdentityOrContact, Mode: policy.ModeAutomaticExtraction,
-		Scope: policy.ScopeLongTerm, Category: policy.CategoryIdentity,
-		Context: policy.ContextDirectAssertion, Confidence: 0.95, Importance: 4,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidate, _, err := store.ProposeCandidate(context.Background(), "user-1", memory.CandidateProposal{Output: output, IdempotencyKey: "pending-phone"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	principal := identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}
-	response, err := agent.Process(context.Background(), Request{RequestID: "req-1", Principal: principal, DisplayName: "Display", SessionKey: "session-1", IsDirect: true, Prompt: "yes remember it"})
-	if err != nil || response.Response != "model response" {
-		t.Fatalf("response=%+v err=%v", response, err)
-	}
-	messages := primaryRequests(chat.requests)[0].Messages
-	if strings.Contains(messages[0].Content, "memory confirmation") || strings.Contains(messages[len(messages)-1].Content, "pending_memory_confirmation") || strings.Contains(messages[len(messages)-1].Content, "555-0100") {
-		t.Fatalf("pending confirmation was injected: %+v", messages)
-	}
-	var publishedID int64
-	err = store.sql.QueryRow(`SELECT COALESCE(published_memory_id, 0) FROM memory_candidates WHERE canonical_user_id = 'user-1' AND id = ?`, candidate.ID).Scan(&publishedID)
-	if err != nil || publishedID != candidate.PublishedMemoryID {
-		t.Fatalf("conversational phrase changed candidate publication: id=%d err=%v", publishedID, err)
 	}
 }
 
@@ -1217,11 +1126,8 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 
 func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
-	agent, store := newTestAgent(t, chat, nil, nil)
-	intro := "You are speaking with Example User aka examplehandle."
-	if err := store.SyncSpeakerIntro("user-1", intro); err != nil {
-		t.Fatalf("sync speaker intro: %v", err)
-	}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+	intro := "You are speaking with user-1."
 
 	_, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
@@ -1229,7 +1135,7 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 	}
 
 	req := primaryRequests(chat.requests)[0]
-	if req.User != "Example User aka examplehandle" {
+	if req.User != "user-1" {
 		t.Fatalf("provider user = %q, want stripped speaker name", req.User)
 	}
 	if messagesContain(req.Messages, intro) {
@@ -1376,7 +1282,7 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-mcp", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-mcp", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1405,7 +1311,7 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session-mcp", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-mcp", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1418,24 +1324,7 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	turns, err := store.CompactionWindowAfter(context.Background(), "user-1", "session-mcp", profile.Generation, 0, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.EnqueueSessionCompactionJob(context.Background(), "user-1", "session-mcp", profile.Generation, turns.Turns[0].ID, turns.Turns[1].ID, turns.Turns[1].ID, "test-model", "test-v1"); err != nil {
-		t.Fatal(err)
-	}
-	job, err := store.ClaimSessionCompactionJob(context.Background(), "test", time.Minute, "test-model", "test-v1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveSessionCompactionArtifact(context.Background(), job, memory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.PublishSessionSummary(context.Background(), job); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CompleteSessionCompactionJob(context.Background(), job, false); err != nil {
+	if err := store.publishSummary(context.Background(), "user-1", "session-mcp", profile.Generation, 2, memory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
@@ -1458,16 +1347,13 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "three"}},
 	}}
-	agent, store := newTestAgent(t, chat, nil, nil)
+	agent, _ := newTestAgent(t, chat, nil, nil)
 	fileStore := files.NewStore(t.TempDir())
 	agent.SetFileMemory(fileStore)
 	if _, err := fileStore.Apply(context.Background(), "user-1", "user", []files.Operation{{Action: "add", Content: "User is Ada."}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Project is Atlas."}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: "The user is Ada.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
@@ -1478,9 +1364,6 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 		t.Fatalf("file memory was not injected: %q", firstFiles)
 	}
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Replies should be concise."}}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := memorytest.PublishMemory(context.Background(), store.Store, "user-1", memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "communication_preferences", Statement: "The user prefers concise replies.", Confidence: 1, Importance: 5}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := processAgent(agent, "req-2", "homeassistant", "session-1", "user-1", "Ada", "second", nil, nil); err != nil {
@@ -1511,7 +1394,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "next session"}},
 	}}
 	fileStore := files.NewStore(t.TempDir())
-	reg, err := tools.NewRegistryFromConfig(&config.Config{}, nil, fileStore, config.NewLogger(config.LevelError))
+	reg, err := tools.NewRegistryFromConfig(&config.Config{}, fileStore, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1553,14 +1436,11 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "one"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "two"}},
 	}}
-	agent, store := newTestAgent(t, chat, nil, nil)
+	agent, _ := newTestAgent(t, chat, nil, nil)
 	fileStore := files.NewStore(t.TempDir())
 	agent.SetFileMemory(fileStore)
 	for _, tc := range []struct{ user, statement string }{{"user-1", "The user is Alice."}, {"user-2", "The user is Bob."}} {
 		if _, err := fileStore.Apply(context.Background(), tc.user, "user", []files.Operation{{Action: "add", Content: tc.statement}}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := memorytest.PublishMemory(context.Background(), store.Store, tc.user, memorytest.MemoryFixture{Scope: memory.ScopeLongTerm, Category: "identity", Statement: tc.statement, Confidence: 1, Importance: 5}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1778,6 +1658,9 @@ func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, nam
 }
 
 func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayName, prompt string, images []llm.InputImage, streamFunc func(StreamChunk)) (*Response, error) {
+	if fixture, ok := agent.userMemory.(*agentMemoryFixture); ok {
+		agent.soul = soul.NewProfileStore(filepath.Join(fixture.root, userID), userID, fixture.defaultSoul)
+	}
 	assurance := identity.AssuranceHomeAssistantToken
 	switch gateway {
 	case "discord":
@@ -1831,31 +1714,30 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
-	soulStore := soul.NewStore(soulPath)
-	dbPath := filepath.Join(dir, "oswald.db")
-	db, err := database.Open(dbPath, log)
-	if err != nil {
-		t.Fatalf("open account database: %v", err)
+	fixture := &agentMemoryFixture{root: dir, defaultSoul: soulPath, stores: map[string]*memory.ProfileStore{}, readers: map[string]*sql.DB{}}
+	for _, owner := range []string{"user-1", "user-2"} {
+		root := filepath.Join(dir, owner)
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		store, err := memory.NewProfileStore(context.Background(), root, owner, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.stores[owner] = store
+		db, err := database.OpenState(context.Background(), filepath.Join(root, "state.db"), log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.readers[owner] = db.SQL()
+		t.Cleanup(func() { db.Close() })
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?), (?)`, "user-1", "user-2"); err != nil {
-		t.Fatalf("seed account user: %v", err)
-	}
-	if _, err := db.SQL().Exec(`INSERT INTO linked_accounts (gateway, identifier, canonical_user_id, display_name, verified) VALUES ('homeassistant', 'user-1', 'user-1', 'User 1', 1), ('homeassistant', 'user-2', 'user-2', 'User 2', 1)`); err != nil {
-		t.Fatalf("seed linked accounts: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	embeddingModel := ""
-	if embedder != nil {
-		embeddingModel = "embed-model"
-	}
-	userStore, err := memory.NewSQLiteStore(dbPath, embedder, embeddingModel, log)
-	if err != nil {
-		t.Fatalf("user store: %v", err)
-	}
-	agent := NewAgent(chat, reg, "test-model", soulStore, userStore, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
-	agent.SetImageCache(imagecache.New(dir))
-	t.Cleanup(func() { _ = userStore.Close() })
-	return agent, &agentMemoryFixture{Store: userStore, sql: db.SQL()}, soulPath
+	fixture.sql = fixture.readers["user-1"]
+	soulStore := soul.NewProfileStore(filepath.Join(dir, "user-1"), "user-1", soulPath)
+	agent := NewAgent(chat, reg, "test-model", soulStore, fixture, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
+	agent.SetImageCache(imagecache.NewProfileCache(filepath.Join(dir, "user-1"), "user-1"))
+	t.Cleanup(func() { fixture.Close() })
+	return agent, fixture, soulPath
 }
 
 func primaryRequests(requests []llm.ChatRequest) []llm.ChatRequest {

@@ -17,6 +17,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
@@ -265,14 +266,16 @@ func TestCommandMutationTelemetryAndContext(t *testing.T) {
 
 func TestRejectedAdmissionHasOnlyTerminalSummary(t *testing.T) {
 	for _, text := range []string{"hello", "/ping"} {
-		for _, banned := range []bool{false, true} {
+		for _, invalidGateway := range []bool{false, true} {
 			log, records := telemetryLogger(t)
 			p := testPrincipal("user")
-			if !banned {
+			if invalidGateway {
 				p.CanonicalUserID = "private-input-canary"
 				p.Gateway = "private-error-canary"
+			} else {
+				p.Assurance = identity.AssuranceSelfAsserted
 			}
-			Execute(Request{Principal: p, Text: text}, Dependencies{Log: log, Access: &fakeAccess{banned: banned}}, &fakeResponder{})
+			Execute(Request{Principal: p, Text: text}, Dependencies{Log: log}, &fakeResponder{})
 			received, completed := 0, 0
 			for _, record := range records() {
 				if record["event"] == "gateway.request.received" {
@@ -280,14 +283,8 @@ func TestRejectedAdmissionHasOnlyTerminalSummary(t *testing.T) {
 				}
 				if record["event"] == "gateway.request.complete" {
 					completed++
-					if banned {
-						if record["reason_code"] != "user_banned" || record["delivery_status"] != "not_attempted" || record["response_kind"] != "ignored" {
-							t.Fatalf("banned summary = %v", record)
-						}
-					} else {
-						if _, ok := record["user_id"]; ok {
-							t.Fatalf("untrusted user field: %v", record)
-						}
+					if _, ok := record["user_id"]; ok {
+						t.Fatalf("untrusted user field: %v", record)
 					}
 					if record["is_admitted"] != false || record["record_kind"] != "summary" || record["status"] != "rejected" {
 						t.Fatalf("rejection = %v", record)

@@ -27,42 +27,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
-
-func TestRuntimeInvalidationPurgesOnlyMatchingIMessageState(t *testing.T) {
-	g := &Gateway{
-		messageIndex: map[string]messageContext{
-			"session": {SessionKey: "imessage:chat:one", SenderID: "+15550000001"},
-			"sender":  {SessionKey: "imessage:other:one", SenderID: "+15550000001"},
-			"foreign": {SessionKey: "imessage:chat:two", SenderID: "+15550000002"},
-		},
-		contactNames: map[string]contactNameCacheEntry{
-			"+15550000001": {DisplayName: "One"},
-			"+15550000002": {DisplayName: "Two"},
-		},
-	}
-	g.HandleRuntimeInvalidation(invalidation.Event{SessionIDs: []string{"imessage:chat:one"}, ExternalIdentities: []string{"imessage:+15550000001", "discord:one"}})
-	if _, ok := g.messageIndex["session"]; ok {
-		t.Fatal("matching session message context remained")
-	}
-	if _, ok := g.messageIndex["sender"]; ok {
-		t.Fatal("matching sender message context remained")
-	}
-	if _, ok := g.messageIndex["foreign"]; !ok || len(g.messageIndex) != 1 {
-		t.Fatalf("foreign message context was purged: %+v", g.messageIndex)
-	}
-	if _, ok := g.contactNames["+15550000001"]; ok {
-		t.Fatal("matching contact cache entry remained")
-	}
-	if _, ok := g.contactNames["+15550000002"]; !ok || len(g.contactNames) != 1 {
-		t.Fatalf("foreign contact cache entry was purged: %+v", g.contactNames)
-	}
-}
 
 func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
@@ -555,17 +524,16 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 }
 
-func TestIMessageBannedMessageSendsNothing(t *testing.T) {
+func TestIMessageUnmappedMessageSendsNothing(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
-	g.Runtime.Access = bannedIMessageAccess{}
 
 	for _, text := range []string{"hello", "/help"} {
 		g.processIncomingMessage(webhookMessage{
 			GUID: "msg-1", Text: text,
-			Handle: messageHandle{Address: "+15551234567"},
+			Handle: messageHandle{Address: "+15557654321"},
 			Chats:  []messageChat{{GUID: "direct", Style: chatStyleDirect}},
 		})
 	}
@@ -577,12 +545,6 @@ func TestIMessageBannedMessageSendsNothing(t *testing.T) {
 			t.Fatalf("banned user received indicator: %q", path)
 		}
 	}
-}
-
-type bannedIMessageAccess struct{}
-
-func (bannedIMessageAccess) BanStatus(string) (bool, string, error) {
-	return true, "spam", nil
 }
 
 func TestIMessageGroupPublicTextPreservesMidSentenceOswald(t *testing.T) {

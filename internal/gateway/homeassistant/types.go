@@ -14,7 +14,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const protocolVersion = 1
@@ -83,26 +82,6 @@ func (g *Gateway) authenticate(r *http.Request) bool {
 	}
 	presented := sha256.Sum256([]byte(parts[1]))
 	return subtle.ConstantTimeCompare(presented[:], g.tokenHash[:]) == 1
-}
-
-// HandleRuntimeInvalidation closes active conversations for removed or disconnected HA users.
-func (g *Gateway) HandleRuntimeInvalidation(event invalidation.Event) {
-	if !event.CloseConnections {
-		return
-	}
-	for _, external := range event.ExternalIdentities {
-		userID, ok := strings.CutPrefix(external, "homeassistant:")
-		if !ok || userID == "" {
-			continue
-		}
-		g.connectionsMu.Lock()
-		connections := g.connections[userID]
-		delete(g.connections, userID)
-		g.connectionsMu.Unlock()
-		for connection := range connections {
-			connection.closeWithReason("authorization revoked")
-		}
-	}
 }
 
 func (g *Gateway) track(userID string, connection *trackedConnection) {

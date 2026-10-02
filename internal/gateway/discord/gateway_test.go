@@ -32,7 +32,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -544,24 +543,6 @@ func TestDiscordStreamRecoversFinalAnswerAfterStatusEditFailure(t *testing.T) {
 	}
 	if deleteCount != 0 || postCount != 1 || patchCount != 3 {
 		t.Fatalf("delete_count=%d post_count=%d patch_count=%d, want 0, 1, and 3", deleteCount, postCount, patchCount)
-	}
-}
-
-func TestRuntimeInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) {
-	dg := &Gateway{replyIndex: map[string]replyContext{
-		"session": {SessionKey: "discord:channel:one", SenderID: "one"},
-		"sender":  {SessionKey: "discord:other:one", SenderID: "one"},
-		"foreign": {SessionKey: "discord:channel:two", SenderID: "two"},
-	}}
-	dg.HandleRuntimeInvalidation(invalidation.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
-	if _, ok := dg.replyIndex["session"]; ok {
-		t.Fatal("matching session reply context remained")
-	}
-	if _, ok := dg.replyIndex["sender"]; ok {
-		t.Fatal("matching sender reply context remained")
-	}
-	if _, ok := dg.replyIndex["foreign"]; !ok || len(dg.replyIndex) != 1 {
-		t.Fatalf("foreign reply context was purged: %+v", dg.replyIndex)
 	}
 }
 

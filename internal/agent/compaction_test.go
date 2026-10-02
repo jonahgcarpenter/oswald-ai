@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -15,7 +14,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
@@ -148,7 +146,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +174,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	if last.Role != "user" || last.Content != "continue exactly" || !hasCompactionStatus(chunks) {
 		t.Fatalf("current request or status changed: last=%+v chunks=%+v", last, chunks)
 	}
-	if summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session", profile.Generation); !errors.Is(err, sql.ErrNoRows) || summary.ID != 0 {
+	if summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session", profile.Generation); err != nil || summary.ID != 0 {
 		t.Fatalf("foreground checkpoint was persisted: summary=%+v err=%v", summary, err)
 	}
 }
@@ -189,13 +187,13 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, nil)
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
-	profile, err := store.ResolveSessionProfile(ctx, "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(ctx, "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i <= foregroundDebtPageSize; i++ {
 		if i == 1 {
-			if _, err := memorytest.AppendPendingTurn(ctx, store.Store, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
+			if _, err := store.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{UserID: "user-1", SessionID: "session", Generation: profile.Generation, UserText: "pending", AssistantText: "pending answer", TTL: time.Hour}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -223,7 +221,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 func TestProcessPropagatesCancellationDuringForegroundCompaction(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +273,7 @@ func TestProcessRecoversProviderOverflowOnEmptyResponseRetry(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "answer after recovery"}}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +312,7 @@ func TestProcessInitialCompactionUsesPressureBeforeHistoryOmission(t *testing.T)
 			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 			a, store := newTestAgent(t, chat, nil, nil)
 			a.budget.PromptLimit = 1000
-			profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+			profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 			if err != nil {
 				t.Fatal(err)
 			}

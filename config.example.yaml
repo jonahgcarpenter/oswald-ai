@@ -1,9 +1,10 @@
 # Copy to .oswald/config.yaml only after manually provisioning the profiles.
-# No .env files are loaded. *_env references read the process environment.
+# ${VAR} reads this profile's private .env; process environment takes precedence.
+# Named profiles resolve inherited values using their own .env, not this one.
 providers:
   gateway:
     api: http://127.0.0.1:8080/v1
-    # key_env: MODEL_GATEWAY_API_KEY
+    # key: ${MODEL_GATEWAY_API_KEY}
 model:
   provider: custom:gateway
   default: your/provider-model
@@ -28,7 +29,7 @@ platforms:
   discord:
     enabled: false
     extra:
-      token_env: DISCORD_TOKEN
+      token: ${DISCORD_TOKEN:-}
       dm_policy: allowlist
       allow_from: []
       guild_require_mention: true
@@ -36,7 +37,7 @@ platforms:
     enabled: false
     extra:
       server_url: http://127.0.0.1:1234
-      server_password_env: BLUEBUBBLES_PASSWORD
+      server_password: ${BLUEBUBBLES_PASSWORD:-}
       webhook_host: 0.0.0.0
       webhook_port: 8645
       dm_policy: allowlist
@@ -44,8 +45,17 @@ platforms:
       group_require_mention: true
 tools:
   web_search:
-    # brave_key_env: BRAVE_API_KEY
+    # brave_key: ${BRAVE_API_KEY}
     searxng_url: ""
   image_generate:
     url: ""
     generation_timeout: 2m
+# MCP connections are isolated by profile and opened lazily; restart to reload.
+mcp:
+  servers: {}
+  # servers:
+  #   example:
+  #     url: https://example.com/mcp
+  #     description: Describe what this server can do.
+  #     headers:
+  #       Authorization: Bearer ${EXAMPLE_MCP_TOKEN}

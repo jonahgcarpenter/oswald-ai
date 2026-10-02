@@ -9,7 +9,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 // Name returns the human-readable gateway name.
@@ -43,11 +42,6 @@ func (g *Gateway) Start(b *broker.Broker) error {
 func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := g.Runtime
 	deps.Broker = g.Broker
-	if deps.Access == nil {
-		if access, ok := g.Links.(gatewayruntime.AccessChecker); ok {
-			deps.Access = access
-		}
-	}
 	if deps.Log == nil {
 		deps.Log = g.Log
 	}
@@ -80,31 +74,4 @@ func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {
 		return scoped[0]
 	}
 	return g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
-}
-
-// HandleRuntimeInvalidation purges message and contact context owned by the invalidated tenant.
-func (g *Gateway) HandleRuntimeInvalidation(event invalidation.Event) {
-	sessions := make(map[string]bool, len(event.SessionIDs))
-	for _, sessionID := range event.SessionIDs {
-		sessions[sessionID] = true
-	}
-	senders := make(map[string]bool)
-	const prefix = "imessage:"
-	for _, external := range event.ExternalIdentities {
-		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
-			senders[external[len(prefix):]] = true
-		}
-	}
-	g.messageMu.Lock()
-	for id, ctx := range g.messageIndex {
-		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
-			delete(g.messageIndex, id)
-		}
-	}
-	g.messageMu.Unlock()
-	g.contactMu.Lock()
-	for senderID := range senders {
-		delete(g.contactNames, senderID)
-	}
-	g.contactMu.Unlock()
 }

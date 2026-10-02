@@ -3,17 +3,14 @@ package config
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ProfileRoute binds a transport-authenticated identity to an operator profile.
@@ -44,8 +41,9 @@ func (p AdmissionPolicy) Allows(identifier string) bool {
 }
 
 type providerYAML struct {
-	API    string `yaml:"api"`
-	KeyEnv string `yaml:"key_env"`
+	API    string  `yaml:"api"`
+	KeyEnv string  `yaml:"key_env"`
+	Key    *string `yaml:"key"`
 }
 type modelYAML struct {
 	Provider      *string `yaml:"provider"`
@@ -54,6 +52,7 @@ type modelYAML struct {
 }
 type webYAML struct {
 	BraveKeyEnv *string `yaml:"brave_key_env"`
+	BraveKey    *string `yaml:"brave_key"`
 	SearxngURL  *string `yaml:"searxng_url"`
 }
 type imageYAML struct {
@@ -66,17 +65,20 @@ type toolsYAML struct {
 }
 type platformExtraYAML struct {
 	TokenEnv            string   `yaml:"token_env"`
+	Token               *string  `yaml:"token"`
 	DMPolicy            string   `yaml:"dm_policy"`
 	AllowFrom           []string `yaml:"allow_from"`
 	GuildRequireMention *bool    `yaml:"guild_require_mention"`
 	GroupRequireMention *bool    `yaml:"group_require_mention"`
 	ServerURL           string   `yaml:"server_url"`
 	ServerPasswordEnv   string   `yaml:"server_password_env"`
+	ServerPassword      *string  `yaml:"server_password"`
 	WebhookHost         string   `yaml:"webhook_host"`
 	WebhookPort         int      `yaml:"webhook_port"`
 	APIHost             string   `yaml:"api_host"`
 	APIPort             int      `yaml:"api_port"`
 	AuthTokenEnv        string   `yaml:"auth_token_env"`
+	AuthToken           *string  `yaml:"auth_token"`
 	ListenPort          int      `yaml:"listen_port"`
 }
 type platformYAML struct {
@@ -96,8 +98,25 @@ type documentYAML struct {
 		Workers  int    `yaml:"worker_pool_size"`
 		LogLevel string `yaml:"log_level"`
 	} `yaml:"runtime"`
-	// MCP is reserved operator data; no remote MCP wiring is enabled yet.
-	MCP yaml.Node `yaml:"mcp"`
+	MCP struct {
+		Servers map[string]mcpServerYAML `yaml:"servers"`
+	} `yaml:"mcp"`
+}
+
+type mcpServerYAML struct {
+	URL         string            `yaml:"url"`
+	Description string            `yaml:"description"`
+	Transport   string            `yaml:"transport"`
+	Headers     map[string]string `yaml:"headers"`
+	Enabled     *bool             `yaml:"enabled"`
+}
+
+// MCPServer holds one resolved operator-owned profile connection. It is never
+// persisted in SQLite, and its URL/headers must not be logged.
+type MCPServer struct {
+	Name, URL, Description, Transport string
+	Headers                           map[string]string
+	Enabled                           bool
 }
 
 var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -127,57 +146,7 @@ func privateDirectory(path string) error {
 	return nil
 }
 
-func readYAML(path string, optional bool) (documentYAML, error) {
-	var doc documentYAML
-	info, err := os.Lstat(path)
-	if optional && errors.Is(err, os.ErrNotExist) {
-		return doc, nil
-	}
-	if err != nil {
-		return doc, errors.New("configuration file is unavailable")
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 256*1024 {
-		return doc, errors.New("unsafe or oversized configuration file")
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return doc, errors.New("configuration file is unavailable")
-	}
-	defer f.Close()
-	opened, err := f.Stat()
-	if err != nil || !opened.Mode().IsRegular() || opened.Size() > 256*1024 {
-		return doc, errors.New("unsafe or oversized configuration file")
-	}
-	decoder := yaml.NewDecoder(io.LimitReader(f, 256*1024+1))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&doc); err != nil {
-		return doc, errors.New("invalid configuration YAML")
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return doc, errors.New("configuration must contain exactly one YAML document")
-	}
-	return doc, nil
-}
-
-func secret(name string, required bool) (string, error) {
-	if name == "" {
-		if required {
-			return "", errors.New("required credential reference is missing")
-		}
-		return "", nil
-	}
-	if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(name) {
-		return "", errors.New("invalid credential environment reference")
-	}
-	value := os.Getenv(name)
-	if required && strings.TrimSpace(value) == "" {
-		return "", errors.New("required process credential is missing")
-	}
-	return value, nil
-}
-
-func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string) error {
+func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string, env profileEnvironment) error {
 	for name, value := range doc.Providers {
 		providers[name] = value
 	}
@@ -204,15 +173,19 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	// The LLM transport appends /v1 routes itself.
 	endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
 	cfg.LLMGatewayURL = endpoint.String()
-	cfg.LLMGatewayAPIKey, err = secret(provider.KeyEnv, provider.KeyEnv != "")
+	cfg.LLMGatewayAPIKey, err = env.credential(provider.Key, provider.KeyEnv, provider.KeyEnv != "" || provider.Key != nil)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(cfg.LLMGatewayModel) == "" || cfg.ModelContextWindow < 0 {
 		return errors.New("invalid model configuration")
 	}
-	if doc.Tools.WebSearch.BraveKeyEnv != nil {
-		cfg.BraveAPIKey, err = secret(*doc.Tools.WebSearch.BraveKeyEnv, *doc.Tools.WebSearch.BraveKeyEnv != "")
+	if doc.Tools.WebSearch.BraveKeyEnv != nil || doc.Tools.WebSearch.BraveKey != nil {
+		name := ""
+		if doc.Tools.WebSearch.BraveKeyEnv != nil {
+			name = *doc.Tools.WebSearch.BraveKeyEnv
+		}
+		cfg.BraveAPIKey, err = env.credential(doc.Tools.WebSearch.BraveKey, name, name != "")
 		if err != nil {
 			return err
 		}
@@ -238,6 +211,44 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 			return errors.New("invalid tool provider endpoint")
 		}
 	}
+	cfg.MCPServers = nil
+	if len(doc.MCP.Servers) > 32 {
+		return errors.New("too many profile MCP servers")
+	}
+	for name, server := range doc.MCP.Servers {
+		if !regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`).MatchString(name) || name == "soul" {
+			return errors.New("invalid MCP server name")
+		}
+		transport := server.Transport
+		if transport == "" {
+			transport = "streamable_http"
+		}
+		if transport != "streamable_http" {
+			return errors.New("unsupported MCP transport")
+		}
+		endpoint, err := url.Parse(server.URL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
+			return errors.New("invalid MCP endpoint")
+		}
+		description := strings.TrimSpace(server.Description)
+		if description == "" || len([]rune(description)) > 500 || strings.ContainsAny(description, "\r\n\x00") {
+			return errors.New("invalid MCP description")
+		}
+		if len(server.Headers) > 32 {
+			return errors.New("too many MCP headers")
+		}
+		for key, value := range server.Headers {
+			if !regexp.MustCompile(`^[!#$%&'*+.^_`+"`"+`|~0-9A-Za-z-]+$`).MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
+				return errors.New("invalid MCP header")
+			}
+		}
+		enabled := true
+		if server.Enabled != nil {
+			enabled = *server.Enabled
+		}
+		cfg.MCPServers = append(cfg.MCPServers, MCPServer{Name: name, URL: server.URL, Description: description, Transport: transport, Headers: server.Headers, Enabled: enabled})
+	}
+	sort.Slice(cfg.MCPServers, func(i, j int) bool { return cfg.MCPServers[i].Name < cfg.MCPServers[j].Name })
 	return nil
 }
 
@@ -248,8 +259,8 @@ func port(value int) (string, error) {
 	return strconv.Itoa(value), nil
 }
 
-// LoadProfiles loads global YAML and manually provisioned named profiles. It never
-// reads .env files or changes the process environment; errors omit private YAML.
+// LoadProfiles merges raw YAML before resolving each profile's private .env and
+// process environment. It never mutates os.Environ; errors omit private content.
 func LoadProfiles(root string) (*Config, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -258,14 +269,22 @@ func LoadProfiles(root string) (*Config, error) {
 	if err := privateDirectory(root); err != nil {
 		return nil, err
 	}
-	doc, err := readYAML(filepath.Join(root, "config.yaml"), false)
+	raw, err := readYAMLNode(filepath.Join(root, "config.yaml"), false)
+	if err != nil {
+		return nil, err
+	}
+	env, err := loadProfileEnvironment(root)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := resolveDocument(raw, env)
 	if err != nil {
 		return nil, err
 	}
 	cfg := &Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*Config{}, WorkerPoolSize: 1, LogLevel: LevelInfo, ComfyUIGenerationTimeout: 2 * time.Minute, DiscordGroupRequireMention: true, BlueBubblesGroupRequireMention: true}
 	providers := map[string]providerYAML{}
 	selected := ""
-	if err := applyDocument(cfg, doc, providers, &selected); err != nil {
+	if err := applyDocument(cfg, doc, providers, &selected, env); err != nil {
 		return nil, err
 	}
 	if doc.Runtime != nil {
@@ -317,7 +336,7 @@ func LoadProfiles(root string) (*Config, error) {
 		x := settings.Extra
 		switch platform {
 		case "discord":
-			cfg.DiscordToken, err = secret(x.TokenEnv, true)
+			cfg.DiscordToken, err = env.credential(x.Token, x.TokenEnv, true)
 			cfg.DiscordPolicy, err = admissionPolicy("discord", x.DMPolicy, x.AllowFrom, err)
 			if x.GuildRequireMention != nil {
 				cfg.DiscordGroupRequireMention = *x.GuildRequireMention
@@ -335,7 +354,7 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
-			cfg.BlueBubblesPassword, err = secret(x.ServerPasswordEnv, true)
+			cfg.BlueBubblesPassword, err = env.credential(x.ServerPassword, x.ServerPasswordEnv, true)
 			cfg.BlueBubblesPolicy, err = admissionPolicy("imessage", x.DMPolicy, x.AllowFrom, err)
 			if x.GroupRequireMention != nil {
 				cfg.BlueBubblesGroupRequireMention = *x.GroupRequireMention
@@ -351,7 +370,7 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, err
 			}
-			cfg.HomeAssistantAuthToken, err = secret(x.AuthTokenEnv, true)
+			cfg.HomeAssistantAuthToken, err = env.credential(x.AuthToken, x.AuthTokenEnv, true)
 			if len(strings.TrimSpace(cfg.HomeAssistantAuthToken)) < 32 {
 				return nil, errors.New("home assistant credential is too short")
 			}
@@ -368,21 +387,27 @@ func LoadProfiles(root string) (*Config, error) {
 		if err := privateDirectory(profileRoot); err != nil {
 			return nil, err
 		}
-		profileDoc, err := readYAML(filepath.Join(profileRoot, "config.yaml"), true)
+		profileRaw, err := readYAMLNode(filepath.Join(profileRoot, "config.yaml"), true)
 		if err != nil {
 			return nil, err
 		}
-		if profileDoc.Gateway != nil || profileDoc.Platforms != nil || profileDoc.Runtime != nil {
-			return nil, errors.New("profile cannot override shared gateway or runtime configuration")
+		merged, err := profileDocument(raw, profileRaw)
+		if err != nil {
+			return nil, err
+		}
+		profileEnv, err := loadProfileEnvironment(profileRoot)
+		if err != nil {
+			return nil, err
+		}
+		profileDoc, err := resolveDocument(merged, profileEnv)
+		if err != nil {
+			return nil, err
 		}
 		profile := *cfg
 		profile.ProfileName, profile.ProfileRoot, profile.Profiles = name, profileRoot, nil
 		profileProviders := map[string]providerYAML{}
-		for k, v := range providers {
-			profileProviders[k] = v
-		}
-		profileSelected := selected
-		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected); err != nil {
+		profileSelected := ""
+		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected, profileEnv); err != nil {
 			return nil, err
 		}
 		cfg.Profiles[name] = &profile

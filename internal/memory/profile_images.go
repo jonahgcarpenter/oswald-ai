@@ -3,9 +3,9 @@ package memory
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
@@ -110,7 +110,11 @@ func (s *ProfileStore) SessionImages(ctx context.Context, owner, key string, gen
 				}
 				continue
 			}
-			images = append(images, requestctx.InputImage{ID: image.ID, Path: image.Path, ImageID: image.ImageID, Version: image.Version, VersionHighwater: highwater[image.ImageID], ParentSourceImageID: image.Parent, MIMEType: mime, Data: base64.StdEncoding.EncodeToString(data)})
+			normalized, err := media.NormalizeInputImageFromBytes(nil, mime, data, "session-image")
+			if err != nil {
+				continue
+			}
+			images = append(images, requestctx.InputImage{ID: image.ID, Path: image.Path, Source: "generated", ImageID: image.ImageID, Version: image.Version, VersionHighwater: highwater[image.ImageID], ParentSourceImageID: image.Parent, MIMEType: normalized.Image.MimeType, Data: normalized.Image.Data})
 		}
 	}
 	return images, tx.Commit()

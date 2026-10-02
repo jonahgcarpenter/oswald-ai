@@ -3,194 +3,62 @@ package memory
 import (
 	"errors"
 	"time"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/policy"
 )
 
-const (
-	FormationExtractorVersion   = "formation-v4"
-	AgentSaveExtractorVersion   = "agent-save-v1"
-	DurableModelSubmissionLimit = 3
-
-	FormationPurposeBackgroundPattern = "background_pattern"
-	FormationPurposeAgentSave         = "agent_save"
-)
-
-// ErrStaleFormationJobLease indicates that the exact claimed lease is no longer live.
-var ErrStaleFormationJobLease = errors.New("stale memory formation job lease")
-
-// ErrModelSubmissionBudgetExhausted indicates that a durable model-backed job
-// has already reserved every allowed provider submission.
+// ErrModelSubmissionBudgetExhausted identifies exhausted durable provider credits.
 var ErrModelSubmissionBudgetExhausted = errors.New("durable model submission budget exhausted")
 
-// ErrStaleSessionCompactionJobLease indicates that the exact compaction lease is no longer live.
+// ErrStaleSessionCompactionJobLease identifies a lost exact-token compression lease.
 var ErrStaleSessionCompactionJobLease = errors.New("stale session compaction job lease")
 
-// FormationSource identifies the canonical turn and request that formed memory.
-type FormationSource struct {
-	RequestID         string
-	SessionID         string
-	SessionGeneration int
-	TurnID            int64
-	Model             string
-	ExtractorVersion  string
+// DeliverySource carries delivered exchange correlation into compression.
+type DeliverySource struct {
+	RequestID, SessionID string
+	SessionGeneration    int
+	TurnID               int64
+	Model                string
 }
 
-// CandidateProposal is one validated policy result ready for canonical staging.
-type CandidateProposal struct {
-	Output               policy.CandidateOutput
-	Source               FormationSource
-	IdempotencyKey       string
-	TargetMemoryID       int64
-	SupersedesStatement  string
-	RequireCorroboration bool
-	// Cardinality is set only by the versioned assessment path; empty retains legacy slot rules.
-	Cardinality   string
-	Correction    bool
-	FormationJob  *FormationJob
-	CompactionJob *SessionCompactionJob
-}
-
-// FormationCandidate is a persisted memory proposal.
-type FormationCandidate struct {
-	ID                  int64
-	UserID              string
-	State               string
-	UpdatedAt           time.Time
-	Scope               string
-	Category            string
-	Statement           string
-	Evidence            string
-	Confidence          float64
-	Importance          int
-	Provenance          string
-	SourceAuthority     string
-	Sensitivity         string
-	FormationMode       string
-	DecisionReason      string
-	SourceRequestID     string
-	SourceSessionID     string
-	SourceGeneration    int
-	SourceTurnID        int64
-	ExtractionModel     string
-	ExtractorVersion    string
-	SupersedesMemoryID  int64
-	SupersedesStatement string
-	PublishedMemoryID   int64
-	ExpiresAt           time.Time
-	ClaimSlot           string
-	ClaimValue          string
-}
-
-// FormationJob is one leased post-turn extraction operation.
-type FormationJob struct {
-	ID                      int64
-	UserID                  string
-	RequestID               string
-	SessionID               string
-	SessionGeneration       int
-	TurnID                  int64
-	Model                   string
-	ExtractorVersion        string
-	Purpose                 string
-	AttemptCount            int
-	InvalidOutputRetryCount int
-	LastErrorCode           string
-	ModelSubmissionCount    int
-	CorrectiveErrorCode     string
-	LeaseOwner              string
-	LeaseUntil              time.Time
-}
-
-// StoredSessionTurn identifies an exchange that was actually persisted.
+// StoredSessionTurn identifies an exchange actually persisted, not delivered.
 type StoredSessionTurn struct {
-	ID         int64
-	UserID     string
-	SessionID  string
-	Generation int
-	UserText   string
-	// CreatedAt is the trusted source timestamp, not extraction time.
-	CreatedAt time.Time
-	// AssistantResponse is interpretation context only, never memory evidence.
+	ID                int64
+	UserID, SessionID string
+	Generation        int
+	UserText          string
+	CreatedAt         time.Time
 	AssistantResponse string
 }
 
 const (
-	// SessionCompactionModelSubmissionLimit permits one initial call and three retries.
-	SessionCompactionModelSubmissionLimit = 4
-	// SessionCompactionInvalidOutputRetryLimit permits all three retries to correct invalid output.
+	SessionCompactionModelSubmissionLimit    = 4
 	SessionCompactionInvalidOutputRetryLimit = 3
+	maxSummaryNarrativeRunes                 = 8000
+	maxSummaryArrayItems                     = 50
+	maxSummaryItemRunes                      = 1000
+	maxSummaryCandidates                     = 20
+	maxSummaryStructuredRunes                = 16000
+	maxSummaryArtifactBytes                  = 40000
+	maxSummaryCandidateRunes                 = 2000
 )
 
-const (
-	maxSummaryNarrativeRunes  = 8000
-	maxSummaryArrayItems      = 50
-	maxSummaryItemRunes       = 1000
-	maxSummaryCandidates      = 20
-	maxSummaryStructuredRunes = 16000
-	maxSummaryArtifactBytes   = 40000
-	maxSummaryCandidateRunes  = 2000
-)
-
-// SessionSummary is one immutable structured checkpoint for a session generation.
+// SessionSummary is an immutable structured checkpoint for a profile generation.
 type SessionSummary struct {
-	ID                   int64
-	UserID               string
-	SessionID            string
-	SessionGeneration    int
-	CoveredFromTurnID    int64
-	CoveredThroughTurnID int64
-	Narrative            string
-	OpenTasks            []string
-	Commitments          []string
-	Entities             []string
-	Decisions            []string
-	TopicTags            []string
-	SourceTurnIDs        []int64
+	ID                                                     int64
+	UserID, SessionID                                      string
+	SessionGeneration                                      int
+	CoveredFromTurnID, CoveredThroughTurnID                int64
+	Narrative                                              string
+	OpenTasks, Commitments, Entities, Decisions, TopicTags []string
+	SourceTurnIDs                                          []int64
 }
 
-// SessionCompactionJob is one fixed-range, leased chunk of a stable campaign.
-type SessionCompactionJob struct {
-	ID int64
-	// RequestID is the covered endpoint's persisted origin, loaded at claim time.
-	RequestID               string `json:"-"`
-	UserID                  string
-	SessionID               string
-	SessionGeneration       int
-	CoveredFromTurnID       int64
-	CoveredThroughTurnID    int64
-	TargetTurnID            int64
-	State                   string
-	ArtifactSummaryID       int64
-	Model                   string
-	GeneratorVersion        string
-	AttemptCount            int
-	InvalidOutputRetryCount int
-	LastErrorCode           string
-	ModelSubmissionCount    int
-	CorrectiveErrorCode     string
-	LeaseOwner              string
-	LeaseUntil              time.Time
-	AvailableAt             time.Time
-}
-
-// DeliveredSessionPromptPressure is the newest delivered completed-request
-// pressure snapshot for one active session generation.
-type DeliveredSessionPromptPressure struct {
-	TurnID int64
-	SessionPromptPressure
-}
-
-// SessionPromptPressure is the immutable completed-request pressure snapshot
-// that becomes planner-visible only after its source turn is delivered.
+// SessionPromptPressure becomes planner-visible only after successful delivery.
 type SessionPromptPressure struct {
-	Tokens  int
-	Limit   int
-	Version string
+	Tokens, Limit int
+	Version       string
 }
 
-// SummaryArtifact is the first model-produced structured result saved for a job.
-// Its canonical JSON representation is immutable after the first successful save.
+// SummaryArtifact retains the approved version-1 receipt's JSON representation.
 type SummaryArtifact struct {
 	Narrative        string                        `json:"narrative"`
 	OpenTasks        []string                      `json:"open_tasks"`
@@ -203,7 +71,8 @@ type SummaryArtifact struct {
 	Candidates       []CompactionCandidateArtifact `json:"candidates"`
 }
 
-// CompactionCandidateArtifact is an untrusted source-turn-specific memory proposal.
+// CompactionCandidateArtifact preserves the nested artifact wire shape. Active
+// compression requires an empty candidates array; no fact publication exists.
 type CompactionCandidateArtifact struct {
 	SourceTurnID int64   `json:"source_turn_id"`
 	Statement    string  `json:"statement"`
@@ -221,71 +90,19 @@ type CompactionCandidateArtifact struct {
 	ClaimValue   string  `json:"claim_value"`
 }
 
-// CompactionWindow gives a planner chronological delivered turns and the
-// unbounded count and newest eligible ID before the first pending delivery.
-type CompactionWindow struct {
-	Turns        []SessionTurn
-	TotalCount   int
-	NewestTurnID int64
-}
-
-// ActiveSessionScope identifies one currently active tenant session generation.
+// ActiveSessionScope identifies an active profile conversation generation.
 type ActiveSessionScope struct {
-	UserID     string
-	SessionID  string
-	Generation int
+	UserID, SessionID string
+	Generation        int
 }
 
-const (
-	ScopeShortTerm = "short_term"
-	ScopeLongTerm  = "long_term"
-
-	StatusActive = "active"
-)
-
-// ValidCategories lists supported memory categories in display order.
-var ValidCategories = []string{"identity", "communication_preferences", "durable_preferences", "projects", "relationships", "environment", "notes"}
-
-// MemoryEntry is a single short-term or long-term user memory.
-type MemoryEntry struct {
-	Context          string
-	RetiredAt        time.Time
-	RetirementReason string
-	ID               int64
-	// Revision is the canonical optimistic-concurrency token, not an index revision.
-	Revision        int64
-	UserID          string
-	Scope           string
-	Category        string
-	Statement       string
-	Evidence        string
-	Confidence      float64
-	Importance      int
-	Status          string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	ExpiresAt       time.Time
-	SupersedesID    int64
-	ProvenanceType  string
-	SourceAuthority string
-	Sensitivity     string
-	ClaimSlot       string
-	ClaimValue      string
-	EvidenceCount   int
-	Score           float64
-}
-
-// SessionTurn is a completed exchange stored for session continuity.
+// SessionTurn is a complete exchange stored for conversation continuity.
 type SessionTurn struct {
-	ID            int64
-	SessionID     string
-	UserID        string
-	Generation    int
-	UserText      string
-	AssistantText string
-	ToolNames     []string
-	ToolHistory   ToolHistory
-	CreatedAt     time.Time
-	ExpiresAt     time.Time
-	Score         float64
+	ID                      int64
+	SessionID, UserID       string
+	Generation              int
+	UserText, AssistantText string
+	ToolNames               []string
+	ToolHistory             ToolHistory
+	CreatedAt, ExpiresAt    time.Time
 }

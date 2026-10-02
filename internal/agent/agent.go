@@ -294,6 +294,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			return nil, fmt.Errorf("image cache is unavailable")
 		}
 		for i := range contextImages {
+			if contextImages[i].Path != "" {
+				if _, _, err := a.imageCache.Resolve(ctx, senderID, contextImages[i].Path); err != nil {
+					return nil, fmt.Errorf("resolve image catalog source: %w", err)
+				}
+				continue
+			}
 			data, err := base64.StdEncoding.DecodeString(contextImages[i].Data)
 			if err != nil {
 				return nil, fmt.Errorf("decode image catalog source: %w", err)

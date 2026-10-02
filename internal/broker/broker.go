@@ -42,21 +42,20 @@ type LaneKey struct {
 
 // Request carries a single user request from a gateway into the broker.
 type Request struct {
-	Usage            *requestctx.UsageCollector
-	Metadata         requestctx.Metadata
-	RequestID        string
-	ChatID           string
-	Principal        identity.Principal
-	DisplayName      string
-	SessionKey       string
-	IsDirect         bool
-	Prompt           string
-	Stateless        bool
-	ClientHistory    []llm.ChatMessage
-	Images           []llm.InputImage
-	StreamFunc       func(agent.StreamChunk)
-	RefreshPrincipal func(identity.Principal) (identity.Principal, error)
-	ResponseChan     chan Result
+	Usage         *requestctx.UsageCollector
+	Metadata      requestctx.Metadata
+	RequestID     string
+	ChatID        string
+	Principal     identity.Principal
+	DisplayName   string
+	SessionKey    string
+	IsDirect      bool
+	Prompt        string
+	Stateless     bool
+	ClientHistory []llm.ChatMessage
+	Images        []llm.InputImage
+	StreamFunc    func(agent.StreamChunk)
+	ResponseChan  chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -290,31 +289,6 @@ func (b *Broker) Submit(req *Request) error {
 		if cause := context.Cause(w.ctx); cause != nil {
 			deliver(Result{Err: cause, ExecutionComplete: true})
 			return nil
-		}
-		if req.RefreshPrincipal != nil {
-			resolved := false
-			for attempt := 0; attempt < 8; attempt++ {
-				previousUserID := req.Principal.CanonicalUserID
-				principal, err := req.RefreshPrincipal(req.Principal)
-				if err != nil {
-					deliver(Result{Principal: req.Principal, Err: err, ExecutionComplete: true})
-					return nil
-				}
-				req.Principal = principal
-				b.mu.Lock()
-				w.ownerUserID = principal.CanonicalUserID
-				b.mu.Unlock()
-				if principal.CanonicalUserID == previousUserID {
-					resolved = true
-					break
-				}
-				b.transferReaderFence(w, principal.CanonicalUserID)
-			}
-			if !resolved {
-				err := fmt.Errorf("principal ownership changed too many times while queued")
-				deliver(Result{Principal: req.Principal, Err: err, ExecutionComplete: true})
-				return nil
-			}
 		}
 		if cause := context.Cause(w.ctx); cause != nil {
 			deliver(Result{Principal: req.Principal, Err: cause, ExecutionComplete: true})
@@ -590,32 +564,6 @@ func (b *Broker) runWorker(id int) {
 		b.complete(w)
 	}
 	b.log.Debug("broker.worker.stopped", "broker worker stopped", config.F("worker_id", id))
-}
-
-func (b *Broker) transferReaderFence(w *work, canonicalUserID string) {
-	for i, fence := range w.fences {
-		if i >= len(w.releasedFences) {
-			w.releasedFences = append(w.releasedFences, make([]bool, i-len(w.releasedFences)+1)...)
-		}
-		if !w.releasedFences[i] {
-			fence.release(false)
-			w.releasedFences[i] = true
-		}
-	}
-	b.mu.Lock()
-	fence := b.userFences[canonicalUserID]
-	if fence == nil {
-		fence = newUserFence()
-		b.userFences[canonicalUserID] = fence
-	}
-	b.mu.Unlock()
-	reserved := fence.reserveReader()
-	if !reserved {
-		fence.acquire(false, false)
-	}
-	w.fences = append(w.fences, fence)
-	w.reservedReaders = append(w.reservedReaders, reserved)
-	w.releasedFences = append(w.releasedFences, false)
 }
 
 func (b *Broker) complete(completed *work) {

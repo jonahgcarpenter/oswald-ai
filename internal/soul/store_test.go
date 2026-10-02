@@ -5,127 +5,65 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
-func TestStoreCopiesOnceAndReadsEachUserFresh(t *testing.T) {
+func TestProfileSoulIsReadFreshWithoutCopyingTemplate(t *testing.T) {
 	root := t.TempDir()
+	profile := filepath.Join(root, "profile")
+	if err := os.Mkdir(profile, 0700); err != nil {
+		t.Fatal(err)
+	}
 	template := filepath.Join(root, "SOUL.md")
 	if err := os.WriteFile(template, []byte("default"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(template)
-	var wg sync.WaitGroup
-	results := make(chan error, 20)
-	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			got, err := store.Read(context.Background(), "one")
-			if err == nil && got != "default" {
-				results <- os.ErrInvalid
-				return
-			}
-			results <- err
-		}()
+	store := NewProfileStore(profile, "one", template)
+	if got, err := store.Read(context.Background(), "one"); err != nil || got != "default" {
+		t.Fatalf("fallback: %q %v", got, err)
 	}
-	wg.Wait()
-	close(results)
-	for err := range results {
-		if err != nil {
+	if _, err := os.Stat(filepath.Join(profile, "SOUL.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("template copied")
+	}
+	for _, policy := range []string{"personal", "edited"} {
+		if err := os.WriteFile(filepath.Join(profile, "SOUL.md"), []byte(policy), 0600); err != nil {
 			t.Fatal(err)
 		}
+		if got, err := store.Read(context.Background(), "one"); err != nil || got != policy {
+			t.Fatalf("fresh policy: %q %v", got, err)
+		}
 	}
-	userSoul := filepath.Join(root, "one", "SOUL.md")
-	if info, err := os.Stat(userSoul); err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("private soul mode: %v %v", info, err)
-	}
-	if err := os.WriteFile(userSoul, []byte("personal"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(template, []byte("new default"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := store.Read(context.Background(), "one"); err != nil || got != "personal" {
-		t.Fatalf("operator edit overwritten: %q %v", got, err)
-	}
-	if got, err := store.Read(context.Background(), "two"); err != nil || got != "new default" {
-		t.Fatalf("new user's template: %q %v", got, err)
-	}
-	if err := store.Delete(context.Background(), "one"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(userSoul); !os.IsNotExist(err) {
-		t.Fatalf("soul was not deleted: %v", err)
+	if _, err := store.Read(context.Background(), "two"); err == nil {
+		t.Fatal("other owner accepted")
 	}
 }
 
-func TestStoreRejectsUnsafePathsAndMissingTemplate(t *testing.T) {
+func TestProfileSoulRejectsUnsafeFilesMissingRootAndCancellation(t *testing.T) {
 	root := t.TempDir()
-	store := NewStore(filepath.Join(root, "SOUL.md"))
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "SOUL.md")
+	store := NewProfileStore(root, "one", path)
 	if _, err := store.Read(context.Background(), "one"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("missing template: %v", err)
+		t.Fatal("missing policy accepted")
 	}
-	if _, err := os.Stat(filepath.Join(root, "one", "SOUL.md")); !os.IsNotExist(err) {
-		t.Fatalf("missing template created private soul: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "one", "SOUL.md"), []byte("existing private soul"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := store.Read(context.Background(), "one"); err != nil || got != "existing private soul" {
-		t.Fatalf("existing soul should not require template: %q %v", got, err)
-	}
-	if err := os.Remove(filepath.Join(root, "one", "SOUL.md")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "SOUL.md"), []byte("default"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Read(context.Background(), "../outside"); err == nil {
-		t.Fatal("accepted unsafe ID")
-	}
-	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(root, "one", "SOUL.md")); err != nil {
+	if err := os.Symlink(filepath.Join(root, "outside"), path); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Read(context.Background(), "one"); err == nil {
-		t.Fatal("followed user soul symlink")
+		t.Fatal("symlink accepted")
 	}
-	if err := store.Delete(context.Background(), "one"); err == nil {
-		t.Fatal("deleted symlinked soul")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Read(ctx, "one"); !errors.Is(err, context.Canceled) {
+		t.Fatal("cancellation lost")
 	}
-}
-
-func TestMigrateTemplateRefusesDifferentDestination(t *testing.T) {
-	root := t.TempDir()
-	old := filepath.Join(root, "legacy.md")
-	newPath := filepath.Join(root, "SOUL.md")
-	if err := os.WriteFile(old, []byte("operator edit"), 0600); err != nil {
-		t.Fatal(err)
+	missing := filepath.Join(root, "absent")
+	if _, err := NewProfileStore(missing, "one", path).Read(context.Background(), "one"); err == nil {
+		t.Fatal("missing profile accepted")
 	}
-	store := NewStore(newPath)
-	if err := store.MigrateTemplate(old); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Fatalf("legacy remains: %v", err)
-	}
-	if err := os.WriteFile(old, []byte("other edit"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MigrateTemplate(old); err == nil {
-		t.Fatal("silently overwrote new template")
-	}
-	if data, err := os.ReadFile(newPath); err != nil || string(data) != "operator edit" {
-		t.Fatalf("new template changed: %q %v", data, err)
-	}
-	if err := os.WriteFile(old, []byte("operator edit"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MigrateTemplate(old); err != nil {
-		t.Fatalf("identical templates: %v", err)
-	}
-	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("identical legacy template remains: %v", err)
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("profile created")
 	}
 }

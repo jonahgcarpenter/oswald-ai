@@ -71,7 +71,7 @@ func (s *ProfileService) Stop() {
 }
 
 // Enqueue acknowledges delivery before waking compression planning.
-func (s *ProfileService) Enqueue(ctx context.Context, owner string, source memory.FormationSource) error {
+func (s *ProfileService) Enqueue(ctx context.Context, owner string, source memory.DeliverySource) error {
 	if err := s.store.MarkSessionTurnDelivered(ctx, owner, source.TurnID); err != nil {
 		return err
 	}
