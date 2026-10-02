@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +40,7 @@ type Service struct {
 
 // NewService creates a derived-index lifecycle service.
 func NewService(store *memory.Store, globalStore *global.Store, embedder llm.Embedder, model string, log *config.Logger) *Service {
-	return &Service{store: store, globalStore: globalStore, embedder: embedder, model: model, log: log, wake: make(chan struct{}, 1)}
+	return &Service{store: store, globalStore: globalStore, embedder: embedder, model: strings.TrimSpace(model), log: log, wake: make(chan struct{}, 1)}
 }
 
 // Signal nonblockingly wakes the worker; startup and polling reconcile missed signals.
@@ -124,6 +125,17 @@ func (s *Service) cycle(ctx context.Context) {
 	// Retain the successful dimension probe without sharing cycle log scope.
 	defer func() { parent.dimension = worker.dimension }()
 	s = worker
+	if s.model == "" || s.embedder == nil {
+		started := time.Now()
+		count, err := s.store.RetireVectorIndexRevisions(ctx)
+		if err != nil {
+			s.warn("index.vector.disable_failed", "vector", err)
+		} else if count > 0 && s.log != nil {
+			s.log.Server("indexruntime").Info("index.vector.disabled", "retired disabled vector indexes",
+				config.F("record_kind", "measurement"), config.F("revision_count", count),
+				config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+		}
+	}
 	s.ensureFTS(ctx, memory.IndexKindMemoryFTS)
 	s.ensureFTS(ctx, memory.IndexKindTranscriptFTS)
 	s.ensureFTS(ctx, memory.IndexKindGlobalMemoryFTS)
@@ -401,7 +413,7 @@ func (s *Service) applyChange(ctx context.Context, change memory.DerivedIndexCha
 	}
 	if change.EntityKind == "memory" {
 		for _, revision := range revisions {
-			if revision.Kind == memory.IndexKindMemoryVector && s.embedder == nil {
+			if revision.Kind == memory.IndexKindMemoryVector && (s.model == "" || s.embedder == nil) {
 				continue
 			}
 			record, recordErr := s.store.MemoryIndexRecordByID(ctx, change.EntityID, change.UserID)
@@ -422,7 +434,7 @@ func (s *Service) applyChange(ctx context.Context, change memory.DerivedIndexCha
 	}
 	if change.EntityKind == "global_memory" {
 		for _, revision := range revisions {
-			if revision.Kind == memory.IndexKindGlobalMemoryVector && s.embedder == nil {
+			if revision.Kind == memory.IndexKindGlobalMemoryVector && (s.model == "" || s.embedder == nil) {
 				continue
 			}
 			record, recordErr := s.store.GlobalMemoryIndexRecordByID(ctx, change.EntityID)

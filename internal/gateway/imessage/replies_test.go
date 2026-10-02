@@ -466,7 +466,12 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 				if !found || result.IsFromBot || result.IsPredecessor || result.Text != root.Text || calls.Load() != 2 {
 					t.Fatal("invalid anchor did not stop after the validated human root")
 				}
-				got := events()
+				var got []map[string]any
+				for _, event := range events() {
+					if event["event"] == "gateway.reply_lookup.complete" {
+						got = append(got, event)
+					}
+				}
 				if len(got) != 1 {
 					t.Fatalf("measurement count=%d", len(got))
 				}
@@ -847,7 +852,12 @@ func TestReplyResolverTerminalMeasurements(t *testing.T) {
 					cancel()
 				}
 				g.resolveReply(ctx, threadIncoming(), true, "req-terminal")
-				got := events()
+				var got []map[string]any
+				for _, event := range events() {
+					if event["event"] == "gateway.reply_lookup.complete" {
+						got = append(got, event)
+					}
+				}
 				if len(got) != 1 || got[0]["event"] != "gateway.reply_lookup.complete" || got[0]["level"] != "info" || got[0]["request_id"] != "req-terminal" {
 					t.Fatalf("events=%+v", got)
 				}

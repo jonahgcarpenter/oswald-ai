@@ -14,6 +14,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const replyLookupTimeout = 5 * time.Second
@@ -48,10 +49,15 @@ const threadPredecessorSQL = `message.ROWID = (
 // lifetime. Cache entries establish direct references only, never thread order.
 func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allowPredecessor bool, requestID string) (result messageContext, found bool) {
 	started := time.Now()
+	// Keep HTTP attempt diagnostics correlated even for callers without metadata.
+	meta := requestctx.MetadataFromContext(parent)
+	meta.RequestID = requestID
+	parent = requestctx.WithMetadata(parent, meta)
 	ctx, cancel := context.WithTimeout(parent, replyLookupTimeout)
 	defer cancel()
 	status := "ok"
 	phase, reasonCode := "reference", "resolved"
+	eligibilityReason := "not_evaluated"
 	cacheCount, remoteCount, directCount, predecessorCount, notFoundCount, rejectedCount, errorCount := 0, 0, 0, 0, 0, 0, 0
 	reject := func(reason string) {
 		status, reasonCode = "rejected", reason
@@ -69,6 +75,18 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("cache_count", cacheCount),
 			config.F("remote_count", remoteCount), config.F("direct_count", directCount), config.F("predecessor_count", predecessorCount),
 			config.F("not_found_count", notFoundCount), config.F("rejected_count", rejectedCount), config.F("error_count", errorCount))
+		decisionReason := eligibilityReason
+		if eligibilityReason == "not_evaluated" || rejectedCount > 0 || errorCount > 0 || notFoundCount > 0 {
+			decisionReason = reasonCode
+		}
+		g.log().Debug("gateway.reply_lookup.decision", "evaluated imessage reply recognition",
+			config.F("request_id", requestID), config.F("phase", phase), config.F("reason_code", decisionReason),
+			config.F("bot_eligibility_reason", eligibilityReason),
+			config.F("is_reply_found", found), config.F("is_reply_to_bot", found && result.IsFromBot),
+			config.F("is_predecessor_allowed", allowPredecessor), config.F("is_predecessor", result.IsPredecessor),
+			config.F("has_reply_to_guid", msg.ReplyToGUID != ""),
+			config.F("has_thread_originator_guid", msg.ThreadOriginatorGUID != ""),
+			config.F("has_thread_originator_part", msg.ThreadOriginatorPart != ""))
 	}()
 	chatGUID := msg.primaryChat().GUID
 	// An explicit selected target must not be replaced by a different thread root.
@@ -88,9 +106,11 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	if cachedOK && cached.ChatGUID == chatGUID {
 		cacheCount++
 		if cached.IsFromBot || !allowPredecessor || msg.ThreadOriginatorGUID == "" || target != msg.ThreadOriginatorGUID {
+			eligibilityReason = "eligible_bot"
 			directCount = 1
 			if !cached.IsFromBot {
 				reasonCode = "not_eligible_bot"
+				eligibilityReason = "cached_non_bot"
 			}
 			return cached, true
 		}
@@ -131,6 +151,7 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 		return
 	}
 	result, found = g.replyContextFromMessage(data, chatGUID), true
+	eligibilityReason = replyEligibilityReason(data)
 	if result.IsFromBot || !allowPredecessor || msg.ThreadOriginatorGUID == "" || target != msg.ThreadOriginatorGUID {
 		directCount = 1
 		if !result.IsFromBot {
@@ -187,6 +208,7 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 			return
 		}
 		result, found = g.replyContextFromMessage(explicit, chatGUID), true
+		eligibilityReason = replyEligibilityReason(explicit)
 		directCount = 1
 		if !result.IsFromBot {
 			reasonCode = "not_eligible_bot"
@@ -239,6 +261,7 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	}
 	// Millisecond equality cannot verify raw ordering locally; SQL owns that check.
 	result = g.replyContextFromMessage(p, chatGUID)
+	eligibilityReason = replyEligibilityReason(p)
 	result.IsPredecessor = true
 	predecessorCount = 1
 	if !result.IsFromBot {
@@ -276,6 +299,7 @@ func (g *Gateway) fetchReplyMessage(ctx context.Context, guid, chatGUID string) 
 	}
 	if err == nil && len(rows) > 0 {
 		if len(rows) != 1 {
+			g.logReplyResponseRejected(ctx, "response_ambiguous", true, len(rows))
 			return messageLookupData{}, errors.New("ambiguous reply lookup")
 		}
 		return rows[0], nil
@@ -292,6 +316,7 @@ func (g *Gateway) fetchReplyMessage(ctx context.Context, guid, chatGUID string) 
 		return messageLookupData{}, err
 	}
 	if response.Error != nil {
+		g.logReplyResponseRejected(ctx, "provider_error", false, 0)
 		return messageLookupData{}, errors.New("reply lookup provider error")
 	}
 	return response.Data, nil
@@ -310,15 +335,44 @@ func (g *Gateway) queryReplyMessages(ctx context.Context, payload messageQueryRe
 	if err := g.replyLookupHTTP(ctx, http.MethodPost, endpoint, body, &response); err != nil {
 		return nil, err
 	}
-	if response.Error != nil || len(response.Data) > payload.Limit {
+	if response.Error != nil {
+		g.logReplyResponseRejected(ctx, "provider_error", true, len(response.Data))
+		return nil, errInvalidReplyResponse
+	}
+	if len(response.Data) > payload.Limit {
+		g.logReplyResponseRejected(ctx, "response_row_limit", true, len(response.Data))
 		return nil, errInvalidReplyResponse
 	}
 	return response.Data, nil
 }
 
-func (g *Gateway) replyLookupHTTP(ctx context.Context, method, endpoint string, body []byte, result any) error {
+func (g *Gateway) logReplyResponseRejected(ctx context.Context, reason string, isQuery bool, count int) {
+	g.log().Debug("gateway.reply_lookup.response.rejected", "rejected imessage reply lookup response",
+		append(requestctx.LogFields(ctx), config.F("reason_code", reason), config.F("is_query", isQuery),
+			config.F("result_count", count))...)
+}
+
+func (g *Gateway) replyLookupHTTP(ctx context.Context, method, endpoint string, body []byte, result any) (lookupErr error) {
+	started := time.Now()
+	reason, statusCode := "resolved", 0
+	defer func() {
+		status := "ok"
+		if lookupErr != nil {
+			status = "error"
+			if errors.Is(lookupErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				reason = "lookup_timeout"
+			} else if errors.Is(lookupErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				status, reason = "ok", "lookup_canceled"
+			}
+		}
+		g.log().Debug("gateway.reply_lookup.http.complete", "completed imessage reply lookup HTTP attempt",
+			append(requestctx.LogFields(ctx), config.F("reason_code", reason), config.F("status", status),
+				config.F("http_status", statusCode), config.F("duration_ms", time.Since(started).Milliseconds()),
+				config.F("is_query", method == http.MethodPost))...)
+	}()
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
+		reason = "request_invalid"
 		return err
 	}
 	if method == http.MethodPost {
@@ -326,23 +380,50 @@ func (g *Gateway) replyLookupHTTP(ctx context.Context, method, endpoint string, 
 	}
 	resp, err := g.httpClient().Do(req)
 	if err != nil {
+		reason = "transport_failed"
 		return err
 	}
 	defer resp.Body.Close()
+	statusCode = resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		reason = "http_status_failed"
 		return fmt.Errorf("reply lookup HTTP status %d", resp.StatusCode)
 	}
 	encoded, err := io.ReadAll(io.LimitReader(resp.Body, replyLookupBodyLimit+1))
 	if err != nil {
+		reason = "body_read_failed"
 		return err
 	}
 	if len(encoded) > replyLookupBodyLimit {
+		reason = "body_too_large"
 		return errInvalidReplyResponse
 	}
 	if err := json.Unmarshal(encoded, result); err != nil {
+		reason = "response_malformed"
 		return errInvalidReplyResponse
 	}
 	return nil
+}
+
+// replyEligibilityReason describes the first failed bot-authorship predicate
+// without exposing source content or BlueBubbles identifiers.
+func replyEligibilityReason(data messageLookupData) string {
+	switch {
+	case !data.IsFromMe:
+		return "human_authored"
+	case data.SendError == nil:
+		return "send_error_missing"
+	case *data.SendError != 0:
+		return "send_failed"
+	case data.IsCorrupt:
+		return "message_corrupt"
+	case data.DateRetracted != nil && *data.DateRetracted != 0:
+		return "message_retracted"
+	case strings.TrimSpace(data.Text) == "" && len(data.Attachments) == 0:
+		return "no_usable_content"
+	default:
+		return "eligible_bot"
+	}
 }
 
 func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID string) messageContext {
