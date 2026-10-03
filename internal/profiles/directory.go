@@ -10,7 +10,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
-// LocalOpenAIPrincipal returns the fixed, loopback-only API profile identity.
+// LocalOpenAIPrincipal returns the fixed, loopback-only API principal, which
+// shares the default profile.
 func (d *Directory) LocalOpenAIPrincipal(ctx context.Context) (identity.Principal, error) {
 	if err := ctx.Err(); err != nil {
 		return identity.Principal{}, err
@@ -59,9 +60,6 @@ func NewDirectory(cfg *config.Config, log *config.Logger) (*Directory, error) {
 		}
 		directory.routes[key] = route.Profile
 	}
-	if cfg.OpenAIListenPort != "" && cfg.Profiles["api"] == nil {
-		return nil, errors.New("API profile is not provisioned")
-	}
 	return directory, nil
 }
 
@@ -99,10 +97,11 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 	}
 	assurance := identity.Assurance("")
 	if platform == "openai" {
-		if externalID != identity.LocalOpenAIIdentifier || d.global.OpenAIListenPort == "" || d.global.Profiles["api"] == nil {
+		if externalID != identity.LocalOpenAIIdentifier || d.global.OpenAIListenPort == "" {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
-		return identity.Principal{CanonicalUserID: "api", Gateway: "openai", ExternalID: externalID, Assurance: identity.AssuranceLocalLoopback}, nil
+		// The loopback API shares the default profile.
+		return identity.Principal{CanonicalUserID: "default", Gateway: "openai", ExternalID: externalID, Assurance: identity.AssuranceLocalLoopback}, nil
 	}
 	identifier, err := config.NormalizeGatewayIdentifier(platform, externalID)
 	if err != nil {

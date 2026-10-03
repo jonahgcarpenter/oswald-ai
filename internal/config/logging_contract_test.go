@@ -22,8 +22,8 @@ func TestProductionLoggingContract(t *testing.T) {
 	reviewedEvents := map[string]string{
 		"internal/llm/telemetry.go#beginMeasurement":      "event",
 		"internal/providers/web/telemetry.go#BeginSearch": "event",
-		// fatalConfig forwards fixed source literals supplied by its callers.
-		"cmd/oswald-server/main.go#fatalConfig": "event",
+		// logFailure forwards fixed source literals supplied by its callers.
+		"internal/startup/serve.go#logFailure": "event",
 	}
 	literal := func(e ast.Expr) (string, bool) {
 		v, ok := e.(*ast.BasicLit)

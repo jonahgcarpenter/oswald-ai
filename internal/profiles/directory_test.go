@@ -21,7 +21,7 @@ func TestConfiguredIdentitiesShareProfileWithoutAccounts(t *testing.T) {
 		}
 	}
 	principal, err := directory.Resolve("openai", identity.LocalOpenAIIdentifier, true)
-	if err != nil || principal.CanonicalUserID != "api" || !principal.Authenticated() {
+	if err != nil || principal.CanonicalUserID != "default" || !principal.Authenticated() {
 		t.Fatal("incorrect API ownership", err)
 	}
 	if _, err := directory.Resolve("discord", "456", true); !errors.Is(err, ErrUnmappedIdentity) {

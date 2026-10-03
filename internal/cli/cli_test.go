@@ -16,6 +16,7 @@ func TestRunUsageAndDispatch(t *testing.T) {
 		{"no arguments", nil, exitUsage},
 		{"unknown command", []string{"frobnicate"}, exitUsage},
 		{"run is service only", []string{"run"}, exitUsage},
+		{"setup with arguments", []string{"setup", "extra"}, exitUsage},
 		{"global help flag", []string{"--help"}, exitOK},
 		{"help command", []string{"help"}, exitOK},
 		{"profile without subcommand", []string{"profile"}, exitUsage},

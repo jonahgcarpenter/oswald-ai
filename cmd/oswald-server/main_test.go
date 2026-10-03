@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -11,11 +12,14 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/startup"
 )
 
 func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 	if os.Getenv("OSWALD_STARTUP_TEST_HELPER") == "1" {
-		os.Exit(run(config.OswaldHomeDir))
+		if err := startup.Serve(context.Background(), config.OswaldHomeDir, os.Stdout); err != nil {
+			os.Exit(1)
+		}
 		return
 	}
 	for _, tc := range []struct{ name, event, message string }{

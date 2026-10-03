@@ -528,7 +528,6 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, withConfigPath(err, base+"api_port")
 			}
-			names["api"] = true
 		}
 	}
 	if cfg.DiscordToken == "" && cfg.BlueBubblesListenPort == "" && cfg.OpenAIListenPort == "" {

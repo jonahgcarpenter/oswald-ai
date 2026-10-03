@@ -303,7 +303,7 @@ func TestFixedAPIProfileAndPreRuntimeLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.CanonicalUserID != "api" {
+	if principal.CanonicalUserID != "default" {
 		t.Fatal("API selected another profile")
 	}
 	g, err := New("12345", svc, gatewayruntime.Dependencies{}, "route", log)

@@ -85,7 +85,7 @@ func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestar
 					if err != nil {
 						return err
 					}
-					if discord.CanonicalUserID != "alice" || messages.CanonicalUserID != "alice" || api.CanonicalUserID != "api" {
+					if discord.CanonicalUserID != "alice" || messages.CanonicalUserID != "alice" || api.CanonicalUserID != "default" {
 						return errors.New("configured ownership changed")
 					}
 					if fallback, err := resolver.Resolve("discord", "456", true); err != nil || fallback.CanonicalUserID != "default" {

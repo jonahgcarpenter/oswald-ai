@@ -19,7 +19,7 @@ func TestProfileEnvironmentInterpolationIsolationAndPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.LLMGatewayAPIKey != "default-secret" || cfg.Profiles["alice"].LLMGatewayAPIKey != "alice-secret" || cfg.Profiles["api"].LLMGatewayAPIKey != "api-secret" {
+	if cfg.LLMGatewayAPIKey != "default-secret" || cfg.Profiles["alice"].LLMGatewayAPIKey != "alice-secret" {
 		t.Fatal("profile environments were not isolated")
 	}
 	if _, exists := os.LookupEnv("OSWALD_TEST_PRIVATE_KEY"); exists {
@@ -40,7 +40,7 @@ func TestProfileInterpolationOccursAfterOverrides(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OSWALD_TEST_OVERRIDE_KEY=default-secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, profile := range []string{"alice", "api"} {
+	for _, profile := range []string{"alice"} {
 		if err := os.WriteFile(filepath.Join(root, "profiles", profile, "config.yaml"), []byte("providers:\n  fake:\n    key: replacement\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -120,7 +120,7 @@ func TestProfileMCPConfigurationUsesProfileEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.MCPServers) != 0 || len(cfg.Profiles["api"].MCPServers) != 0 || len(cfg.Profiles["alice"].MCPServers) != 1 {
+	if len(cfg.MCPServers) != 0 || len(cfg.Profiles["alice"].MCPServers) != 1 {
 		t.Fatal("MCP configuration escaped its profile")
 	}
 	if cfg.Profiles["alice"].MCPServers[0].Headers["Authorization"] != "Bearer alice-token" {

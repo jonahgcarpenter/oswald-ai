@@ -62,7 +62,7 @@ func TestProfileYAMLInheritanceAndNoDotenvLoading(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.LLMGatewayURL != "http://localhost:9999" || cfg.LLMGatewayAPIKey != "synthetic-process-credential" || cfg.Profiles["alice"].LLMGatewayModel != "fake/override" || cfg.Profiles["api"].LLMGatewayModel != "fake/model" || cfg.Profiles["alice"].ModelContextWindow != 65536 || len(cfg.ProfileRoutes) != 2 {
+	if cfg.LLMGatewayURL != "http://localhost:9999" || cfg.LLMGatewayAPIKey != "synthetic-process-credential" || cfg.Profiles["alice"].LLMGatewayModel != "fake/override" || cfg.Profiles["alice"].ModelContextWindow != 65536 || len(cfg.ProfileRoutes) != 2 {
 		t.Fatal("incorrect effective profile configuration")
 	}
 	if cfg.ProfileRoutes[1].Platform != "imessage" {

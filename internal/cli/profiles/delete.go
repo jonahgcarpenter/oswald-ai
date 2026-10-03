@@ -81,7 +81,4 @@ func warnProfileConsequences(root, name string, stdout, stderr io.Writer) {
 		}
 		fmt.Fprintf(stdout, "warning: gateway route %q (%s) targets %q; startup fails until it is removed or repointed\n", label, route.Platform, name)
 	}
-	if name == "api" && cfg.OpenAIListenPort != "" {
-		fmt.Fprintln(stdout, "warning: the API listener is enabled and requires the \"api\" profile")
-	}
 }

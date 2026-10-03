@@ -62,6 +62,7 @@ func profileStartupFixture(t *testing.T) *config.Config {
 
 func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) {
 	cfg := profileStartupFixture(t)
+	cfg.MCPServers = []config.MCPServer{{Name: "default_tools", URL: "https://example.com/mcp", Description: "Synthetic default tools.", Transport: "streamable_http", Enabled: true}}
 	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Description: "Synthetic API tools.", Transport: "streamable_http", Enabled: true}}
 	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Description: "Synthetic Alice tools.", Transport: "streamable_http", Enabled: true}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,7 +79,7 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				cancel()
 				return nil
 			}
-			selected, ok := deps.ForProfile("api")
+			selected, ok := deps.ForProfile(principal.CanonicalUserID)
 			if !ok {
 				done <- errors.New("missing API runtime")
 				cancel()
@@ -120,15 +121,15 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 	}
 	model.mutex.Lock()
 	defer model.mutex.Unlock()
-	if len(model.requests) != 1 || model.requests[0].Model != "fake/api" {
+	if len(model.requests) != 1 || model.requests[0].Model != "fake/default" {
 		t.Fatal("API selected another profile")
 	}
 	foundMCP := false
 	for _, tool := range model.requests[0].Tools {
-		if tool.Function.Name == "alice_tools.tools" {
+		if tool.Function.Name == "alice_tools.tools" || tool.Function.Name == "api_tools.tools" {
 			t.Fatal("another profile's MCP tools were advertised")
 		}
-		if tool.Function.Name == "api_tools.tools" {
+		if tool.Function.Name == "default_tools.tools" {
 			foundMCP = true
 		}
 	}
