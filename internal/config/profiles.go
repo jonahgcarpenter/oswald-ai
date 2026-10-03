@@ -23,24 +23,50 @@ type ProfileRoute struct {
 	Profile  string `yaml:"profile"`
 }
 
-// AdmissionPolicy controls direct-message admission before expensive processing.
+// AdmissionPolicy controls gateway admission. Banned identities are rejected
+// everywhere and take precedence; a nonempty Allowed list admits only those
+// identities, while an empty list admits every routed identity.
 type AdmissionPolicy struct {
-	Mode      string
-	AllowFrom []string
+	Allowed []string
+	Banned  []string
 }
 
-// Allows reports whether an already normalized external identity is admitted.
+// Bans reports whether an already normalized external identity is banned.
+func (p AdmissionPolicy) Bans(identifier string) bool {
+	for _, banned := range p.Banned {
+		if banned == identifier {
+			return true
+		}
+	}
+	return false
+}
+
+// Allows reports whether an already normalized external identity may be admitted.
 func (p AdmissionPolicy) Allows(identifier string) bool {
-	if p.Mode == "allow" {
+	if p.Bans(identifier) {
+		return false
+	}
+	if len(p.Allowed) == 0 {
 		return true
 	}
-	for _, allowed := range p.AllowFrom {
+	for _, allowed := range p.Allowed {
 		if allowed == identifier {
 			return true
 		}
 	}
 	return false
 }
+
+// DefaultBlueBubblesWebhookPath preserves the historical webhook route when the
+// operator configures no webhook_path.
+const DefaultBlueBubblesWebhookPath = "/bluebubbles/webhook"
+
+const (
+	maxMentionPatterns     = 4
+	maxMentionPatternRunes = 512
+)
+
+var webhookPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,127}$`)
 
 type providerYAML struct {
 	API    string  `yaml:"api"`
@@ -66,22 +92,23 @@ type toolsYAML struct {
 	ImageGenerate imageYAML `yaml:"image_generate"`
 }
 type platformExtraYAML struct {
-	TokenEnv            string   `yaml:"token_env"`
-	Token               *string  `yaml:"token"`
-	DMPolicy            string   `yaml:"dm_policy"`
-	AllowFrom           []string `yaml:"allow_from"`
-	GuildRequireMention *bool    `yaml:"guild_require_mention"`
-	GroupRequireMention *bool    `yaml:"group_require_mention"`
-	ServerURL           string   `yaml:"server_url"`
-	ServerPasswordEnv   string   `yaml:"server_password_env"`
-	ServerPassword      *string  `yaml:"server_password"`
-	WebhookHost         string   `yaml:"webhook_host"`
-	WebhookPort         int      `yaml:"webhook_port"`
-	APIHost             string   `yaml:"api_host"`
-	APIPort             int      `yaml:"api_port"`
-	AuthTokenEnv        string   `yaml:"auth_token_env"`
-	AuthToken           *string  `yaml:"auth_token"`
-	ListenPort          int      `yaml:"listen_port"`
+	TokenEnv          string   `yaml:"token_env"`
+	Token             *string  `yaml:"token"`
+	AllowedUsers      []string `yaml:"allowed_users"`
+	BannedUsers       []string `yaml:"banned_users"`
+	RequireMention    *bool    `yaml:"require_mention"`
+	ServerURL         string   `yaml:"server_url"`
+	ServerPasswordEnv string   `yaml:"server_password_env"`
+	ServerPassword    *string  `yaml:"server_password"`
+	WebhookHost       string   `yaml:"webhook_host"`
+	WebhookPort       int      `yaml:"webhook_port"`
+	WebhookPath       string   `yaml:"webhook_path"`
+	MentionPatterns   []string `yaml:"mention_pattern"`
+	APIHost           string   `yaml:"api_host"`
+	APIPort           int      `yaml:"api_port"`
+	AuthTokenEnv      string   `yaml:"auth_token_env"`
+	AuthToken         *string  `yaml:"auth_token"`
+	ListenPort        int      `yaml:"listen_port"`
 }
 type platformYAML struct {
 	Enabled bool              `yaml:"enabled"`
@@ -154,10 +181,10 @@ var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api"
 var platformTopKeys = map[string]bool{"enabled": true, "extra": true}
 
 var platformExtraKeys = map[string]bool{
-	"token_env": true, "token": true, "dm_policy": true, "allow_from": true,
-	"guild_require_mention": true, "group_require_mention": true,
-	"server_url": true, "server_password_env": true, "server_password": true,
-	"webhook_host": true, "webhook_port": true,
+	"token_env": true, "token": true, "allowed_users": true, "banned_users": true,
+	"require_mention": true,
+	"server_url":      true, "server_password_env": true, "server_password": true,
+	"webhook_host": true, "webhook_port": true, "webhook_path": true, "mention_pattern": true,
 	"api_host": true, "api_port": true,
 	"auth_token_env": true, "auth_token": true, "listen_port": true,
 }
@@ -471,12 +498,12 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, withConfigPath(err, base+"token")
 			}
-			cfg.DiscordPolicy, err = admissionPolicy("discord", x.DMPolicy, x.AllowFrom, nil)
+			cfg.DiscordPolicy, err = admissionPolicy("discord", base, x.AllowedUsers, x.BannedUsers)
 			if err != nil {
-				return nil, withConfigPath(err, base+"dm_policy")
+				return nil, err
 			}
-			if x.GuildRequireMention != nil {
-				cfg.DiscordGroupRequireMention = *x.GuildRequireMention
+			if x.RequireMention != nil {
+				cfg.DiscordGroupRequireMention = *x.RequireMention
 			}
 		case "bluebubbles":
 			cfg.BlueBubblesURL = x.ServerURL
@@ -495,12 +522,20 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, withConfigPath(err, base+"server_password")
 			}
-			cfg.BlueBubblesPolicy, err = admissionPolicy("imessage", x.DMPolicy, x.AllowFrom, nil)
+			cfg.BlueBubblesPolicy, err = admissionPolicy("imessage", base, x.AllowedUsers, x.BannedUsers)
 			if err != nil {
-				return nil, withConfigPath(err, base+"dm_policy")
+				return nil, err
 			}
-			if x.GroupRequireMention != nil {
-				cfg.BlueBubblesGroupRequireMention = *x.GroupRequireMention
+			if x.RequireMention != nil {
+				cfg.BlueBubblesGroupRequireMention = *x.RequireMention
+			}
+			cfg.BlueBubblesWebhookPath, err = parseWebhookPath(x.WebhookPath)
+			if err != nil {
+				return nil, withConfigPath(err, base+"webhook_path")
+			}
+			cfg.BlueBubblesMentionPatterns, err = compileMentionPatterns(x.MentionPatterns, base+"mention_pattern")
+			if err != nil {
+				return nil, err
 			}
 		case "api":
 			if x.APIHost != "" && x.APIHost != "127.0.0.1" {
@@ -562,25 +597,75 @@ func LoadProfiles(root string) (*Config, error) {
 	return cfg, nil
 }
 
-func admissionPolicy(platform, mode string, identifiers []string, prior error) (AdmissionPolicy, error) {
-	if prior != nil {
-		return AdmissionPolicy{}, prior
+// admissionPolicy normalizes allow/ban identities for one platform. An empty
+// allowed list admits every routed identity; banned identities always win.
+func admissionPolicy(platform, base string, allowed, banned []string) (AdmissionPolicy, error) {
+	allowedIDs, err := normalizeIdentities(platform, allowed)
+	if err != nil {
+		return AdmissionPolicy{}, configErr("config_value_invalid", base+"allowed_users")
 	}
-	if mode == "" {
-		mode = "allowlist"
+	bannedIDs, err := normalizeIdentities(platform, banned)
+	if err != nil {
+		return AdmissionPolicy{}, configErr("config_value_invalid", base+"banned_users")
 	}
-	if mode != "allowlist" && mode != "allow" {
-		return AdmissionPolicy{}, configErr("config_value_invalid", "dm_policy")
+	return AdmissionPolicy{Allowed: allowedIDs, Banned: bannedIDs}, nil
+}
+
+// normalizeIdentities canonicalizes and deduplicates configured identities.
+func normalizeIdentities(platform string, values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
 	}
-	policy := AdmissionPolicy{Mode: mode}
-	for _, id := range identifiers {
-		normalized, err := NormalizeGatewayIdentifier(platform, id)
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		id, err := NormalizeGatewayIdentifier(platform, value)
 		if err != nil {
-			return AdmissionPolicy{}, configErr("config_value_invalid", "allow_from")
+			return nil, err
 		}
-		policy.AllowFrom = append(policy.AllowFrom, normalized)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
 	}
-	return policy, nil
+	return normalized, nil
+}
+
+// parseWebhookPath validates an operator-supplied BlueBubbles webhook route.
+func parseWebhookPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return DefaultBlueBubblesWebhookPath, nil
+	}
+	if !webhookPathRE.MatchString(value) || strings.Contains(value, "..") {
+		return "", configErr("config_value_invalid", "")
+	}
+	return value, nil
+}
+
+// compileMentionPatterns validates and anchors configured mention patterns. A
+// mention must begin the message, so every pattern is compiled with a leading
+// anchor; patterns that would match the empty string are rejected.
+func compileMentionPatterns(patterns []string, path string) ([]*regexp.Regexp, error) {
+	if len(patterns) == 0 {
+		return nil, nil
+	}
+	if len(patterns) > maxMentionPatterns {
+		return nil, configErr("config_value_invalid", path)
+	}
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		if pattern == "" || len([]rune(pattern)) > maxMentionPatternRunes || strings.ContainsAny(pattern, "\x00\r\n") {
+			return nil, configErr("config_value_invalid", path)
+		}
+		anchored, err := regexp.Compile("^(?:" + pattern + ")")
+		if err != nil || anchored.MatchString("") {
+			return nil, configErr("config_value_invalid", path)
+		}
+		compiled = append(compiled, anchored)
+	}
+	return compiled, nil
 }
 
 // NormalizeGatewayIdentifier canonicalizes configured and authenticated identities.

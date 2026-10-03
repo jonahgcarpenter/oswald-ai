@@ -16,7 +16,9 @@ runtime:
 gateway:
   multiplex_profiles: true
   profile_routes: []
-  # Add explicit routes; unmapped transport identities are rejected.
+  # Add explicit routes for named profiles; admitted identities without a route
+  # fall back to the default profile. Unmapped transport identities are admitted
+  # per the platform allow/ban policy below.
   # - name: example-discord
   #   platform: discord
   #   user_id: "123456789"
@@ -31,9 +33,9 @@ platforms:
     enabled: false
     extra:
       token: ${DISCORD_TOKEN:-}
-      dm_policy: allowlist
-      allow_from: []
-      guild_require_mention: true
+      allowed_users: []   # Explicit allow list; empty admits every routed user.
+      banned_users: []    # Users to silently ignore everywhere.
+      require_mention: true  # Guild messages must begin with a bot mention.
   bluebubbles:
     enabled: false
     extra:
@@ -41,9 +43,11 @@ platforms:
       server_password: ${BLUEBUBBLES_PASSWORD:-}
       webhook_host: 0.0.0.0
       webhook_port: 8645
-      dm_policy: allowlist
-      allow_from: []
-      group_require_mention: true
+      webhook_path: /bluebubbles/webhook
+      allowed_users: []
+      banned_users: []
+      require_mention: true  # Group messages must begin with a mention.
+      # mention_pattern: ['@?Oswald\b[,:\-]?']  # Go regexp, anchored at start.
 tools:
   web_search:
     # brave_key: ${BRAVE_API_KEY}

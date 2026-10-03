@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 // Config holds validated effective profile settings and shared gateway policy.
 type Config struct {
@@ -18,7 +21,8 @@ type Config struct {
 	BlueBubblesListenPort          string
 	BlueBubblesURL                 string
 	BlueBubblesPassword            string
-	BlueBubblesDMMention           bool
+	BlueBubblesWebhookPath         string
+	BlueBubblesMentionPatterns     []*regexp.Regexp
 	DiscordToken                   string
 	OpenAIListenPort               string
 	LLMGatewayURL                  string

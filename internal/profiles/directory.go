@@ -78,8 +78,11 @@ func (d *Directory) Config(name string) (*config.Config, bool) {
 	return profile, ok
 }
 
-// Resolve enforces direct-message policy and returns profile ownership for an
-// authenticated transport identity. It does not create files, users, or DB rows.
+// Resolve enforces admission policy and returns profile ownership for an
+// authenticated transport identity. Banned identities are rejected everywhere;
+// a nonempty allow list admits only listed identities in direct messages.
+// Unrouted but admitted identities fall back to the default profile. It does
+// not create files, users, or DB rows.
 func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identity.Principal, resultErr error) {
 	started := time.Now()
 	defer func() {
@@ -107,12 +110,12 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 	}
 	switch platform {
 	case "discord":
-		if d.global.DiscordToken == "" || (direct && !d.global.DiscordPolicy.Allows(identifier)) {
+		if d.global.DiscordToken == "" || d.global.DiscordPolicy.Bans(identifier) || (direct && !d.global.DiscordPolicy.Allows(identifier)) {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		assurance = identity.AssuranceDiscordGateway
 	case "imessage":
-		if d.global.BlueBubblesListenPort == "" || (direct && !d.global.BlueBubblesPolicy.Allows(identifier)) {
+		if d.global.BlueBubblesListenPort == "" || d.global.BlueBubblesPolicy.Bans(identifier) || (direct && !d.global.BlueBubblesPolicy.Allows(identifier)) {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		assurance = identity.AssuranceBlueBubblesWebhook
@@ -126,7 +129,9 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 	}
 	name, ok := d.routes[platform+":"+identifier]
 	if !ok {
-		return identity.Principal{}, ErrUnmappedIdentity
+		// Explicit routes select named profiles; every other admitted identity
+		// shares the default profile without creating an account.
+		name = "default"
 	}
 	return identity.Principal{CanonicalUserID: name, Gateway: platform, ExternalID: identifier, Assurance: assurance}, nil
 }

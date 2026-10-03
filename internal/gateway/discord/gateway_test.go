@@ -1316,7 +1316,7 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { memories.Close() })
-	links, err := profiles.NewDirectory(&config.Config{ProfileRoot: dir, ProfileName: "default", DiscordToken: "token", DiscordPolicy: config.AdmissionPolicy{Mode: "allow"}, DiscordGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "default"}}}, log)
+	links, err := profiles.NewDirectory(&config.Config{ProfileRoot: dir, ProfileName: "default", DiscordToken: "token", DiscordPolicy: config.AdmissionPolicy{Banned: []string{"456"}}, DiscordGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "default"}}}, log)
 	if err != nil {
 		t.Fatal(err)
 	}

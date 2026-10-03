@@ -49,7 +49,9 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 
 	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 	mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
-	mentionsBot := strings.Contains(msg.Content, mention1) || strings.Contains(msg.Content, mention2)
+	// A mention must be the first thing the sender says in a guild message.
+	trimmedContent := strings.TrimSpace(msg.Content)
+	mentionsBot := strings.HasPrefix(trimmedContent, mention1) || strings.HasPrefix(trimmedContent, mention2)
 	if msg.GuildID != "" && !dg.Links.RequiresMention("discord") {
 		mentionsBot = true
 	}

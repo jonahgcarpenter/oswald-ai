@@ -3,6 +3,7 @@ package imessage
 import (
 	"net"
 	"net/http"
+	"regexp"
 	"sync"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
@@ -29,14 +30,23 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(webhookPath, g.handleWebhook)
+	mux.HandleFunc(g.listenPath(), g.handleWebhook)
 
 	listener, err := net.Listen("tcp", ":"+g.Port)
 	if err != nil {
 		return err
 	}
-	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", webhookPath))
+	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", g.listenPath()))
 	return http.Serve(listener, mux)
+}
+
+// listenPath returns the configured webhook route, falling back to the built-in
+// default for directly constructed gateways.
+func (g *Gateway) listenPath() string {
+	if g.WebhookPath != "" {
+		return g.WebhookPath
+	}
+	return defaultWebhookPath
 }
 
 func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
@@ -53,7 +63,8 @@ type Gateway struct {
 	Port                string
 	BlueBubblesURL      string
 	BlueBubblesPassword string
-	DMMention           bool
+	WebhookPath         string
+	MentionPatterns     []*regexp.Regexp
 	Links               identity.Resolver
 	Runtime             gatewayruntime.Dependencies
 	Log                 *config.Logger

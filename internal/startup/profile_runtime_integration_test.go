@@ -60,9 +60,9 @@ func (integrationMemoryModel) Chat(_ context.Context, req llm.ChatRequest, _ fun
 func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestart(t *testing.T) {
 	cfg := profileStartupFixture(t)
 	cfg.DiscordToken = "synthetic-token"
-	cfg.DiscordPolicy = config.AdmissionPolicy{Mode: "allow"}
+	cfg.DiscordPolicy = config.AdmissionPolicy{}
 	cfg.BlueBubblesListenPort = "12346"
-	cfg.BlueBubblesPolicy = config.AdmissionPolicy{Mode: "allow"}
+	cfg.BlueBubblesPolicy = config.AdmissionPolicy{}
 	cfg.ProfileRoutes = []config.ProfileRoute{{Name: "discord", Platform: "discord", UserID: "123", Profile: "alice"}, {Name: "messages", Platform: "imessage", UserID: "+15551234567", Profile: "alice"}}
 	log := config.NewLogger(config.LevelInfo)
 	log.SetOutput(io.Discard)
@@ -88,8 +88,8 @@ func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestar
 					if discord.CanonicalUserID != "alice" || messages.CanonicalUserID != "alice" || api.CanonicalUserID != "api" {
 						return errors.New("configured ownership changed")
 					}
-					if _, err := resolver.Resolve("discord", "456", true); err == nil {
-						return errors.New("unmapped identity admitted")
+					if fallback, err := resolver.Resolve("discord", "456", true); err != nil || fallback.CanonicalUserID != "default" {
+						return errors.New("unmapped identity did not fall back to default")
 					}
 					request := func(p identity.Principal, key, prompt string, stateless bool) (*integrationResponder, error) {
 						r := &integrationResponder{}

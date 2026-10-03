@@ -295,7 +295,7 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 					}
 					n.Tag = "!!int"
 					n.Style = 0
-				case "enabled", "guild_require_mention", "group_require_mention", "dm_mention":
+				case "enabled", "require_mention":
 					if value != "true" && value != "false" {
 						return configErr("config_value_invalid", path)
 					}

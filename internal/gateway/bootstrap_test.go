@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -33,15 +34,15 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 		t.Fatalf("unexpected home assistant services %q", serviceNames(services))
 	}
 
-	services, err = NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken, DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw", BlueBubblesDMMention: true}, links, runtimeDeps, log)
+	services, err = NewServicesFromConfig(&config.Config{HomeAssistantListenPort: "8000", HomeAssistantAuthToken: testHomeAssistantToken, DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw", BlueBubblesWebhookPath: "/custom-webhook", BlueBubblesMentionPatterns: []*regexp.Regexp{regexp.MustCompile(`^(?:@?Oswald\b)`)}}, links, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("configured services: %v", err)
 	}
 	if serviceNames(services) != "Home Assistant, Discord, iMessage" {
 		t.Fatalf("unexpected configured services %q", serviceNames(services))
 	}
-	if gateway, ok := services[2].(*imessage.Gateway); !ok || !gateway.DMMention {
-		t.Fatal("iMessage DM mention setting was not passed to the gateway")
+	if gateway, ok := services[2].(*imessage.Gateway); !ok || gateway.WebhookPath != "/custom-webhook" || len(gateway.MentionPatterns) != 1 {
+		t.Fatal("iMessage webhook path and mention patterns were not passed to the gateway")
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 const (
 	chatStyleGroup       = 43
 	chatStyleDirect      = 45
-	webhookPath          = "/bluebubbles/webhook"
+	defaultWebhookPath   = "/bluebubbles/webhook"
 	defaultSendMethod    = "private-api"
 	capabilityAttempts   = 5
 	capabilityRetryDelay = 500 * time.Millisecond

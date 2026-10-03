@@ -48,15 +48,15 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	if isGroup {
 		selectedMessageGUID = msg.GUID
 	}
-	mentionsBot := mentionRE.MatchString(text)
+	mentionEnd := g.leadingMention(text)
+	hasLeadingMention := mentionEnd >= 0
+	mentionsBot := hasLeadingMention
 	if isGroup && !g.Links.RequiresMention("imessage") {
 		mentionsBot = true
 	}
-	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
-	if !isGroup && g.DMMention && !dmMentionRE.MatchString(text) {
-		g.logIgnoredMessage("dm_without_mention", "new-message", msg,
-			config.F("request_id", requestID), config.F("is_group", false), config.F("message_chars", len(msg.Text)))
-		return
+	textWithoutMention := text
+	if hasLeadingMention {
+		textWithoutMention = strings.TrimSpace(text[mentionEnd:])
 	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
 	currentIsReplyToBot := false
@@ -217,5 +217,24 @@ func (m webhookMessage) primaryChat() messageChat {
 	return m.Chats[0]
 }
 
-var mentionRE = regexp.MustCompile(`<@Oswald>|@?Oswald\b`)
-var dmMentionRE = regexp.MustCompile(`(^|[^[:alnum:]_])(<@Oswald>|@?Oswald\b)`)
+// defaultMentionPatterns preserves the built-in mention forms. A mention must
+// be the first thing the sender says, so the patterns are anchored.
+var defaultMentionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(?:<@Oswald>|@?Oswald\b)`),
+}
+
+// leadingMention reports whether the trimmed message begins with a mention and,
+// if so, the byte offset just past the longest matching prefix.
+func (g *Gateway) leadingMention(trimmed string) int {
+	patterns := g.MentionPatterns
+	if len(patterns) == 0 {
+		patterns = defaultMentionPatterns
+	}
+	end := -1
+	for _, pattern := range patterns {
+		if loc := pattern.FindStringIndex(trimmed); loc != nil && loc[0] == 0 && loc[1] > end {
+			end = loc[1]
+		}
+	}
+	return end
+}

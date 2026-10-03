@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -69,70 +70,87 @@ func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
 	}
 }
 
-func TestIMessageDMMentionIgnoresUnmentionedMessages(t *testing.T) {
+func TestIMessageGroupMentionMustLeadMessage(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
-	g.DMMention = true
 
-	for _, text := range []string{"hello", "/help", "NotOswald hello", "Oswaldian hello"} {
-		g.processIncomingMessage(webhookMessage{
-			GUID: "msg-1", Text: text, ReplyToGUID: "missing-reply",
-			Handle:      messageHandle{Address: "+15551234567"},
-			Chats:       []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
-			Attachments: []attachment{{GUID: "missing-attachment", MimeType: "image/png"}},
-		})
-	}
-	if len(model.primaryRequests()) != 0 || len(bb.sentMessages()) != 0 || len(bb.paths()) != 0 {
-		t.Fatalf("unmentioned DMs caused work: requests=%d sent=%v paths=%v", len(model.primaryRequests()), bb.sentMessages(), bb.paths())
-	}
-}
-
-func TestIMessageDMMentionAcceptsExistingForms(t *testing.T) {
-	bb := newFakeBlueBubbles(t)
-	defer bb.server.Close()
-	g, b, model := newIMessageTestGateway(t, bb.server.URL)
-	defer b.Shutdown()
-	g.DMMention = true
-
-	for i, text := range []string{"<@Oswald> hello", "@Oswald hello", "Oswald hello"} {
-		g.processIncomingMessage(webhookMessage{
-			GUID: fmt.Sprintf("msg-%d", i), Text: text,
-			Handle: messageHandle{Address: "+15551234567"},
-			Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
-		})
-		requests := model.primaryRequests()
-		if len(requests) != i+1 || requests[i].Messages[len(requests[i].Messages)-1].Content != "hello" {
-			t.Fatalf("mention %q did not produce clean prompt: requests=%v", text, requests)
-		}
-	}
-	g.processIncomingMessage(webhookMessage{
-		GUID: "msg-command", Text: "<@Oswald> /help",
-		Handle: messageHandle{Address: "+15551234567"},
-		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
-	})
-	if len(model.primaryRequests()) != 3 || len(bb.sentMessages()) != 4 {
-		t.Fatalf("mentioned DMs were not delivered: requests=%d sent=%v", len(model.primaryRequests()), bb.sentMessages())
-	}
-}
-
-func TestIMessageDMMentionLeavesGroupInvocationUnchanged(t *testing.T) {
-	bb := newFakeBlueBubbles(t)
-	defer bb.server.Close()
-	g, b, model := newIMessageTestGateway(t, bb.server.URL)
-	defer b.Shutdown()
-	g.DMMention = true
-
-	for _, text := range []string{"hello", "@Oswald hello"} {
+	// A mid-sentence name is not an invocation, even though it contains "Oswald".
+	for _, text := range []string{"What do you think Oswald will think?", "Please ask oswald about it", "NotOswald hello", "Oswaldian hello"} {
 		g.processIncomingMessage(webhookMessage{
 			GUID: "msg-1", Text: text,
 			Handle: messageHandle{Address: "+15551234567"},
 			Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
 		})
 	}
-	if len(model.primaryRequests()) != 1 || len(bb.sentMessages()) != 1 {
-		t.Fatalf("group invocation changed: requests=%d sent=%v", len(model.primaryRequests()), bb.sentMessages())
+	if len(model.primaryRequests()) != 0 || len(bb.sentMessages()) != 0 {
+		t.Fatalf("non-leading mention caused work: requests=%d sent=%v", len(model.primaryRequests()), bb.sentMessages())
+	}
+
+	// A leading mention invokes and is stripped from the prompt.
+	for i, text := range []string{"@Oswald hello", "Oswald hello", "  @Oswald   hello  "} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: fmt.Sprintf("lead-%d", i), Text: text,
+			Handle: messageHandle{Address: "+15551234567"},
+			Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+		})
+		requests := model.primaryRequests()
+		if len(requests) != i+1 || requests[i].Messages[len(requests[i].Messages)-1].Content != "hello" {
+			t.Fatalf("leading mention %q did not produce a clean prompt: %v", text, requests)
+		}
+	}
+}
+
+func TestIMessageLeadingMentionInDirectMessageIsStrippedNotGated(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+
+	// Direct messages never require a mention, but a leading mention is removed.
+	for i, text := range []string{"@Oswald hello", "What do you think Oswald will think?"} {
+		g.processIncomingMessage(webhookMessage{
+			GUID: fmt.Sprintf("dm-%d", i), Text: text,
+			Handle: messageHandle{Address: "+15551234567"},
+			Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+		})
+		requests := model.primaryRequests()
+		if len(requests) != i+1 {
+			t.Fatalf("direct message %q was not processed: %v", text, requests)
+		}
+	}
+	if got := model.primaryRequests()[0].Messages[1].Content; got != "hello" {
+		t.Fatalf("leading mention not stripped from DM: %q", got)
+	}
+	if got := model.primaryRequests()[1].Messages[1].Content; got != "What do you think Oswald will think?" {
+		t.Fatalf("mid-sentence name rewritten in DM: %q", got)
+	}
+}
+
+func TestIMessageConfiguredMentionPatternAnchorsAndStrips(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	g.MentionPatterns = []*regexp.Regexp{regexp.MustCompile(`^(?:hey oswald\b[,:\-]?)`)}
+
+	g.processIncomingMessage(webhookMessage{
+		GUID: "custom-1", Text: "hey oswald, status?",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	g.processIncomingMessage(webhookMessage{
+		GUID: "custom-2", Text: "ask hey oswald a question",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat;+;group", Style: chatStyleGroup}},
+	})
+	requests := model.primaryRequests()
+	if len(requests) != 1 {
+		t.Fatalf("configured pattern did not anchor to message start: %v", requests)
+	}
+	if got := requests[0].Messages[len(requests[0].Messages)-1].Content; got != "status?" {
+		t.Fatalf("configured mention not stripped: %q", got)
 	}
 }
 
@@ -524,7 +542,7 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 }
 
-func TestIMessageUnmappedMessageSendsNothing(t *testing.T) {
+func TestIMessageBannedIdentitySendsNothing(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
 	g, b, model := newIMessageTestGateway(t, bb.server.URL)
@@ -552,7 +570,7 @@ func TestIMessageGroupPublicTextPreservesMidSentenceOswald(t *testing.T) {
 	defer bb.server.Close()
 	g, b, chat := newIMessageTestGateway(t, bb.server.URL)
 	defer b.Shutdown()
-	const raw = "  Please ask Oswald about the meeting  "
+	const raw = "  @Oswald Please ask Oswald about the meeting  "
 	g.processIncomingMessage(webhookMessage{
 		GUID: "msg-public", Text: raw,
 		Handle: messageHandle{Address: "+15551234567"},
@@ -568,7 +586,7 @@ func TestIMessageGroupPublicTextPreservesMidSentenceOswald(t *testing.T) {
 		t.Fatalf("model requests=%d", len(primary))
 	}
 	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
-	if prompt != "Please ask  about the meeting" {
+	if prompt != "Please ask Oswald about the meeting" {
 		t.Fatalf("unexpected cleaned prompt: %q", prompt)
 	}
 	if chat.metadata.GroupGateway != "imessage" || chat.metadata.GroupChatID != "chat;+;group" || chat.metadata.PublicUserText != raw {
@@ -1085,7 +1103,7 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 
 func imessageProfileDirectory(t *testing.T, root string, log *config.Logger) *profiles.Directory {
 	t.Helper()
-	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: root, ProfileName: "default", BlueBubblesListenPort: "8645", BlueBubblesPolicy: config.AdmissionPolicy{Mode: "allow"}, BlueBubblesGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "imessage", UserID: "+15551234567", Profile: "default"}}}, log)
+	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: root, ProfileName: "default", BlueBubblesListenPort: "8645", BlueBubblesPolicy: config.AdmissionPolicy{Banned: []string{"+15557654321"}}, BlueBubblesGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "imessage", UserID: "+15551234567", Profile: "default"}}}, log)
 	if err != nil {
 		t.Fatal(err)
 	}
