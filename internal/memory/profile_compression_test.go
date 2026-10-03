@@ -58,12 +58,13 @@ func TestProfileCompressionExactRenewalTokenAndPublication(t *testing.T) {
 	if err != nil || summary.CoveredThroughTurnID != turn.ID {
 		t.Fatal("summary not persisted", err)
 	}
-	if err := s.ResetSessionContext(ctx, "alice", key); err != nil {
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
 		t.Fatal(err)
 	}
+	// /new preserves durable compression metadata; only TTL expiry removes it.
 	var count int
-	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:%'`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("reset retained compression metadata", err)
+	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:v1:compression:%'`).Scan(&count); err != nil || count == 0 {
+		t.Fatal("new session dropped live compression metadata", err)
 	}
 }
 
@@ -256,12 +257,12 @@ func TestProfileCompressionPinsCampaignAndCorrectiveFeedback(t *testing.T) {
 	if err != nil || target != turns[2].ID {
 		t.Fatal("partial checkpoint erased campaign", err)
 	}
-	if err := s.ResetSessionContext(ctx, "alice", key); err != nil {
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
 		t.Fatal(err)
 	}
 	var count int
-	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:%'`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("reset retained campaign", err)
+	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:v1:campaign:%'`).Scan(&count); err != nil || count == 0 {
+		t.Fatal("new session dropped campaign metadata", err)
 	}
 }
 

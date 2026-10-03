@@ -126,19 +126,19 @@ func TestProfileRuntimeSharesOnlyConfiguredMemoryAndRetainsSnapshotsAcrossRestar
 						return errors.New("another profile's notes leaked")
 					}
 					if phase == 1 {
-						reset, err := request(discord, "discord:dm:123", "/reset", false)
+						started, err := request(discord, "discord:dm:123", "/new", false)
 						if err != nil {
 							return err
 						}
-						if reset.command.Text == "" {
-							return errors.New("reset response missing")
+						if started.command.Text == "" {
+							return errors.New("new-session response missing")
 						}
-						updated, err := request(discord, "discord:dm:123", "check reset note", false)
+						updated, err := request(discord, "discord:dm:123", "check new session note", false)
 						if err != nil {
 							return err
 						}
 						if updated.response == nil || updated.response.Response != "saved note visible" {
-							return errors.New("reset lost file memory or retained old snapshot")
+							return errors.New("new session lost file memory or retained old snapshot")
 						}
 					}
 					return nil

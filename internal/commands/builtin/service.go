@@ -7,7 +7,7 @@ import (
 )
 
 // NewProfileService registers only the profile runtime's public commands.
-func NewProfileService(store sessioncommands.Resetter, canceler stopcommands.Canceler) (*commands.Service, error) {
+func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canceler) (*commands.Service, error) {
 	help := &helpHandler{}
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: help}, commands.Command{Handler: sessioncommands.New(store)}, commands.Command{Handler: stopcommands.New(canceler)})
 	if err != nil {

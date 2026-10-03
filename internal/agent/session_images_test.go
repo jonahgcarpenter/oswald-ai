@@ -655,21 +655,21 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 	}
 }
 
-func TestGeneratedImageCannotSucceedAfterSessionResetBeforePersistence(t *testing.T) {
+func TestGeneratedImageCannotSucceedAfterSessionEndBeforePersistence(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{toolCallResponse("generate", imagegenerate.Name, nil), {Message: llm.ChatMessage{Role: "assistant", Content: "Here it is."}}}}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, store := newTestAgent(t, chat, nil, reg)
 	image := testInputImage(t, 2, 3)
 	data, _ := base64.StdEncoding.DecodeString(image.Data)
 	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name, Description: "generate"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
-		if err := store.ResetSessionContext(ctx, "user-1", "session"); err != nil {
+		if err := store.NewSessionContext(ctx, "user-1", "session"); err != nil {
 			t.Fatal(err)
 		}
 		return governance.Result{Content: `{"status":"generated"}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "output.jpg", MIMEType: image.MimeType, Data: data}}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	response, err := processAgent(a, "reset", "discord", "session", "user-1", "User", "generate", nil, nil)
+	response, err := processAgent(a, "new-session", "discord", "session", "user-1", "User", "generate", nil, nil)
 	if err == nil || response != nil {
 		t.Fatal("unpersisted generated image reported as delivered")
 	}

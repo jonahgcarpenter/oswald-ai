@@ -72,7 +72,7 @@ func TestValidation(t *testing.T) {
 		{"temperature", `{"model":"oswald","temperature":0,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer secret"}, 400},
 		{"tool message", `{"model":"oswald","messages":[{"role":"tool","content":"result"},{"role":"user","content":"hi"}]}`, []string{"Bearer secret"}, 400},
 		{"last assistant", `{"model":"oswald","messages":[{"role":"assistant","content":"hi"}]}`, []string{"Bearer secret"}, 400},
-		{"command", `{"model":"oswald","messages":[{"role":"user","content":"/reset"}]}`, []string{"Bearer secret"}, 400},
+		{"command", `{"model":"oswald","messages":[{"role":"user","content":"/new"}]}`, []string{"Bearer secret"}, 400},
 		{"image", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`, []string{"Bearer secret"}, 400},
 		{"mixed text and image", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text","text":"Hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`, []string{"Bearer secret"}, 400},
 		{"unexpected part field", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text","text":"Hi","image_url":"hidden"}]}]}`, []string{"Bearer secret"}, 400},

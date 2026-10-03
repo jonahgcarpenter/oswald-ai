@@ -68,8 +68,8 @@ func (s *agentMemoryFixture) AppendPendingSessionTurn(ctx context.Context, write
 func (s *agentMemoryFixture) MarkSessionTurnDelivered(ctx context.Context, owner string, id int64) error {
 	return s.stores[owner].MarkSessionTurnDelivered(ctx, owner, id)
 }
-func (s *agentMemoryFixture) ResetSessionContext(ctx context.Context, owner, key string) error {
-	return s.stores[owner].ResetSessionContext(ctx, owner, fixtureSession(key))
+func (s *agentMemoryFixture) NewSessionContext(ctx context.Context, owner, key string) error {
+	return s.stores[owner].NewSessionContext(ctx, owner, fixtureSession(key))
 }
 
 // Pending inspection is deliberately distinct from production delivered reads.

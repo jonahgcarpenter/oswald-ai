@@ -95,7 +95,7 @@ func TestProfileExchangeDeliveryAndReopen(t *testing.T) {
 	}
 }
 
-func TestProfileSnapshotFirstWriterResetAndExpiryFences(t *testing.T) {
+func TestProfileSnapshotNewSessionAndExpiryFences(t *testing.T) {
 	s, _ := newProfileStateFixture(t)
 	ctx := context.Background()
 	key := "discord:dm:123"
@@ -116,30 +116,68 @@ func TestProfileSnapshotFirstWriterResetAndExpiryFences(t *testing.T) {
 	if err != nil || u != "" || m != "" {
 		t.Fatal("empty first snapshot was overwritten", err)
 	}
-	turn := appendProfileExchange(t, s, 1, "before reset")
-	if err := s.ResetSessionContext(ctx, "alice", key); err != nil {
+	turn := appendProfileExchange(t, s, 1, "before new session")
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	// The ended session is no longer the active target for its generation.
 	if _, _, err := s.BindSessionFileMemory(ctx, "alice", key, 1, "stale", ""); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal("stale snapshot bound", err)
 	}
 	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatal("stale delivery published", err)
+		t.Fatal("delivery published into an ended session", err)
+	}
+	// The prior transcript is preserved and remains searchable.
+	var preserved int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages m JOIN sessions x ON x.id=m.session_id WHERE x.profile_name='alice' AND m.active=1`).Scan(&preserved); err != nil || preserved == 0 {
+		t.Fatal("new session destroyed prior delivered history", err)
 	}
 	session, err = s.ResolveSessionContext(ctx, "alice", key, time.Hour)
 	if err != nil || session.Generation != 2 {
-		t.Fatal("reset failed to advance generation", err)
+		t.Fatal("new session failed to advance generation", err)
 	}
 	if _, _, bound, err := s.SessionFileMemory(ctx, "alice", key, 2); err != nil || bound {
-		t.Fatal("reset retained snapshot", err)
+		t.Fatal("new session retained the prior snapshot", err)
 	}
+	// The prior delivered transcript survives until its own TTL lapses.
 	now = now.Add(2 * time.Hour)
 	if _, err := s.PageDeliveredSessionTurnsAfter(ctx, "alice", key, 2, 0, 100); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatal("expired generation served", err)
+		t.Fatal("expired generation served from the live session", err)
 	}
 	session, err = s.ResolveSessionContext(ctx, "alice", key, time.Hour)
 	if err != nil || session.Generation != 3 {
 		t.Fatal("expiry failed to advance generation", err)
+	}
+}
+
+func TestNewSessionKeepsPriorTranscriptSearchableUntilExpiry(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	deliveredExchange(t, s, 1, "the postgres migration plan", "use pg_upgrade")
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	results, err := s.DiscoverySessions(ctx, "alice", SearchFilter{Query: "postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("prior transcript not searchable after new session: %+v", results)
+	}
+	// The old session is not the live conversation: exclusion hides it.
+	live, err := s.ActiveSessionID(ctx, "alice", key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live != "" {
+		t.Fatal("new session should not be open before the next turn")
 	}
 }
 
@@ -185,7 +223,7 @@ func TestProfileConcurrentFirstSnapshotIsOneWinningPair(t *testing.T) {
 	}
 }
 
-func TestProfileExchangeRollbackAndResetClearFTS(t *testing.T) {
+func TestProfileExchangeRollbackAndNewSessionPreservesFTS(t *testing.T) {
 	s, _ := newProfileStateFixture(t)
 	ctx := context.Background()
 	key := "discord:dm:123"
@@ -211,16 +249,17 @@ func TestProfileExchangeRollbackAndResetClearFTS(t *testing.T) {
 	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ResetSessionContext(ctx, "alice", key); err != nil {
+	// /new is bookkeeping only: the transcript and its FTS text are preserved.
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
 		t.Fatal(err)
 	}
 	for _, table := range []string{"messages_fts", "messages_fts_trigram"} {
-		if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE ` + table + ` MATCH 'elephant'`).Scan(&count); err != nil || count != 0 {
-			t.Fatal("reset retained FTS text", err)
+		if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE ` + table + ` MATCH 'elephant'`).Scan(&count); err != nil || count != 1 {
+			t.Fatal("new session dropped searchable FTS text", err)
 		}
 	}
-	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM state_meta WHERE key LIKE 'oswald:%'`).Scan(&count); err != nil || count != 0 {
-		t.Fatal("reset retained private state", err)
+	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM messages WHERE content LIKE '%elephant%' AND active=1`).Scan(&count); err != nil || count != 1 {
+		t.Fatal("new session dropped delivered messages", err)
 	}
 }
 
@@ -256,5 +295,60 @@ func TestProfileStoreOperationsEmitSafeInfoMeasurements(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNewSessionEndedConversationSurvivesSweepUntilTTL(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	appendProfileExchange(t, s, 1, "kept transcript")
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	// A sweep before the TTL lapses must not delete the ended session.
+	if err := s.SweepProfile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("new-session transcript swept before TTL: count=%d err=%v", count, err)
+	}
+	// After the TTL lapses, ordinary expiry removes it.
+	now = now.Add(2 * time.Hour)
+	if err := s.SweepProfile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("expired transcript not swept: count=%d err=%v", count, err)
+	}
+}
+
+func TestDeliveryIntoEndedSessionFailsClosed(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: 1, UserText: "racing send", AssistantText: "answer", Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The conversation moves on before the outbound send confirms.
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("late delivery into an ended session published: %v", err)
+	}
+	var active int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE active=1`).Scan(&active); err != nil || active != 0 {
+		t.Fatalf("unconfirmed exchange surfaced: active=%d err=%v", active, err)
 	}
 }

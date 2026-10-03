@@ -91,7 +91,7 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				return nil
 			}
 			for _, definition := range definitions {
-				if definition.Name != "help" && definition.Name != "reset" && definition.Name != "stop" {
+				if definition.Name != "help" && definition.Name != "new" && definition.Name != "stop" {
 					done <- errors.New("obsolete command registered")
 					cancel()
 					return nil

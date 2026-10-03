@@ -214,10 +214,11 @@ func (s *ProfileStore) ResolveSessionContext(ctx context.Context, owner, key str
 	return result, tx.Commit()
 }
 
-// ResetSessionContext atomically advances the generation, clears transcript and
-// snapshot state, and ends old sessions. It never changes private memory files.
-func (s *ProfileStore) ResetSessionContext(ctx context.Context, owner, key string) (resultErr error) {
-	defer s.measure("memory.profile.reset.complete", time.Now(), &resultErr)
+// NewSessionContext closes the conversation's current session without deleting
+// anything. Transcript, metadata, summaries, and locks stay for later recall and
+// ordinary TTL expiry; the next turn opens a fresh session at a new generation.
+func (s *ProfileStore) NewSessionContext(ctx context.Context, owner, key string) (resultErr error) {
+	defer s.measure("memory.profile.new_session.complete", time.Now(), &resultErr)
 	source, err := s.scope(owner, key)
 	if err != nil {
 		return err
@@ -227,46 +228,14 @@ func (s *ProfileStore) ResetSessionContext(ctx context.Context, owner, key strin
 		return err
 	}
 	defer tx.Rollback()
+	now := float64(s.now().UnixNano()) / 1e9
 	if _, err := tx.ExecContext(ctx, `INSERT INTO conversation_generations(source,session_key,generation) VALUES(?,?,1) ON CONFLICT(source,session_key) DO UPDATE SET generation=generation+1`, source, key); err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND source=? AND session_key=?`, owner, source, key)
-	if err != nil {
+	// A deliberate tombstone: the transcript is kept, not deleted. Maintained
+	// sessions are left unfinalized so ordinary TTL sweep remains their owner.
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET ended_at=COALESCE(ended_at,?),end_reason=COALESCE(end_reason,'new_session') WHERE profile_name=? AND source=? AND session_key=? AND ended_at IS NULL`, now, owner, source, key); err != nil {
 		return err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	iterationErr := rows.Err()
-	rows.Close()
-	if iterationErr != nil {
-		return iterationErr
-	}
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_id=?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM state_meta WHERE key=? OR substr(key,1,?)=?`, snapshotKey(id), len("oswald:v1:turn:"+id+":"), "oswald:v1:turn:"+id+":"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM compression_locks WHERE session_id=?`, id); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM state_meta WHERE key=? OR substr(key,1,?)=?`, profileSummaryKey(id), len("oswald:v1:compression:"+id+":"), "oswald:v1:compression:"+id+":"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM state_meta WHERE substr(key,1,?)=?`, len("oswald:v1:campaign:"+id+":"), "oswald:v1:campaign:"+id+":"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET ended_at=COALESCE(ended_at,?),end_reason='reset',expiry_finalized=1,message_count=0,tool_call_count=0 WHERE id=?`, float64(s.now().UnixNano())/1e9, id); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }

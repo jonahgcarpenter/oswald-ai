@@ -25,14 +25,15 @@ const (
 )
 
 type discoveryArgs struct {
-	Query   string
-	Limit   int
-	Sort    string
-	Detail  string
-	After   *time.Time
-	Before  *time.Time
-	Exclude []string
-	Roles   map[string]bool
+	Query         string
+	Limit         int
+	Sort          string
+	Detail        string
+	After         *time.Time
+	Before        *time.Time
+	Exclude       []string
+	Roles         map[string]bool
+	LiveSessionID string
 }
 
 // NewHandler returns the model-facing session_search handler. Each call is
@@ -53,17 +54,18 @@ func NewHandler(store *memory.ProfileStore) func(context.Context, map[string]int
 			return governance.Result{}, err
 		}
 		owner := principal.CanonicalUserID
+		liveSessionID := liveSession(ctx, store, owner)
 		sessionID, hasSession := stringArg(args, "session_id")
 		anchor, hasAnchor := intArg(args, "around_message_id")
 		_, hasQuery := stringArg(args, "query")
 		if hasSession && hasAnchor {
-			return scroll(ctx, store, owner, sessionID, anchor, intArgDefault(args, "window", defaultWindow))
+			return scroll(ctx, store, owner, liveSessionID, sessionID, anchor, intArgDefault(args, "window", defaultWindow))
 		}
 		if hasSession {
 			if hasQuery {
 				return governance.Result{}, errors.New("session_search: use either query or session_id, not both")
 			}
-			return read(ctx, store, owner, sessionID)
+			return read(ctx, store, owner, liveSessionID, sessionID)
 		}
 		if hasAnchor {
 			return governance.Result{}, errors.New("session_search: around_message_id requires session_id")
@@ -73,10 +75,25 @@ func NewHandler(store *memory.ProfileStore) func(context.Context, map[string]int
 			if err != nil {
 				return governance.Result{}, err
 			}
+			parsed.LiveSessionID = liveSessionID
 			return discover(ctx, store, owner, parsed)
 		}
-		return browse(ctx, store, owner, intArgDefault(args, "limit", defaultLimit))
+		return browse(ctx, store, owner, liveSessionID, intArgDefault(args, "limit", defaultLimit))
 	}
+}
+
+// liveSession resolves the active conversation's session id for exclusion.
+// A missing metadata session or no active row yields "", excluding nothing.
+func liveSession(ctx context.Context, store *memory.ProfileStore, owner string) string {
+	meta := requestctx.MetadataFromContext(ctx)
+	if meta.SessionID == "" || meta.SessionGeneration <= 0 {
+		return ""
+	}
+	id, err := store.ActiveSessionID(ctx, owner, meta.SessionID, meta.SessionGeneration)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 func rejectUnknownFields(args map[string]interface{}) error {
@@ -221,7 +238,7 @@ func relativeDuration(value string) (time.Duration, bool) {
 }
 
 func discover(ctx context.Context, store *memory.ProfileStore, owner string, parsed discoveryArgs) (governance.Result, error) {
-	sessions, err := store.DiscoverySessions(ctx, owner, memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude})
+	sessions, err := store.DiscoverySessions(ctx, owner, memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude, LiveSessionID: parsed.LiveSessionID})
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
@@ -232,13 +249,10 @@ func discover(ctx context.Context, store *memory.ProfileStore, owner string, par
 	return governance.Result{Content: response, Outcome: outcomeFor(len(sessions))}, nil
 }
 
-func scroll(ctx context.Context, store *memory.ProfileStore, owner, sessionID string, anchor int64, window int) (governance.Result, error) {
-	// Scrolling into the active conversation lineage is redundant work.
-	if meta := requestctx.MetadataFromContext(ctx); meta.SessionID != "" && meta.SessionGeneration > 0 {
-		if active, err := store.ActiveSessionID(ctx, owner, meta.SessionID, meta.SessionGeneration); err == nil && active != "" {
-			if shared, err := store.SharesLineage(ctx, owner, active, sessionID); err == nil && shared {
-				return governance.Result{}, errors.New("session_search: scroll rejected: anchor lives in the current session lineage (already in your active context)")
-			}
+func scroll(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID, sessionID string, anchor int64, window int) (governance.Result, error) {
+	if liveSessionID != "" {
+		if shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID); err == nil && shared {
+			return governance.Result{}, errors.New("session_search: scroll rejected: anchor lives in the current session lineage (already in your active context)")
 		}
 	}
 	before, anchorMessage, after, err := store.SessionWindow(ctx, owner, sessionID, anchor, window)
@@ -252,7 +266,12 @@ func scroll(ctx context.Context, store *memory.ProfileStore, owner, sessionID st
 	return governance.Result{Content: response, Outcome: governance.OutcomeProductive}, nil
 }
 
-func read(ctx context.Context, store *memory.ProfileStore, owner, sessionID string) (governance.Result, error) {
+func read(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID, sessionID string) (governance.Result, error) {
+	if liveSessionID != "" {
+		if shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID); err == nil && shared {
+			return governance.Result{}, errors.New("session_search: read rejected: session is the current lineage (already in your active context)")
+		}
+	}
 	first, last, count, err := store.SessionTranscript(ctx, owner, sessionID, readHead, readTail)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
@@ -268,14 +287,14 @@ func read(ctx context.Context, store *memory.ProfileStore, owner, sessionID stri
 	return governance.Result{Content: response, Outcome: outcomeFor(count)}, nil
 }
 
-func browse(ctx context.Context, store *memory.ProfileStore, owner string, limit int) (governance.Result, error) {
+func browse(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID string, limit int) (governance.Result, error) {
 	if limit < 1 {
 		limit = defaultLimit
 	}
 	if limit > maxLimit {
 		limit = maxLimit
 	}
-	records, err := store.RecentSessions(ctx, owner, limit)
+	records, err := store.RecentSessionsExcluding(ctx, owner, liveSessionID, limit)
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}

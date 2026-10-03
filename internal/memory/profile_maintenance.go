@@ -28,7 +28,7 @@ func (s *ProfileStore) SweepProfile(ctx context.Context) (resultErr error) {
 	}
 	defer tx.Rollback()
 	now := float64(s.now().UnixNano()) / 1e9
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND expiry_finalized=0 AND (ended_at IS NOT NULL OR last_activity_at+json_extract(origin_json,'$.ttl_seconds')<=?) ORDER BY started_at LIMIT 100`, s.profile, now)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND expiry_finalized=0 AND last_activity_at+json_extract(origin_json,'$.ttl_seconds')<=? ORDER BY started_at LIMIT 100`, s.profile, now)
 	if err != nil {
 		return err
 	}

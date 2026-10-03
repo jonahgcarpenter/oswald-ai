@@ -56,11 +56,10 @@ type SessionSummaryRecord struct {
 }
 
 const (
-	// searchEligible is the delivery/generation filter shared by every shape.
-	searchEligible = `m.active=1 AND s.profile_name=? AND ` +
-		`s.origin_json IS NOT NULL AND ` +
-		`json_extract(s.origin_json,'$.generation') = ` +
-		`COALESCE((SELECT g.generation FROM conversation_generations g WHERE g.source=s.source AND g.session_key=s.session_key), 0)`
+	// searchEligible is the delivery and profile filter shared by every shape.
+	// Generation equality is intentionally not required: /new keeps prior
+	// sessions as searchable history, and nothing eager-deletes delivered rows.
+	searchEligible = `m.active=1 AND s.profile_name=?`
 )
 
 // SearchFilter bounds a discovery query.
@@ -71,6 +70,9 @@ type SearchFilter struct {
 	After   *time.Time
 	Before  *time.Time
 	Exclude []string
+	// LiveSessionID is the active conversation's session id; it and its lineage
+	// are omitted because that content is already in the model's live context.
+	LiveSessionID string
 }
 
 // DiscoverySessions runs an FTS5 search over delivered messages and returns one
@@ -88,6 +90,9 @@ func (s *ProfileStore) DiscoverySessions(ctx context.Context, owner string, filt
 	}
 	excluded, err := s.excludedLineage(ctx, owner, filter.Exclude)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.addLiveLineage(ctx, owner, filter.LiveSessionID, excluded); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.SQL().QueryContext(ctx, `
@@ -187,6 +192,22 @@ func (s *ProfileStore) rankLineages(ctx context.Context, owner string, hits []Se
 		results = append(results, *summary)
 	}
 	return results, nil
+}
+
+// addLiveLineage marks the live conversation's lineage root as excluded so
+// already-in-context content is never recalled.
+func (s *ProfileStore) addLiveLineage(ctx context.Context, owner, liveSessionID string, excluded map[string]bool) error {
+	if strings.TrimSpace(liveSessionID) == "" {
+		return nil
+	}
+	root, err := s.lineageRoot(ctx, owner, liveSessionID)
+	if err != nil {
+		return err
+	}
+	if root != "" {
+		excluded[root] = true
+	}
+	return nil
 }
 
 // excludedLineage expands inspected session ids into their full lineage roots.
@@ -407,7 +428,7 @@ SELECT s.id, s.source, COALESCE(s.model,''), COALESCE(s.title,''),
        s.started_at, COALESCE(s.last_activity_at, s.started_at), COALESCE(s.message_count,0),
        COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id AND m.active=1 ORDER BY m.id LIMIT 1),'')
 FROM sessions s
-WHERE s.profile_name=? AND s.origin_json IS NOT NULL AND json_extract(s.origin_json,'$.generation') = COALESCE((SELECT g.generation FROM conversation_generations g WHERE g.source=s.source AND g.session_key=s.session_key),0)
+WHERE s.profile_name=?
 ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT ?`, owner, limit)
 	if err != nil {
 		return nil, err
@@ -501,4 +522,38 @@ func (s *ProfileStore) SharesLineage(ctx context.Context, owner, left, right str
 		return false, err
 	}
 	return leftRoot == rightRoot, nil
+}
+
+// RecentSessionsExcluding returns recent delivered sessions with the live
+// conversation's lineage omitted.
+func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
+	records, err := s.RecentSessions(ctx, owner, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(liveSessionID) == "" {
+		if len(records) > limit {
+			records = records[:limit]
+		}
+		return records, nil
+	}
+	liveRoot, err := s.lineageRoot(ctx, owner, liveSessionID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := records[:0]
+	for _, record := range records {
+		root, err := s.lineageRoot(ctx, owner, record.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if root != "" && root == liveRoot {
+			continue
+		}
+		filtered = append(filtered, record)
+		if len(filtered) == limit {
+			break
+		}
+	}
+	return filtered, nil
 }
