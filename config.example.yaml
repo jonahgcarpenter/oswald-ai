@@ -11,7 +11,6 @@ model:
   default: your/provider-model
   context_length: 32768
 runtime:
-  worker_pool_size: 1
   log_level: info
 gateway:
   multiplex_profiles: true

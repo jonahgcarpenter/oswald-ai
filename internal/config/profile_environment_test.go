@@ -8,7 +8,7 @@ import (
 )
 
 func TestProfileEnvironmentInterpolationIsolationAndPrecedence(t *testing.T) {
-	text := strings.Replace(syntheticProfileConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: "${OSWALD_TEST_PRIVATE_KEY}"`, 1)
+	text := strings.Replace(syntheticProfileConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: "${OSWALD_TEST_PRIVATE_KEY}"`, 1)
 	root := profileConfigFixture(t, text)
 	for directory, value := range map[string]string{root: "default-secret", filepath.Join(root, "profiles", "alice"): "alice-secret", filepath.Join(root, "profiles", "api"): "api-secret"} {
 		if err := os.WriteFile(filepath.Join(directory, ".env"), []byte("OSWALD_TEST_PRIVATE_KEY="+value+"\n"), 0600); err != nil {
@@ -36,7 +36,7 @@ func TestProfileEnvironmentInterpolationIsolationAndPrecedence(t *testing.T) {
 }
 
 func TestProfileInterpolationOccursAfterOverrides(t *testing.T) {
-	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: "${OSWALD_TEST_OVERRIDE_KEY}"`, 1))
+	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: "${OSWALD_TEST_OVERRIDE_KEY}"`, 1))
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OSWALD_TEST_OVERRIDE_KEY=default-secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestProfileInterpolationOccursAfterOverrides(t *testing.T) {
 }
 
 func TestProfileInterpolationMissingVariableDoesNotLeakContent(t *testing.T) {
-	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: "private-canary-${OSWALD_TEST_MISSING_KEY}"`, 1))
+	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: "private-canary-${OSWALD_TEST_MISSING_KEY}"`, 1))
 	_, err := LoadProfiles(root)
 	if err == nil || strings.Contains(err.Error(), "private-canary") || strings.Contains(err.Error(), "OSWALD_TEST_MISSING_KEY") {
 		t.Fatal("missing interpolation was accepted or disclosed private content")

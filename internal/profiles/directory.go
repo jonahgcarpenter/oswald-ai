@@ -119,11 +119,6 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		assurance = identity.AssuranceBlueBubblesWebhook
-	case "homeassistant":
-		if d.global.HomeAssistantListenPort == "" {
-			return identity.Principal{}, ErrUnmappedIdentity
-		}
-		assurance = identity.AssuranceHomeAssistantToken
 	default:
 		return identity.Principal{}, ErrUnmappedIdentity
 	}

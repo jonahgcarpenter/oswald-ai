@@ -69,9 +69,8 @@ const (
 var webhookPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,127}$`)
 
 type providerYAML struct {
-	API    string  `yaml:"api"`
-	KeyEnv string  `yaml:"key_env"`
-	Key    *string `yaml:"key"`
+	API string  `yaml:"api"`
+	Key *string `yaml:"key"`
 }
 type modelYAML struct {
 	Provider      *string `yaml:"provider"`
@@ -79,9 +78,8 @@ type modelYAML struct {
 	ContextLength *int    `yaml:"context_length"`
 }
 type webYAML struct {
-	BraveKeyEnv *string `yaml:"brave_key_env"`
-	BraveKey    *string `yaml:"brave_key"`
-	SearxngURL  *string `yaml:"searxng_url"`
+	BraveKey   *string `yaml:"brave_key"`
+	SearxngURL *string `yaml:"searxng_url"`
 }
 type imageYAML struct {
 	URL     *string `yaml:"url"`
@@ -92,23 +90,18 @@ type toolsYAML struct {
 	ImageGenerate imageYAML `yaml:"image_generate"`
 }
 type platformExtraYAML struct {
-	TokenEnv          string   `yaml:"token_env"`
-	Token             *string  `yaml:"token"`
-	AllowedUsers      []string `yaml:"allowed_users"`
-	BannedUsers       []string `yaml:"banned_users"`
-	RequireMention    *bool    `yaml:"require_mention"`
-	ServerURL         string   `yaml:"server_url"`
-	ServerPasswordEnv string   `yaml:"server_password_env"`
-	ServerPassword    *string  `yaml:"server_password"`
-	WebhookHost       string   `yaml:"webhook_host"`
-	WebhookPort       int      `yaml:"webhook_port"`
-	WebhookPath       string   `yaml:"webhook_path"`
-	MentionPatterns   []string `yaml:"mention_pattern"`
-	APIHost           string   `yaml:"api_host"`
-	APIPort           int      `yaml:"api_port"`
-	AuthTokenEnv      string   `yaml:"auth_token_env"`
-	AuthToken         *string  `yaml:"auth_token"`
-	ListenPort        int      `yaml:"listen_port"`
+	Token           *string  `yaml:"token"`
+	AllowedUsers    []string `yaml:"allowed_users"`
+	BannedUsers     []string `yaml:"banned_users"`
+	RequireMention  *bool    `yaml:"require_mention"`
+	ServerURL       string   `yaml:"server_url"`
+	ServerPassword  *string  `yaml:"server_password"`
+	WebhookHost     string   `yaml:"webhook_host"`
+	WebhookPort     int      `yaml:"webhook_port"`
+	WebhookPath     string   `yaml:"webhook_path"`
+	MentionPatterns []string `yaml:"mention_pattern"`
+	APIHost         string   `yaml:"api_host"`
+	APIPort         int      `yaml:"api_port"`
 }
 type platformYAML struct {
 	Enabled bool              `yaml:"enabled"`
@@ -124,7 +117,6 @@ type documentYAML struct {
 	Platforms map[string]platformYAML `yaml:"platforms"`
 	Tools     toolsYAML               `yaml:"tools"`
 	Runtime   *struct {
-		Workers  int    `yaml:"worker_pool_size"`
 		LogLevel string `yaml:"log_level"`
 	} `yaml:"runtime"`
 	MCP struct {
@@ -176,17 +168,16 @@ func privateDirectory(path, source string) error {
 }
 
 // knownPlatforms bounds configured platform names before any validation.
-var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true, "homeassistant": true}
+var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true}
 
 var platformTopKeys = map[string]bool{"enabled": true, "extra": true}
 
 var platformExtraKeys = map[string]bool{
-	"token_env": true, "token": true, "allowed_users": true, "banned_users": true,
+	"token": true, "allowed_users": true, "banned_users": true,
 	"require_mention": true,
-	"server_url":      true, "server_password_env": true, "server_password": true,
+	"server_url":      true, "server_password": true,
 	"webhook_host": true, "webhook_port": true, "webhook_path": true, "mention_pattern": true,
 	"api_host": true, "api_port": true,
-	"auth_token_env": true, "auth_token": true, "listen_port": true,
 }
 
 func mappingValueIndex(node *yaml.Node, key string) int {
@@ -294,7 +285,7 @@ func pruneDisabledPlatforms(raw *yaml.Node, env profileEnvironment) (*yaml.Node,
 	return pruned, nil
 }
 
-func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string, env profileEnvironment) error {
+func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string) error {
 	for name, value := range doc.Providers {
 		providers[name] = value
 	}
@@ -322,19 +313,15 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	// The LLM transport appends /v1 routes itself.
 	endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
 	cfg.LLMGatewayURL = endpoint.String()
-	cfg.LLMGatewayAPIKey, err = env.credential(provider.Key, provider.KeyEnv, provider.KeyEnv != "" || provider.Key != nil)
+	cfg.LLMGatewayAPIKey, err = credential(provider.Key, provider.Key != nil)
 	if err != nil {
 		return withConfigPath(err, "providers."+providerName+".key")
 	}
 	if strings.TrimSpace(cfg.LLMGatewayModel) == "" || cfg.ModelContextWindow < 0 {
 		return configErr("config_model_invalid", "model")
 	}
-	if doc.Tools.WebSearch.BraveKeyEnv != nil || doc.Tools.WebSearch.BraveKey != nil {
-		name := ""
-		if doc.Tools.WebSearch.BraveKeyEnv != nil {
-			name = *doc.Tools.WebSearch.BraveKeyEnv
-		}
-		cfg.BraveAPIKey, err = env.credential(doc.Tools.WebSearch.BraveKey, name, name != "")
+	if doc.Tools.WebSearch.BraveKey != nil {
+		cfg.BraveAPIKey, err = credential(doc.Tools.WebSearch.BraveKey, false)
 		if err != nil {
 			return withConfigPath(err, "tools.web_search.brave_key")
 		}
@@ -438,17 +425,13 @@ func LoadProfiles(root string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*Config{}, WorkerPoolSize: 1, LogLevel: LevelInfo, ComfyUIGenerationTimeout: 2 * time.Minute, DiscordGroupRequireMention: true, BlueBubblesGroupRequireMention: true}
+	cfg := &Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*Config{}, LogLevel: LevelInfo, ComfyUIGenerationTimeout: 2 * time.Minute, DiscordGroupRequireMention: true, BlueBubblesGroupRequireMention: true}
 	providers := map[string]providerYAML{}
 	selected := ""
-	if err := applyDocument(cfg, doc, providers, &selected, env); err != nil {
+	if err := applyDocument(cfg, doc, providers, &selected); err != nil {
 		return nil, err
 	}
 	if doc.Runtime != nil {
-		cfg.WorkerPoolSize = doc.Runtime.Workers
-		if cfg.WorkerPoolSize <= 0 {
-			return nil, configErr("config_runtime_invalid", "runtime.worker_pool_size")
-		}
 		cfg.LogLevel = ParseLevel(doc.Runtime.LogLevel)
 	}
 	names := map[string]bool{}
@@ -464,7 +447,7 @@ func LoadProfiles(root string) (*Config, error) {
 			if route.Platform == "bluebubbles" {
 				route.Platform = "imessage"
 			}
-			if route.Platform != "discord" && route.Platform != "imessage" && route.Platform != "homeassistant" {
+			if route.Platform != "discord" && route.Platform != "imessage" {
 				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
 			id, err := NormalizeGatewayIdentifier(route.Platform, route.UserID)
@@ -494,7 +477,7 @@ func LoadProfiles(root string) (*Config, error) {
 		x := settings.Extra
 		switch platform {
 		case "discord":
-			cfg.DiscordToken, err = env.credential(x.Token, x.TokenEnv, true)
+			cfg.DiscordToken, err = credential(x.Token, true)
 			if err != nil {
 				return nil, withConfigPath(err, base+"token")
 			}
@@ -518,7 +501,7 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, withConfigPath(err, base+"webhook_port")
 			}
-			cfg.BlueBubblesPassword, err = env.credential(x.ServerPassword, x.ServerPasswordEnv, true)
+			cfg.BlueBubblesPassword, err = credential(x.ServerPassword, true)
 			if err != nil {
 				return nil, withConfigPath(err, base+"server_password")
 			}
@@ -546,21 +529,9 @@ func LoadProfiles(root string) (*Config, error) {
 				return nil, withConfigPath(err, base+"api_port")
 			}
 			names["api"] = true
-		case "homeassistant":
-			cfg.HomeAssistantListenPort, err = port(x.ListenPort)
-			if err != nil {
-				return nil, withConfigPath(err, base+"listen_port")
-			}
-			cfg.HomeAssistantAuthToken, err = env.credential(x.AuthToken, x.AuthTokenEnv, true)
-			if err != nil {
-				return nil, withConfigPath(err, base+"auth_token")
-			}
-			if len(strings.TrimSpace(cfg.HomeAssistantAuthToken)) < 32 {
-				return nil, configErr("config_credential_invalid", base+"auth_token")
-			}
 		}
 	}
-	if cfg.DiscordToken == "" && cfg.BlueBubblesListenPort == "" && cfg.OpenAIListenPort == "" && cfg.HomeAssistantListenPort == "" {
+	if cfg.DiscordToken == "" && cfg.BlueBubblesListenPort == "" && cfg.OpenAIListenPort == "" {
 		return nil, configErr("config_gateway_unavailable", "")
 	}
 	for name := range names {
@@ -589,7 +560,7 @@ func LoadProfiles(root string) (*Config, error) {
 		profile.ProfileName, profile.ProfileRoot, profile.Profiles = name, profileRoot, nil
 		profileProviders := map[string]providerYAML{}
 		profileSelected := ""
-		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected, profileEnv); err != nil {
+		if err := applyDocument(&profile, profileDoc, profileProviders, &profileSelected); err != nil {
 			return nil, err
 		}
 		cfg.Profiles[name] = &profile
@@ -693,10 +664,6 @@ func NormalizeGatewayIdentifier(platform, value string) (string, error) {
 			if !regexp.MustCompile(`^\+[0-9]{7,15}$`).MatchString(value) {
 				return "", errors.New("invalid iMessage identity")
 			}
-		}
-	case "homeassistant":
-		if !regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`).MatchString(value) {
-			return "", errors.New("invalid Home Assistant identity")
 		}
 	default:
 		return "", fmt.Errorf("unsupported identity platform")

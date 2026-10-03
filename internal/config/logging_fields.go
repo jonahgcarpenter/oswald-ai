@@ -179,7 +179,7 @@ func logScalar(key string, value any) (any, bool, bool) {
 			}
 			for _, gateway := range strings.Split(v, ",") {
 				switch strings.TrimSpace(gateway) {
-				case "discord", "imessage", "homeassistant", "openai":
+				case "discord", "imessage", "openai":
 				default:
 					return "redacted", true, true
 				}

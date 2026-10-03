@@ -201,7 +201,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
-	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") || strings.EqualFold(strings.TrimSpace(gateway), "openai") {
+	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
 		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
@@ -278,7 +278,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
-	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(imagegenerate.Name) {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && a.registry.HasHandler(imagegenerate.Name) {
 		imagesStarted := time.Now()
 		priorImages, err := a.userMemory.SessionImages(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil {
@@ -289,7 +289,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-	if gateway != "homeassistant" && gateway != "openai" && a.registry.HasHandler(imagegenerate.Name) {
+	if gateway != "openai" && a.registry.HasHandler(imagegenerate.Name) {
 		if a.imageCache == nil {
 			return nil, fmt.Errorf("image cache is unavailable")
 		}
@@ -384,7 +384,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
-	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(imagegenerate.Name) {
+	if len(contextImages) > 0 && a.registry.HasHandler(imagegenerate.Name) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext

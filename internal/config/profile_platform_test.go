@@ -12,7 +12,7 @@ import (
 const disabledPlatformConfig = `providers:
   fake:
     api: "http://localhost:9999/v1"
-    key_env: PROFILE_TEST_MODEL_KEY
+    key: "${PROFILE_TEST_MODEL_KEY}"
 model:
   provider: custom:fake
   default: fake/model
@@ -27,7 +27,7 @@ platforms:
   discord:
     enabled: true
     extra:
-      token_env: PROFILE_TEST_DISCORD_TOKEN
+      token: "${PROFILE_TEST_DISCORD_TOKEN}"
   bluebubbles:
     enabled: false
     extra:
@@ -138,7 +138,7 @@ func TestNamedProfilesInheritDefaultEnvironmentAndOverride(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OSWALD_TEST_INHERITED_MODEL_KEY=default-secret\nOSWALD_TEST_SHARED_KEY=default-shared\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	text := strings.Replace(disabledPlatformConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: ${OSWALD_TEST_SHARED_KEY}`, 1)
+	text := strings.Replace(disabledPlatformConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: ${OSWALD_TEST_SHARED_KEY}`, 1)
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestConfigErrorsCarrySafeDiagnostics(t *testing.T) {
 	}{
 		{
 			name:     "missing model credential",
-			text:     strings.Replace(disabledPlatformConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: ${OSWALD_TEST_MISSING_MODEL_KEY}`, 1),
+			text:     strings.Replace(disabledPlatformConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: ${OSWALD_TEST_MISSING_MODEL_KEY}`, 1),
 			wantCode: "config_variable_missing", wantPath: "providers.fake.key", wantVar: "OSWALD_TEST_MISSING_MODEL_KEY",
 		},
 		{
@@ -240,7 +240,7 @@ func TestConfigErrorsCarrySafeDiagnostics(t *testing.T) {
 
 func TestConfigErrorDiagnosticsAreEmittedSafely(t *testing.T) {
 	root := disabledPlatformFixture(t)
-	text := strings.Replace(disabledPlatformConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: "private-canary-${OSWALD_TEST_MISSING_MODEL_KEY}"`, 1)
+	text := strings.Replace(disabledPlatformConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: "private-canary-${OSWALD_TEST_MISSING_MODEL_KEY}"`, 1)
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}

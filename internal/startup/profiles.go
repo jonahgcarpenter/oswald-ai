@@ -42,6 +42,10 @@ type profileDependencies struct {
 	newGateways func(*config.Config, identity.Resolver, gatewayruntime.Dependencies, *config.Logger) ([]gateway.Service, error)
 }
 
+// brokerWorkerCount is fixed: the upstream model backend owns request queuing,
+// so the broker only needs one worker to drain its per-conversation lanes.
+const brokerWorkerCount = 1
+
 func runProfiles(ctx context.Context, cfg *config.Config, rootLog *config.Logger) error {
 	return runProfilesWith(ctx, cfg, rootLog, profileDependencies{newClient: func(cfg *config.Config, log *config.Logger) llm.Chatter {
 		return llm.NewGatewayClient(cfg.LLMGatewayURL, cfg.LLMGatewayAPIKey, cfg.LLMGatewayVirtualKey, log)
@@ -145,7 +149,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		imageWorkers = append(imageWorkers, worker)
 		log.Info("app.profile.initialized", "initialized profile runtime", config.F("user_id", name), config.F("status", "ok"))
 	}
-	requestBroker = broker.NewBroker(processor, cfg.WorkerPoolSize, rootLog.Server("broker"))
+	requestBroker = broker.NewBroker(processor, brokerWorkerCount, rootLog.Server("broker"))
 	requestBroker.Start()
 	profileDeps := map[string]gatewayruntime.Dependencies{}
 	for name, store := range stores {

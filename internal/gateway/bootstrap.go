@@ -8,7 +8,6 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/homeassistant"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/openai"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
@@ -27,19 +26,6 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 			services = append(services, api)
 		}
 	}
-	homeAssistantTokenSet := strings.TrimSpace(cfg.HomeAssistantAuthToken) != ""
-	homeAssistantPortSet := strings.TrimSpace(cfg.HomeAssistantListenPort) != ""
-	if homeAssistantTokenSet && homeAssistantPortSet {
-		homeAssistantGateway, err := homeassistant.New(cfg.HomeAssistantListenPort, cfg.HomeAssistantAuthToken, links, runtimeDeps, log)
-		if err != nil {
-			gatewayLog.Warn("gateway.homeassistant.config_invalid", "home assistant gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
-		} else {
-			services = append(services, homeAssistantGateway)
-		}
-	} else {
-		gatewayLog.Debug("gateway.homeassistant.disabled", "home assistant gateway is disabled", config.F("is_token_set", homeAssistantTokenSet), config.F("is_port_set", homeAssistantPortSet))
-	}
-
 	discordToken := strings.TrimSpace(cfg.DiscordToken)
 	if discordToken != "" {
 		discordGateway := &discord.Gateway{

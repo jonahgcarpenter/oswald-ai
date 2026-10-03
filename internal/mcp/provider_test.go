@@ -52,7 +52,7 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 			t.Fatal("home.tools schema unexpectedly includes limit parameter")
 		}
 	}
-	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "homeassistant", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
+	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "imessage", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
 	if tools := provider.DiscoveryTools(ctx, invalid); len(tools) != 0 {
 		t.Fatalf("invalid principal received discovery tools: %+v", tools)
 	}
@@ -160,7 +160,7 @@ func TestProviderEntryPointsRejectUnauthenticatedPrincipal(t *testing.T) {
 }
 
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 }
 
 func TestSearchToolsReturnsAllToolsWithoutQuery(t *testing.T) {

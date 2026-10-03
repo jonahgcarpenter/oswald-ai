@@ -40,7 +40,7 @@ import (
 func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
 	principal := identity.Principal{
 		CanonicalUserID: "user-1",
-		Gateway:         "homeassistant",
+		Gateway:         "imessage",
 		ExternalID:      "user-1",
 		Assurance:       identity.AssuranceSelfAsserted,
 	}
@@ -53,7 +53,7 @@ func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
 func TestStatelessClientHistoryDoesNotReplayOrPersistSession(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "answer"}}}}
 	a, store := newTestAgent(t, chat, nil, nil)
-	prior, err := processAgent(a, "prior", "homeassistant", "session", "user-1", "User", "sqlite-private-marker", nil, nil)
+	prior, err := processAgent(a, "prior", "imessage", "session", "user-1", "User", "sqlite-private-marker", nil, nil)
 	if err != nil || prior.SourceTurnID == 0 {
 		t.Fatalf("seed prior turn: %+v %v", prior, err)
 	}
@@ -64,7 +64,7 @@ func TestStatelessClientHistoryDoesNotReplayOrPersistSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	history := []llm.ChatMessage{{Role: "system", Content: "first client message"}, {Role: "user", Content: "second client message"}, {Role: "assistant", Content: "prior client reply"}, {Role: "assistant", Content: "second client reply"}, {Role: "user", Content: "unfinished client exchange"}}
-	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Prompt: "current question", Stateless: true, ClientHistory: history})
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "session", Prompt: "current question", Stateless: true, ClientHistory: history})
 	if err != nil || resp.SourceTurnID != 0 || resp.SessionGeneration != 0 || resp.Response != "stateless answer" {
 		t.Fatalf("stateless response=%+v err=%v", resp, err)
 	}
@@ -104,7 +104,7 @@ func TestStatelessClientHistoryValidationAndBudget(t *testing.T) {
 	chat := &fakeChatter{}
 	a, _ := newTestAgent(t, chat, nil, nil)
 	a.budget = budget.ContextBudget{PromptLimit: 512}
-	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Prompt: "question", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: strings.Repeat("x", 10000)}}})
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "session", Prompt: "question", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: strings.Repeat("x", 10000)}}})
 	if resp != nil || err == nil || !strings.Contains(err.Error(), "budget") || len(chat.requests) != 0 {
 		t.Fatalf("oversized history response=%+v err=%v requests=%d", resp, err, len(chat.requests))
 	}
@@ -204,7 +204,7 @@ func TestProcessReturnsBeforeProviderCallWhenCanceled(t *testing.T) {
 	cancel()
 	response, err := agent.Process(ctx, Request{
 		RequestID: "canceled", SessionKey: "session", Prompt: "hello",
-		Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken},
+		Principal: identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook},
 	})
 	if !errors.Is(err, context.Canceled) || response != nil {
 		t.Fatalf("response=%+v err=%v", response, err)
@@ -225,7 +225,7 @@ func TestProcessPropagatesCancellationDuringProviderCallWithoutPersistence(t *te
 	go func() {
 		response, err := agent.Process(ctx, Request{
 			RequestID: "canceled", SessionKey: "session", Prompt: "hello",
-			Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken},
+			Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook},
 		})
 		done <- struct {
 			response *Response
@@ -259,7 +259,7 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{testInputImage(t, 800, 600)}, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "[Replying to Alice: \"old\"]\n\nnew prompt", []llm.InputImage{testInputImage(t, 800, 600)}, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, reg)
 
 	var chunks []StreamChunk
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -458,7 +458,7 @@ func TestProcessOffersFileMemoryTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
-	if _, err := processAgent(agent, "retrieval-only", "homeassistant", "session", "user-1", "Display", "hello", nil, nil); err != nil {
+	if _, err := processAgent(agent, "retrieval-only", "imessage", "session", "user-1", "Display", "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -479,7 +479,6 @@ func TestProcessHidesImageGenerationForTextOnlyGateways(t *testing.T) {
 	}{
 		{name: "discord text only", gateway: "discord", wantImage: true},
 		{name: "discord with image", gateway: "discord", images: []llm.InputImage{testInputImage(t, 2, 2)}, wantImage: true},
-		{name: "home assistant", gateway: "homeassistant", images: []llm.InputImage{testInputImage(t, 2, 2)}},
 		{name: "openai", gateway: "openai"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -528,7 +527,7 @@ func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.toolPolicy.MaxToolIterations = 1
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -568,7 +567,7 @@ func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	if _, err := processAgent(agent, "duplicate", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+	if _, err := processAgent(agent, "duplicate", "imessage", "session", "user-1", "User", "lookup", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(invocations, ","); got != "same,different" {
@@ -604,7 +603,7 @@ func TestProcessAllowsExactRetryAfterToolFailure(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	if _, err := processAgent(agent, "retry", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+	if _, err := processAgent(agent, "retry", "imessage", "session", "user-1", "User", "lookup", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if invocations != 2 {
@@ -636,7 +635,7 @@ func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	if _, err := processAgent(agent, "retire", "homeassistant", "session", "user-1", "User", "search", nil, nil); err != nil {
+	if _, err := processAgent(agent, "retire", "imessage", "session", "user-1", "User", "search", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -666,7 +665,7 @@ func TestProcessGlobalCapMidBatchEmitsResultForEveryCall(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.toolPolicy.MaxExecutions = 1
 
-	response, err := processAgent(agent, "cap", "homeassistant", "session", "user-1", "User", "lookup", nil, nil)
+	response, err := processAgent(agent, "cap", "imessage", "session", "user-1", "User", "lookup", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +702,7 @@ func TestProcessNormalizesMissingToolCallIDsConsistently(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	if _, err := processAgent(agent, "ids", "homeassistant", "session", "user-1", "User", "lookup", nil, nil); err != nil {
+	if _, err := processAgent(agent, "ids", "imessage", "session", "user-1", "User", "lookup", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[1].Messages
@@ -751,7 +750,7 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 	}
 	agent, store := newTestAgent(t, chat, nil, reg)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -787,7 +786,7 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, nil)
 
 	var chunks []StreamChunk
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -829,7 +828,7 @@ func TestProcessRetriesTemporaryOllamaParserErrorWithTools(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -854,7 +853,7 @@ func TestProcessUsesFriendlyFallbackAfterRepeatedOllamaParserError(t *testing.T)
 	agent, store := newTestAgent(t, chat, nil, nil)
 	var chunks []StreamChunk
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -885,7 +884,7 @@ func TestProcessDoesNotRetryUnrelatedModelError(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: "out of memory"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -904,7 +903,7 @@ func TestProcessRetriesStoppedModelRunnerWithExponentiallySmallerImages(t *testi
 	agent, _ := newTestAgent(t, chat, nil, nil)
 	input := testInputImage(t, 800, 600)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", []llm.InputImage{input}, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", []llm.InputImage{input}, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -933,7 +932,7 @@ func TestProcessUsesImageSizeFallbackAfterFiveStoppedRunnerAttempts(t *testing.T
 	agent, store := newTestAgent(t, chat, nil, nil)
 	var chunks []StreamChunk
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", []llm.InputImage{testInputImage(t, 800, 600)}, func(chunk StreamChunk) {
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", []llm.InputImage{testInputImage(t, 800, 600)}, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -971,7 +970,7 @@ func TestProcessDoesNotRetryStoppedModelRunnerWithoutImages(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 500, Body: `model runner has unexpectedly stopped`}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	resp, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -986,7 +985,7 @@ func TestProcessFailsWhenTenantProfileCannotBeResolved(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil); err == nil {
+	if _, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil); err == nil {
 		t.Fatal("expected profile resolution failure")
 	}
 	if len(chat.requests) != 0 {
@@ -1013,7 +1012,7 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 			t.Fatal(err)
 		}
 	}
-	_, err = processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "follow up", nil, nil)
+	_, err = processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "follow up", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -1044,7 +1043,7 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	if err := store.publishSummary(context.Background(), "user-1", "session-1", profile.Generation, 2, memory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-summary", "homeassistant", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-summary", "imessage", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
@@ -1093,14 +1092,14 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 	if err := os.WriteFile(soulPath, []byte("You are the new default."), 0o600); err != nil {
 		t.Fatalf("change default template: %v", err)
 	}
-	if _, err := processAgent(agent, "req-2", "homeassistant", "session-2", "user-1", "Display", "second question", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-2", "discord", "session-2", "user-1", "Display", "second question", nil, nil); err != nil {
 		t.Fatalf("second process: %v", err)
 	}
 	secondSystem := primaryRequests(chat.requests)[1].Messages[0]
 	if secondSystem.Role != "system" || secondSystem.Content != "You are Oswald after a manual edit." {
 		t.Fatalf("manual soul edit was not reloaded as the system prompt: %+v", secondSystem)
 	}
-	if _, err := processAgent(agent, "req-3", "homeassistant", "session-3", "user-2", "Display", "third question", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-3", "discord", "session-3", "user-2", "Display", "third question", nil, nil); err != nil {
 		t.Fatalf("third process: %v", err)
 	}
 	thirdSystem := primaryRequests(chat.requests)[2].Messages[0]
@@ -1113,7 +1112,7 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
-	_, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "discord", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -1129,7 +1128,7 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, nil)
 	intro := "You are speaking with user-1."
 
-	_, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Display", "question", nil, nil)
+	_, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -1191,7 +1190,7 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	agent, _ := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
 
-	resp, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
+	resp, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -1233,7 +1232,7 @@ func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
 			if streaming {
 				callback = func(StreamChunk) {}
 			}
-			resp, err := processAgent(a, "req-mcp-batch", "homeassistant", "session-mcp-batch", "user-1", "User", "turn on office light", nil, callback)
+			resp, err := processAgent(a, "req-mcp-batch", "imessage", "session-mcp-batch", "user-1", "User", "turn on office light", nil, callback)
 			if err != nil || resp == nil || resp.Response != "done" {
 				t.Fatalf("process = %+v, %v", resp, err)
 			}
@@ -1290,7 +1289,7 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
@@ -1327,7 +1326,7 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 	if err := store.publishSummary(context.Background(), "user-1", "session-mcp", profile.Generation, 2, memory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	request := primaryRequests(chat.requests)[0]
@@ -1356,7 +1355,7 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Project is Atlas."}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-1", "homeassistant", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Ada", "first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	firstFiles := primaryRequests(chat.requests)[0].Messages[0].Content
@@ -1366,10 +1365,10 @@ func TestProcessFreezesFileMemoryWithinSession(t *testing.T) {
 	if _, err := fileStore.Apply(context.Background(), "user-1", "memory", []files.Operation{{Action: "add", Content: "Replies should be concise."}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-2", "homeassistant", "session-1", "user-1", "Ada", "second", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-2", "imessage", "session-1", "user-1", "Ada", "second", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-3", "homeassistant", "session-2", "user-1", "Ada", "third", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-3", "imessage", "session-2", "user-1", "Ada", "third", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -1400,7 +1399,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 	}
 	agent, _ := newTestAgent(t, chat, nil, reg)
 	agent.SetFileMemory(fileStore)
-	if _, err := processAgent(agent, "write-file", "homeassistant", "session", "user-1", "User", "remember this", nil, nil); err != nil {
+	if _, err := processAgent(agent, "write-file", "imessage", "session", "user-1", "User", "remember this", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -1411,7 +1410,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 	if result == nil || result.Content != "Memory updated (current/limit chars: 17/2200).\nProject is Atlas." {
 		t.Fatalf("write result not visible in current round: %+v", requests)
 	}
-	if _, err := processAgent(agent, "read-file", "homeassistant", "session", "user-1", "User", "what did I save?", nil, nil); err != nil {
+	if _, err := processAgent(agent, "read-file", "imessage", "session", "user-1", "User", "what did I save?", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests = primaryRequests(chat.requests)
@@ -1423,7 +1422,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 			t.Fatalf("file write tool result replayed into next request: %+v", requests[2].Messages)
 		}
 	}
-	if _, err := processAgent(agent, "next-session", "homeassistant", "another-session", "user-1", "User", "what did I save?", nil, nil); err != nil {
+	if _, err := processAgent(agent, "next-session", "imessage", "another-session", "user-1", "User", "what did I save?", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if requests = primaryRequests(chat.requests); len(requests) != 4 || !strings.Contains(requests[3].Messages[0].Content, "Project is Atlas.") {
@@ -1444,10 +1443,10 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := processAgent(agent, "req-a", "homeassistant", "shared-session", "user-1", "Alice", "hello", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-a", "imessage", "shared-session", "user-1", "Alice", "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := processAgent(agent, "req-b", "homeassistant", "shared-session", "user-2", "Bob", "hello", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-b", "imessage", "shared-session", "user-2", "Bob", "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -1469,7 +1468,7 @@ func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
 		}
 	}
 
-	if _, err := processAgent(agent, "req-mcp", "homeassistant", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
+	if _, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
@@ -1485,7 +1484,7 @@ func TestProcessDoesNotAutomaticallyInjectGlobalMemory(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	defer store.Close()
-	if _, err := processAgent(agent, "request", "homeassistant", "session", "user-1", "User", "hello", nil, nil); err != nil {
+	if _, err := processAgent(agent, "request", "imessage", "session", "user-1", "User", "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -1514,7 +1513,7 @@ func TestAgentKeepsDefaultVisibleMemoryAfterGlobalMCPResult(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, reg)
 	defer store.Close()
 	agent.mcpProvider = &fakeMCPProvider{scope: mcp.ScopeGlobal}
-	if _, err := processAgent(agent, "request", "homeassistant", "session", "user-1", "User", "check the deployment", nil, nil); err != nil {
+	if _, err := processAgent(agent, "request", "imessage", "session", "user-1", "User", "check the deployment", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
@@ -1661,7 +1660,7 @@ func processAgent(agent *Agent, requestID, gateway, sessionKey, userID, displayN
 	if fixture, ok := agent.userMemory.(*agentMemoryFixture); ok {
 		agent.soul = soul.NewProfileStore(filepath.Join(fixture.root, userID), userID, fixture.defaultSoul)
 	}
-	assurance := identity.AssuranceHomeAssistantToken
+	assurance := identity.AssuranceBlueBubblesWebhook
 	switch gateway {
 	case "discord":
 		assurance = identity.AssuranceDiscordGateway

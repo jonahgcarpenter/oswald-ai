@@ -10,7 +10,7 @@ import (
 const syntheticProfileConfig = `providers:
   fake:
     api: "http://localhost:9999/v1"
-    key_env: PROFILE_TEST_MODEL_KEY
+    key: "${PROFILE_TEST_MODEL_KEY}"
 model:
   provider: custom:fake
   default: fake/model

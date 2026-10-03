@@ -581,7 +581,7 @@ func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agen
 }
 
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "external-" + userID, Assurance: identity.AssuranceHomeAssistantToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: "external-" + userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 }
 
 type runtimeFakeChatter struct{}

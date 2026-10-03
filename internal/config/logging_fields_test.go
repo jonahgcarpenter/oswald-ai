@@ -37,7 +37,7 @@ func TestInfoOperationalMetadataCompleteness(t *testing.T) {
 		"command":      "help", "command_name": "unknown", "prior_release": "v4.0.8", "target_release": "v4.0.9",
 		"mode": "text_to_image", "server": "github", "remote_tool_name": "list_issues", "tool_outcome": "unproductive",
 		"embedding_model": "ollama/nomic-embed-text:latest", "log_level": "info", "default_method": "private-api",
-		"normalized_mime": "image/png", "event_type": "READY", "gateways": "discord, imessage, homeassistant",
+		"normalized_mime": "image/png", "event_type": "READY", "gateways": "discord, imessage, openai",
 		"tools": "memory,web_search", "phase": "connect", "reason_code": "no_results",
 		"request_kind": "prompt", "prompt_type": "text_image", "execution_status": "ok", "delivery_status": "ok",
 		"persistence_status": "pending", "response_kind": "answer", "record_kind": "measurement", "workload": "foreground",

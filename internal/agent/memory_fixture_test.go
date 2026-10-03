@@ -25,7 +25,7 @@ func fixtureSession(key string) string {
 	if strings.Contains(key, ":") {
 		return key
 	}
-	return "homeassistant:" + key
+	return "imessage:" + key
 }
 func (s *agentMemoryFixture) Close() error {
 	var errs []error

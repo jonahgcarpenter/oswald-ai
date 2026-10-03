@@ -25,7 +25,7 @@ func TestProfileInterpolationRetainsScalarTypes(t *testing.T) {
 }
 
 func TestEmptyProcessCredentialOverridesDotenv(t *testing.T) {
-	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key_env: PROFILE_TEST_MODEL_KEY", `key: "${OSWALD_TEST_EMPTY_OVERRIDE}"`, 1))
+	root := profileConfigFixture(t, strings.Replace(syntheticProfileConfig, "key: \"${PROFILE_TEST_MODEL_KEY}\"", `key: "${OSWALD_TEST_EMPTY_OVERRIDE}"`, 1))
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("OSWALD_TEST_EMPTY_OVERRIDE=private-secret\n"), 0600); err != nil {
 		t.Fatal(err)
 	}

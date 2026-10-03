@@ -45,12 +45,12 @@ func TestRejectedLaneOperationReleasesReaderReservation(t *testing.T) {
 	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
 	defer b.Shutdown()
 	for i := 0; i < requestQueueSize+b.workerCount; i++ {
-		principal := identity.Principal{CanonicalUserID: fmt.Sprintf("filler-%d", i), Gateway: "homeassistant", ExternalID: fmt.Sprintf("filler-%d", i), Assurance: identity.AssuranceHomeAssistantToken}
+		principal := identity.Principal{CanonicalUserID: fmt.Sprintf("filler-%d", i), Gateway: "imessage", ExternalID: fmt.Sprintf("filler-%d", i), Assurance: identity.AssuranceBlueBubblesWebhook}
 		if err := b.Submit(&Request{Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	if err := b.RunInLane(context.Background(), user, "session", func() error { return nil }); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("rejected lane error = %v", err)
 	}
@@ -78,7 +78,7 @@ func TestBrokerForwardsStatelessClientHistory(t *testing.T) {
 	b.Start()
 	defer b.Shutdown()
 	history := []llm.ChatMessage{{Role: "user", Content: "earlier"}}
-	req := &Request{Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Stateless: true, ClientHistory: history, ResponseChan: make(chan Result, 1)}
+	req := &Request{Principal: identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "session", Stateless: true, ClientHistory: history, ResponseChan: make(chan Result, 1)}
 	if err := b.Submit(req); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestLowPriorityPermitYieldsToAcceptedForegroundWork(t *testing.T) {
 	}
 
 	req := &Request{
-		RequestID: "foreground", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken},
+		RequestID: "foreground", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook},
 		SessionKey: "session", ResponseChan: make(chan Result, 1),
 	}
 	if err := b.Submit(req); err != nil {
@@ -157,12 +157,12 @@ func TestWorkerForwardsPrincipalToProcessor(t *testing.T) {
 	b.Start()
 	defer b.Shutdown()
 
-	principal := identity.Principal{CanonicalUserID: "usr_1", Gateway: "homeassistant", ExternalID: "alice", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "usr_1", Gateway: "imessage", ExternalID: "alice", Assurance: identity.AssuranceBlueBubblesWebhook}
 	req := &Request{
 		RequestID:    "req-1",
 		Principal:    principal,
 		DisplayName:  "Alice",
-		SessionKey:   "homeassistant:alice",
+		SessionKey:   "imessage:alice",
 		Prompt:       "hello",
 		ResponseChan: make(chan Result, 1),
 	}
@@ -191,7 +191,7 @@ func TestBrokerSerializesSameLaneFIFO(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	secondStarted := make(chan struct{})
@@ -232,7 +232,7 @@ func TestBrokerRunsDifferentLanesInParallel(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	var wg sync.WaitGroup
@@ -262,7 +262,7 @@ func TestBrokerHotLaneDoesNotOccupyOtherWorker(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	firstStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
@@ -297,7 +297,7 @@ func TestBrokerSameSessionDifferentUsersRunInParallel(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	for _, userID := range []string{"one", "two"} {
-		principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
+		principal := identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 		go func() {
 			_ = b.RunInLane(context.Background(), principal, "shared", func() error { started <- userID; <-release; return nil })
 		}()
@@ -316,7 +316,7 @@ func TestBrokerUserExclusiveFencesAllUserSessions(t *testing.T) {
 	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	activeStarted := make(chan struct{}, 2)
 	releaseActive := make(chan struct{})
 	for _, sessionID := range []string{"one", "two"} {
@@ -371,8 +371,8 @@ func TestBrokerUserExclusiveDoesNotOvertakeAcceptedReader(t *testing.T) {
 	b := NewBroker(nil, 1, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	blocker := identity.Principal{CanonicalUserID: "blocker", Gateway: "homeassistant", ExternalID: "blocker", Assurance: identity.AssuranceHomeAssistantToken}
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	blocker := identity.Principal{CanonicalUserID: "blocker", Gateway: "imessage", ExternalID: "blocker", Assurance: identity.AssuranceBlueBubblesWebhook}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	releaseBlocker := make(chan struct{})
 	blockerStarted := make(chan struct{})
 	go func() {
@@ -432,7 +432,7 @@ func TestBrokerUserExclusiveDoesNotOvertakeSameLaneFollower(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	headStarted := make(chan struct{})
 	releaseHead := make(chan struct{})
 	order := make(chan string, 2)
@@ -493,7 +493,7 @@ func TestBrokerRetainsConfiguredProfileFence(t *testing.T) {
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "homeassistant", ExternalID: "winner", Assurance: identity.AssuranceHomeAssistantToken}
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "imessage", ExternalID: "winner", Assurance: identity.AssuranceBlueBubblesWebhook}
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
@@ -533,8 +533,8 @@ func TestBrokerDoesNotTransferOwnershipToAnUnrelatedProfileFence(t *testing.T) {
 	b := NewBroker(processor, 2, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "homeassistant", ExternalID: "winner", Assurance: identity.AssuranceHomeAssistantToken}
-	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "homeassistant", ExternalID: "loser", Assurance: identity.AssuranceHomeAssistantToken}
+	winner := identity.Principal{CanonicalUserID: "winner", Gateway: "imessage", ExternalID: "winner", Assurance: identity.AssuranceBlueBubblesWebhook}
+	loser := identity.Principal{CanonicalUserID: "loser", Gateway: "imessage", ExternalID: "loser", Assurance: identity.AssuranceBlueBubblesWebhook}
 	exclusiveStarted := make(chan struct{})
 	releaseExclusive := make(chan struct{})
 	go func() {
@@ -576,8 +576,8 @@ func TestBrokerUserExclusiveDoesNotFenceOtherUsersAndReleasesAfterPanic(t *testi
 	b := NewBroker(nil, 3, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	user := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
-	other := identity.Principal{CanonicalUserID: "other", Gateway: "homeassistant", ExternalID: "other", Assurance: identity.AssuranceHomeAssistantToken}
+	user := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
+	other := identity.Principal{CanonicalUserID: "other", Gateway: "imessage", ExternalID: "other", Assurance: identity.AssuranceBlueBubblesWebhook}
 	exclusiveStarted := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
@@ -606,8 +606,8 @@ func TestBrokerUsersExclusiveUsesStableOrderAndFencesEveryUser(t *testing.T) {
 	b := NewBroker(nil, 4, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	a := identity.Principal{CanonicalUserID: "a", Gateway: "homeassistant", ExternalID: "a", Assurance: identity.AssuranceHomeAssistantToken}
-	bUser := identity.Principal{CanonicalUserID: "b", Gateway: "homeassistant", ExternalID: "b", Assurance: identity.AssuranceHomeAssistantToken}
+	a := identity.Principal{CanonicalUserID: "a", Gateway: "imessage", ExternalID: "a", Assurance: identity.AssuranceBlueBubblesWebhook}
+	bUser := identity.Principal{CanonicalUserID: "b", Gateway: "imessage", ExternalID: "b", Assurance: identity.AssuranceBlueBubblesWebhook}
 
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -668,7 +668,7 @@ func TestBrokerUsersExclusiveReleasesAllFencesAfterPanic(t *testing.T) {
 		t.Fatal("exclusive panic was not returned")
 	}
 	for _, userID := range []string{"a", "b"} {
-		principal := identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
+		principal := identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 		if err := b.RunInLane(context.Background(), principal, "after", func() error { return nil }); err != nil {
 			t.Fatalf("fence %s remained locked: %v", userID, err)
 		}
@@ -678,7 +678,7 @@ func TestBrokerUsersExclusiveReleasesAllFencesAfterPanic(t *testing.T) {
 func TestBrokerShutdownDrainsLaneFollowers(t *testing.T) {
 	b := NewBroker(nil, 2, config.NewLogger(config.LevelError))
 	b.Start()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	firstStarted := make(chan struct{})
 	release := make(chan struct{})
 	completed := make(chan string, 2)
@@ -742,7 +742,7 @@ func TestBrokerShutdownCancelsActiveAgentRequest(t *testing.T) {
 	processor := &cancelProcessor{started: make(chan struct{})}
 	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
 	b.Start()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	req := &Request{RequestID: "active", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
 	if err := b.Submit(req); err != nil {
 		t.Fatal(err)
@@ -766,7 +766,7 @@ func TestCancelActiveAgentWorkPreservesQueuedRequest(t *testing.T) {
 	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
 	b.Start()
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	active := &Request{RequestID: "active", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
 	queued := &Request{RequestID: "queued", Principal: principal, SessionKey: "session", ResponseChan: make(chan Result, 1)}
 	if err := b.Submit(active); err != nil {
@@ -802,7 +802,7 @@ func TestCancelAllAgentWorkImmediatelyCompletesQueuedRequests(t *testing.T) {
 	processor := &captureProcessor{requests: make(chan agent.Request, 2)}
 	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
 	defer b.Shutdown()
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "user", Assurance: identity.AssuranceHomeAssistantToken}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "imessage", ExternalID: "user", Assurance: identity.AssuranceBlueBubblesWebhook}
 	requests := []*Request{
 		{RequestID: "one", Principal: principal, SessionKey: "one", ResponseChan: make(chan Result, 1)},
 		{RequestID: "two", Principal: principal, SessionKey: "two", ResponseChan: make(chan Result, 1)},

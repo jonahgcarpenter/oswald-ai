@@ -16,8 +16,6 @@ type Config struct {
 	BlueBubblesPolicy              AdmissionPolicy
 	DiscordGroupRequireMention     bool
 	BlueBubblesGroupRequireMention bool
-	HomeAssistantListenPort        string
-	HomeAssistantAuthToken         string
 	BlueBubblesListenPort          string
 	BlueBubblesURL                 string
 	BlueBubblesPassword            string
@@ -34,7 +32,6 @@ type Config struct {
 	SearxngURL                     string
 	ComfyUIURL                     string
 	ComfyUIGenerationTimeout       time.Duration
-	WorkerPoolSize                 int
 	LogLevel                       Level
 }
 

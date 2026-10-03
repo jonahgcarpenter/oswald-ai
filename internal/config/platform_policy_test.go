@@ -8,7 +8,7 @@ import (
 const policyPlatformConfig = `providers:
   fake:
     api: "http://localhost:9999/v1"
-    key_env: PROFILE_TEST_MODEL_KEY
+    key: "${PROFILE_TEST_MODEL_KEY}"
 model:
   provider: custom:fake
   default: fake/model
@@ -52,7 +52,7 @@ func blueBubblesPolicyFixture(t *testing.T, extra string) string {
 	return profileConfigFixture(t, `providers:
   fake:
     api: "http://localhost:9999/v1"
-    key_env: PROFILE_TEST_MODEL_KEY
+    key: "${PROFILE_TEST_MODEL_KEY}"
 model:
   provider: custom:fake
   default: fake/model

@@ -118,7 +118,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
-	response, err := processAgent(agent, "compact-tool", "homeassistant", "session", "user-1", "User", "research this", nil, func(chunk StreamChunk) {
+	response, err := processAgent(agent, "compact-tool", "imessage", "session", "user-1", "User", "research this", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -157,7 +157,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
-	response, err := processAgent(agent, "compact-overflow", "homeassistant", "session", "user-1", "User", "continue exactly", nil, func(chunk StreamChunk) {
+	response, err := processAgent(agent, "compact-overflow", "imessage", "session", "user-1", "User", "continue exactly", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -203,7 +203,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	}
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Delivered conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
-	response, err := processAgent(agent, "gap-pages", "homeassistant", "session", "user-1", "User", "continue", nil, nil)
+	response, err := processAgent(agent, "gap-pages", "imessage", "session", "user-1", "User", "continue", nil, nil)
 	if err != nil || response.Response != "continued" || len(compactor.calls) != 1 {
 		t.Fatalf("response=%+v err=%v calls=%d", response, err, len(compactor.calls))
 	}
@@ -233,7 +233,7 @@ func TestProcessPropagatesCancellationDuringForegroundCompaction(t *testing.T) {
 
 	response, err := agent.Process(ctx, Request{
 		RequestID: "compact-canceled", SessionKey: "session", Prompt: "continue",
-		Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken},
+		Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook},
 	})
 	if !errors.Is(err, context.Canceled) || response != nil || len(chat.requests) != 1 {
 		t.Fatalf("response=%+v err=%v provider_calls=%d", response, err, len(chat.requests))
@@ -257,7 +257,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "The lookup completed."}}
 	agent.SetForegroundCompactor(compactor)
 
-	response, err := processAgent(agent, "compact-final", "homeassistant", "session", "user-1", "User", "look this up", nil, nil)
+	response, err := processAgent(agent, "compact-final", "imessage", "session", "user-1", "User", "look this up", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestProcessRecoversProviderOverflowOnEmptyResponseRetry(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Prior conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
 
-	response, err := processAgent(agent, "compact-empty", "homeassistant", "session", "user-1", "User", "answer this", nil, nil)
+	response, err := processAgent(agent, "compact-empty", "imessage", "session", "user-1", "User", "answer this", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

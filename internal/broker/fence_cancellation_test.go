@@ -57,7 +57,7 @@ func TestRunUsersExclusiveRejectionReleasesAllWriterReservations(t *testing.T) {
 			processor := &captureProcessor{requests: make(chan agent.Request, capacity)}
 			b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
 			defer b.Shutdown()
-			user := identity.Principal{CanonicalUserID: "a", ExternalID: "a", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}
+			user := identity.Principal{CanonicalUserID: "a", ExternalID: "a", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook}
 			var requests []*Request
 			for range capacity {
 				req := &Request{Principal: user, SessionKey: "filler", ResponseChan: make(chan Result, 1)}
@@ -176,7 +176,7 @@ func TestCancelAllAgentWorkPreservesCommandsAndFencesUntilProcessorReturns(t *te
 		exclusiveOnce.Do(func() { close(releaseExclusive) })
 		b.Shutdown()
 	}()
-	user := identity.Principal{CanonicalUserID: "a", ExternalID: "a", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}
+	user := identity.Principal{CanonicalUserID: "a", ExternalID: "a", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook}
 	active := &Request{RequestID: "active", Principal: user, SessionKey: "session", ResponseChan: make(chan Result, 2)}
 	queued := &Request{RequestID: "queued", Principal: user, SessionKey: "session", ResponseChan: make(chan Result, 2)}
 	if err := b.Submit(active); err != nil {

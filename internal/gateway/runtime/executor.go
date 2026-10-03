@@ -29,7 +29,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 	gateway := "unknown"
 	switch req.Principal.Gateway {
-	case "discord", "imessage", "homeassistant", "openai":
+	case "discord", "imessage", "openai":
 		gateway = req.Principal.Gateway
 	}
 	log := deps.Log.Server("gateway.runtime", config.F("gateway", gateway))

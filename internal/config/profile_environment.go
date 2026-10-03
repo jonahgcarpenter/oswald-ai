@@ -82,34 +82,20 @@ func (e profileEnvironment) lookup(name string) (string, bool) {
 
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-func (e profileEnvironment) credential(literal *string, name string, required bool) (string, error) {
+// credential resolves a literal credential value. Values are already expanded
+// from "${VAR}" references before decoding, so a nil field means the credential
+// is not configured; a declared but empty value is rejected when required.
+func credential(literal *string, required bool) (string, error) {
 	if literal == nil {
-		return e.secret(name, required)
-	}
-	if name != "" {
-		return "", configVarErr("config_credential_conflict", name, "")
-	}
-	if required && strings.TrimSpace(*literal) == "" {
-		return "", configErr("config_credential_missing", "")
-	}
-	return *literal, nil
-}
-
-func (e profileEnvironment) secret(name string, required bool) (string, error) {
-	if name == "" {
 		if required {
 			return "", configErr("config_credential_missing", "")
 		}
 		return "", nil
 	}
-	if !environmentName.MatchString(name) {
-		return "", configVarErr("config_credential_invalid", name, "")
+	if required && strings.TrimSpace(*literal) == "" {
+		return "", configErr("config_credential_missing", "")
 	}
-	value, _ := e.lookup(name)
-	if required && strings.TrimSpace(value) == "" {
-		return "", configVarErr("config_credential_missing", name, "")
-	}
-	return value, nil
+	return *literal, nil
 }
 
 // interpolate resolves Compose-style references without mutating os.Environ.
@@ -286,10 +272,10 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 			n.Value = value
 			// Numeric and boolean configuration fields remain typed even when
 			// their YAML source is a quoted environment reference.
-			if strings.HasPrefix(path, "platforms.") || (strings.HasPrefix(path, "mcp.servers.") && strings.Count(path, ".") == 3 && strings.HasSuffix(path, ".enabled")) || path == "runtime.worker_pool_size" || path == "model.context_length" {
+			if strings.HasPrefix(path, "platforms.") || (strings.HasPrefix(path, "mcp.servers.") && strings.Count(path, ".") == 3 && strings.HasSuffix(path, ".enabled")) || path == "model.context_length" {
 				key := path[strings.LastIndex(path, ".")+1:]
 				switch key {
-				case "api_port", "webhook_port", "listen_port", "worker_pool_size", "context_length":
+				case "api_port", "webhook_port", "context_length":
 					if _, err := strconv.Atoi(value); err != nil {
 						return configErr("config_value_invalid", path)
 					}

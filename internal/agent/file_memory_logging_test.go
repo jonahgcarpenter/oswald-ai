@@ -37,7 +37,7 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 	log.SetOutput(&output)
 	a.log = log
 	for _, requestID := range []string{"first-request", "second-request"} {
-		if _, err := processAgent(a, requestID, "homeassistant", "session", "user-1", "private-display@example.test", "private-prompt", nil, nil); err != nil {
+		if _, err := processAgent(a, requestID, "imessage", "session", "user-1", "private-display@example.test", "private-prompt", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if requestID == "first-request" {
@@ -102,7 +102,7 @@ func TestProcessFileMemoryReadFailureWarnsWithoutModelSubmission(t *testing.T) {
 	a.log = log
 	response, err := a.Process(context.Background(), Request{
 		RequestID:  "failed-read",
-		Principal:  identity.Principal{CanonicalUserID: "user-1", ExternalID: "private-external-canary", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken},
+		Principal:  identity.Principal{CanonicalUserID: "user-1", ExternalID: "private-external-canary", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook},
 		SessionKey: "private-session-canary", Prompt: "private-prompt-canary",
 	})
 	if err == nil || response != nil || !strings.Contains(err.Error(), "read file memory") {
@@ -146,14 +146,14 @@ func TestProcessRejectsIncompleteSessionFileMemorySnapshot(t *testing.T) {
 	if _, err := store.ResolveSessionContext(ctx, "user-1", "session", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.sql.Exec(`INSERT INTO state_meta(key,value) SELECT 'oswald:v1:files:'||id,'{"version":1,"user":"private-profile-canary"}' FROM sessions WHERE profile_name='user-1' AND session_key='homeassistant:session'`); err != nil {
+	if _, err := store.sql.Exec(`INSERT INTO state_meta(key,value) SELECT 'oswald:v1:files:'||id,'{"version":1,"user":"private-profile-canary"}' FROM sessions WHERE profile_name='user-1' AND session_key='imessage:session'`); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
 	log := config.NewLogger(config.LevelInfo)
 	log.SetOutput(&output)
 	agent.log = log
-	response, err := processAgent(agent, "invalid-snapshot", "homeassistant", "session", "user-1", "User", "prompt", nil, nil)
+	response, err := processAgent(agent, "invalid-snapshot", "imessage", "session", "user-1", "User", "prompt", nil, nil)
 	if err == nil || response != nil || len(chat.requests) != 0 || !strings.Contains(output.String(), `"event":"agent.memory.files.bind_failed"`) || strings.Contains(output.String(), "private-profile-canary") {
 		t.Fatalf("invalid snapshot response=%+v err=%v calls=%d", response, err, len(chat.requests))
 	}

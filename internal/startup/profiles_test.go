@@ -46,7 +46,7 @@ func profileStartupFixture(t *testing.T) *config.Config {
 	if err := os.WriteFile(filepath.Join(root, "SOUL.md"), []byte("synthetic default policy"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*config.Config{}, OpenAIListenPort: "12345", WorkerPoolSize: 1, LLMGatewayModel: "fake/default", LLMGatewayURL: "http://synthetic.invalid", ComfyUIGenerationTimeout: config.DefaultRetentionPolicy().MaintenanceInterval}
+	cfg := &config.Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*config.Config{}, OpenAIListenPort: "12345", LLMGatewayModel: "fake/default", LLMGatewayURL: "http://synthetic.invalid", ComfyUIGenerationTimeout: config.DefaultRetentionPolicy().MaintenanceInterval}
 	for _, name := range []string{"alice", "api"} {
 		path := filepath.Join(root, "profiles", name)
 		if err := os.MkdirAll(path, 0700); err != nil {

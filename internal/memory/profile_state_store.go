@@ -116,7 +116,7 @@ func (s *ProfileStore) scope(owner, key string) (string, error) {
 		return "", errors.New("invalid profile session scope")
 	}
 	source, _, ok := strings.Cut(key, ":")
-	if !ok || (source != "discord" && source != "imessage" && source != "homeassistant") {
+	if !ok || (source != "discord" && source != "imessage") {
 		return "", errors.New("invalid profile session source")
 	}
 	return source, nil
