@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // ProfileRoute binds a transport-authenticated identity to an operator profile.
@@ -124,10 +126,10 @@ var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 // ValidProfileName excludes traversal, hidden entries, and the reserved default name.
 func ValidProfileName(name string) bool { return name != "default" && profileNameRE.MatchString(name) }
 
-func privateDirectory(path string) error {
+func privateDirectory(path, source string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return err
+		return withConfigSource(configErr("config_dir_unavailable", ""), source)
 	}
 	current := string(os.PathSeparator)
 	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
@@ -137,13 +139,132 @@ func privateDirectory(path string) error {
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
 		if err != nil {
-			return errors.New("profile directory is unavailable")
+			return withConfigSource(configErr("config_dir_unavailable", ""), source)
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (current == abs && info.Mode().Perm()&0077 != 0) {
-			return errors.New("unsafe profile directory")
+			return withConfigSource(configErr("config_dir_unsafe", ""), source)
 		}
 	}
 	return nil
+}
+
+// knownPlatforms bounds configured platform names before any validation.
+var knownPlatforms = map[string]bool{"discord": true, "bluebubbles": true, "api": true, "homeassistant": true}
+
+var platformTopKeys = map[string]bool{"enabled": true, "extra": true}
+
+var platformExtraKeys = map[string]bool{
+	"token_env": true, "token": true, "dm_policy": true, "allow_from": true,
+	"guild_require_mention": true, "group_require_mention": true,
+	"server_url": true, "server_password_env": true, "server_password": true,
+	"webhook_host": true, "webhook_port": true,
+	"api_host": true, "api_port": true,
+	"auth_token_env": true, "auth_token": true, "listen_port": true,
+}
+
+func mappingValueIndex(node *yaml.Node, key string) int {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return -1
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// platformEnabled resolves only a platform's enabled flag. An unset variable
+// gating the flag leaves the platform disabled rather than failing the load.
+func platformEnabled(name string, node *yaml.Node, env profileEnvironment) (bool, error) {
+	index := mappingValueIndex(node, "enabled")
+	if index < 0 {
+		return false, nil
+	}
+	value := node.Content[index]
+	path := "platforms." + name + ".enabled"
+	if value.Kind != yaml.ScalarNode {
+		return false, configErr("config_platform_enabled_invalid", path)
+	}
+	switch value.Tag {
+	case "!!bool":
+		return value.Value == "true", nil
+	case "!!str":
+		resolved, err := env.interpolateOptional(value.Value)
+		if err != nil {
+			return false, withConfigPath(err, path)
+		}
+		switch strings.TrimSpace(resolved) {
+		case "", "false":
+			return false, nil
+		case "true":
+			return true, nil
+		}
+	}
+	return false, configErr("config_platform_enabled_invalid", path)
+}
+
+// validatePlatformKeys rejects unknown or duplicate keys without resolving any
+// values, so a disabled platform can still report a typo.
+func validatePlatformKeys(name string, node *yaml.Node) error {
+	path := "platforms." + name
+	if node.Kind != yaml.MappingNode {
+		return configErr("config_key_invalid", path)
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if !platformTopKeys[key] {
+			return configErr("config_key_unknown", path+"."+key)
+		}
+		if key != "extra" {
+			continue
+		}
+		extra := node.Content[i+1]
+		if extra.Kind != yaml.MappingNode {
+			return configErr("config_key_invalid", path+".extra")
+		}
+		for j := 0; j+1 < len(extra.Content); j += 2 {
+			if field := extra.Content[j].Value; !platformExtraKeys[field] {
+				return configErr("config_key_unknown", path+".extra."+field)
+			}
+		}
+	}
+	return nil
+}
+
+// pruneDisabledPlatforms drops disabled platform subtrees before strict
+// interpolation. Operators do not need credentials for platforms turned off,
+// while unknown keys and unsupported platform names are still rejected.
+func pruneDisabledPlatforms(raw *yaml.Node, env profileEnvironment) (*yaml.Node, error) {
+	pruned := cloneYAML(raw)
+	platforms := mappingValueIndex(pruned, "platforms")
+	if platforms < 0 {
+		return pruned, nil
+	}
+	node := pruned.Content[platforms]
+	if node.Kind != yaml.MappingNode {
+		return nil, configErr("config_key_invalid", "platforms")
+	}
+	kept := make([]*yaml.Node, 0, len(node.Content))
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		name := node.Content[i].Value
+		entry := node.Content[i+1]
+		if !knownPlatforms[name] {
+			return nil, configErr("config_platform_unsupported", "platforms."+name)
+		}
+		if err := validatePlatformKeys(name, entry); err != nil {
+			return nil, err
+		}
+		enabled, err := platformEnabled(name, entry, env)
+		if err != nil {
+			return nil, err
+		}
+		if enabled {
+			kept = append(kept, node.Content[i], node.Content[i+1])
+		}
+	}
+	node.Content = kept
+	return pruned, nil
 }
 
 func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string, env profileEnvironment) error {
@@ -160,25 +281,26 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		cfg.ModelContextWindow = *doc.Model.ContextLength
 	}
 	if !strings.HasPrefix(*selected, "custom:") {
-		return errors.New("model provider must reference custom:<provider>")
+		return configErr("config_model_provider_invalid", "model.provider")
 	}
-	provider, ok := providers[strings.TrimPrefix(*selected, "custom:")]
+	providerName := strings.TrimPrefix(*selected, "custom:")
+	provider, ok := providers[providerName]
 	if !ok {
-		return errors.New("selected model provider is undefined")
+		return configErr("config_model_provider_invalid", "model.provider")
 	}
 	endpoint, err := url.Parse(provider.API)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return errors.New("invalid model provider endpoint")
+		return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")
 	}
 	// The LLM transport appends /v1 routes itself.
 	endpoint.Path = strings.TrimSuffix(strings.TrimRight(endpoint.Path, "/"), "/v1")
 	cfg.LLMGatewayURL = endpoint.String()
 	cfg.LLMGatewayAPIKey, err = env.credential(provider.Key, provider.KeyEnv, provider.KeyEnv != "" || provider.Key != nil)
 	if err != nil {
-		return err
+		return withConfigPath(err, "providers."+providerName+".key")
 	}
 	if strings.TrimSpace(cfg.LLMGatewayModel) == "" || cfg.ModelContextWindow < 0 {
-		return errors.New("invalid model configuration")
+		return configErr("config_model_invalid", "model")
 	}
 	if doc.Tools.WebSearch.BraveKeyEnv != nil || doc.Tools.WebSearch.BraveKey != nil {
 		name := ""
@@ -187,7 +309,7 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		}
 		cfg.BraveAPIKey, err = env.credential(doc.Tools.WebSearch.BraveKey, name, name != "")
 		if err != nil {
-			return err
+			return withConfigPath(err, "tools.web_search.brave_key")
 		}
 	}
 	if doc.Tools.WebSearch.SearxngURL != nil {
@@ -199,47 +321,48 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	if doc.Tools.ImageGenerate.Timeout != nil {
 		cfg.ComfyUIGenerationTimeout, err = time.ParseDuration(*doc.Tools.ImageGenerate.Timeout)
 		if err != nil || cfg.ComfyUIGenerationTimeout <= 0 {
-			return errors.New("invalid image generation timeout")
+			return configErr("config_tool_timeout_invalid", "tools.image_generate.generation_timeout")
 		}
 	}
-	for _, raw := range []string{cfg.ComfyUIURL, cfg.SearxngURL} {
-		if raw == "" {
+	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}} {
+		if entry.raw == "" {
 			continue
 		}
-		endpoint, err := url.Parse(raw)
+		endpoint, err := url.Parse(entry.raw)
 		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-			return errors.New("invalid tool provider endpoint")
+			return configErr("config_tool_endpoint_invalid", entry.path)
 		}
 	}
 	cfg.MCPServers = nil
 	if len(doc.MCP.Servers) > 32 {
-		return errors.New("too many profile MCP servers")
+		return configErr("config_mcp_invalid", "mcp.servers")
 	}
 	for name, server := range doc.MCP.Servers {
+		base := "mcp.servers." + name
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`).MatchString(name) || name == "soul" {
-			return errors.New("invalid MCP server name")
+			return configErr("config_mcp_invalid", base)
 		}
 		transport := server.Transport
 		if transport == "" {
 			transport = "streamable_http"
 		}
 		if transport != "streamable_http" {
-			return errors.New("unsupported MCP transport")
+			return configErr("config_mcp_invalid", base+".transport")
 		}
 		endpoint, err := url.Parse(server.URL)
 		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
-			return errors.New("invalid MCP endpoint")
+			return configErr("config_mcp_invalid", base+".url")
 		}
 		description := strings.TrimSpace(server.Description)
 		if description == "" || len([]rune(description)) > 500 || strings.ContainsAny(description, "\r\n\x00") {
-			return errors.New("invalid MCP description")
+			return configErr("config_mcp_invalid", base+".description")
 		}
 		if len(server.Headers) > 32 {
-			return errors.New("too many MCP headers")
+			return configErr("config_mcp_invalid", base+".headers")
 		}
 		for key, value := range server.Headers {
 			if !regexp.MustCompile(`^[!#$%&'*+.^_`+"`"+`|~0-9A-Za-z-]+$`).MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
-				return errors.New("invalid MCP header")
+				return configErr("config_mcp_invalid", base+".headers")
 			}
 		}
 		enabled := true
@@ -254,30 +377,37 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 
 func port(value int) (string, error) {
 	if value < 1 || value > 65535 {
-		return "", errors.New("invalid listener port")
+		return "", configErr("config_port_invalid", "")
 	}
 	return strconv.Itoa(value), nil
 }
 
 // LoadProfiles merges raw YAML before resolving each profile's private .env and
-// process environment. It never mutates os.Environ; errors omit private content.
+// process environment. Named profiles inherit the default .env and override it
+// with their own. It never mutates os.Environ; errors omit private content.
 func LoadProfiles(root string) (*Config, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return nil, err
+		return nil, withConfigSource(configErr("config_dir_unavailable", ""), "global_root")
 	}
-	if err := privateDirectory(root); err != nil {
+	if err := privateDirectory(root, "global_root"); err != nil {
 		return nil, err
 	}
 	raw, err := readYAMLNode(filepath.Join(root, "config.yaml"), false)
 	if err != nil {
-		return nil, err
+		return nil, withConfigSource(err, "global_config")
 	}
-	env, err := loadProfileEnvironment(root)
+	env, err := loadProfileEnvironment(root, "global_env")
 	if err != nil {
 		return nil, err
 	}
-	doc, err := resolveDocument(raw, env)
+	// Disabled platforms are dropped before interpolation so their credentials
+	// are never required. Their keys are still validated above.
+	pruned, err := pruneDisabledPlatforms(raw, env)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := resolveDocument(pruned, env)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +420,7 @@ func LoadProfiles(root string) (*Config, error) {
 	if doc.Runtime != nil {
 		cfg.WorkerPoolSize = doc.Runtime.Workers
 		if cfg.WorkerPoolSize <= 0 {
-			return nil, errors.New("worker pool must be positive")
+			return nil, configErr("config_runtime_invalid", "runtime.worker_pool_size")
 		}
 		cfg.LogLevel = ParseLevel(doc.Runtime.LogLevel)
 	}
@@ -299,25 +429,25 @@ func LoadProfiles(root string) (*Config, error) {
 		seen := map[string]bool{}
 		for _, route := range doc.Gateway.Routes {
 			if route.Profile != "default" && !ValidProfileName(route.Profile) {
-				return nil, errors.New("invalid routed profile name")
+				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
 			if route.Profile != "default" && !doc.Gateway.MultiplexProfiles {
-				return nil, errors.New("named profile routes require multiplex_profiles")
+				return nil, configErr("config_route_invalid", "gateway.multiplex_profiles")
 			}
 			if route.Platform == "bluebubbles" {
 				route.Platform = "imessage"
 			}
 			if route.Platform != "discord" && route.Platform != "imessage" && route.Platform != "homeassistant" {
-				return nil, errors.New("unsupported profile route platform")
+				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
 			id, err := NormalizeGatewayIdentifier(route.Platform, route.UserID)
 			if err != nil {
-				return nil, err
+				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
 			route.UserID = id
 			key := route.Platform + ":" + id
 			if seen[key] {
-				return nil, errors.New("conflicting profile routes")
+				return nil, configErr("config_route_invalid", "gateway.profile_routes")
 			}
 			seen[key] = true
 			cfg.ProfileRoutes = append(cfg.ProfileRoutes, route)
@@ -327,17 +457,24 @@ func LoadProfiles(root string) (*Config, error) {
 		}
 	}
 	for platform, settings := range doc.Platforms {
-		if platform != "discord" && platform != "bluebubbles" && platform != "api" && platform != "homeassistant" {
-			return nil, errors.New("unsupported gateway platform")
+		if !knownPlatforms[platform] {
+			return nil, configErr("config_platform_unsupported", "platforms."+platform)
 		}
 		if !settings.Enabled {
 			continue
 		}
+		base := "platforms." + platform + ".extra."
 		x := settings.Extra
 		switch platform {
 		case "discord":
 			cfg.DiscordToken, err = env.credential(x.Token, x.TokenEnv, true)
-			cfg.DiscordPolicy, err = admissionPolicy("discord", x.DMPolicy, x.AllowFrom, err)
+			if err != nil {
+				return nil, withConfigPath(err, base+"token")
+			}
+			cfg.DiscordPolicy, err = admissionPolicy("discord", x.DMPolicy, x.AllowFrom, nil)
+			if err != nil {
+				return nil, withConfigPath(err, base+"dm_policy")
+			}
 			if x.GuildRequireMention != nil {
 				cfg.DiscordGroupRequireMention = *x.GuildRequireMention
 			}
@@ -345,60 +482,70 @@ func LoadProfiles(root string) (*Config, error) {
 			cfg.BlueBubblesURL = x.ServerURL
 			endpoint, parseErr := url.Parse(x.ServerURL)
 			if parseErr != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-				return nil, errors.New("invalid BlueBubbles endpoint")
+				return nil, configErr("config_endpoint_invalid", base+"server_url")
 			}
 			if x.WebhookHost != "" && x.WebhookHost != "0.0.0.0" {
-				return nil, errors.New("unsupported webhook host")
+				return nil, configErr("config_platform_host_unsupported", base+"webhook_host")
 			}
 			cfg.BlueBubblesListenPort, err = port(x.WebhookPort)
 			if err != nil {
-				return nil, err
+				return nil, withConfigPath(err, base+"webhook_port")
 			}
 			cfg.BlueBubblesPassword, err = env.credential(x.ServerPassword, x.ServerPasswordEnv, true)
-			cfg.BlueBubblesPolicy, err = admissionPolicy("imessage", x.DMPolicy, x.AllowFrom, err)
+			if err != nil {
+				return nil, withConfigPath(err, base+"server_password")
+			}
+			cfg.BlueBubblesPolicy, err = admissionPolicy("imessage", x.DMPolicy, x.AllowFrom, nil)
+			if err != nil {
+				return nil, withConfigPath(err, base+"dm_policy")
+			}
 			if x.GroupRequireMention != nil {
 				cfg.BlueBubblesGroupRequireMention = *x.GroupRequireMention
 			}
 		case "api":
 			if x.APIHost != "" && x.APIHost != "127.0.0.1" {
-				return nil, errors.New("API listener must remain loopback-only")
+				return nil, configErr("config_platform_host_unsupported", base+"api_host")
 			}
 			cfg.OpenAIListenPort, err = port(x.APIPort)
+			if err != nil {
+				return nil, withConfigPath(err, base+"api_port")
+			}
 			names["api"] = true
 		case "homeassistant":
 			cfg.HomeAssistantListenPort, err = port(x.ListenPort)
 			if err != nil {
-				return nil, err
+				return nil, withConfigPath(err, base+"listen_port")
 			}
 			cfg.HomeAssistantAuthToken, err = env.credential(x.AuthToken, x.AuthTokenEnv, true)
-			if len(strings.TrimSpace(cfg.HomeAssistantAuthToken)) < 32 {
-				return nil, errors.New("home assistant credential is too short")
+			if err != nil {
+				return nil, withConfigPath(err, base+"auth_token")
 			}
-		}
-		if err != nil {
-			return nil, err
+			if len(strings.TrimSpace(cfg.HomeAssistantAuthToken)) < 32 {
+				return nil, configErr("config_credential_invalid", base+"auth_token")
+			}
 		}
 	}
 	if cfg.DiscordToken == "" && cfg.BlueBubblesListenPort == "" && cfg.OpenAIListenPort == "" && cfg.HomeAssistantListenPort == "" {
-		return nil, errors.New("no gateways are enabled")
+		return nil, configErr("config_gateway_unavailable", "")
 	}
 	for name := range names {
 		profileRoot := filepath.Join(root, "profiles", name)
-		if err := privateDirectory(profileRoot); err != nil {
+		if err := privateDirectory(profileRoot, "profile_root"); err != nil {
 			return nil, err
 		}
 		profileRaw, err := readYAMLNode(filepath.Join(profileRoot, "config.yaml"), true)
 		if err != nil {
-			return nil, err
+			return nil, withConfigSource(err, "profile_config")
 		}
 		merged, err := profileDocument(raw, profileRaw)
 		if err != nil {
 			return nil, err
 		}
-		profileEnv, err := loadProfileEnvironment(profileRoot)
+		ownEnv, err := loadProfileEnvironment(profileRoot, "profile_env")
 		if err != nil {
 			return nil, err
 		}
+		profileEnv := mergeEnvironments(env, ownEnv)
 		profileDoc, err := resolveDocument(merged, profileEnv)
 		if err != nil {
 			return nil, err
@@ -423,13 +570,13 @@ func admissionPolicy(platform, mode string, identifiers []string, prior error) (
 		mode = "allowlist"
 	}
 	if mode != "allowlist" && mode != "allow" {
-		return AdmissionPolicy{}, errors.New("unsupported DM policy")
+		return AdmissionPolicy{}, configErr("config_value_invalid", "dm_policy")
 	}
 	policy := AdmissionPolicy{Mode: mode}
 	for _, id := range identifiers {
 		normalized, err := NormalizeGatewayIdentifier(platform, id)
 		if err != nil {
-			return AdmissionPolicy{}, err
+			return AdmissionPolicy{}, configErr("config_value_invalid", "allow_from")
 		}
 		policy.AllowFrom = append(policy.AllowFrom, normalized)
 	}

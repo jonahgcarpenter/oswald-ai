@@ -121,7 +121,7 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 				cache := a.imageCache
 				reg, err := tools.NewRegistryWithImageCache(&config.Config{
 					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-				}, nil, cache, log)
+				}, nil, nil, cache, log)
 				if err != nil {
 					t.Fatal(err)
 				}

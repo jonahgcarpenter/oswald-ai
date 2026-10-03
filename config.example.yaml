@@ -1,6 +1,7 @@
 # Copy to .oswald/config.yaml only after manually provisioning the profiles.
 # ${VAR} reads this profile's private .env; process environment takes precedence.
-# Named profiles resolve inherited values using their own .env, not this one.
+# Named profiles inherit the default .env and override it with their own.
+# Disabled platforms never require their credentials; unknown keys are still rejected.
 providers:
   gateway:
     api: http://127.0.0.1:8080/v1

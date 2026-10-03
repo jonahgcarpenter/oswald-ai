@@ -104,6 +104,7 @@ func TestProfileCannotOverrideGatewaysOrUseLocalCredentialFiles(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// An explicitly empty process value overrides the profile's own dotenv.
 	t.Setenv("PROFILE_TEST_MODEL_KEY", "")
 	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", ".env"), []byte("PROFILE_TEST_MODEL_KEY=synthetic\n"), 0600); err != nil {
 		t.Fatal(err)

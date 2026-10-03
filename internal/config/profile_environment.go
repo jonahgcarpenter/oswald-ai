@@ -23,36 +23,53 @@ func readPrivateConfig(path string, optional bool) ([]byte, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, errors.New("configuration file is unavailable")
+		return nil, configErr("config_file_unavailable", "")
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 256*1024 {
-		return nil, errors.New("unsafe or oversized configuration file")
+		return nil, configErr("config_file_unsafe", "")
 	}
 	if filepath.Base(path) == ".env" && info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("profile environment file must be private")
+		return nil, configErr("config_file_unsafe", "")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 256*1024+1))
 	if err != nil || len(data) > 256*1024 {
-		return nil, errors.New("configuration file is unavailable or oversized")
+		return nil, configErr("config_file_unavailable", "")
 	}
 	return data, nil
 }
 
-func loadProfileEnvironment(root string) (profileEnvironment, error) {
+// loadProfileEnvironment reads one private .env file. Named profiles merge the
+// default environment first so inherited values resolve without duplication.
+func loadProfileEnvironment(root, source string) (profileEnvironment, error) {
 	data, err := readPrivateConfig(filepath.Join(root, ".env"), true)
 	if err != nil {
-		return nil, err
+		return nil, withConfigSource(err, source)
 	}
 	values := map[string]string{}
 	if len(data) > 0 {
 		values, err = godotenv.Unmarshal(string(data))
 		if err != nil {
-			return nil, errors.New("invalid profile environment file")
+			return nil, withConfigSource(configErr("config_env_invalid", ""), source)
 		}
 	}
 	return profileEnvironment(values), nil
+}
+
+// mergeEnvironments overlays a profile's own values over the default profile's.
+func mergeEnvironments(base, override profileEnvironment) profileEnvironment {
+	if len(base) == 0 {
+		return override
+	}
+	merged := make(profileEnvironment, len(base)+len(override))
+	for name, value := range base {
+		merged[name] = value
+	}
+	for name, value := range override {
+		merged[name] = value
+	}
+	return merged
 }
 
 func (e profileEnvironment) lookup(name string) (string, bool) {
@@ -70,10 +87,10 @@ func (e profileEnvironment) credential(literal *string, name string, required bo
 		return e.secret(name, required)
 	}
 	if name != "" {
-		return "", errors.New("credential value and environment reference cannot both be supplied")
+		return "", configVarErr("config_credential_conflict", name, "")
 	}
 	if required && strings.TrimSpace(*literal) == "" {
-		return "", errors.New("required profile credential is missing")
+		return "", configErr("config_credential_missing", "")
 	}
 	return *literal, nil
 }
@@ -81,16 +98,16 @@ func (e profileEnvironment) credential(literal *string, name string, required bo
 func (e profileEnvironment) secret(name string, required bool) (string, error) {
 	if name == "" {
 		if required {
-			return "", errors.New("required credential reference is missing")
+			return "", configErr("config_credential_missing", "")
 		}
 		return "", nil
 	}
 	if !environmentName.MatchString(name) {
-		return "", errors.New("invalid credential environment reference")
+		return "", configVarErr("config_credential_invalid", name, "")
 	}
 	value, _ := e.lookup(name)
 	if required && strings.TrimSpace(value) == "" {
-		return "", errors.New("required profile credential is missing")
+		return "", configVarErr("config_credential_missing", name, "")
 	}
 	return value, nil
 }
@@ -98,6 +115,16 @@ func (e profileEnvironment) secret(name string, required bool) (string, error) {
 // interpolate resolves Compose-style references without mutating os.Environ.
 // Missing bare references fail closed; $$ produces a literal dollar sign.
 func (e profileEnvironment) interpolate(text string) (string, error) {
+	return e.expand(text, false)
+}
+
+// interpolateOptional resolves references but treats unset variables as empty.
+// It decides platform enablement before that platform's subtree is validated.
+func (e profileEnvironment) interpolateOptional(text string) (string, error) {
+	return e.expand(text, true)
+}
+
+func (e profileEnvironment) expand(text string, optional bool) (string, error) {
 	var out strings.Builder
 	for i := 0; i < len(text); {
 		if text[i] != '$' {
@@ -112,11 +139,11 @@ func (e profileEnvironment) interpolate(text string) (string, error) {
 			continue
 		}
 		if i == len(text) || text[i] != '{' {
-			return "", errors.New("environment references must use ${VAR} or $$")
+			return "", configErr("config_interpolation_invalid", "")
 		}
 		end := strings.IndexByte(text[i+1:], '}')
 		if end < 0 {
-			return "", errors.New("invalid environment interpolation")
+			return "", configErr("config_interpolation_invalid", "")
 		}
 		expression := text[i+1 : i+1+end]
 		i += end + 2
@@ -131,28 +158,35 @@ func (e profileEnvironment) interpolate(text string) (string, error) {
 				}
 			}
 			if op == "" {
-				return "", errors.New("unsupported environment interpolation")
+				return "", configErr("config_interpolation_unsupported", "")
 			}
 		}
 		if !environmentName.MatchString(name) {
-			return "", errors.New("invalid environment interpolation")
+			return "", configErr("config_interpolation_invalid", "")
 		}
 		value, set := e.lookup(name)
-		missing := !set || (strings.HasPrefix(op, ":") && value == "")
 		if op == "" && !set {
-			return "", errors.New("required interpolation variable is missing")
-		}
-		if missing {
-			switch op {
-			case "-", ":-":
-				value = fallback
-			case "?", ":?":
-				return "", errors.New("required interpolation variable is missing")
+			if !optional {
+				return "", configVarErr("config_variable_missing", name, "")
+			}
+			value = ""
+		} else {
+			missing := !set || (strings.HasPrefix(op, ":") && value == "")
+			if missing {
+				switch op {
+				case "-", ":-":
+					value = fallback
+				case "?", ":?":
+					if !optional {
+						return "", configVarErr("config_variable_missing", name, "")
+					}
+					value = ""
+				}
 			}
 		}
 		out.WriteString(value)
 		if out.Len() > 256*1024 {
-			return "", errors.New("expanded configuration exceeds limit")
+			return "", configErr("config_expansion_oversized", "")
 		}
 	}
 	return out.String(), nil
@@ -169,14 +203,14 @@ func cloneYAML(node *yaml.Node) *yaml.Node {
 
 func validateYAMLNode(node *yaml.Node, depth int) error {
 	if depth > 32 || node.Kind == yaml.AliasNode {
-		return errors.New("configuration aliases or excessive nesting are unsupported")
+		return configErr("config_yaml_invalid", "")
 	}
 	if node.Kind == yaml.MappingNode {
 		seen := map[string]bool{}
 		for i := 0; i < len(node.Content); i += 2 {
 			key := node.Content[i]
 			if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || seen[key.Value] {
-				return errors.New("invalid or duplicate configuration key")
+				return configErr("config_key_invalid", "")
 			}
 			seen[key.Value] = true
 		}
@@ -200,14 +234,14 @@ func readYAMLNode(path string, optional bool) (*yaml.Node, error) {
 	var node yaml.Node
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	if decoder.Decode(&node) != nil {
-		return nil, errors.New("invalid configuration YAML")
+		return nil, configErr("config_yaml_invalid", "")
 	}
 	var extra any
 	if decoder.Decode(&extra) != io.EOF {
-		return nil, errors.New("configuration must contain exactly one YAML document")
+		return nil, configErr("config_yaml_invalid", "")
 	}
 	if len(node.Content) != 1 || node.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("configuration must be a mapping")
+		return nil, configErr("config_yaml_invalid", "")
 	}
 	if err := validateYAMLNode(node.Content[0], 0); err != nil {
 		return nil, err
@@ -242,12 +276,12 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 	var expand func(*yaml.Node, string) error
 	expand = func(n *yaml.Node, path string) error {
 		if n.Kind == yaml.AliasNode {
-			return errors.New("configuration aliases are unsupported")
+			return configErr("config_yaml_invalid", path)
 		}
 		if n.Kind == yaml.ScalarNode && n.Tag == "!!str" {
 			value, err := env.interpolate(n.Value)
 			if err != nil {
-				return err
+				return withConfigPath(err, path)
 			}
 			n.Value = value
 			// Numeric and boolean configuration fields remain typed even when
@@ -257,13 +291,13 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 				switch key {
 				case "api_port", "webhook_port", "listen_port", "worker_pool_size", "context_length":
 					if _, err := strconv.Atoi(value); err != nil {
-						return errors.New("invalid interpolated integer")
+						return configErr("config_value_invalid", path)
 					}
 					n.Tag = "!!int"
 					n.Style = 0
 				case "enabled", "guild_require_mention", "group_require_mention", "dm_mention":
 					if value != "true" && value != "false" {
-						return errors.New("invalid interpolated boolean")
+						return configErr("config_value_invalid", path)
 					}
 					n.Tag = "!!bool"
 					n.Style = 0
@@ -274,7 +308,7 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 			// Configuration keys are fixed schema labels, not environment data.
 			if n.Kind == yaml.MappingNode && i%2 == 0 {
 				if strings.Contains(child.Value, "$") {
-					return errors.New("configuration keys cannot use interpolation")
+					return configErr("config_key_invalid", path)
 				}
 				continue
 			}
@@ -296,12 +330,12 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 	}
 	data, err := yaml.Marshal(copy)
 	if err != nil || len(data) > 256*1024 {
-		return doc, errors.New("expanded configuration exceeds limit")
+		return doc, configErr("config_expansion_oversized", "")
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&doc); err != nil {
-		return doc, errors.New("invalid configuration YAML")
+		return doc, configErr("config_yaml_invalid", "")
 	}
 	return doc, nil
 }
@@ -318,7 +352,7 @@ func profileDocument(global, override *yaml.Node) (*yaml.Node, error) {
 		switch override.Content[i].Value {
 		case "providers", "model", "tools", "mcp":
 		default:
-			return nil, errors.New("profile cannot override shared gateway or runtime configuration")
+			return nil, configErr("config_profile_override_invalid", override.Content[i].Value)
 		}
 	}
 	return mergeYAML(base, override), nil

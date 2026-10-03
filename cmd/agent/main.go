@@ -15,7 +15,7 @@ func main() {
 	cfg, err := config.Load()
 	startup.PrintBanner(os.Stdout)
 	if err != nil {
-		config.NewLogger(config.LevelInfo).Server("app").Fatal("app.config.invalid", "invalid runtime configuration", config.ErrorField(err))
+		fatalConfig(config.NewLogger(config.LevelInfo).Server("app"), "app.config.invalid", "invalid runtime configuration", err)
 	}
 	rootLog := config.NewLogger(cfg.LogLevel)
 	log := rootLog.Server("app")
@@ -26,8 +26,19 @@ func main() {
 	if err != nil {
 		var startupErr *startup.Error
 		if errors.As(err, &startupErr) {
-			log.Fatal(startupErr.Event, startupErr.Message, config.ErrorField(startupErr.Cause))
+			fatalConfig(log, startupErr.Event, startupErr.Message, startupErr.Cause)
 		}
-		log.Fatal("app.start.failed", "application startup failed", config.ErrorField(err))
+		fatalConfig(log, "app.start.failed", "application startup failed", err)
 	}
+}
+
+// fatalConfig logs a fixed event and message with safe configuration
+// diagnostics: the classification code, schema path, artifact label, and
+// referenced variable name, never any configuration value.
+func fatalConfig(log *config.Logger, event, message string, err error) {
+	fields := []config.Field{config.ErrorField(err)}
+	if configErr, ok := config.AsConfigError(err); ok {
+		fields = append(fields, configErr.LogFields()...)
+	}
+	log.Fatal(event, message, fields...)
 }

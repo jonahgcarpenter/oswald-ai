@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"math"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -11,10 +13,12 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -33,7 +37,7 @@ func visibleTestTool(reg *registry.Registry, name string) (llm.Tool, bool) {
 
 func newTestRegistry(t *testing.T, cfg *config.Config) *registry.Registry {
 	t.Helper()
-	reg, err := NewRegistryFromConfig(cfg, nil, config.NewLogger(config.LevelError))
+	reg, err := NewRegistryFromConfig(cfg, nil, nil, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +117,38 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		if !got[name] || !reg.HasHandler(name) {
 			t.Fatalf("final builtin tool is unavailable: %s", name)
 		}
+	}
+	// session_search is a store-backed tool; without a profile store its
+	// reserved name must stay hidden and handler-less.
+	if _, shown := visibleTestTool(reg, sessionsearch.Name); shown || reg.HasHandler(sessionsearch.Name) {
+		t.Fatal("session_search advertised without a profile store")
+	}
+}
+
+func TestSessionSearchRequiresProfileStoreAndIsPolicyBounded(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memory.NewProfileStore(context.Background(), root, "alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reg, err := NewRegistryFromConfig(testConfig(), nil, store, config.NewLogger(config.LevelError))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := visibleTestTool(reg, sessionsearch.Name)
+	if !ok || !reg.HasHandler(sessionsearch.Name) {
+		t.Fatal("session_search not advertised with a profile store")
+	}
+	if len(tool.Function.Parameters.Required) != 0 {
+		t.Fatalf("session_search must require no arguments: %+v", tool.Function.Parameters.Required)
+	}
+	policy, ok := reg.Policy(sessionsearch.Name)
+	if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult || policy.MaxUnproductive != 2 || !policy.BlockDuplicates {
+		t.Fatalf("session_search policy = %+v", policy)
 	}
 }
 
@@ -214,7 +250,7 @@ func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
 
 func TestRegisterRejectsInvalidSearxngURL(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	if _, err := NewRegistryFromConfig(&config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web_search client") {
+	if _, err := NewRegistryFromConfig(&config.Config{BraveAPIKey: "secret", SearxngURL: "localhost:8080"}, nil, nil, log); err == nil || !strings.Contains(err.Error(), "SearXNG web_search client") {
 		t.Fatalf("invalid SearXNG URL registration error = %v", err)
 	}
 }

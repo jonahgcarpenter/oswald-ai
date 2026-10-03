@@ -1,9 +1,0 @@
-# Optional .oswald/profiles/<name>/config.yaml. Inherits unspecified settings.
-# Profile configuration cannot override shared listeners or admission policy.
-# Credentials in inherited or overridden values resolve against this profile's .env.
-model:
-  default: your/profile-specific-model
-  context_length: 32768
-tools:
-  image_generate:
-    url: ""

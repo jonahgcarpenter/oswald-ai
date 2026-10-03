@@ -453,7 +453,7 @@ func TestProcessExecutesToolThenFinalAnswerAndStreamsEvents(t *testing.T) {
 func TestProcessOffersFileMemoryTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	log := config.NewLogger(config.LevelError)
-	reg, err := tools.NewRegistryFromConfig(&config.Config{SearxngURL: "http://localhost:8080"}, nil, log)
+	reg, err := tools.NewRegistryFromConfig(&config.Config{SearxngURL: "http://localhost:8080"}, nil, nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1394,7 +1394,7 @@ func TestProcessFileWriteVisibleNowAndNextSession(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "next session"}},
 	}}
 	fileStore := files.NewStore(t.TempDir())
-	reg, err := tools.NewRegistryFromConfig(&config.Config{}, fileStore, config.NewLogger(config.LevelError))
+	reg, err := tools.NewRegistryFromConfig(&config.Config{}, fileStore, nil, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}

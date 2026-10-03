@@ -24,6 +24,8 @@ func TestProductionLoggingContract(t *testing.T) {
 		"internal/providers/web/telemetry.go#BeginSearch": "event",
 		// startup.Error.Event and Message are fixed source literals, not Cause.
 		"cmd/agent/main.go#main": "startupErr.Event",
+		// fatalConfig forwards fixed source literals supplied by its callers.
+		"cmd/agent/main.go#fatalConfig": "event",
 	}
 	literal := func(e ast.Expr) (string, bool) {
 		v, ok := e.(*ast.BasicLit)

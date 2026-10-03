@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
@@ -15,11 +16,12 @@ import (
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
-func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, cache *imagecache.Cache, log *config.Logger) error {
+func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
@@ -100,6 +102,18 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		return fmt.Errorf("register memory tool: %w", err)
 	}
 
+	if profileStore != nil {
+		sessionPolicy := governance.ToolPolicy{
+			MaxUnproductive: 2,
+			BlockDuplicates: true,
+			NormalizeArgs:   normalizeSessionSearchArgs,
+			History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
+		}
+		if err := reg.RegisterHandler(sessionsearch.Name, sessionPolicy, registry.Handler(sessionsearch.NewHandler(profileStore))); err != nil {
+			return fmt.Errorf("register session_search tool: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -128,6 +142,26 @@ func normalizeImageGenerateArgs(args map[string]interface{}) interface{} {
 	}
 	if source, exists := args["image_url"]; exists {
 		normalized["image_url"] = source
+	}
+	return normalized
+}
+
+// normalizeSessionSearchArgs canonicalizes shape-defining selectors so repeated
+// identical reads collapse, while distinct queries remain distinct.
+func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"query", "session_id", "sort", "detail", "after", "before", "role_filter"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	for _, key := range []string{"limit", "around_message_id", "window"} {
+		if value, ok := args[key]; ok {
+			normalized[key] = value
+		}
+	}
+	if raw, ok := args["exclude_session_ids"].([]interface{}); ok {
+		normalized["exclude_session_ids_count"] = len(raw)
 	}
 	return normalized
 }

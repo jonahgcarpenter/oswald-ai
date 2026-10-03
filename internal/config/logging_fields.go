@@ -46,6 +46,11 @@ var stringLogFields = map[string]bool{
 	// and MCP config ID (not its URL or remote client/account identity).
 	"challenge_id": true,
 	"server_id":    true,
+	// Operator configuration diagnostics: validated schema paths, artifact
+	// labels, and referenced environment variable names, never their values.
+	"config_path":     true,
+	"config_source":   true,
+	"config_variable": true,
 }
 
 var privateLogFields = map[string]bool{
