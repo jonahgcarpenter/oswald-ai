@@ -1,11 +1,2 @@
-# Golang
 tmp/ 
-.env
-
-# database
-*.db*
-profiles/
-config.yaml
-
-# Track profile routing source, not operator profile directories.
-!/internal/profiles/
+.oswald/
