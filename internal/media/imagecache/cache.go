@@ -47,7 +47,7 @@ type Cache struct {
 	now     func() time.Time
 }
 
-// New constructs a cache at root; use config.DefaultDataRoot for the application cache.
+// New constructs a cache at root; use config.OswaldHomeDir for the application cache.
 func New(root string) *Cache { return &Cache{root: root, now: time.Now} }
 
 // NewProfileCache owns images directly below one manually provisioned profile.

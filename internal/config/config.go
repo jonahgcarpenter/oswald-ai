@@ -51,8 +51,9 @@ func DefaultRetentionPolicy() RetentionPolicy {
 	return RetentionPolicy{SessionInactivity: 24 * time.Hour, PendingDeliveryTimeout: 15 * time.Minute, MaintenanceInterval: time.Hour, BatchSize: 100}
 }
 
-// DefaultDataRoot is the default profile and global configuration directory.
-const DefaultDataRoot = ".oswald"
+// OswaldHomeDir is the home directory holding global configuration and the
+// default profile.
+const OswaldHomeDir = ".oswald"
 
 // Load reads global/profile YAML using isolated profile environments.
-func Load() (*Config, error) { return LoadProfiles(DefaultDataRoot) }
+func Load() (*Config, error) { return LoadProfiles(OswaldHomeDir) }
