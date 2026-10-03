@@ -168,11 +168,11 @@ const defaultConfig = `# Oswald configuration. The oswald setup command writes t
 # profiles inherit the default .env and override it with their own. Disabled
 # platforms never require their credentials; unknown keys are still rejected.
 providers:
-  gateway:
+  gateway_name:
     api: http://127.0.0.1:8080/v1
-    # key: ${MODEL_GATEWAY_API_KEY}
+    # key: ${PROVIDER_API_KEY}
 model:
-  provider: custom:gateway
+  provider: custom:gateway_name
   default: your/provider-model
   context_length: 32768
 runtime:
@@ -192,7 +192,7 @@ platforms:
     enabled: true
     extra:
       api_host: 127.0.0.1
-      api_port: 8081
+      api_port: 8000
   discord:
     enabled: false
     extra:
@@ -206,7 +206,7 @@ platforms:
       server_url: http://127.0.0.1:1234
       server_password: ${BLUEBUBBLES_PASSWORD:-}
       webhook_host: 0.0.0.0
-      webhook_port: 8645
+      webhook_port: 8080
       webhook_path: /bluebubbles/webhook
       allowed_users: []
       banned_users: []
@@ -236,7 +236,7 @@ const defaultEnv = `# Private operator credentials. The process environment take
 # Prefer ${VAR} references in config.yaml over editing this file directly.
 # Keep this file private (chmod 600).
 #
-# MODEL_GATEWAY_API_KEY=
+# PROVIDER_API_KEY=
 # DISCORD_TOKEN=
 # BLUEBUBBLES_PASSWORD=
 # BRAVE_API_KEY=
