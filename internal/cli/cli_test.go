@@ -15,6 +15,7 @@ func TestRunUsageAndDispatch(t *testing.T) {
 	}{
 		{"no arguments", nil, exitUsage},
 		{"unknown command", []string{"frobnicate"}, exitUsage},
+		{"run is service only", []string{"run"}, exitUsage},
 		{"global help flag", []string{"--help"}, exitOK},
 		{"help command", []string{"help"}, exitOK},
 		{"profile without subcommand", []string{"profile"}, exitUsage},
@@ -27,16 +28,5 @@ func TestRunUsageAndDispatch(t *testing.T) {
 				t.Fatalf("Run(%v) = %d, want %d (stderr=%q)", tc.args, got, tc.want, stderr.String())
 			}
 		})
-	}
-}
-
-func TestRunConfigFailureReturnsErrorWithoutBanner(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	got := Run(context.Background(), []string{"--root", t.TempDir(), "run"}, strings.NewReader(""), &stdout, &stderr)
-	if got != exitError {
-		t.Fatalf("run with invalid configuration = %d, want %d", got, exitError)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("unexpected banner on non-terminal stdout: %q", stdout.String())
 	}
 }

@@ -16,7 +16,8 @@ COPY cmd/ ./cmd/
 COPY .oswald/SOUL.md ./.oswald/SOUL.md
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-agent ./cmd/agent/main.go
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald ./cmd/oswald
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-server ./cmd/oswald-server
 
 FROM debian:bookworm-slim
 
@@ -36,9 +37,10 @@ RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
 
 WORKDIR /home/oswald-ai/
 
-COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
+COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald .
+COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-server .
 
-RUN chmod +x ./oswald-agent
+RUN chmod +x ./oswald ./oswald-server
 
 COPY --from=builder --chown=oswald-ai:oswald-group /app/.oswald/ ./.oswald/
 
@@ -46,4 +48,4 @@ USER oswald-ai
 
 EXPOSE 8000
 
-CMD ["./oswald-agent"]
+CMD ["./oswald-server"]

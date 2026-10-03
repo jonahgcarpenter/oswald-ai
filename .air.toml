@@ -6,8 +6,8 @@ tmp_dir = "tmp"
 [build]
   delay = 500
 
-  cmd = "go build -tags sqlite_fts5 -o ./tmp/main ./cmd/agent/main.go"
-  bin = "./tmp/main"
+  cmd = "go build -tags sqlite_fts5 -o ./tmp/oswald-server ./cmd/oswald-server && go build -tags sqlite_fts5 -o ./tmp/oswald ./cmd/oswald"
+  bin = "./tmp/oswald-server"
 
   exclude_dir = ["tmp", "vendor", "testdata"]
 

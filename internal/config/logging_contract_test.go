@@ -23,7 +23,7 @@ func TestProductionLoggingContract(t *testing.T) {
 		"internal/llm/telemetry.go#beginMeasurement":      "event",
 		"internal/providers/web/telemetry.go#BeginSearch": "event",
 		// fatalConfig forwards fixed source literals supplied by its callers.
-		"internal/cli/run.go#fatalConfig": "event",
+		"cmd/oswald-server/main.go#fatalConfig": "event",
 	}
 	literal := func(e ast.Expr) (string, bool) {
 		v, ok := e.(*ast.BasicLit)
@@ -109,7 +109,7 @@ func TestProductionLoggingContract(t *testing.T) {
 					}
 					switch sel.Sel.Name {
 					case "Fatal":
-						if rel != "cmd/agent/main.go" {
+						if rel != "cmd/oswald-server/main.go" {
 							t.Errorf("%s: Fatal outside main", fset.Position(call.Pos()))
 						}
 					case "Info", "Warn", "Error", "Debug", "warn", "health":

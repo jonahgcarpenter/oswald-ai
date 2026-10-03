@@ -40,8 +40,6 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return exitUsage
 	}
 	switch rest[0] {
-	case "run":
-		return run(ctx, *root, stdout)
 	case "profile":
 		return profiles.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "help":
@@ -58,7 +56,6 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `usage: oswald [--root DIR] <command> [arguments]
 
 commands:
-  run                    run the oswald service
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
 `)

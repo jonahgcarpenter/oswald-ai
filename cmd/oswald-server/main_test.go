@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 	if os.Getenv("OSWALD_STARTUP_TEST_HELPER") == "1" {
-		main()
+		os.Exit(run(config.OswaldHomeDir))
 		return
 	}
 	for _, tc := range []struct{ name, event, message string }{

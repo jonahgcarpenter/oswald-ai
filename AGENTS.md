@@ -30,9 +30,9 @@ The release workflow runs tagged tests before publishing its container; it does 
 
 ## Architecture and Ownership
 
-- `cmd/agent`: run-only compatibility shim; delegates to `internal/cli`.
-- `cmd/oswald`: single operator binary; parses argv, calls `internal/cli.Run`, and owns process exit.
-- `internal/cli`: command dispatch and exit-code mapping. Each command group is a subdirectory (`internal/cli/profiles`); `run` lives in `internal/cli/run.go`. Only `cmd/oswald`/`cmd/agent` exit.
+- `cmd/oswald`: operator CLI binary; parses argv, calls `internal/cli.Run`, and owns process exit. It never links the server composition.
+- `cmd/oswald-server`: service binary; loads configuration, prints the banner, installs signal handling, calls `startup.Run`, and owns process exit.
+- `internal/cli`: operator command dispatch and exit-code mapping. Each command group is a subdirectory (`internal/cli/profiles`). The server has no dependency on this tree.
 - `internal/startup`: sole composition root; profile agents, stores, providers, tools, workers, shared broker, gateways, ordered cleanup.
 - `internal/config`: strict YAML, private profile environments, interpolation, retention, safe structured logging.
 - `internal/profiles`: immutable trusted transport-to-profile routing; no account persistence or administration.
@@ -86,7 +86,7 @@ SQLite uses foreign keys, secure delete, WAL, synchronous NORMAL, a five-second 
 
 ## Startup and Shutdown
 
-The `oswald run` command loads configuration, prints the terminal-only bright-magenta UTF-8 banner, creates the logger, installs signal handling, and calls `startup.Run`. No stores/workers/gateways are assembled in `main` or `internal/cli`.
+`oswald-server` loads configuration, prints the terminal-only bright-magenta UTF-8 banner, creates the logger, installs signal handling, and calls `startup.Run`. No stores/workers/gateways are assembled in `main` or `internal/cli`.
 
 Startup validates the immutable directory, then initializes profiles in sorted order: approved state store, maintenance, file/soul/cache stores, builtin registry, model client, shared foreground/background compactor, lazy profile MCP manager/provider, agent, cache expiry worker. It then assembles the shared foreground broker, profile commands, low-priority compression workers, and configured gateways with profile-selected runtime dependencies.
 
