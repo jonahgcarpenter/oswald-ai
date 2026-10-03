@@ -1,5 +1,0 @@
-.env
-data/
-.oswald/database/
-.oswald/usr_*/
-*.db*
