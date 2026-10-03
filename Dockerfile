@@ -31,19 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system oswald-group && useradd --system --gid oswald-group oswald-ai
+RUN groupadd --system oswald-group && useradd --system --gid oswald-group --home-dir /home/oswald --no-create-home oswald
+
+# Home directory for the service user; operator data lives in its .oswald root.
+RUN install -d -m 0755 -o oswald -g oswald-group /home/oswald
+RUN install -d -m 0700 -o oswald -g oswald-group /home/oswald/.oswald
 
 # Binaries live in /opt/oswald, owned by root and read-only to the service user.
 COPY --from=builder /app/oswald /opt/oswald/oswald
 COPY --from=builder /app/oswald-server /opt/oswald/oswald-server
 
-# Operator data lives at the filesystem-root .oswald, owned by the service user.
-RUN install -d -m 0700 -o oswald-ai -g oswald-group /.oswald
-
 ENV PATH="/opt/oswald:${PATH}"
 
-USER oswald-ai
-WORKDIR /
+USER oswald
+WORKDIR /home/oswald
 
 EXPOSE 8000
 
