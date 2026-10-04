@@ -179,6 +179,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		},
 		DisplayName:    displayName,
 		SessionKey:     sessionKey,
+		ChatLabel:      g.chatLabel(chat, displayName, isGroup, log),
 		IsDirect:       !isGroup,
 		IsGroup:        isGroup,
 		IsMention:      mentionsBot,

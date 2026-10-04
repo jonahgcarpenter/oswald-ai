@@ -38,9 +38,13 @@ type Request struct {
 	RequestID   string
 	Principal   identity.Principal
 	DisplayName string
-	SessionKey  string
-	IsDirect    bool
-	Prompt      string
+	// ChatLabel names the transport conversation for the session-context block
+	// (for example `"DM with fragsap"`). It is untrusted metadata and empty for
+	// stateless requests.
+	ChatLabel  string
+	SessionKey string
+	IsDirect   bool
+	Prompt     string
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage

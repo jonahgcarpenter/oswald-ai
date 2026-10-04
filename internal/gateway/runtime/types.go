@@ -40,6 +40,9 @@ type Request struct {
 	DisplayName string
 	SessionKey  string
 	ClientID    string
+	// ChatLabel names the transport conversation for the session-context block.
+	// It is untrusted metadata, built by each gateway.
+	ChatLabel string
 
 	IsDirect     bool
 	IsGroup      bool

@@ -138,6 +138,17 @@ type contactNameCacheEntry struct {
 	ExpiresAt   time.Time
 }
 
+type chatNameCacheEntry struct {
+	Name      string
+	ExpiresAt time.Time
+}
+
+type chatInfoResponse struct {
+	Data struct {
+		DisplayName string `json:"displayName"`
+	} `json:"data"`
+}
+
 type serverInfoResponse struct {
 	Data struct {
 		PrivateAPI      bool `json:"private_api"`

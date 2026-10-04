@@ -279,12 +279,19 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		contextBlock = renderFileMemory(userContent, memoryContent)
 		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
 	}
-	if runtimeBlock := runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway); runtimeBlock != "" {
-		if strings.TrimSpace(contextBlock) == "" {
-			contextBlock = runtimeBlock
-		} else {
-			contextBlock += "\n\n" + runtimeBlock
+	appendContext := func(block string) {
+		if block == "" {
+			return
 		}
+		if strings.TrimSpace(contextBlock) == "" {
+			contextBlock = block
+		} else {
+			contextBlock += "\n\n" + block
+		}
+	}
+	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
+	if !request.Stateless {
+		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)

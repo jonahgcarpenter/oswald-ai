@@ -27,6 +27,9 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 	if dg.replyIndex == nil {
 		dg.replyIndex = make(map[string]replyContext)
 	}
+	if dg.labelNames == nil {
+		dg.labelNames = make(map[string]labelNameCacheEntry)
+	}
 	dg.setHeartbeatAcked(true)
 
 	for {
@@ -74,6 +77,8 @@ type Gateway struct {
 	VideoFrames    media.VideoFrameExtractor
 	replyMu        sync.RWMutex
 	replyIndex     map[string]replyContext
+	labelMu        sync.RWMutex
+	labelNames     map[string]labelNameCacheEntry
 	sessionMu      sync.RWMutex
 	sessionID      string
 	resumeURL      string

@@ -147,6 +147,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		Principal:      principal,
 		DisplayName:    msg.Author.Username,
 		SessionKey:     sessionKey,
+		ChatLabel:      dg.chatLabel(msg, log),
 		IsDirect:       msg.GuildID == "",
 		IsGroup:        msg.GuildID != "",
 		IsMention:      mentionsBot,

@@ -27,6 +27,9 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if g.contactNames == nil {
 		g.contactNames = make(map[string]contactNameCacheEntry)
 	}
+	if g.chatNames == nil {
+		g.chatNames = make(map[string]chatNameCacheEntry)
+	}
 	g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
 
 	mux := http.NewServeMux()
@@ -78,6 +81,8 @@ type Gateway struct {
 	messageIndex        map[string]messageContext
 	contactMu           sync.RWMutex
 	contactNames        map[string]contactNameCacheEntry
+	chatNameMu          sync.RWMutex
+	chatNames           map[string]chatNameCacheEntry
 }
 
 func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {

@@ -363,6 +363,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Principal:     req.Principal,
 		DisplayName:   req.DisplayName,
 		SessionKey:    req.SessionKey,
+		ChatLabel:     req.ChatLabel,
 		IsDirect:      req.IsDirect,
 		Prompt:        decision.Prompt,
 		Stateless:     req.Stateless,

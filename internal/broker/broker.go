@@ -50,6 +50,7 @@ type Request struct {
 	DisplayName   string
 	SessionKey    string
 	IsDirect      bool
+	ChatLabel     string
 	Prompt        string
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
@@ -300,7 +301,7 @@ func (b *Broker) Submit(req *Request) error {
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
-			IsDirect: req.IsDirect,
+			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
 		if cause := context.Cause(w.ctx); cause != nil {

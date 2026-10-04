@@ -1108,6 +1108,27 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestProcessInjectsSessionContextBlock(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, _ := newTestAgent(t, chat, nil, nil)
+
+	_, err := agent.Process(context.Background(), Request{
+		RequestID:   "req-1",
+		Principal:   identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "discord", Assurance: identity.AssuranceDiscordGateway},
+		DisplayName: "fragsap",
+		ChatLabel:   `"DM with fragsap"`,
+		SessionKey:  "discord:dm:123",
+		Prompt:      "question",
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	system := primaryRequests(chat.requests)[0].Messages[0].Content
+	if !strings.Contains(system, "## Current Session Context") || !strings.Contains(system, `**Source:** Discord ("DM with fragsap")`) || !strings.Contains(system, `**User:** "fragsap"`) {
+		t.Fatalf("system prompt missing session context block:\n%s", system)
+	}
+}
+
 func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
