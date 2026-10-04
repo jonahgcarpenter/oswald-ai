@@ -60,7 +60,7 @@ func TestAssemblePromptContextReplaysNativeToolHistoryAndFallsBackWhenUnavailabl
 	if roles(full.Messages) != "system,user,assistant,tool,assistant,user" {
 		t.Fatalf("native history roles=%s messages=%+v", roles(full.Messages), full.Messages)
 	}
-	if full.Messages[2].ToolCalls[0].ID != "hist_41_1_1" || full.Messages[3].ToolCallID != "hist_41_1_1" || !strings.Contains(full.Messages[3].Content, "potentially stale") {
+	if full.Messages[2].ToolCalls[0].ID != "hist_41_1_1" || full.Messages[3].ToolCallID != "hist_41_1_1" || full.Messages[3].Content != `{"temperature":72}` {
 		t.Fatalf("native history correlation=%+v", full.Messages)
 	}
 
