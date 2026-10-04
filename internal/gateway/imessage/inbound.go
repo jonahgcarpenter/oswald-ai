@@ -59,11 +59,16 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		textWithoutMention = strings.TrimSpace(text[mentionEnd:])
 	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
+	// allowPredecessor permits the thread-root fallback; it is also the exact
+	// condition under which an unmentioned group reply is looked up at all.
+	allowPredecessor := isGroup && !mentionsBot && !currentIsCommandAttempt
+	replyLookupAttempted := false
 	currentIsReplyToBot := false
 	var resolvedReply messageContext
 	var replyFound bool
 	if replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt) {
-		resolvedReply, replyFound = g.resolveReply(ctx, msg, isGroup && !mentionsBot && !currentIsCommandAttempt, requestID)
+		replyLookupAttempted = true
+		resolvedReply, replyFound = g.resolveReply(ctx, msg, allowPredecessor, requestID)
 		currentIsReplyToBot = replyFound && resolvedReply.IsFromBot
 	}
 	preflight := routing.Preflight(routing.PreflightInput{
@@ -78,6 +83,12 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 			config.F("is_group", isGroup),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", replyGUID != ""),
+			config.F("has_thread_root", msg.ThreadOriginatorGUID != ""),
+			config.F("has_explicit_target", msg.ReplyToGUID != ""),
+			config.F("reply_lookup_attempted", replyLookupAttempted),
+			config.F("reply_found", replyFound),
+			config.F("reply_is_bot", currentIsReplyToBot),
+			config.F("allow_predecessor", allowPredecessor),
 			config.F("is_command", currentIsCommandAttempt),
 			config.F("message_chars", len(msg.Text)),
 		)
