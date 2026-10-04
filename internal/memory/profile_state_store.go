@@ -174,6 +174,11 @@ func (s *ProfileStore) ResolveSessionContext(ctx context.Context, owner, key str
 		return result, err
 	}
 	if err == nil {
+		var startedAt float64
+		if err := tx.QueryRowContext(ctx, `SELECT started_at FROM sessions WHERE id=?`, id).Scan(&startedAt); err != nil {
+			return result, err
+		}
+		result.StartedAt = secondsToTime(startedAt)
 		if _, err := tx.ExecContext(ctx, `UPDATE sessions SET last_activity_at=? WHERE id=?`, now, id); err != nil {
 			return result, err
 		}
@@ -209,6 +214,7 @@ func (s *ProfileStore) ResolveSessionContext(ctx context.Context, owner, key str
 			return result, err
 		}
 		result.IsNewSession = true
+		result.StartedAt = secondsToTime(now)
 	}
 	result.SpeakerIntro = "You are speaking with " + s.profile + "."
 	return result, tx.Commit()

@@ -637,7 +637,7 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, store, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", "test-provider", soulStore, store, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})

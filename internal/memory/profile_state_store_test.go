@@ -45,7 +45,7 @@ func TestProfileExchangeDeliveryAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !session.IsNewSession || session.Generation != 1 {
+	if !session.IsNewSession || session.Generation != 1 || session.StartedAt.IsZero() {
 		t.Fatal("incorrect first generation")
 	}
 	first := appendProfileExchange(t, s, session.Generation, "first")
@@ -83,7 +83,7 @@ func TestProfileExchangeDeliveryAndReopen(t *testing.T) {
 	}
 	defer reopened.Close()
 	session, err = reopened.ResolveSessionContext(ctx, "alice", key, 24*time.Hour)
-	if err != nil || session.IsNewSession || session.Generation != 1 {
+	if err != nil || session.IsNewSession || session.Generation != 1 || session.StartedAt.IsZero() {
 		t.Fatal("restart advanced generation", err)
 	}
 	turns, err = reopened.PageDeliveredSessionTurnsAfter(ctx, "alice", key, 1, 0, 100)

@@ -9,6 +9,7 @@ import (
 type SessionContext struct {
 	Generation   int
 	SpeakerIntro string
+	StartedAt    time.Time
 	IsNewSession bool
 }
 

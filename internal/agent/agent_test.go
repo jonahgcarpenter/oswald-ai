@@ -1096,14 +1096,14 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 		t.Fatalf("second process: %v", err)
 	}
 	secondSystem := primaryRequests(chat.requests)[1].Messages[0]
-	if secondSystem.Role != "system" || secondSystem.Content != "You are Oswald after a manual edit." {
+	if secondSystem.Role != "system" || !strings.HasPrefix(secondSystem.Content, "You are Oswald after a manual edit.") {
 		t.Fatalf("manual soul edit was not reloaded as the system prompt: %+v", secondSystem)
 	}
 	if _, err := processAgent(agent, "req-3", "discord", "session-3", "user-2", "Display", "third question", nil, nil); err != nil {
 		t.Fatalf("third process: %v", err)
 	}
 	thirdSystem := primaryRequests(chat.requests)[2].Messages[0]
-	if thirdSystem.Role != "system" || thirdSystem.Content != "You are the new default." {
+	if thirdSystem.Role != "system" || !strings.HasPrefix(thirdSystem.Content, "You are the new default.") {
 		t.Fatalf("new user did not get the current template: %+v", thirdSystem)
 	}
 }
@@ -1733,7 +1733,7 @@ func newTestAgentWithSoulPath(t *testing.T, chat llm.Chatter, embedder llm.Embed
 	}
 	fixture.sql = fixture.readers["user-1"]
 	soulStore := soul.NewProfileStore(filepath.Join(dir, "user-1"), "user-1", soulPath)
-	agent := NewAgent(chat, reg, "test-model", soulStore, fixture, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
+	agent := NewAgent(chat, reg, "test-model", "test-provider", soulStore, fixture, budget.ContextBudget{PromptLimit: 100000}, testGlobalPolicy(), log)
 	agent.SetImageCache(imagecache.NewProfileCache(filepath.Join(dir, "user-1"), "user-1"))
 	t.Cleanup(func() { fixture.Close() })
 	return agent, fixture, soulPath

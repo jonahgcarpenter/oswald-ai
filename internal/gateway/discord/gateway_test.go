@@ -1326,7 +1326,7 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	}
 	soulStore := soul.NewProfileStore(dir, "default", soulPath)
 	chat := &discordFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", "test-provider", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands()

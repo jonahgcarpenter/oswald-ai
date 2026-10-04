@@ -43,9 +43,9 @@ type foregroundCompactionStats struct {
 	EstimatedAfter  int
 }
 
-func newForegroundCompactionState(compactor ForegroundCompactor, inputLimit int, deploymentPolicy, fileContext, currentPrompt string, currentImages []llm.InputImage, previous *memory.SessionSummary, debt []memory.SessionTurn, stream func(StreamChunk)) *foregroundCompactionState {
-	if fileContext != "" {
-		deploymentPolicy += "\n\n" + fileContext
+func newForegroundCompactionState(compactor ForegroundCompactor, inputLimit int, deploymentPolicy, contextBlock, currentPrompt string, currentImages []llm.InputImage, previous *memory.SessionSummary, debt []memory.SessionTurn, stream func(StreamChunk)) *foregroundCompactionState {
+	if contextBlock != "" {
+		deploymentPolicy += "\n\n" + contextBlock
 	}
 	prefix := []llm.ChatMessage{{Role: "system", Content: deploymentPolicy}}
 	return &foregroundCompactionState{

@@ -148,7 +148,7 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ai := agent.NewAgent(llm.NewGatewayClient(model.URL, "", "", log), reg, "test-model", soul.NewProfileStore(dir, "default", soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(llm.NewGatewayClient(model.URL, "", "", log), reg, "test-model", "test-provider", soul.NewProfileStore(dir, "default", soulPath), memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	commandService, err := commands.NewServiceWithCommands()
 	if err != nil {

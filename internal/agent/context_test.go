@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -223,6 +224,43 @@ func TestAssemblePromptContextNeverLetsSummaryDisplaceMinimumTail(t *testing.T) 
 	got := AssemblePromptContext("policy", "profile", "current", nil, hugeSummary, 2, turns, nil, withoutSummary.EstimatedAfter)
 	if got.SummaryIncluded || got.MinimumTailCount != 2 || got.SelectedTurnCount != 2 {
 		t.Fatalf("summary displaced required tail: %+v", got)
+	}
+}
+
+func TestRuntimeInfoBlockFormatsServerLocalTime(t *testing.T) {
+	loc := time.FixedZone("CDT", -5*3600)
+	started := time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC)
+	now := time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC)
+	got := runtimeInfoBlock(false, started, now, loc, "vllm/qwen3.8-27b-uncensored-exl3", "custom", "discord")
+	want := "Conversation started: Saturday, September 26, 2026 (CDT, UTC-05:00)\n" +
+		"Today's date (as of the last context rebuild): Sunday, October 04, 2026 (CDT, UTC-05:00) — trust this over the start date for what day it is now; query tools for exact time.\n" +
+		"Model: vllm/qwen3.8-27b-uncensored-exl3\nProvider: custom\nPlatform: discord"
+	if got != want {
+		t.Fatalf("runtime block = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeInfoBlockOmitsStartForStatelessAndBlanks(t *testing.T) {
+	loc := time.FixedZone("CDT", -5*3600)
+	now := time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC)
+	got := runtimeInfoBlock(true, time.Time{}, now, loc, "", "", "")
+	if strings.Contains(got, "Conversation started") || strings.Contains(got, "Model:") || strings.Contains(got, "Provider:") || strings.Contains(got, "Platform:") {
+		t.Fatalf("stateless/blank runtime block leaked fields: %q", got)
+	}
+	if !strings.HasPrefix(got, "Today's date (as of the last context rebuild): Sunday, October 04, 2026 (CDT, UTC-05:00)") {
+		t.Fatalf("stateless runtime block = %q", got)
+	}
+}
+
+func TestAssemblePromptContextOrdersRuntimeBlockAfterUserProfile(t *testing.T) {
+	files := renderFileMemory("Alice profile body", "")
+	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")
+	got := AssemblePromptContext("soul", files+"\n\n"+block, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	content := got.Messages[0].Content
+	profileAt := strings.Index(content, "USER PROFILE (who the user is)")
+	runtimeAt := strings.Index(content, "Conversation started:")
+	if profileAt < 0 || runtimeAt < 0 || runtimeAt < profileAt {
+		t.Fatalf("runtime block not ordered after user profile: %q", content)
 	}
 }
 

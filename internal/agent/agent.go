@@ -45,6 +45,7 @@ type Agent struct {
 	mcpProvider MCPProvider
 	budget      tokenbudget.ContextBudget
 	model       string
+	provider    string
 	soul        *soul.Store
 	userMemory  SessionStore
 	fileMemory  *files.Store
@@ -75,13 +76,14 @@ func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 	}
 }
 
-// NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, prompt budget, tool-governance policy,
-// and logger.
+// NewAgent initializes the Agent with an LLM chat client, tool registry, model
+// name and configured provider key, soul store, SQLite user memory store,
+// prompt budget, tool-governance policy, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
 	model string,
+	provider string,
 	soul *soul.Store,
 	userMemory SessionStore,
 	budget tokenbudget.ContextBudget,
@@ -99,6 +101,7 @@ func NewAgent(
 		mcpProvider: mcpProvider,
 		budget:      budget,
 		model:       model,
+		provider:    provider,
 		soul:        soul,
 		userMemory:  userMemory,
 		toolPolicy:  toolPolicy,
@@ -224,8 +227,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
 	speakerLine := ""
-	fileContext := ""
+	contextBlock := ""
 	sessionGeneration := 0
+	var sessionStartedAt time.Time
 	if a.userMemory != nil && !request.Stateless {
 		session, err := a.userMemory.ResolveSessionContext(ctx, senderID, sessionKey, sessionTurnTTL)
 		if err != nil {
@@ -233,6 +237,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		} else {
 			speakerLine = session.SpeakerIntro
 			sessionGeneration = session.Generation
+			sessionStartedAt = session.StartedAt
 			reqLog.Debug("agent.session.loaded", "loaded tenant session context",
 				config.F("session_generation", session.Generation),
 				config.F("is_session_new", session.IsNewSession))
@@ -271,8 +276,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				}
 			}
 		}
-		fileContext = renderFileMemory(userContent, memoryContent)
+		contextBlock = renderFileMemory(userContent, memoryContent)
 		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+	}
+	if runtimeBlock := runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway); runtimeBlock != "" {
+		if strings.TrimSpace(contextBlock) == "" {
+			contextBlock = runtimeBlock
+		} else {
+			contextBlock += "\n\n" + runtimeBlock
+		}
 	}
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)
@@ -367,7 +379,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, fileContext, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 	messages := promptContext.Messages
 	if request.Stateless {
 		if historyContext != "" {
@@ -382,7 +394,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	if request.Stateless {
 		compactor = nil
 	}
-	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, fileContext, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
 	if len(contextImages) > 0 && a.registry.HasHandler(imagegenerate.Name) {
 		imageContext := sessionImageContext(contextImages, nil)

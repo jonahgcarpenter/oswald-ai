@@ -306,6 +306,7 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	if !ok {
 		return configErr("config_model_provider_invalid", "model.provider")
 	}
+	cfg.LLMGatewayProvider = providerName
 	endpoint, err := url.Parse(provider.API)
 	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
 		return configErr("config_model_endpoint_invalid", "providers."+providerName+".api")

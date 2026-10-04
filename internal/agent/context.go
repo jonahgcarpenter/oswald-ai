@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
@@ -87,6 +88,34 @@ func gatewaySystemPrompt(gateway string) string {
 	}
 }
 
+// runtimeInfoBlock reports deployment/runtime facts appended to the system
+// prompt after the user profile. The start line is omitted for stateless
+// requests, which have no durable conversation.
+func runtimeInfoBlock(stateless bool, startedAt, now time.Time, loc *time.Location, model, provider, platform string) string {
+	var lines []string
+	if !stateless && !startedAt.IsZero() {
+		lines = append(lines, "Conversation started: "+formatRuntimeTime(startedAt, loc))
+	}
+	lines = append(lines, "Today's date (as of the last context rebuild): "+formatRuntimeTime(now, loc)+" — trust this over the start date for what day it is now; query tools for exact time.")
+	if value := strings.TrimSpace(model); value != "" {
+		lines = append(lines, "Model: "+value)
+	}
+	if value := strings.TrimSpace(provider); value != "" {
+		lines = append(lines, "Provider: "+value)
+	}
+	if value := strings.TrimSpace(platform); value != "" {
+		lines = append(lines, "Platform: "+value)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRuntimeTime(value time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.Local
+	}
+	return value.In(loc).Format("Monday, January 02, 2006 (MST, UTC-07:00)")
+}
+
 func promptPressureVersion(model string, inputLimit int) string {
 	return fmt.Sprintf("%s:%s:%d", sessionPromptPressurePrefix, strings.TrimSpace(model), inputLimit)
 }
@@ -139,7 +168,7 @@ type PromptContext struct {
 // caller-selected newest verbatim tail before additional history.
 func AssemblePromptContext(
 	deploymentPolicy string,
-	fileContext string,
+	contextBlock string,
 	currentPrompt string,
 	currentImages []llm.InputImage,
 	summary memory.SessionSummary,
@@ -150,8 +179,8 @@ func AssemblePromptContext(
 ) PromptContext {
 	recentTurns = prepareHistoricalTurns(recentTurns, tools)
 	required := make([]llm.ChatMessage, 0, 2)
-	if fileContext != "" {
-		deploymentPolicy += "\n\n" + fileContext
+	if contextBlock != "" {
+		deploymentPolicy += "\n\n" + contextBlock
 	}
 	required = append(required, llm.ChatMessage{Role: "system", Content: deploymentPolicy})
 	current := llm.ChatMessage{

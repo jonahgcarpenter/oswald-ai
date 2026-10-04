@@ -25,6 +25,7 @@ type Config struct {
 	OpenAIListenPort               string
 	LLMGatewayURL                  string
 	LLMGatewayModel                string
+	LLMGatewayProvider             string
 	LLMGatewayAPIKey               string
 	LLMGatewayVirtualKey           string
 	ModelContextWindow             int

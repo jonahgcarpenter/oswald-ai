@@ -139,7 +139,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
 		}
 		mcpManagers = append(mcpManagers, manager)
-		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager))
+		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, profile.LLMGatewayProvider, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager))
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
 		engine.SetForegroundCompactor(compactor)
