@@ -220,12 +220,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	reqLog.Info("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
-	var promptParts []string
-	promptParts = append(promptParts, soulContent)
-	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
-		promptParts = append(promptParts, gatewayPrompt)
-	}
-	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
+	dynamicSystemPrompt := soulContent
 	speakerLine := ""
 	contextBlock := ""
 	sessionGeneration := 0
@@ -293,6 +288,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	if !request.Stateless {
 		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
 	}
+	appendContext(platformNotes(gateway))
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration

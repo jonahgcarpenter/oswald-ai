@@ -1055,7 +1055,7 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	}
 }
 
-func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
+func TestProcessAddsIMessagePlatformNotes(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
@@ -1065,8 +1065,8 @@ func TestProcessAddsIMessagePlainTextSystemInstruction(t *testing.T) {
 	}
 
 	system := primaryRequests(chat.requests)[0].Messages[0]
-	if system.Role != "system" || !strings.Contains(system.Content, "iMessage") || !strings.Contains(system.Content, "does not render Markdown") {
-		t.Fatalf("missing imessage system instruction: %+v", system)
+	if system.Role != "system" || !strings.Contains(system.Content, "**Platform notes:**") || !strings.Contains(system.Content, "responding via iMessage") {
+		t.Fatalf("missing imessage platform notes: %+v", system)
 	}
 }
 
@@ -1082,8 +1082,8 @@ func TestProcessUsesFreshOperatorManagedSoulAsSystemPrompt(t *testing.T) {
 		t.Fatalf("first process: %v", err)
 	}
 	firstSystem := primaryRequests(chat.requests)[0].Messages[0]
-	if firstSystem.Role != "system" || !strings.HasPrefix(firstSystem.Content, "You are Oswald.\n\n# Gateway Instructions") {
-		t.Fatalf("soul and gateway instructions have incorrect authority or order: %+v", firstSystem)
+	if firstSystem.Role != "system" || !strings.HasPrefix(firstSystem.Content, "You are Oswald.") {
+		t.Fatalf("soul and platform notes have incorrect authority or order: %+v", firstSystem)
 	}
 
 	if err := os.WriteFile(filepath.Join(filepath.Dir(soulPath), "user-1", "SOUL.md"), []byte("You are Oswald after a manual edit."), 0o600); err != nil {
@@ -1127,9 +1127,14 @@ func TestProcessInjectsSessionContextBlock(t *testing.T) {
 	if !strings.Contains(system, "## Current Session Context") || !strings.Contains(system, `**Source:** Discord ("DM with fragsap")`) || !strings.Contains(system, `**User:** "fragsap"`) {
 		t.Fatalf("system prompt missing session context block:\n%s", system)
 	}
+	contextAt := strings.Index(system, "## Current Session Context")
+	notesAt := strings.Index(system, "**Platform notes:**")
+	if contextAt < 0 || notesAt < 0 || notesAt < contextAt {
+		t.Fatalf("platform notes not ordered after session context:\n%s", system)
+	}
 }
 
-func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T) {
+func TestProcessAddsDiscordPlatformNotesWithoutIMessageContent(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
 
@@ -1138,9 +1143,12 @@ func TestProcessDoesNotAddIMessageSystemInstructionForOtherGateways(t *testing.T
 		t.Fatalf("process: %v", err)
 	}
 
-	system := primaryRequests(chat.requests)[0].Messages[0]
-	if strings.Contains(system.Content, "does not render Markdown") {
-		t.Fatalf("unexpected imessage system instruction: %+v", system)
+	system := primaryRequests(chat.requests)[0].Messages[0].Content
+	if !strings.Contains(system, "running inside Discord") {
+		t.Fatalf("missing discord platform notes:\n%s", system)
+	}
+	if strings.Contains(system, "responding via iMessage") {
+		t.Fatalf("discord prompt leaked imessage platform notes:\n%s", system)
 	}
 }
 

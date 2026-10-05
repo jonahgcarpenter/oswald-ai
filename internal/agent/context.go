@@ -79,10 +79,16 @@ func providerUserValue(value string) string {
 	return strings.TrimSpace(value)
 }
 
-func gatewaySystemPrompt(gateway string) string {
+// platformNotes renders trusted per-gateway capability and formatting guidance.
+// It is appended as the final system block so it follows the untrusted session
+// context. Unknown or stateless transports (for example the API gateway) return
+// an empty string.
+func platformNotes(gateway string) string {
 	switch strings.TrimSpace(strings.ToLower(gateway)) {
+	case "discord":
+		return "**Platform notes:** You are running inside Discord. You do NOT have access to Discord-specific APIs — you cannot search channel history, pin messages, manage roles, or list server members. Do not promise to perform these actions. If the user asks, explain that you can only read messages sent directly to you and respond."
 	case "imessage":
-		return "# Gateway Instructions\nThe user is reading this in iMessage, which does not render Markdown. Write responses in plain text. Do not use Markdown formatting such as **bold**, headings, tables, fenced code blocks, or inline code ticks. Use simple line breaks and plain bullets when helpful."
+		return "**Platform notes:** You are responding via iMessage. Keep responses short and conversational — think texts, not essays. Structure longer replies as separate short thoughts, each separated by a blank line (double newline). The full response is delivered as a single iMessage, so use blank lines for readability, not as bubble splits: one idea per paragraph, 1–3 sentences each. If the user needs a detailed answer, give the short version first and offer to elaborate."
 	default:
 		return ""
 	}

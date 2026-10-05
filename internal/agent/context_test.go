@@ -286,6 +286,22 @@ func TestSessionContextBlockOmitsEmptyLabelAndSanitizes(t *testing.T) {
 	}
 }
 
+func TestPlatformNotesPerGateway(t *testing.T) {
+	discord := platformNotes("discord")
+	if !strings.Contains(discord, "running inside Discord") || !strings.Contains(discord, "do NOT have access to Discord-specific APIs") {
+		t.Fatalf("discord platform notes = %q", discord)
+	}
+	imessage := platformNotes("iMessage")
+	if !strings.Contains(imessage, "responding via iMessage") || !strings.Contains(imessage, "single iMessage") {
+		t.Fatalf("imessage platform notes = %q", imessage)
+	}
+	for _, gateway := range []string{"openai", "unknown", ""} {
+		if got := platformNotes(gateway); got != "" {
+			t.Fatalf("platform notes for %q = %q, want empty", gateway, got)
+		}
+	}
+}
+
 func roles(messages []llm.ChatMessage) string {
 	values := make([]string, len(messages))
 	for i, message := range messages {
