@@ -49,7 +49,7 @@ type NormalizationResult struct {
 	Image            llm.InputImage
 	DetectedMIME     string
 	DecodedFormat    string
-	OriginalWidth    int
+	OriginalWidth    int // Source dimensions after declared display orientation.
 	OriginalHeight   int
 	Width            int
 	Height           int
@@ -66,8 +66,8 @@ func LooksLikeImageMIME(mimeType string) bool {
 	return strings.HasPrefix(mimeType, "image/")
 }
 
-// NormalizeInputImageFromBytes decodes a raw image, preserves alpha with PNG,
-// and otherwise re-encodes to JPEG before returning the LLM payload.
+// NormalizeInputImageFromBytes decodes and orients a raw image, preserves alpha
+// with PNG, and otherwise re-encodes to JPEG before returning the LLM payload.
 func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data []byte, source string) (NormalizationResult, error) {
 	if len(data) == 0 {
 		return NormalizationResult{}, fmt.Errorf("image payload is empty")
@@ -84,6 +84,10 @@ func NormalizeInputImageFromBytes(header http.Header, declaredMIME string, data 
 	decoded, format, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return NormalizationResult{}, fmt.Errorf("image payload decode failed for MIME type %q: %w", detectedMIME, err)
+	}
+	decoded, err = orientSourceImage(decoded, data, format)
+	if err != nil {
+		return NormalizationResult{}, err
 	}
 	originalBounds := decoded.Bounds()
 	originalWidth := originalBounds.Dx()
