@@ -72,7 +72,7 @@ func TestChatCompletionMeasurement(t *testing.T) {
 			if r["is_usage_complete"] != (test.reported && !test.failed) || r["is_usage_invalid"] != false {
 				t.Errorf("usage metadata=%+v", r)
 			}
-			for key, want := range map[string]any{"level": "info", "record_kind": "measurement", "operation": "chat", "transport": "streaming", "status": test.status, "is_submitted": true, "is_usage_reported": test.reported, "model": "configured-model", "parent_operation_id": "parent_1", "request_id": "req_1", "user_id": "usr_1", "gateway": "discord", "workload": "foreground", "malformed_chunk_count": float64(test.malformed)} {
+			for key, want := range map[string]any{"level": "debug", "record_kind": "measurement", "operation": "chat", "transport": "streaming", "status": test.status, "is_submitted": true, "is_usage_reported": test.reported, "model": "configured-model", "parent_operation_id": "parent_1", "request_id": "req_1", "user_id": "usr_1", "gateway": "discord", "workload": "foreground", "malformed_chunk_count": float64(test.malformed)} {
 				if r[key] != want {
 					t.Errorf("%s=%v want %v", key, r[key], want)
 				}
@@ -305,7 +305,7 @@ func TestLaterInvalidStreamUsagePreservesKnownCounts(t *testing.T) {
 				t.Fatalf("completion count=%d logs=%s", len(records), output.String())
 			}
 			r := records[0]
-			for key, want := range map[string]any{"level": "info", "status": status, "outcome": outcome, "is_usage_reported": true, "is_usage_complete": false, "is_usage_invalid": true, "prompt_tokens": float64(81), "completion_tokens": float64(20), "total_tokens": float64(100)} {
+			for key, want := range map[string]any{"level": "debug", "status": status, "outcome": outcome, "is_usage_reported": true, "is_usage_complete": false, "is_usage_invalid": true, "prompt_tokens": float64(81), "completion_tokens": float64(20), "total_tokens": float64(100)} {
 				if r[key] != want {
 					t.Errorf("%s=%v want %v", key, r[key], want)
 				}

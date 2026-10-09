@@ -24,7 +24,7 @@ func (g *Gateway) refreshBlueBubblesCapabilitiesWithRetry(maxAttempts int, delay
 		var available bool
 		loaded, available = g.refreshBlueBubblesCapabilities(log)
 		if available {
-			log.Info("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("attempt_count", attempt), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("is_private_api_enabled", true), config.F("is_helper_connected", true), config.F("status", "ok"))
+			log.Debug("gateway.bluebubbles.capabilities", "resolved BlueBubbles capabilities", config.F("attempt_count", attempt), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("is_private_api_enabled", true), config.F("is_helper_connected", true), config.F("status", "ok"))
 			return true
 		}
 		if attempt < maxAttempts && delay > 0 {

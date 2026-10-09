@@ -67,7 +67,7 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 		return nil, fmt.Errorf("no gateways are configured correctly")
 	}
 
-	gatewayLog.Info("gateway.bootstrap.enabled", "resolved enabled gateways",
+	gatewayLog.Debug("gateway.bootstrap.enabled", "resolved enabled gateways",
 		config.F("gateway_count", len(services)),
 		config.F("gateways", serviceNames(services)),
 	)

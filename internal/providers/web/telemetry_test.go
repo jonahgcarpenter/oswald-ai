@@ -29,7 +29,7 @@ func TestFallbackCompletionReportsFinalDegradation(t *testing.T) {
 		}
 		if r["event"] == "provider.web.search.fallback.complete" {
 			found = true
-			if r["level"] != "info" || r["status"] != "degraded" || r["result_count"] != float64(1) {
+			if r["level"] != "debug" || r["status"] != "degraded" || r["result_count"] != float64(1) {
 				t.Errorf("record=%+v", r)
 			}
 		}

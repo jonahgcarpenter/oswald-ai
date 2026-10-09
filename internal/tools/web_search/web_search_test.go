@@ -205,7 +205,7 @@ func TestHandlerRejectsInvalidLimitBeforeSearch(t *testing.T) {
 
 func TestHandlerTerminalResultMeasurement(t *testing.T) {
 	const canary = "private_search_payload"
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, test := range []struct {
 			name, status, outcome         string
 			args                          map[string]interface{}
@@ -249,7 +249,7 @@ func TestHandlerTerminalResultMeasurement(t *testing.T) {
 						continue
 					}
 					completions++
-					if record["level"] != "info" || record["record_kind"] != "measurement" || record["request_id"] != "req_search" || record["operation_id"] != "op_search" || record["parent_operation_id"] != "op_parent" || record["status"] != test.status || record["outcome"] != test.outcome || record["result_count"] != float64(test.count) || record["is_search_invoked"] != test.invoked {
+					if record["level"] != "debug" || record["record_kind"] != "measurement" || record["request_id"] != "req_search" || record["operation_id"] != "op_search" || record["parent_operation_id"] != "op_parent" || record["status"] != test.status || record["outcome"] != test.outcome || record["result_count"] != float64(test.count) || record["is_search_invoked"] != test.invoked {
 						t.Fatalf("measurement=%+v", record)
 					}
 					limit, exists := record["requested_result_count"]

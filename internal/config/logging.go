@@ -3,7 +3,6 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -17,7 +16,7 @@ const serviceName = "oswald-ai"
 
 var reservedLogFields = map[string]struct{}{
 	"ts": {}, "level": {}, "service": {}, "log_type": {}, "component": {}, "event": {}, "msg": {},
-	"log_schema_version": {}, "instance_id": {},
+	"instance_id": {},
 }
 
 var validLogStatuses = map[string]struct{}{
@@ -156,16 +155,15 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 	}
 
 	payload := map[string]any{
-		"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
-		"level":              level.String(),
-		"service":            serviceName,
-		"log_type":           l.logType,
-		"component":          safeLogLabel(l.component),
-		"event":              safeLogLabel(event),
-		"msg":                boundedLogString(msg, maxLogMessageBytes),
-		"log_schema_version": 1,
-		"instance_id":        l.instanceID,
-		"record_kind":        "event",
+		"ts":          time.Now().UTC().Format(time.RFC3339Nano),
+		"level":       level.String(),
+		"service":     serviceName,
+		"log_type":    l.logType,
+		"component":   safeLogLabel(l.component),
+		"event":       safeLogLabel(event),
+		"msg":         boundedLogString(msg, maxLogMessageBytes),
+		"instance_id": l.instanceID,
+		"record_kind": "event",
 	}
 
 	valid := true
@@ -184,29 +182,31 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 	for _, field := range l.agent {
 		valid = addLogField(payload, field) && valid
 	}
+	if level == LevelInfo {
+		compactActivityLog(payload, event)
+	}
 
-	line, err := json.Marshal(payload)
+	line, err := marshalOrderedLog(payload)
 	if err != nil || !valid || len(line) > maxLogRecordBytes {
 		fallback := map[string]any{
-			"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
-			"level":              "error",
-			"service":            serviceName,
-			"log_type":           l.logType,
-			"component":          safeLogLabel(l.component),
-			"event":              "logger.marshal_failed",
-			"msg":                "failed to marshal log payload",
-			"status":             "error",
-			"error_code":         "invalid_log_payload",
-			"log_schema_version": 1,
-			"instance_id":        l.instanceID,
-			"record_kind":        "event",
+			"ts":          time.Now().UTC().Format(time.RFC3339Nano),
+			"level":       "error",
+			"service":     serviceName,
+			"log_type":    l.logType,
+			"component":   safeLogLabel(l.component),
+			"event":       "logger.marshal_failed",
+			"msg":         "failed to marshal log payload",
+			"status":      "error",
+			"error_code":  "invalid_log_payload",
+			"instance_id": l.instanceID,
+			"record_kind": "event",
 		}
 		for _, key := range correlationLogKeys {
 			if value, ok := payload[key]; ok {
 				fallback[key] = value
 			}
 		}
-		line, _ = json.Marshal(fallback)
+		line, _ = marshalOrderedLog(fallback)
 	}
 
 	l.logger.Print(string(line))

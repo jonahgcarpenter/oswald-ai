@@ -119,6 +119,12 @@ func TestProductionLoggingContract(t *testing.T) {
 					if len(call.Args) < 2 {
 						return true
 					}
+					if sel.Sel.Name == "Info" {
+						event, fixed := literal(call.Args[0])
+						if !fixed || !activityLogEvents[event] {
+							t.Errorf("%s: INFO must belong to the activity/lifecycle catalog", fset.Position(call.Pos()))
+						}
+					}
 					if _, fixed := literal(call.Args[0]); !fixed {
 						name := ""
 						switch e := call.Args[0].(type) {

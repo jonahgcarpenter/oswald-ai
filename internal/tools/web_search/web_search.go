@@ -156,7 +156,7 @@ func NewHandler(searcher web.Searcher, log *config.Logger) func(ctx context.Cont
 			if limitErr == nil {
 				fields = append(fields, config.F("requested_result_count", limit))
 			}
-			agentLog.Info("agent.tool.web.search.complete", "web search tool completed", fields...)
+			agentLog.Debug("agent.tool.web.search.complete", "web search tool completed", fields...)
 		}()
 		if limitErr != nil {
 			rejected = true

@@ -61,7 +61,7 @@ func BeginSearch(ctx context.Context, log *config.Logger, provider string) (cont
 		if provider == "fallback" {
 			event = "provider.web.search.fallback.complete"
 		}
-		log.Server("provider.web.search").Info(event, "web search completed", fields...)
+		log.Server("provider.web.search").Debug(event, "web search completed", fields...)
 		if status == "degraded" || status == "error" {
 			log.Server("provider.web.search").Warn("provider.web.search.degraded", "web search unavailable or degraded", RequestLogFields(ctx, config.F("provider", provider), config.F("status", status), config.ErrorField(err))...)
 		}
@@ -95,7 +95,7 @@ func SearchAttempt(log *config.Logger, client *http.Client, req *http.Request, p
 	if err != nil {
 		fields = append(fields, config.ErrorField(err))
 	}
-	log.Server("provider.web.search").Info("provider.web.search.attempt.complete", "web search HTTP attempt completed", fields...)
+	log.Server("provider.web.search").Debug("provider.web.search.attempt.complete", "web search HTTP attempt completed", fields...)
 	return resp, err
 }
 

@@ -104,7 +104,7 @@ func (s *ProfileService) cycle(ctx context.Context) {
 	retry, ready, dead, done, expired, healthErr := s.store.CompressionHealth(healthCtx)
 	cancel()
 	if healthErr == nil {
-		s.log.Server("compaction").Info("compaction.profile.health", "profile compression health", config.F("record_kind", "snapshot"), config.F("retry_count", retry), config.F("ready_count", ready), config.F("dead_count", dead), config.F("succeeded_count", done), config.F("expired_lease_count", expired), config.F("selected_scope_count", len(scopes)), config.F("is_scope_selection_capped", len(scopes) == 100))
+		s.log.Server("compaction").Debug("compaction.profile.health", "profile compression health", config.F("record_kind", "snapshot"), config.F("retry_count", retry), config.F("ready_count", ready), config.F("dead_count", dead), config.F("succeeded_count", done), config.F("expired_lease_count", expired), config.F("selected_scope_count", len(scopes)), config.F("is_scope_selection_capped", len(scopes) == 100))
 	} else if ctx.Err() == nil {
 		s.log.Server("compaction").Warn("compaction.profile.health_failed", "failed to read profile compression health", config.ErrorField(healthErr))
 	}
@@ -184,7 +184,7 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 				s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to retire uncompactable exchange", config.ErrorField(err))
 				return
 			}
-			s.log.Server("compaction").Info("compaction.profile.uncompactable", "complete exchange exceeds compression capacity", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("turn_count", 1), config.F("status", "rejected"))
+			s.log.Server("compaction").Debug("compaction.profile.uncompactable", "complete exchange exceeds compression capacity", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("turn_count", 1), config.F("status", "rejected"))
 		}
 		return
 	}
@@ -268,7 +268,10 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 	if cleanupErr != nil && !errors.Is(cleanupErr, memory.ErrStaleSessionCompactionJobLease) && !errors.Is(cleanupErr, sql.ErrNoRows) {
 		s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to release profile compression", config.ErrorField(cleanupErr))
 	}
-	s.log.Server("compaction").Info("compaction.profile.complete", "completed profile compression attempt", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", status), config.F("outcome", outcome), config.F("turn_count", len(turns)), config.F("is_submitted", submitted), config.F("is_artifact_reused", artifactReused), config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(err))
+	s.log.Server("compaction").Debug("compaction.profile.complete", "completed profile compression attempt", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", status), config.F("outcome", outcome), config.F("turn_count", len(turns)), config.F("is_submitted", submitted), config.F("is_artifact_reused", artifactReused), config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(err))
+	if err != nil && workCtx.Err() == nil && !errors.Is(err, context.Canceled) {
+		s.log.Server("compaction").Warn("compaction.failed", "profile compression did not complete", config.F("user_id", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", "degraded"), config.ErrorField(err))
+	}
 	if err == nil {
 		select {
 		case s.wake <- struct{}{}:

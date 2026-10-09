@@ -19,7 +19,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	if deps.ForProfile != nil {
 		selected, ok := deps.ForProfile(req.Principal.CanonicalUserID)
 		if !ok || !req.Principal.Authenticated() {
-			deps.Log.Server("gateway.runtime").Info("gateway.profile.rejected", "rejected unavailable profile", config.F("status", "rejected"))
+			deps.Log.Server("gateway.runtime").Warn("gateway.profile.rejected", "rejected unavailable profile", config.F("status", "rejected"))
 			return Outcome{Action: routing.ActionIgnore, Reason: "profile_unavailable"}
 		}
 		deps = selected
@@ -98,6 +98,20 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		}
 		return f
 	}
+	activityFields := func() []config.Field {
+		fields := []config.Field{config.F("request_id", req.RequestID), config.F("user_id", userID)}
+		if kind != "prompt" {
+			return fields
+		}
+		inputType := "text"
+		if len(decision.Images) > 0 {
+			inputType = "image"
+			if strings.TrimSpace(req.Text) != "" {
+				inputType = "text_image"
+			}
+		}
+		return append(fields, config.F("input_type", inputType))
+	}
 	defer func() {
 		e := usage.ExecutionSnapshot()
 		toolExecutionCount, toolBlockedCount = e.ToolExecutionCount, e.BlockedCount
@@ -160,7 +174,18 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		if model != "" {
 			f = append(f, config.F("model", model))
 		}
-		log.Info("gateway.request.complete", "completed addressed gateway request", f...)
+		log.Debug("gateway.request.complete", "completed addressed gateway request", f...)
+		if isAdmitted {
+			completion := append(activityFields(), config.F("execution_outcome", executionStatus), config.F("delivery_outcome", measured.status),
+				config.F("is_execution_complete", isExecutionComplete), config.F("duration_ms", max(int64(0), time.Since(req.ReceivedAt).Milliseconds())))
+			if kind == "prompt" {
+				completion = append(completion, config.F("tool_execution_count", toolExecutionCount))
+				log.Info("chat.completed", "completed chat turn", completion...)
+			} else if kind == "command" {
+				completion = append(completion, config.F("command_name", commandName))
+				log.Info("command.completed", "completed command", completion...)
+			}
+		}
 		if terminalErr == nil {
 			terminalErr = outcome.Err
 		}
@@ -169,7 +194,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			if terminalErrorCode != "" {
 				errorField = config.F("error_code", terminalErrorCode)
 			}
-			log.Error("gateway.request.failed", "gateway request failed", append(fields(), config.F("status", "error"), errorField)...)
+			log.Warn("gateway.request.failed", "gateway request failed", append(fields(), config.F("status", "error"), errorField)...)
 		}
 	}()
 
@@ -211,7 +236,10 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 
 	isAdmitted = true
-	log.Info("gateway.request.received", "admitted gateway request", append(fields(), config.F("record_kind", "event"), config.F("is_admitted", true))...)
+	log.Debug("gateway.request.received", "admitted gateway request", append(fields(), config.F("record_kind", "event"), config.F("is_admitted", true))...)
+	if kind == "prompt" {
+		log.Info("chat.requested", "admitted chat turn", activityFields()...)
+	}
 	if decision.Action == routing.ActionCommand {
 		startedAt := time.Now()
 		response := commands.Result{Text: "Unknown command: /"}
@@ -247,7 +275,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 					if commandErr != nil {
 						mutationStatus = "error"
 					}
-					log.Info("gateway.command.mutation.complete", "completed command mutation", append(fields(),
+					log.Debug("gateway.command.mutation.complete", "completed command mutation", append(fields(),
 						config.F("operation", response.Outcome.Operation), config.F("reason_code", response.Outcome.ReasonCode),
 						config.F("is_changed", true), config.F("affected_count", response.Outcome.AffectedCount),
 						config.F("active_canceled_count", response.Outcome.ActiveCanceledCount), config.F("queued_canceled_count", response.Outcome.QueuedCanceledCount), config.F("status", mutationStatus))...)

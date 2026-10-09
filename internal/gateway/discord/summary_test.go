@@ -13,7 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
-func TestAttachmentAndEmbedShareOneInfoSummary(t *testing.T) {
+func TestAttachmentAndEmbedShareOneDebugSummary(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "summary-log")
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestAttachmentAndEmbedShareOneInfoSummary(t *testing.T) {
 	defer file.Close()
 	old := os.Stderr
 	os.Stderr = file
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	os.Stderr = old
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -58,7 +58,7 @@ func TestAttachmentAndEmbedShareOneInfoSummary(t *testing.T) {
 			continue
 		}
 		count++
-		if event["level"] != "info" || event["status"] != "degraded" || event["gateway"] != "discord" || event["request_id"] != "req-input-summary" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(2) || event["declared_format_count"] != float64(1) || event["declared_embed_count"] != float64(1) {
+		if event["level"] != "debug" || event["status"] != "degraded" || event["gateway"] != "discord" || event["request_id"] != "req-input-summary" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(2) || event["declared_format_count"] != float64(1) || event["declared_embed_count"] != float64(1) {
 			t.Fatalf("summary=%+v", event)
 		}
 		if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {

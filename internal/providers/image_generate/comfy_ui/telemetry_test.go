@@ -58,7 +58,7 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 		}
 		if r["event"] == "provider.comfyui.stage.complete" {
 			stages[r["phase"].(string)]++
-			if r["level"] != "info" || r["duration_ms"] == nil || r["parent_operation_id"] != "op_parent" {
+			if r["level"] != "debug" || r["duration_ms"] == nil || r["parent_operation_id"] != "op_parent" {
 				t.Errorf("stage=%+v", r)
 			}
 			if r["phase"] == "cleanup" && (r["http_status"] != float64(503) || r["error_code"] != "http_server_error") {
@@ -92,7 +92,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, explicit := range []bool{false, true} {
 			client, err := NewClient(server.URL, time.Second)
 			if err != nil {
@@ -128,7 +128,7 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 				}
 				if record["event"] == "provider.comfyui.stage.complete" && record["phase"] == "submit" {
 					submits++
-					if record["strength"] != want || record["level"] != "info" || record["status"] != "error" || record["request_id"] != "req_strength" || record["parent_operation_id"] != "op_strength" {
+					if record["strength"] != want || record["level"] != "debug" || record["status"] != "error" || record["request_id"] != "req_strength" || record["parent_operation_id"] != "op_strength" {
 						t.Fatalf("unexpected strength measurement: %+v", record)
 					}
 				}

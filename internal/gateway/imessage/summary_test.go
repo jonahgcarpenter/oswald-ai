@@ -23,7 +23,7 @@ func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger,
 	t.Cleanup(func() { _ = file.Close() })
 	old := os.Stderr
 	os.Stderr = file
-	level := config.LevelInfo
+	level := config.LevelDebug
 	if len(levels) > 0 {
 		level = levels[0]
 	}
@@ -54,7 +54,7 @@ func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger,
 	}
 }
 
-func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
+func TestUnsupportedAttachmentSummaryAtDebugAfterProfileAdmission(t *testing.T) {
 	log, events := captureInfoSummaries(t)
 	g, b, _ := newIMessageTestGateway(t, "")
 	defer b.Shutdown()
@@ -70,7 +70,7 @@ func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
 			continue
 		}
 		count++
-		if event["level"] != "info" || event["status"] != "degraded" || event["request_id"] != "req-input-summary" || event["gateway"] != "imessage" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(1) || event["declared_format_count"] != float64(1) {
+		if event["level"] != "debug" || event["status"] != "degraded" || event["request_id"] != "req-input-summary" || event["gateway"] != "imessage" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(1) || event["declared_format_count"] != float64(1) {
 			t.Fatalf("summary=%+v", event)
 		}
 		if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {
@@ -82,7 +82,7 @@ func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
 	}
 }
 
-func TestCapabilityResolutionSummariesAtInfo(t *testing.T) {
+func TestCapabilityResolutionTerminalSummaries(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, event, reason, status string
 		httpStatus                        int
@@ -112,7 +112,12 @@ func TestCapabilityResolutionSummariesAtInfo(t *testing.T) {
 			if got := attempts.Load(); got != int32(wantAttempts) {
 				t.Fatalf("attempt count=%d", got)
 			}
-			got := events()
+			var got []map[string]any
+			for _, event := range events() {
+				if event["event"] == tc.event {
+					got = append(got, event)
+				}
+			}
 			if len(got) != 1 {
 				t.Fatalf("expected one terminal summary, got %+v", got)
 			}

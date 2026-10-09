@@ -56,7 +56,7 @@ func NewProfileManager(owner string, servers []config.MCPServer, log *config.Log
 		source.servers = append(source.servers, ServerConfig{ID: rand.Text(), Scope: ScopeUser, OwnerUserID: owner, Name: entry.Name, Description: entry.Description, Transport: entry.Transport, URL: entry.URL, Headers: headers, Enabled: entry.Enabled})
 	}
 	manager := newManager(source, log)
-	manager.log.Info("mcp.profile.configured", "configured profile MCP servers", config.F("user_id", owner), config.F("server_count", len(servers)), config.F("status", "ok"))
+	manager.log.Debug("mcp.profile.configured", "configured profile MCP servers", config.F("user_id", owner), config.F("server_count", len(servers)), config.F("status", "ok"))
 	return manager, nil
 }
 

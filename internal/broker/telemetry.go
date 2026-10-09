@@ -55,7 +55,7 @@ func (b *Broker) logExecutionComplete(ctx context.Context, usage *requestctx.Usa
 		status, outcome = "ok", "canceled"
 	}
 	s := usage.Snapshot()
-	b.log.Info("broker.request.execution.complete", "completed broker processor execution", append(requestctx.LogFields(ctx),
+	b.log.Debug("broker.request.execution.complete", "completed broker processor execution", append(requestctx.LogFields(ctx),
 		config.F("record_kind", "summary"), config.F("is_execution_complete", true), config.F("status", status), config.F("outcome", outcome),
 		config.ErrorField(err),
 		config.F("model", e.Model), config.F("response_kind", e.ResponseKind), config.F("persistence_status", e.PersistenceStatus),
@@ -100,7 +100,7 @@ func (b *Broker) Snapshot() Snapshot {
 
 func (b *Broker) logHealth() {
 	s := b.Snapshot()
-	b.log.Info("broker.health", "broker health snapshot",
+	b.log.Debug("broker.health", "broker health snapshot",
 		config.F("record_kind", "snapshot"),
 		config.F("worker_count", s.WorkerCount), config.F("queued_count", s.QueuedCount),
 		config.F("active_count", s.ActiveCount), config.F("outstanding_count", s.OutstandingCount),

@@ -56,7 +56,7 @@ func (dg *Gateway) deliverFinal(state *discordStreamState, response *agent.Respo
 	dg.outboundMu.Lock()
 	if dg.outboundClosed || len(dg.outbound) >= 20 || bytes > 80<<20-dg.outboundBytes {
 		dg.outboundMu.Unlock()
-		dg.log().Info("gateway.outbound.rejected", "discord outbound capacity unavailable", config.F("request_id", state.stream.responder.requestID), config.F("status", "rejected"))
+		dg.log().Warn("gateway.outbound.rejected", "discord outbound capacity unavailable", config.F("request_id", state.stream.responder.requestID), config.F("status", "rejected"))
 		return errors.New("discord outbound capacity unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -69,7 +69,7 @@ func (dg *Gateway) deliverFinal(state *discordStreamState, response *agent.Respo
 		dg.outboundDone = make(chan struct{})
 		go dg.runOutbound(workerCtx, dg.outboundDone)
 	}
-	dg.log().Info("gateway.outbound.admitted", "admitted discord final delivery", config.F("request_id", state.stream.responder.requestID), config.F("pending_count", len(dg.outbound)), config.F("attachment_bytes", dg.outboundBytes))
+	dg.log().Debug("gateway.outbound.admitted", "admitted discord final delivery", config.F("request_id", state.stream.responder.requestID), config.F("pending_count", len(dg.outbound)), config.F("attachment_bytes", dg.outboundBytes))
 	dg.outboundMu.Unlock()
 	defer cancel()
 	select {
@@ -112,7 +112,7 @@ func (dg *Gateway) completeOutbound(e *outboundEntry, err error, waitingOnly boo
 		if errors.Is(err, context.DeadlineExceeded) {
 			outcome = "expired"
 		}
-		dg.log().Info("gateway.outbound.complete", "completed discord final delivery", config.F("record_kind", "measurement"), config.F("request_id", e.state.stream.responder.requestID), config.F("status", status), config.F("outcome", outcome), config.F("duration_ms", time.Since(e.started).Milliseconds()), config.F("pending_count", len(dg.outbound)), config.ErrorField(err))
+		dg.log().Debug("gateway.outbound.complete", "completed discord final delivery", config.F("record_kind", "measurement"), config.F("request_id", e.state.stream.responder.requestID), config.F("status", status), config.F("outcome", outcome), config.F("duration_ms", time.Since(e.started).Milliseconds()), config.F("pending_count", len(dg.outbound)), config.ErrorField(err))
 		e.result <- err
 		return
 	}
@@ -156,7 +156,7 @@ func (dg *Gateway) runOutbound(ctx context.Context, done chan struct{}) {
 			}
 			deadline, _ := e.ctx.Deadline()
 			wait = min(wait, max(0, time.Until(deadline)))
-			dg.log().Info("gateway.outbound.retry", "retrying discord final delivery", config.F("request_id", e.state.stream.responder.requestID), config.F("status", "retry"), config.F("delay_ms", wait.Milliseconds()))
+			dg.log().Debug("gateway.outbound.retry", "retrying discord final delivery", config.F("request_id", e.state.stream.responder.requestID), config.F("status", "retry"), config.F("delay_ms", wait.Milliseconds()))
 			timer := time.NewTimer(wait)
 			select {
 			case <-timer.C:

@@ -39,6 +39,6 @@ func generationStageLogger(ctx context.Context, log *config.Logger, strength *fl
 		if code := config.HTTPStatus(err); code != 0 {
 			fields = append(fields, config.F("http_status", code))
 		}
-		log.Info("provider.comfyui.stage.complete", "ComfyUI stage completed", fields...)
+		log.Debug("provider.comfyui.stage.complete", "ComfyUI stage completed", fields...)
 	}
 }

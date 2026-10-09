@@ -187,13 +187,13 @@ func (dg *Gateway) listenLoop(conn *gorilla.Conn) error {
 						dg.BotID = ready.User.ID
 						dg.setReadySession(ready.SessionID, ready.ResumeGatewayURL)
 						dg.setHeartbeatAcked(true)
-						dg.log().Info("gateway.session.ready", "discord gateway ready")
+						dg.log().Info("gateway.connected", "discord gateway ready", config.F("gateway", "discord"), config.F("status", "ok"))
 					} else {
 						dg.log().Warn("gateway.event.decode_failed", "invalid discord READY event", config.F("event_type", "READY"), config.F("status", "rejected"), config.ErrorField(err))
 					}
 				case "RESUMED":
 					dg.setHeartbeatAcked(true)
-					dg.log().Info("gateway.session.resumed", "discord session resumed")
+					dg.log().Info("gateway.connected", "discord session resumed", config.F("gateway", "discord"), config.F("status", "ok"))
 				case "MESSAGE_CREATE":
 					receivedAt := time.Now()
 					requestID := config.NewRequestID()

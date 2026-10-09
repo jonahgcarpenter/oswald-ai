@@ -39,7 +39,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if err != nil {
 		return err
 	}
-	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", g.listenPath()))
+	log.Debug("gateway.listen", "imessage gateway listener starting", config.F("port", g.Port))
 	return http.Serve(listener, mux)
 }
 

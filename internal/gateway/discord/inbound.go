@@ -107,7 +107,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		if len(unsupported) > 0 {
 			status = "degraded"
 		}
-		log.Info("gateway.attachment.processed", "normalized discord input attachments and embeds", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("declared_embed_count", len(msg.Embeds)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
+		log.Debug("gateway.attachment.processed", "normalized discord input attachments and embeds", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("declared_embed_count", len(msg.Embeds)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
 	if embedImageCount > 0 {
 		text = stripEmbedURLsFromText(text, msg.Embeds)

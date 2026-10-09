@@ -113,6 +113,6 @@ func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, 
 		if operation == "embedding" {
 			event = "provider.gateway.embed.complete"
 		}
-		c.requestLog(ctx, model).Info(event, "LLM gateway call completed", fields...)
+		c.requestLog(ctx, model).Debug(event, "LLM gateway call completed", fields...)
 	}
 }

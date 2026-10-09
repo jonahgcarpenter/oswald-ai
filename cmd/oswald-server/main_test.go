@@ -70,7 +70,7 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 				if err := json.Unmarshal(line, &event); err != nil {
 					t.Fatalf("stderr contains a non-JSON event: %q: %v", line, err)
 				}
-				if event["event"] == "app.shutdown.complete" {
+				if event["event"] == "app.stopped" {
 					cleanupComplete = true
 				}
 				if event["level"] == "error" {

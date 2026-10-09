@@ -236,7 +236,7 @@ func (b *Broker) Start() {
 		for _, head := range heads {
 			b.makeReady(head)
 		}
-		b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
+		b.log.Debug("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
 		b.logHealth()
 		b.workerWG.Add(1)
 		go func() {
@@ -500,7 +500,7 @@ func (b *Broker) Shutdown() {
 		queued := b.outstanding
 		started := b.started
 		b.mu.Unlock()
-		b.log.Info("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
+		b.log.Debug("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
 		if started && b.workerCount > 0 {
 			b.workWG.Wait()
 		} else {
@@ -509,7 +509,7 @@ func (b *Broker) Shutdown() {
 		close(b.ready)
 		b.workerWG.Wait()
 		b.logHealth()
-		b.log.Info("broker.shutdown.complete", "broker shutdown complete")
+		b.log.Debug("broker.shutdown.complete", "broker shutdown complete")
 	})
 }
 

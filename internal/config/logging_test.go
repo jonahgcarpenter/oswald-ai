@@ -42,8 +42,8 @@ func assertEnvelope(t *testing.T, record map[string]any) {
 	if _, err := time.Parse(time.RFC3339Nano, record["ts"].(string)); err != nil {
 		t.Fatalf("invalid timestamp: %v", err)
 	}
-	if record["log_schema_version"] != float64(1) {
-		t.Fatalf("bad schema version: %v", record)
+	if _, exists := record["log_schema_version"]; exists {
+		t.Fatalf("unexpected log schema version: %v", record)
 	}
 	if id, ok := record["instance_id"].(string); !ok || id == "" {
 		t.Fatalf("bad instance ID: %v", record)
@@ -221,7 +221,7 @@ func TestLoggerPrivacyBoundaryAndFallbackCorrelation(t *testing.T) {
 
 func TestLoggerInstanceAndBounds(t *testing.T) {
 	root := NewLogger(LevelInfo)
-	child := root.Server("child").With(F("instance_id", "spoof"), F("log_schema_version", 99)).Agent("agent", "req", "usr", "discord", "model")
+	child := root.Server("child").With(F("instance_id", "spoof")).Agent("agent", "req", "usr", "discord", "model")
 	if root.instanceID != child.instanceID || root.instanceID == NewLogger(LevelInfo).instanceID {
 		t.Fatal("instance inheritance/uniqueness")
 	}

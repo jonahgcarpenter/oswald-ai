@@ -31,7 +31,7 @@ var stringLogFields = map[string]bool{
 	"job_state": true, "formation_purpose": true, "generator_version": true, "extractor_version": true,
 	"input_type": true, "prompt_type": true, "finish_reason": true, "transport": true,
 	"phase": true, "reason_code": true, "response_kind": true, "request_kind": true,
-	"execution_status": true, "delivery_status": true, "persistence_status": true, "record_kind": true,
+	"execution_status": true, "delivery_status": true, "execution_outcome": true, "delivery_outcome": true, "persistence_status": true, "record_kind": true,
 	"done_reason": true, "job_kind": true, "entity_kind": true, "index_kind": true,
 	"revision_state": true, "source": true, "server_name": true, "identity_assurance": true,
 	"build_version": true, "build_revision": true, "go_version": true, "cleanup_reason": true,

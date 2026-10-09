@@ -23,6 +23,10 @@ import (
 )
 
 func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
+	return telemetryLoggerAtLevel(t, config.LevelDebug)
+}
+
+func telemetryLoggerAtLevel(t *testing.T, level config.Level) (*config.Logger, func() []map[string]any) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "telemetry.log")
 	f, err := os.Create(path)
@@ -32,7 +36,7 @@ func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
 	t.Cleanup(func() { f.Close() })
 	old := os.Stderr
 	os.Stderr = f
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(level)
 	os.Stderr = old
 	return log, func() []map[string]any {
 		data, err := os.ReadFile(path)
@@ -209,7 +213,7 @@ func TestRequestTerminalCancellationAndErrors(t *testing.T) {
 			Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "hello"}, Dependencies{Broker: b, Log: log}, r)
 			completed, errorCount := 0, 0
 			for _, record := range records() {
-				if record["level"] == "error" {
+				if record["event"] == "gateway.request.failed" && record["level"] == "warn" {
 					errorCount++
 				}
 				if record["event"] == "gateway.request.complete" {
@@ -306,7 +310,7 @@ func TestProviderErrorHasSafeRootDiagnostic(t *testing.T) {
 	Execute(Request{Principal: testPrincipal("user"), Text: "hello"}, Dependencies{Log: log, Broker: b}, &fakeResponder{})
 	count := 0
 	for _, record := range records() {
-		if record["level"] == "error" {
+		if record["level"] == "warn" {
 			count++
 			if record["event"] != "gateway.request.failed" || record["error_code"] != "model_failure" {
 				t.Fatalf("diagnostic = %v", record)

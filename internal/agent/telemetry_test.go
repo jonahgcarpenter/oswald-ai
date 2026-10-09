@@ -41,7 +41,7 @@ func TestToolAndGenerationTelemetryDoesNotDoubleMeter(t *testing.T) {
 	defer f.Close()
 	old := os.Stderr
 	os.Stderr = f
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	os.Stderr = old
 	chat := &meteredTestChatter{t: t, fakeChatter: fakeChatter{responses: []*llm.ChatResponse{
 		{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
@@ -106,14 +106,14 @@ func TestToolAndGenerationTelemetryDoesNotDoubleMeter(t *testing.T) {
 		if event == "agent.response.complete" && record["record_kind"] != "summary" {
 			t.Fatalf("generation record = %v", record)
 		}
-		if event == "agent.tool.complete" && record["record_kind"] != "measurement" {
+		if event == "tool.completed" && record["record_kind"] != "measurement" {
 			t.Fatalf("tool record = %v", record)
 		}
-		if event == "agent.tool.blocked" && record["tool_name"] != "unadvertised" {
+		if event == "tool.blocked" && record["tool_name"] != "unadvertised" {
 			t.Fatalf("unsafe blocked name: %v", record)
 		}
 	}
-	if counts["agent.tool.complete"] != 1 || counts["agent.tool.blocked"] != 1 || counts["agent.response.complete"] != 1 || counts["agent.tool.start"] != 0 {
+	if counts["tool.completed"] != 1 || counts["tool.blocked"] != 1 || counts["agent.response.complete"] != 1 || counts["agent.tool.start"] != 1 {
 		t.Fatalf("event counts: %v", counts)
 	}
 }
@@ -137,7 +137,7 @@ func TestToolCompletionPreservesActualOutcomeDuringCancellation(t *testing.T) {
 			defer f.Close()
 			old := os.Stderr
 			os.Stderr = f
-			log := config.NewLogger(config.LevelInfo)
+			log := config.NewLogger(config.LevelDebug)
 			os.Stderr = old
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -170,7 +170,7 @@ func TestToolCompletionPreservesActualOutcomeDuringCancellation(t *testing.T) {
 				if err := json.Unmarshal([]byte(line), &record); err != nil {
 					t.Fatal(err)
 				}
-				if record["event"] != "agent.tool.complete" {
+				if record["event"] != "tool.completed" {
 					continue
 				}
 				count++

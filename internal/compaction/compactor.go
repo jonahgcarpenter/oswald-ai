@@ -186,7 +186,7 @@ func (e *LLMCompactor) CompactForeground(ctx context.Context, previous *memory.S
 				return memory.SummaryArtifact{}, fmt.Errorf("foreground session compaction exhausted retries: %w", err)
 			}
 			if e.log != nil {
-				e.log.Server("session.compaction").Info("session.compaction.foreground.retry", "retrying foreground compaction", append(requestctx.LogFields(ctx), config.F("model_submission_count", submissions), config.F("model_submission_limit", foregroundAttemptLimit), config.F("covered_turn_count", count), config.F("reason_code", compactionErrorCode(err)), config.F("status", "retry"))...)
+				e.log.Server("session.compaction").Debug("session.compaction.foreground.retry", "retrying foreground compaction", append(requestctx.LogFields(ctx), config.F("model_submission_count", submissions), config.F("model_submission_limit", foregroundAttemptLimit), config.F("covered_turn_count", count), config.F("reason_code", compactionErrorCode(err)), config.F("status", "retry"))...)
 			}
 			delay := time.Duration(1<<(submissions-1)) * 100 * time.Millisecond
 			timer := time.NewTimer(delay)

@@ -263,8 +263,8 @@ func TestProfileExchangeRollbackAndNewSessionPreservesFTS(t *testing.T) {
 	}
 }
 
-func TestProfileStoreOperationsEmitSafeInfoMeasurements(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+func TestProfileStoreOperationsEmitSafeDebugMeasurements(t *testing.T) {
+	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, 0700); err != nil {

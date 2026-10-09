@@ -58,7 +58,7 @@ func TestBraveTelemetryKeepsPrivateDataOutOfMeasurements(t *testing.T) {
 		}
 		if record["event"] == "provider.web.search.complete" {
 			completions++
-			if record["level"] != "info" || record["request_id"] != "req_search" || record["operation_id"] == "op_parent" || record["parent_operation_id"] != "op_parent" {
+			if record["level"] != "debug" || record["request_id"] != "req_search" || record["operation_id"] == "op_parent" || record["parent_operation_id"] != "op_parent" {
 				t.Errorf("completion=%+v", record)
 			}
 		}

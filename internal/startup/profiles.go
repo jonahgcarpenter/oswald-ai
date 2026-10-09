@@ -97,7 +97,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		if resultErr != nil {
 			reason = "initialization_failure"
 		}
-		log.Info("app.shutdown.complete", "profile application cleanup completed", config.F("cleanup_reason", reason), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
+		log.Info("app.stopped", "profile application cleanup completed", config.F("cleanup_reason", reason), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", "ok"))
 	}()
 	if cfg == nil || cfg.ProfileRoot == "" {
 		return &Error{Event: "app.config.invalid", Message: "profile YAML configuration is required"}
@@ -147,7 +147,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		worker := imagecache.NewWorker(cache, rootLog)
 		worker.Start()
 		imageWorkers = append(imageWorkers, worker)
-		log.Info("app.profile.initialized", "initialized profile runtime", config.F("user_id", name), config.F("status", "ok"))
+		log.Debug("app.profile.initialized", "initialized profile runtime", config.F("user_id", name), config.F("status", "ok"))
 	}
 	requestBroker = broker.NewBroker(processor, brokerWorkerCount, rootLog.Server("broker"))
 	requestBroker.Start()
@@ -178,7 +178,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			}
 		}(service)
 	}
-	log.Info("app.start", "profile application started", config.F("profile_count", len(stores)))
+	log.Info("app.started", "profile application started", config.F("profile_count", len(stores)), config.F("gateway_count", len(gateways)), config.F("status", "ok"))
 	<-ctx.Done()
 	return nil
 }

@@ -33,7 +33,7 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&output)
 	a.log = log
 	for _, requestID := range []string{"first-request", "second-request"} {
@@ -72,7 +72,7 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 			t.Fatalf("missing request correlation: %v", record)
 		}
 		counts[requestID]++
-		if record["level"] != "info" || record["record_kind"] != "measurement" || record["status"] != "ok" || record["is_session_snapshot"] != true || record["user_chars"] != float64(len([]rune(userContent))) || record["memory_chars"] != float64(len([]rune(memoryContent))) {
+		if record["level"] != "debug" || record["record_kind"] != "measurement" || record["status"] != "ok" || record["is_session_snapshot"] != true || record["user_chars"] != float64(len([]rune(userContent))) || record["memory_chars"] != float64(len([]rune(memoryContent))) {
 			t.Fatalf("invalid file load measurement: %v", record)
 		}
 		if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {

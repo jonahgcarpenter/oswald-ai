@@ -282,8 +282,8 @@ func TestProfileStateConcurrentOpenAndProfileIsolation(t *testing.T) {
 	}
 }
 
-func TestProfileStateInitializationLogsAreSafeAtInfoAndDebug(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+func TestProfileStateInitializationLogsAreSafeAtDebug(t *testing.T) {
+	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
 			var output bytes.Buffer
 			log := config.NewLogger(level)

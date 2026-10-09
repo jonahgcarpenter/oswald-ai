@@ -59,7 +59,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if err != nil {
 		return err
 	}
-	g.log.Server("gateway.openai").Info("gateway.listen", "openai gateway listening", config.F("port", g.port))
+	g.log.Server("gateway.openai").Debug("gateway.listen", "openai gateway listener starting", config.F("port", g.port))
 	return http.Serve(listener, g.Handler())
 }
 
@@ -80,7 +80,7 @@ func (g *Gateway) resolveLocal(w http.ResponseWriter, r *http.Request) (identity
 		if status == "error" {
 			log.Warn("gateway.openai.identity.complete", "resolved local openai identity", fields...)
 		} else {
-			log.Info("gateway.openai.identity.complete", "resolved local openai identity", fields...)
+			log.Debug("gateway.openai.identity.complete", "resolved local openai identity", fields...)
 		}
 	}()
 	resolve := g.localPrincipal
@@ -97,7 +97,7 @@ func (g *Gateway) resolveLocal(w http.ResponseWriter, r *http.Request) (identity
 }
 
 func (g *Gateway) reject(w http.ResponseWriter, code int, reason, message string) {
-	g.log.Server("gateway.openai").Info("gateway.openai.request.rejected", "rejected openai request before runtime", config.F("record_kind", "measurement"), config.F("gateway", "openai"), config.F("status", "rejected"), config.F("reason_code", reason))
+	g.log.Server("gateway.openai").Debug("gateway.openai.request.rejected", "rejected openai request before runtime", config.F("record_kind", "measurement"), config.F("gateway", "openai"), config.F("status", "rejected"), config.F("reason_code", reason))
 	writeError(w, code, "invalid_request_error", message)
 }
 
