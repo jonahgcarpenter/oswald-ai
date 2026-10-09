@@ -27,7 +27,7 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 	if err := reg.RegisterDefinition(visionanalyze.Definition()); err != nil {
 		t.Fatal(err)
 	}
-	policy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata}}
+	policy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
 	if err := reg.RegisterHandler(visionanalyze.Name, policy, registry.Handler(visionanalyze.NewHandler(a.imageCache))); err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +97,8 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), input.Data) || strings.Contains(string(encoded), "private-vision-question") {
-		t.Fatal("vision image bytes or payloads entered durable history")
+	if strings.Contains(string(encoded), input.Data) || !strings.Contains(string(encoded), "private-vision-question") || !strings.Contains(string(encoded), "[Inline image data omitted]") {
+		t.Fatal("vision text history lost its question or retained inline image bytes")
 	}
 	for _, canary := range []string{paths[0], input.Data, "private-vision-question", "Inspect that previous image"} {
 		if strings.Contains(logs.String(), canary) {

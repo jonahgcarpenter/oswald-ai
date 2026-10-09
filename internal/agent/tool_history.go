@@ -14,7 +14,7 @@ import (
 
 func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) memory.ToolHistoryCall {
 	args := tc.Function.Arguments
-	if tc.Function.Name == visionanalyze.Name || tc.Function.Name == imagegenerate.Name {
+	if name := strings.TrimSpace(tc.Function.Name); name == visionanalyze.Name || name == imagegenerate.Name {
 		args = imageCheckpointArguments(args)
 	}
 	call := memory.ToolHistoryCall{
@@ -52,7 +52,6 @@ func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decisio
 		call.SearchResult = false
 		return call
 	}
-	call.Arguments = tc.Function.Arguments
 	if call.Arguments == nil {
 		call.Arguments = map[string]interface{}{}
 	}

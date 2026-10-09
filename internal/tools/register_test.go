@@ -127,12 +127,12 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	}
 }
 
-func TestVisionRegisteredWithoutComfyUIAndUsesMetadataHistory(t *testing.T) {
+func TestVisionRegisteredWithoutComfyUIAndUsesTextHistory(t *testing.T) {
 	reg := newTestRegistry(t, &config.Config{})
 	tool, visible := visibleTestTool(reg, visionanalyze.Name)
 	policy, configured := reg.Policy(visionanalyze.Name)
-	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || !policy.BlockDuplicates || policy.MaxFailures != 2 || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
-		t.Fatal("vision tool was not independently registered with bounded metadata-only policy")
+	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || !policy.BlockDuplicates || policy.MaxFailures != 2 || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult {
+		t.Fatal("vision tool was not independently registered with bounded nonsearchable text history")
 	}
 	if reg.HasHandler(imagegenerate.Name) {
 		t.Fatal("vision registration enabled unconfigured image generation")
@@ -390,7 +390,7 @@ func TestRegisterImageGenerateProviderMatrix(t *testing.T) {
 			}
 			if test.enabled {
 				policy, ok := reg.Policy(imagegenerate.Name)
-				if !ok || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
+				if !ok || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
 					t.Fatalf("image_generate policy=%+v", policy)
 				}
 			}

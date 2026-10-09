@@ -402,11 +402,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
-	if len(contextImages) > len(userImages) && a.registry.HasHandler(imagegenerate.Name) {
-		imageContext := sessionImageContext(contextImages)
-		messages = append(messages, imageContext)
-		foregroundCompaction.imageContext = &imageContext
-	}
 	if request.Stateless {
 		promptContext.RequiredEstimate = tokenbudget.EstimateRequest(messages, initialCatalog.Tools)
 		promptContext.EstimatedBefore = promptContext.RequiredEstimate

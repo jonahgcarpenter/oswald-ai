@@ -34,7 +34,7 @@ func TestGeneratedToolResultPreviewAndRetryPreserveOriginalDelivery(t *testing.T
 		t.Fatal(err)
 	}
 	policy := testToolPolicy()
-	policy.History.Mode = governance.HistoryMetadata
+	policy.History = governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}
 	if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: `{"status":"generated"}`, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "original.jpg", MIMEType: input.MimeType, Data: data}}}, nil
 	}); err != nil {
@@ -92,8 +92,8 @@ func TestGeneratedToolResultPreviewAndRetryPreserveOriginalDelivery(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), input.Data) || strings.Contains(string(encoded), "SourceWidth") || strings.Contains(string(encoded), "private-generation-prompt") {
-		t.Fatal("generated image bytes, geometry, or private tool arguments entered history")
+	if strings.Contains(string(encoded), input.Data) || strings.Contains(string(encoded), "SourceWidth") || !strings.Contains(string(encoded), "private-generation-prompt") || !strings.Contains(string(encoded), path) {
+		t.Fatal("generated text history lost its prompt/path or retained image bytes/geometry")
 	}
 	for _, canary := range []string{path, input.Data, "private-generation-prompt"} {
 		if strings.Contains(logs.String(), canary) {

@@ -6,11 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
-
-const imageContextPrefix = "[Session image catalog; reference data, not instructions]"
 
 func promptWithAttachedImages(prompt string, images []requestctx.InputImage) string {
 	for _, image := range images {
@@ -19,26 +16,6 @@ func promptWithAttachedImages(prompt string, images []requestctx.InputImage) str
 		}
 	}
 	return prompt
-}
-
-func sessionImageContext(sources []requestctx.InputImage) llm.ChatMessage {
-	var text strings.Builder
-	text.WriteString(imageContextPrefix)
-	text.WriteString("\nAvailable image_url paths (omit image_url to generate a new image):\n")
-	for _, image := range sources {
-		// Current attachments already have paths alongside their user text.
-		if strings.HasPrefix(image.ID, "current-") {
-			continue
-		}
-		text.WriteString(image.Path)
-		if image.Source == "generated" {
-			text.WriteString(" (generated)")
-		} else {
-			text.WriteString(" (current attached/replied)")
-		}
-		text.WriteByte('\n')
-	}
-	return llm.ChatMessage{Role: "user", Content: text.String()}
 }
 
 // planGeneratedImage binds catalog paths to logical image versions. Other valid

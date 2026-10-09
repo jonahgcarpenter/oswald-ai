@@ -80,7 +80,7 @@ func retainedImageToolRounds(messages []llm.ChatMessage) []llm.ChatMessage {
 // including invalid image_generate data URL arguments in a retained mixed batch.
 func imageCheckpointArguments(args map[string]interface{}) map[string]interface{} {
 	source, _ := args["image_url"].(string)
-	if !strings.HasPrefix(source, "data:") {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "data:") {
 		return args
 	}
 	copy := make(map[string]interface{}, len(args))

@@ -24,7 +24,7 @@ import (
 // registerHandlers wires configured builtin handlers and policies into the registry.
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	visionPolicy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}
+	visionPolicy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
 	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandler(cache))); err != nil {
 		return fmt.Errorf("register vision_analyze tool: %w", err)
 	}
@@ -49,7 +49,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 		policy := governance.ToolPolicy{
 			BlockDuplicates: true, NormalizeArgs: normalizeImageGenerateArgs,
-			History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+			History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
 		}
 		if err := reg.RegisterHandler(imagegenerate.Name, policy, registry.Handler(imagegenerate.NewHandler(textWorkflow, imageWorkflow, client, cache, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", imagegenerate.Name, err)
