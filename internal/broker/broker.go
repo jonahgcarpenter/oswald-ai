@@ -237,21 +237,6 @@ func (b *Broker) Start() {
 			b.makeReady(head)
 		}
 		b.log.Debug("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
-		b.logHealth()
-		b.workerWG.Add(1)
-		go func() {
-			defer b.workerWG.Done()
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					b.logHealth()
-				case <-b.lifecycleCtx.Done():
-					return
-				}
-			}
-		}()
 	})
 }
 
@@ -508,7 +493,6 @@ func (b *Broker) Shutdown() {
 		}
 		close(b.ready)
 		b.workerWG.Wait()
-		b.logHealth()
 		b.log.Debug("broker.shutdown.complete", "broker shutdown complete")
 	})
 }

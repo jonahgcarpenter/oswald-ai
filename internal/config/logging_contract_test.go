@@ -112,7 +112,7 @@ func TestProductionLoggingContract(t *testing.T) {
 						if rel != "cmd/oswald-server/main.go" {
 							t.Errorf("%s: Fatal outside main", fset.Position(call.Pos()))
 						}
-					case "Info", "Warn", "Error", "Debug", "warn", "health":
+					case "Info", "Warn", "Error", "Debug", "warn":
 					default:
 						return true
 					}

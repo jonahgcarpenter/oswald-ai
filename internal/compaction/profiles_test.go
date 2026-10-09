@@ -90,10 +90,6 @@ func TestProfileWorkerCorrectiveRetryUsesFrozenRange(t *testing.T) {
 	if !found {
 		t.Fatal("corrective feedback not sent")
 	}
-	retry, ready, dead, done, expired, err := store.CompressionHealth(ctx)
-	if err != nil || retry != 0 || ready != 0 || dead != 0 || done != 1 || expired != 0 {
-		t.Fatal("incorrect durable health", err)
-	}
 }
 
 type preemptedProfileChatter struct{ cancel context.CancelFunc }

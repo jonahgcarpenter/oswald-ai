@@ -97,13 +97,3 @@ func (b *Broker) Snapshot() Snapshot {
 	}
 	return s
 }
-
-func (b *Broker) logHealth() {
-	s := b.Snapshot()
-	b.log.Debug("broker.health", "broker health snapshot",
-		config.F("record_kind", "snapshot"),
-		config.F("worker_count", s.WorkerCount), config.F("queued_count", s.QueuedCount),
-		config.F("active_count", s.ActiveCount), config.F("outstanding_count", s.OutstandingCount),
-		config.F("capacity", s.Capacity), config.F("oldest_queued_age_ms", s.OldestQueuedAgeMS),
-		config.F("is_accepting", s.IsAccepting), config.F("is_background_active", s.IsBackgroundActive), config.F("status", "ok"))
-}

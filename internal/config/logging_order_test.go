@@ -42,7 +42,7 @@ func TestInfoActivityOmitsDevelopmentTelemetry(t *testing.T) {
 	var output bytes.Buffer
 	log := NewLogger(LevelInfo)
 	log.SetOutput(&output)
-	log.Server("broker").Debug("broker.health", "development gauge", F("queued_count", 3))
+	log.Server("broker").Debug("broker.started", "development gauge", F("queued_count", 3))
 	log.Agent("agent", "req", "alice", "discord", "model").Info("tool.completed", "completed tool execution",
 		F("tool_name", "memory"), F("outcome", "productive"), F("duration_ms", 7),
 		F("image_count", 4), F("prompt_tokens", 123), F("iteration", 2), F("prompt", "private-canary"))

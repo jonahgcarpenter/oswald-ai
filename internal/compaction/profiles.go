@@ -100,14 +100,6 @@ func (s *ProfileService) cycle(ctx context.Context) {
 	} else {
 		s.cursor = ""
 	}
-	healthCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	retry, ready, dead, done, expired, healthErr := s.store.CompressionHealth(healthCtx)
-	cancel()
-	if healthErr == nil {
-		s.log.Server("compaction").Debug("compaction.profile.health", "profile compression health", config.F("record_kind", "snapshot"), config.F("retry_count", retry), config.F("ready_count", ready), config.F("dead_count", dead), config.F("succeeded_count", done), config.F("expired_lease_count", expired), config.F("selected_scope_count", len(scopes)), config.F("is_scope_selection_capped", len(scopes) == 100))
-	} else if ctx.Err() == nil {
-		s.log.Server("compaction").Warn("compaction.profile.health_failed", "failed to read profile compression health", config.ErrorField(healthErr))
-	}
 	for _, scope := range scopes {
 		if ctx.Err() != nil {
 			return
