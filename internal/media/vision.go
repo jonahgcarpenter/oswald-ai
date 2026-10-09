@@ -11,8 +11,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 )
 
-// NormalizeVisionImage decodes one still image (the first frame of a GIF), crops
-// in source-image coordinates, then applies the ordinary model input limits.
+// NormalizeVisionImage decodes and orients one still image (the first frame of a
+// GIF), crops in oriented source coordinates, then applies model input limits.
 func NormalizeVisionImage(ctx context.Context, data []byte, mime string, region *image.Rectangle) (NormalizationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return NormalizationResult{}, err
@@ -28,13 +28,21 @@ func NormalizeVisionImage(ctx context.Context, data []byte, mime string, region 
 	if expectedMIME == "" || expectedMIME != mime {
 		return NormalizationResult{}, errors.New("vision image type is unsupported or mismatched")
 	}
-	bounds := image.Rect(0, 0, config.Width, config.Height)
-	if region != nil && (region.Empty() || !region.In(bounds)) {
-		return NormalizationResult{}, errors.New("region must be a nonempty rectangle within the source image")
-	}
 	decoded, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return NormalizationResult{}, errors.New("vision image could not be decoded")
+	}
+	if err := ctx.Err(); err != nil {
+		return NormalizationResult{}, err
+	}
+	decoded, err = orientSourceImage(decoded, data, format)
+	if err != nil {
+		return NormalizationResult{}, err
+	}
+	originalWidth, originalHeight := decoded.Bounds().Dx(), decoded.Bounds().Dy()
+	bounds := image.Rect(0, 0, originalWidth, originalHeight)
+	if region != nil && (region.Empty() || !region.In(bounds)) {
+		return NormalizationResult{}, errors.New("region must be a nonempty rectangle within the source image")
 	}
 	if err := ctx.Err(); err != nil {
 		return NormalizationResult{}, err
@@ -54,7 +62,7 @@ func NormalizeVisionImage(ctx context.Context, data []byte, mime string, region 
 	return NormalizationResult{
 		Image:        llm.InputImage{MimeType: normalizedMIME, Data: base64.StdEncoding.EncodeToString(encoded), Source: "vision_analyze"},
 		DetectedMIME: mime, DecodedFormat: format,
-		OriginalWidth: config.Width, OriginalHeight: config.Height,
+		OriginalWidth: originalWidth, OriginalHeight: originalHeight,
 		Width: normalized.Bounds().Dx(), Height: normalized.Bounds().Dy(),
 		WasResized: resized, NormalizedBytes: len(encoded), Base64Chars: base64.StdEncoding.EncodedLen(len(encoded)),
 		PreservedAlpha: hasTransparency(normalized),
