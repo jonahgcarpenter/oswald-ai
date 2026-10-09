@@ -11,7 +11,7 @@ import (
 func TestDefinition(t *testing.T) {
 	fixture := []byte(`{
 		"name":"image_generate",
-		"description":"Generate an image from a text description, or transform an existing image by supplying image_url. For transformations, describe the complete desired final image and the details to retain. Editing affects the whole image and may change faces, geometry, or other details; exact preservation and localized edits are not guaranteed. Returns the generated image as a private absolute file path in the image field, with the image delivered as an attachment.",
+		"description":"Generate an image from a text description, or transform an existing image by supplying image_url. For transformations, describe the complete desired final image and the details to retain. Editing affects the whole image and may change faces, geometry, or other details; exact preservation and localized edits are not guaranteed. Returns the image directly in the tool result with its private absolute cache path and source dimensions. The model preview may be downscaled; the latest successful original version is delivered as an attachment with the final response.",
 		"parameters":{"type":"object","properties":{
 			"prompt":{"type":"string","description":"Describe the desired final image, including subject, composition, style, lighting, and colors. When editing, clearly describe the change and the existing details to retain."},
 			"aspect_ratio":{"type":"string","description":"Output aspect ratio: landscape is 1280x720, square is 1024x1024, and portrait is 720x1280. When editing, match the source ratio where possible to avoid center cropping.","enum":["landscape","square","portrait"],"default":"landscape"},

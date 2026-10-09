@@ -28,13 +28,127 @@ func generatedResultID(messages []llm.ChatMessage, callID string) string {
 	if result == nil {
 		return ""
 	}
-	var metadata struct {
-		Image string `json:"image"`
+	for _, line := range strings.Split(result.Content, "\n") {
+		if path, ok := strings.CutPrefix(line, "Image: "); ok {
+			return path
+		}
 	}
-	if json.Unmarshal([]byte(result.Content), &metadata) != nil {
-		return ""
+	return ""
+}
+
+func attachedImagePaths(content string) []string {
+	var paths []string
+	for _, line := range strings.Split(content, "\n") {
+		if path, ok := strings.CutPrefix(line, "[Image attached at: "); ok {
+			paths = append(paths, strings.TrimSuffix(path, "]"))
+		}
 	}
-	return metadata.Image
+	return paths
+}
+
+func TestSessionMemoryUserContentKeepsImagePathsAndStripsReplyContext(t *testing.T) {
+	images := []requestctx.InputImage{{Path: "/private/first.jpg"}, {Path: "/private/second.jpg"}}
+	for _, test := range []struct {
+		name   string
+		prompt string
+		text   string
+	}{
+		{name: "reply", prompt: "[Replying to Alice: \"old\"]\n\nnew prompt", text: "new prompt"},
+		{name: "reply only", prompt: "[Replying to Alice: \"old\"]", text: "[User replied to a prior message]"},
+		{name: "image only"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := strings.TrimSpace(test.text + "\n\n[Image attached at: /private/first.jpg]\n\n[Image attached at: /private/second.jpg]")
+			if got := sessionMemoryUserContent(test.prompt, images); got != want {
+				t.Fatalf("stored content = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCurrentImagePathsStayInUserMessage(t *testing.T) {
+	for _, count := range []int{1, 2, 4} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			chat := &fakeChatter{responses: []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "Yes."}}}}
+			reg := registry.New(config.NewLogger(config.LevelError))
+			a, store := newTestAgent(t, chat, nil, reg)
+			if err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+				t.Fatal("unexpected image generation")
+				return governance.Result{}, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			var images []llm.InputImage
+			for i := 0; i < count; i++ {
+				images = append(images, testInputImage(t, 2+i, 3+i))
+			}
+			response, err := processAgent(a, "attached", "discord", "session", "user-1", "User", "Can you see this?", images, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			messages := chat.requests[0].Messages
+			if len(messages) != 2 {
+				t.Fatalf("wanted system and one user message, got %d messages", len(messages))
+			}
+			current := messages[1]
+			paths := attachedImagePaths(current.Content)
+			if current.Role != "user" || !strings.HasPrefix(current.Content, "Can you see this?\n\n[Image attached at: ") || len(paths) != count || len(current.Images) != count {
+				t.Fatalf("attachment message has %d paths and %d images", len(paths), len(current.Images))
+			}
+			for i, path := range paths {
+				if !filepath.IsAbs(path) || current.Images[i].Data != images[i].Data {
+					t.Fatal("attachment path or image order changed")
+				}
+				if _, _, err := a.imageCache.Resolve(context.Background(), "user-1", path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			turns, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session", response.SessionGeneration, 0, 10)
+			if err != nil || len(turns) != 1 || turns[0].UserText != current.Content {
+				t.Fatalf("stored attachment paths lost: turns=%d err=%v", len(turns), err)
+			}
+			chat.responses = []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "Still yes."}}}
+			if _, err := processAgent(a, "follow-up", "discord", "session", "user-1", "User", "What about that image?", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, message := range chat.requests[len(chat.requests)-1].Messages {
+				if message.Role == "user" && message.Content == current.Content {
+					found = true
+					if len(message.Images) != 0 {
+						t.Fatal("historical image bytes replayed")
+					}
+				}
+			}
+			if !found {
+				t.Fatal("follow-up history lost attachment paths")
+			}
+			chat.responses = []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "Separate profile."}}}
+			if _, err := processAgent(a, "other-profile", "discord", "session", "user-2", "User", "What image?", nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range paths {
+				if messagesContain(chat.requests[len(chat.requests)-1].Messages, path) {
+					t.Fatal("attachment path leaked into another profile's history")
+				}
+			}
+		})
+	}
+}
+
+func TestAttachedImagePathsSurviveCompaction(t *testing.T) {
+	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Earlier context."}}
+	image := requestctx.InputImage{ID: "current-1", Path: "/private/current.png", MIMEType: "image/png", Data: "payload"}
+	prompt := promptWithAttachedImages("Describe this", []requestctx.InputImage{image})
+	state := newForegroundCompactionState(compactor, 100, "policy", "", prompt, []llm.InputImage{{MimeType: image.MIMEType, Data: image.Data}}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
+	rebuilt, stats, err := state.prepare(context.Background(), []llm.ChatMessage{state.current}, nil, true)
+	if err != nil || !stats.Compacted {
+		t.Fatalf("compacted=%v err=%v", stats.Compacted, err)
+	}
+	last := rebuilt[len(rebuilt)-1]
+	if last.Content != prompt || len(last.Images) != 1 || last.Images[0].Data != image.Data {
+		t.Fatal("compaction separated or lost the current attachment")
+	}
 }
 
 func TestImageCatalogPathsStableAcrossTurnsAndNoIDsInModelResults(t *testing.T) {
@@ -53,19 +167,29 @@ func TestImageCatalogPathsStableAcrossTurnsAndNoIDsInModelResults(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachedPaths := attachedImagePaths(chat.requests[0].Messages[len(chat.requests[0].Messages)-1].Content)
+	if len(attachedPaths) != 1 {
+		t.Fatal("current attachment path missing")
+	}
+	occurrences := 0
+	for _, message := range chat.requests[1].Messages {
+		occurrences += strings.Count(message.Content, attachedPaths[0])
+	}
+	if occurrences != 1 {
+		t.Fatal("current attachment path repeated in generated-image catalog")
+	}
 	result := toolResultByID(chat.requests[1].Messages, "image")
-	var metadata map[string]json.RawMessage
-	if result == nil || json.Unmarshal([]byte(result.Content), &metadata) != nil {
+	if result == nil || result.Role != "tool" || len(result.Images) != 1 {
 		t.Fatal("missing image result")
 	}
-	for _, key := range []string{"image_id", "source_image_id", "version", "parent_source_image_id"} {
-		if _, ok := metadata[key]; ok {
-			t.Fatalf("internal metadata %s exposed", key)
+	for _, private := range []string{"image_id", "source_image_id", "parent_source_image_id", "untrusted-id", "untrusted-source"} {
+		if strings.Contains(result.Content, private) {
+			t.Fatalf("internal metadata %s exposed", private)
 		}
 	}
-	var path string
-	if err := json.Unmarshal(metadata["image"], &path); err != nil || !filepath.IsAbs(path) {
-		t.Fatalf("invalid model image path: %v", err)
+	path := generatedResultID(chat.requests[1].Messages, "image")
+	if !filepath.IsAbs(path) {
+		t.Fatal("invalid model image path")
 	}
 	if _, _, err := a.imageCache.Resolve(context.Background(), "user-1", path); err != nil {
 		t.Fatalf("generated path cannot be resolved: %v", err)
@@ -510,7 +634,7 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 					t.Fatal("model transport depends on progress callback")
 				}
 				last := final.Messages[len(final.Messages)-1]
-				if len(last.Images) != 1 || last.Images[0].Data != previous || !strings.Contains(last.Content, "Generated image shown:") {
+				if len(last.Images) != 1 || last.Images[0].Data != previous || last.Role != "tool" || !strings.Contains(last.Content, "Image generated successfully") {
 					t.Fatal("final model call did not see normalized output")
 				}
 				assets, err := store.SessionImages(context.Background(), "user-1", "session", response.SessionGeneration)
@@ -556,14 +680,16 @@ func TestGeneratedImageContextSurvivesCompaction(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Generated an image."}}
 	state := newForegroundCompactionState(compactor, 100, "policy", "", "edit it", nil, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
 	image := requestctx.InputImage{ID: "opaque-id", Path: "/private/image.png", MIMEType: "image/png", Data: "image-payload", Source: "generated"}
-	message := sessionImageContext([]requestctx.InputImage{image}, []requestctx.InputImage{image})
-	state.imageContext = &message
-	rebuilt, stats, err := state.prepare(context.Background(), []llm.ChatMessage{message}, nil, true)
+	message := llm.ChatMessage{Role: "tool", ToolName: imagegenerate.Name, ToolCallID: "generated", Content: imagegenerate.ResultText(image.Path, nil, false), Images: []llm.InputImage{{MimeType: image.MIMEType, Data: image.Data, Source: "generated"}}}
+	assistant := llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "generated", Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: map[string]interface{}{"prompt": "picture"}}}}}
+	messages := []llm.ChatMessage{assistant, message}
+	state.imageToolRounds = retainedImageToolRounds(messages)
+	rebuilt, stats, err := state.prepare(context.Background(), messages, nil, true)
 	if err != nil || !stats.Compacted {
 		t.Fatalf("compacted=%v err=%v", stats.Compacted, err)
 	}
 	last := rebuilt[len(rebuilt)-1]
-	if len(last.Images) != 1 || last.Images[0].Data != image.Data || !strings.Contains(last.Content, image.Path) || strings.Contains(last.Content, image.ID) {
+	if len(last.Images) != 1 || last.Images[0].Data != image.Data || !strings.Contains(last.Content, image.Path) || strings.Contains(last.Content, image.ID) || last.Role != "tool" || last.ToolCallID != "generated" || rebuilt[len(rebuilt)-2].ToolCalls[0].ID != "generated" {
 		t.Fatal("compaction lost active image")
 	}
 	encoded, _ := json.Marshal(compactor.calls)
@@ -621,8 +747,8 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 		}
 		for _, call := range calls {
 			for _, message := range req.Messages {
-				if strings.HasPrefix(message.Content, imageContextPrefix) {
-					call.Function.Arguments["image_url"] = strings.Split(strings.Split(message.Content, "\n")[2], " (")[0]
+				if paths := attachedImagePaths(message.Content); len(paths) > 0 {
+					call.Function.Arguments["image_url"] = paths[0]
 				}
 			}
 		}
@@ -636,9 +762,14 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 	if len(final.Tools) != 0 {
 		t.Fatal("final tools not disabled")
 	}
-	last := final.Messages[len(final.Messages)-1]
-	if len(last.Images) != 4 || last.Images[3].Data != previous {
-		t.Fatal("latest four generated outputs not retained for active vision")
+	var previews []llm.InputImage
+	for _, message := range final.Messages {
+		if message.Role == "tool" && message.ToolName == imagegenerate.Name {
+			previews = append(previews, message.Images...)
+		}
+	}
+	if len(previews) != 4 || previews[3].Data != previous {
+		t.Fatal("latest four generated outputs not retained in tool results")
 	}
 	results := 0
 	for _, message := range final.Messages {

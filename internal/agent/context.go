@@ -10,7 +10,10 @@ import (
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 )
 
 // clientHistoryContext keeps caller-owned conversation text as quoted, lower-authority
@@ -43,13 +46,20 @@ func stripReplyContext(prompt string) (string, bool) {
 	return strings.TrimSpace(parts[1]), true
 }
 
-func sessionMemoryUserContent(prompt string, imageCount int) string {
+func sessionMemoryUserContent(prompt string, images []requestctx.InputImage) string {
 	content, hadReplyContext := stripReplyContext(prompt)
 	if content == "" && hadReplyContext {
 		content = "[User replied to a prior message]"
 	}
-	if imageCount > 0 {
-		content = strings.TrimSpace(content + fmt.Sprintf("\n\n[Attached %d image(s)]", imageCount))
+	content = promptWithAttachedImages(content, images)
+	uncached := 0
+	for _, image := range images {
+		if image.Path == "" {
+			uncached++
+		}
+	}
+	if uncached > 0 {
+		content += fmt.Sprintf("\n\n[Attached %d image(s)]", uncached)
 	}
 	return strings.TrimSpace(content)
 }
@@ -313,17 +323,33 @@ func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memo
 	}
 	prepared := append([]memory.SessionTurn(nil), turns...)
 	for i := range prepared {
+		compatible := true
 		for _, batch := range prepared[i].ToolHistory.Batches {
 			for _, call := range batch.Calls {
-				if !available[call.Name] || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
-					prepared[i] = withoutToolHistory(prepared[i])
-					break
+				imageTool := call.Name == imagegenerate.Name || call.Name == visionanalyze.Name
+				if (!available[call.Name] && !imageTool) || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
+					compatible = false
 				}
 			}
-			if len(prepared[i].ToolHistory.Batches) == 0 {
-				break
+		}
+		if compatible {
+			continue
+		}
+		// Keep independently replayable image call/result pairs even when another
+		// tool's metadata-only or unavailable history requires compact replay.
+		history := memory.EmptyToolHistory()
+		for _, batch := range prepared[i].ToolHistory.Batches {
+			kept := memory.ToolHistoryBatch{AssistantContent: batch.AssistantContent}
+			for _, call := range batch.Calls {
+				if (call.Name == imagegenerate.Name || call.Name == visionanalyze.Name) && !call.ArgumentsTruncated && call.HistoryMode == string(governance.HistoryFull) {
+					kept.Calls = append(kept.Calls, call)
+				}
+			}
+			if len(kept.Calls) > 0 {
+				history.Batches = append(history.Batches, kept)
 			}
 		}
+		prepared[i].ToolHistory = history
 	}
 	return prepared
 }

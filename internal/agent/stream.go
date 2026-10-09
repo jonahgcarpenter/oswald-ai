@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -75,7 +76,7 @@ func toolStreamPayload(toolName string, args map[string]interface{}, result stri
 		DurationMS: duration.Milliseconds(),
 		IsError:    isError,
 	}
-	if toolName == imagegenerate.Name {
+	if toolName == imagegenerate.Name || toolName == visionanalyze.Name {
 		payload.Arguments = nil
 		payload.ResultText = ""
 		return payload

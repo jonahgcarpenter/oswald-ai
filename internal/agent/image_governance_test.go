@@ -8,7 +8,6 @@ import (
 	"image"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,18 +132,18 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 						return
 					}
 					for _, message := range req.Messages {
-						if !strings.HasPrefix(message.Content, imageContextPrefix) {
+						if len(message.Images) == 0 {
 							continue
 						}
-						lines := strings.Split(message.Content, "\n")
+						paths := attachedImagePaths(message.Content)
 						for _, call := range calls {
 							switch call.Function.Arguments["image_url"] {
 							case "current-1":
-								call.Function.Arguments["image_url"] = strings.Split(lines[2], " (")[0]
+								call.Function.Arguments["image_url"] = paths[0]
 							case "current-2":
-								call.Function.Arguments["image_url"] = strings.Split(lines[3], " (")[0]
+								call.Function.Arguments["image_url"] = paths[1]
 							case " current-1 ":
-								call.Function.Arguments["image_url"] = " " + strings.Split(lines[2], " (")[0] + " "
+								call.Function.Arguments["image_url"] = " " + paths[0] + " "
 							}
 						}
 						break

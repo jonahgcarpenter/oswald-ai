@@ -2,6 +2,7 @@ package llm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -53,6 +54,28 @@ func TestMapToGatewayMessagesSerializesImagesAsDataURLs(t *testing.T) {
 	}
 	if got.Content[1].ImageURL.URL != "data:image/jpeg;base64,abc123" {
 		t.Fatalf("unexpected image URL %q", got.Content[1].ImageURL.URL)
+	}
+}
+
+func TestMapToGatewayMessagesKeepsMultimodalToolResultsCorrelated(t *testing.T) {
+	messages := mapToGatewayMessages([]ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "text-call", Function: ToolFunction{Name: "text_tool"}}, {ID: "vision-call", Function: ToolFunction{Name: "vision_analyze"}}}},
+		{Role: "tool", ToolCallID: "text-call", Content: "text result"},
+		{Role: "tool", ToolCallID: "vision-call", Content: "Question: Inspect", Images: []InputImage{{MimeType: "image/png", Data: "abc123", Geometry: &ImageGeometry{SourceWidth: 100, SourceHeight: 80, Width: 100, Height: 80}}}},
+	})
+	if len(messages) != 3 || messages[1].Content != "text result" || messages[1].ToolCallID != "text-call" || messages[2].Role != "tool" || messages[2].ToolCallID != "vision-call" {
+		t.Fatal("tool result correlation or text-only result changed")
+	}
+	parts, ok := messages[2].Content.([]gatewayContentPart)
+	if !ok || len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "Question: Inspect" || parts[1].Type != "image_url" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,abc123" {
+		t.Fatalf("tool result did not contain text and image parts: %+v", messages[2])
+	}
+	encoded, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "Geometry") || strings.Contains(string(encoded), "SourceWidth") || strings.Contains(string(encoded), `"role":"user"`) {
+		t.Fatal("multimodal tool serialization leaked geometry or added a user message")
 	}
 }
 

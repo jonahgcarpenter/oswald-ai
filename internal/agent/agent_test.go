@@ -1172,7 +1172,7 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 }
 
 func TestSessionMemoryUserContentReplyOnly(t *testing.T) {
-	got := sessionMemoryUserContent("[Replying to Alice: \"old\"]", 0)
+	got := sessionMemoryUserContent("[Replying to Alice: \"old\"]", nil)
 	if got != "[User replied to a prior message]" {
 		t.Fatalf("unexpected content %q", got)
 	}
