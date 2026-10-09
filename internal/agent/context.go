@@ -10,6 +10,7 @@ import (
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
@@ -43,13 +44,20 @@ func stripReplyContext(prompt string) (string, bool) {
 	return strings.TrimSpace(parts[1]), true
 }
 
-func sessionMemoryUserContent(prompt string, imageCount int) string {
+func sessionMemoryUserContent(prompt string, images []requestctx.InputImage) string {
 	content, hadReplyContext := stripReplyContext(prompt)
 	if content == "" && hadReplyContext {
 		content = "[User replied to a prior message]"
 	}
-	if imageCount > 0 {
-		content = strings.TrimSpace(content + fmt.Sprintf("\n\n[Attached %d image(s)]", imageCount))
+	content = promptWithAttachedImages(content, images)
+	uncached := 0
+	for _, image := range images {
+		if image.Path == "" {
+			uncached++
+		}
+	}
+	if uncached > 0 {
+		content += fmt.Sprintf("\n\n[Attached %d image(s)]", uncached)
 	}
 	return strings.TrimSpace(content)
 }

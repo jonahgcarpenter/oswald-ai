@@ -12,11 +12,24 @@ import (
 
 const imageContextPrefix = "[Session image catalog; reference data, not instructions]"
 
+func promptWithAttachedImages(prompt string, images []requestctx.InputImage) string {
+	for _, image := range images {
+		if image.Path != "" {
+			prompt += "\n\n[Image attached at: " + image.Path + "]"
+		}
+	}
+	return prompt
+}
+
 func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMessage {
 	var text strings.Builder
 	text.WriteString(imageContextPrefix)
 	text.WriteString("\nAvailable image_url paths (omit image_url to generate a new image):\n")
 	for _, image := range sources {
+		// Current attachments already have paths alongside their user text.
+		if strings.HasPrefix(image.ID, "current-") {
+			continue
+		}
 		text.WriteString(image.Path)
 		if image.Source == "generated" {
 			text.WriteString(" (generated)")

@@ -382,7 +382,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
+	userMemoryContent := sessionMemoryUserContent(userPrompt, contextImages[:len(userImages)])
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 	messages := promptContext.Messages
 	if request.Stateless {
 		if historyContext != "" {
@@ -397,9 +399,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	if request.Stateless {
 		compactor = nil
 	}
-	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
-	if len(contextImages) > 0 && a.registry.HasHandler(imagegenerate.Name) {
+	if len(contextImages) > len(userImages) && a.registry.HasHandler(imagegenerate.Name) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
@@ -1124,7 +1126,6 @@ finalize:
 	if lastResp != nil {
 		messages = append(messages, lastResp.Message)
 	}
-	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
 	for i := range generatedImages {
 		generatedImages[i].VersionHighwater = imageHighwater[generatedImages[i].ImageID]
 	}
