@@ -54,12 +54,13 @@ func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger,
 	}
 }
 
-func TestUnsupportedAttachmentSummaryAtInfoBeforeAccountResolution(t *testing.T) {
+func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
 	log, events := captureInfoSummaries(t)
-	g := &Gateway{Log: log}
-	// Stop at identity normalization after media processing, without an account DB.
+	g, b, _ := newIMessageTestGateway(t, "")
+	defer b.Shutdown()
+	g.Log = log
 	g.processReceivedMessage(webhookMessage{
-		Handle:      messageHandle{Address: "private-address"},
+		Handle:      messageHandle{Address: "+15551234567"},
 		Chats:       []messageChat{{GUID: "private-chat", Style: chatStyleDirect}},
 		Attachments: []attachment{{GUID: "private-attachment", MimeType: "application/private-mime", TransferName: "private-filename"}},
 	}, "req-input-summary", time.Now())

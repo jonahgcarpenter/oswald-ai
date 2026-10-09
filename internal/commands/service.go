@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 )
 
 var (
@@ -105,17 +103,6 @@ func (s *Service) Execute(ctx context.Context, req Request) (Result, error) {
 	req.ArgsText = parsed.ArgsText
 	result, err := handler.Execute(ctx, req)
 	if err != nil {
-		if reason, expected := accounts.PolicyReason(err); expected {
-			result.Outcome.Status = "rejected"
-			result.Outcome.ReasonCode = reason
-			if result.Text == "" {
-				result.Text = err.Error()
-				if reason == "principal_mismatch" {
-					result.Text = "Your account identity changed. Send the command again."
-				}
-			}
-			return result, nil
-		}
 		result.Outcome.Status = "error"
 		result.Outcome.ReasonCode = "operation_failed"
 	} else if result.Outcome.Status == "" {

@@ -37,8 +37,8 @@ func TestInfoOperationalMetadataCompleteness(t *testing.T) {
 		"command":      "help", "command_name": "unknown", "prior_release": "v4.0.8", "target_release": "v4.0.9",
 		"mode": "text_to_image", "server": "github", "remote_tool_name": "list_issues", "tool_outcome": "unproductive",
 		"embedding_model": "ollama/nomic-embed-text:latest", "log_level": "info", "default_method": "private-api",
-		"normalized_mime": "image/png", "event_type": "READY", "gateways": "discord, imessage, homeassistant",
-		"tools": "time.current,user_memory_save,web.search", "phase": "connect", "reason_code": "no_results",
+		"normalized_mime": "image/png", "event_type": "READY", "gateways": "discord, imessage, openai",
+		"tools": "memory,web_search", "phase": "connect", "reason_code": "no_results",
 		"request_kind": "prompt", "prompt_type": "text_image", "execution_status": "ok", "delivery_status": "ok",
 		"persistence_status": "pending", "response_kind": "answer", "record_kind": "measurement", "workload": "foreground",
 		"source": "x_oembed", "build_version": "v4.0.9", "build_revision": "abc123", "go_version": "go1.25.7",
@@ -68,9 +68,9 @@ func TestNamedScalarsNeverInvokeMethods(t *testing.T) {
 	record := captureLog(t, logger, func() {
 		logger.Info("scalar.complete", "fixed", F("status", telemetryString("ok")), F("tool_outcome", telemetryString("productive")),
 			F("attempt_count", telemetryInt(3)), F("is_submitted", telemetryBool(true)), F("effective_output_tps", telemetryFloat(2.5)),
-			F("counts", []telemetryInt{1, 2}), F("tool_name", []telemetryString{"web.search", "time.current"}))
+			F("counts", []telemetryInt{1, 2}), F("tool_name", []telemetryString{"web_search", "memory"}))
 	})
-	want := map[string]any{"request_id": "req_1", "job_id": float64(12), "status": "ok", "tool_outcome": "productive", "attempt_count": float64(3), "is_submitted": true, "effective_output_tps": 2.5, "counts": []any{float64(1), float64(2)}, "tool_name": []any{"web.search", "time.current"}}
+	want := map[string]any{"request_id": "req_1", "job_id": float64(12), "status": "ok", "tool_outcome": "productive", "attempt_count": float64(3), "is_submitted": true, "effective_output_tps": 2.5, "counts": []any{float64(1), float64(2)}, "tool_name": []any{"web_search", "memory"}}
 	for key, value := range want {
 		if !reflect.DeepEqual(record[key], value) {
 			t.Errorf("%s: got %#v want %#v", key, record[key], value)

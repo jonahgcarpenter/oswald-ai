@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
@@ -41,23 +40,35 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	text := strings.TrimSpace(msg.Text)
 	replyGUID := msg.replyTargetGUID()
 	isGroup := chat.Style == chatStyleGroup || strings.Contains(chat.GUID, ";+;")
+	principal, err := g.Links.Resolve("imessage", msg.Handle.Address, !isGroup)
+	if err != nil {
+		return
+	}
 	selectedMessageGUID := ""
 	if isGroup {
 		selectedMessageGUID = msg.GUID
 	}
-	mentionsBot := mentionRE.MatchString(text)
-	textWithoutMention := strings.TrimSpace(mentionRE.ReplaceAllString(text, ""))
-	if !isGroup && g.DMMention && !dmMentionRE.MatchString(text) {
-		g.logIgnoredMessage("dm_without_mention", "new-message", msg,
-			config.F("request_id", requestID), config.F("is_group", false), config.F("message_chars", len(msg.Text)))
-		return
+	mentionEnd := g.leadingMention(text)
+	hasLeadingMention := mentionEnd >= 0
+	mentionsBot := hasLeadingMention
+	if isGroup && !g.Links.RequiresMention("imessage") {
+		mentionsBot = true
+	}
+	textWithoutMention := text
+	if hasLeadingMention {
+		textWithoutMention = strings.TrimSpace(text[mentionEnd:])
 	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
+	// allowPredecessor permits the thread-root fallback; it is also the exact
+	// condition under which an unmentioned group reply is looked up at all.
+	allowPredecessor := isGroup && !mentionsBot && !currentIsCommandAttempt
+	replyLookupAttempted := false
 	currentIsReplyToBot := false
 	var resolvedReply messageContext
 	var replyFound bool
 	if replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt) {
-		resolvedReply, replyFound = g.resolveReply(ctx, msg, isGroup && !mentionsBot && !currentIsCommandAttempt, requestID)
+		replyLookupAttempted = true
+		resolvedReply, replyFound = g.resolveReply(ctx, msg, allowPredecessor, requestID)
 		currentIsReplyToBot = replyFound && resolvedReply.IsFromBot
 	}
 	preflight := routing.Preflight(routing.PreflightInput{
@@ -66,28 +77,18 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		IsReplyToBot: currentIsReplyToBot,
 		Text:         textWithoutMention,
 	})
-	routingReason := preflight.Reason
-	if preflight.Action != routing.ActionIgnore {
-		routingReason = "preflight_allowed"
-	}
-	log.Debug("gateway.message.routing", "evaluated imessage invocation",
-		config.F("reason_code", routingReason),
-		config.F("is_ignored", preflight.Action == routing.ActionIgnore),
-		config.F("is_group", isGroup), config.F("is_mention", mentionsBot),
-		config.F("is_command", currentIsCommandAttempt), config.F("is_reply", replyGUID != ""),
-		config.F("is_reply_found", replyFound), config.F("is_reply_to_bot", currentIsReplyToBot),
-		config.F("has_reply_to_guid", msg.ReplyToGUID != ""),
-		config.F("has_thread_originator_guid", msg.ThreadOriginatorGUID != ""),
-		config.F("has_thread_originator_part", msg.ThreadOriginatorPart != ""),
-		config.F("is_reply_lookup_attempted", replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt)))
 	if preflight.Action == routing.ActionIgnore {
 		g.logIgnoredMessage(preflight.Reason, "new-message", msg,
 			config.F("request_id", requestID),
 			config.F("is_group", isGroup),
 			config.F("is_mention", mentionsBot),
 			config.F("is_reply", replyGUID != ""),
-			config.F("is_reply_found", replyFound),
-			config.F("is_reply_to_bot", currentIsReplyToBot),
+			config.F("has_thread_root", msg.ThreadOriginatorGUID != ""),
+			config.F("has_explicit_target", msg.ReplyToGUID != ""),
+			config.F("reply_lookup_attempted", replyLookupAttempted),
+			config.F("reply_found", replyFound),
+			config.F("reply_is_bot", currentIsReplyToBot),
+			config.F("allow_predecessor", allowPredecessor),
 			config.F("is_command", currentIsCommandAttempt),
 			config.F("message_chars", len(msg.Text)),
 		)
@@ -115,11 +116,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		return
 	}
 
-	normalizedSenderID, err := accounts.NormalizeIdentifier("imessage", msg.Handle.Address)
-	if err != nil {
-		log.Error("gateway.account.normalize_failed", "failed to normalize imessage account", config.F("request_id", requestID), config.ErrorField(err))
-		return
-	}
+	normalizedSenderID := principal.ExternalID
 	displayName := normalizedSenderID
 	if resolvedName, err := g.lookupContactDisplayName(normalizedSenderID, log); err != nil {
 		log.Debug("gateway.contact_lookup.failed", "imessage contact lookup failed", config.F("request_id", requestID), config.F("status", "degraded"), config.ErrorField(err))
@@ -127,11 +124,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		displayName = resolvedName
 	}
 
-	canonicalUserID, err := g.Links.EnsureAccount(ctx, "imessage", normalizedSenderID, displayName)
-	if err != nil {
-		log.Error("gateway.account.resolve_failed", "failed to resolve imessage account", config.F("request_id", requestID), config.ErrorField(err))
-		return
-	}
+	canonicalUserID := principal.CanonicalUserID
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
 	log = log.With(config.F("user_id", canonicalUserID))
@@ -186,6 +179,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		},
 		DisplayName:    displayName,
 		SessionKey:     sessionKey,
+		ChatLabel:      g.chatLabel(chat, displayName, isGroup, log),
 		IsDirect:       !isGroup,
 		IsGroup:        isGroup,
 		IsMention:      mentionsBot,
@@ -235,5 +229,24 @@ func (m webhookMessage) primaryChat() messageChat {
 	return m.Chats[0]
 }
 
-var mentionRE = regexp.MustCompile(`<@Oswald>|@?Oswald\b`)
-var dmMentionRE = regexp.MustCompile(`(^|[^[:alnum:]_])(<@Oswald>|@?Oswald\b)`)
+// defaultMentionPatterns preserves the built-in mention forms. A mention must
+// be the first thing the sender says, so the patterns are anchored.
+var defaultMentionPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^(?:<@Oswald>|@?Oswald\b)`),
+}
+
+// leadingMention reports whether the trimmed message begins with a mention and,
+// if so, the byte offset just past the longest matching prefix.
+func (g *Gateway) leadingMention(trimmed string) int {
+	patterns := g.MentionPatterns
+	if len(patterns) == 0 {
+		patterns = defaultMentionPatterns
+	}
+	end := -1
+	for _, pattern := range patterns {
+		if loc := pattern.FindStringIndex(trimmed); loc != nil && loc[0] == 0 && loc[1] > end {
+			end = loc[1]
+		}
+	}
+	return end
+}

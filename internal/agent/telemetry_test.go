@@ -51,7 +51,7 @@ func TestToolAndGenerationTelemetryDoesNotDoubleMeter(t *testing.T) {
 		{Message: llm.ChatMessage{Role: "assistant", Content: "private-response-canary"}},
 	}}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(ctx context.Context, _ map[string]interface{}) (governance.Result, error) {
 		m := requestctx.MetadataFromContext(ctx)
 		if m.OperationID == "" || m.OperationID == "operation" || m.ParentOperationID != "operation" {
 			t.Error("tool operation correlation missing")
@@ -64,7 +64,7 @@ func TestToolAndGenerationTelemetryDoesNotDoubleMeter(t *testing.T) {
 	a.log = log
 	usage := requestctx.NewUsageCollector()
 	ctx := requestctx.WithUsageCollector(requestctx.WithMetadata(context.Background(), requestctx.Metadata{OperationID: "operation", ParentOperationID: "parent", Workload: "foreground"}), usage)
-	response, err := a.Process(ctx, Request{RequestID: "req", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "private-external-canary", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "private-session-canary", Prompt: "private-input-canary"})
+	response, err := a.Process(ctx, Request{RequestID: "req", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "private-external-canary", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "private-session-canary", Prompt: "private-input-canary"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestToolCompletionPreservesActualOutcomeDuringCancellation(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			reg := registry.New(config.NewLogger(config.LevelError))
-			if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+			if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 				cancel()
 				result := productiveResult("private-result-canary")
 				result.ReasonCode = "test_result"
@@ -153,7 +153,7 @@ func TestToolCompletionPreservesActualOutcomeDuringCancellation(t *testing.T) {
 			chat := &fakeChatter{responses: []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "private-call-canary", Function: llm.ToolFunction{Name: "test.lookup", Arguments: map[string]interface{}{}}}}}}}}
 			a, _ := newTestAgent(t, chat, nil, reg)
 			a.log = log
-			_, err = a.Process(ctx, Request{RequestID: "req", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}, SessionKey: "session", Prompt: "question"})
+			_, err = a.Process(ctx, Request{RequestID: "req", Principal: identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "session", Prompt: "question"})
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("process err = %v", err)
 			}

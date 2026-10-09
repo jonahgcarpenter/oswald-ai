@@ -259,6 +259,21 @@ func buildBlueBubblesAttachmentEndpoint(baseURL, attachmentGUID, password string
 	return parsed.String(), nil
 }
 
+func buildBlueBubblesChatEndpoint(baseURL, chatGUID, password string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", fmt.Errorf("parse BlueBubbles URL: %w", err)
+	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	baseEscapedPath := strings.TrimRight(parsed.EscapedPath(), "/")
+	parsed.Path = basePath + "/api/v1/chat/" + chatGUID
+	parsed.RawPath = baseEscapedPath + "/api/v1/chat/" + url.PathEscape(chatGUID)
+	query := parsed.Query()
+	query.Set("password", password)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
 func buildBlueBubblesChatActionEndpoint(baseURL, chatGUID, action, password string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {

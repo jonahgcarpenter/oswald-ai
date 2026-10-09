@@ -9,7 +9,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 const replyIndexTTL = time.Hour
@@ -165,26 +164,4 @@ func (dg *Gateway) resolveReplyContext(msg MessageCreate, emojiRE *regexp.Regexp
 	}
 	log.Debug("gateway.reply_context.applied", "applied discord reply context", config.F("request_id", requestID), config.F("chat_id", msg.ChannelID), config.F("is_bot_reply", reply.IsFromBot), config.F("reply_image_count", len(reply.Images)), config.F("status", status))
 	return reply
-}
-
-// HandleRuntimeInvalidation purges reply context owned by the invalidated tenant.
-func (dg *Gateway) HandleRuntimeInvalidation(event invalidation.Event) {
-	sessions := make(map[string]bool, len(event.SessionIDs))
-	for _, sessionID := range event.SessionIDs {
-		sessions[sessionID] = true
-	}
-	senders := make(map[string]bool)
-	const prefix = "discord:"
-	for _, external := range event.ExternalIdentities {
-		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
-			senders[external[len(prefix):]] = true
-		}
-	}
-	dg.replyMu.Lock()
-	for id, ctx := range dg.replyIndex {
-		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
-			delete(dg.replyIndex, id)
-		}
-	}
-	dg.replyMu.Unlock()
 }

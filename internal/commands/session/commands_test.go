@@ -8,42 +8,46 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
-func TestResetUsesCanonicalUserAndCurrentSession(t *testing.T) {
-	resetter := &fakeResetter{}
-	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(resetter)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "external", Assurance: identity.AssuranceHomeAssistantToken}
-	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/reset"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resetter.userID != "user" || resetter.sessionID != "session" {
-		t.Fatalf("reset scope user=%q session=%q", resetter.userID, resetter.sessionID)
-	}
-	if result.Text != "Conversation context reset. Your latest profile will be used from now on." {
-		t.Fatalf("unexpected response %q", result.Text)
-	}
+type fakeStarter struct {
+	userID    string
+	sessionID string
 }
 
-func TestResetRejectsUnauthenticatedPrincipal(t *testing.T) {
-	resetter := &fakeResetter{}
-	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(resetter)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	principal := identity.Principal{CanonicalUserID: "user", Gateway: "homeassistant", ExternalID: "external", Assurance: identity.AssuranceSelfAsserted}
-	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/reset"})
-	if err == nil || resetter.userID != "" || result.Text != "" {
-		t.Fatalf("result=%q resetter=%+v err=%v", result.Text, resetter, err)
-	}
-}
-
-type fakeResetter struct{ userID, sessionID string }
-
-func (f *fakeResetter) ResetSessionContext(_ context.Context, userID, sessionID string) error {
-	f.userID = userID
-	f.sessionID = sessionID
+func (s *fakeStarter) NewSessionContext(_ context.Context, userID, sessionID string) error {
+	s.userID, s.sessionID = userID, sessionID
 	return nil
+}
+
+func TestNewSessionCommandStartsFreshSession(t *testing.T) {
+	starter := &fakeStarter{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(starter)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "user", Assurance: identity.AssuranceDiscordGateway}
+	result, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starter.userID != "user" || starter.sessionID != "session" {
+		t.Fatalf("new scope user=%q session=%q", starter.userID, starter.sessionID)
+	}
+	if result.Text != "Started a new session. Past conversations remain searchable." {
+		t.Fatalf("unexpected text: %q", result.Text)
+	}
+	if result.Outcome.Operation != "session.new" {
+		t.Fatalf("unexpected operation: %q", result.Outcome.Operation)
+	}
+}
+
+func TestNewSessionCommandRejectsUnauthenticatedIdentity(t *testing.T) {
+	starter := &fakeStarter{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(starter)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Execute(context.Background(), commands.Request{Principal: identity.Principal{}, SessionKey: "session", Raw: "/new"})
+	if err == nil || starter.userID != "" || result.Text != "" {
+		t.Fatalf("result=%q starter=%+v err=%v", result.Text, starter, err)
+	}
 }

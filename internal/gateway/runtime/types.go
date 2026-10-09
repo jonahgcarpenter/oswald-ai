@@ -12,34 +12,22 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
 type Dependencies struct {
-	Broker                 *broker.Broker
-	Commands               *commands.Service
-	Access                 AccessChecker
-	Log                    *config.Logger
-	Formation              FormationEnqueuer
-	Compaction             CompactionEnqueuer
-	RuntimeInvalidationBus *invalidation.Bus
+	// ForProfile selects immutable profile services before any runtime work.
+	ForProfile func(string) (Dependencies, bool)
+	Broker     *broker.Broker
+	Commands   *commands.Service
+	Log        *config.Logger
+	Compaction CompactionEnqueuer
 }
 
 // CompactionEnqueuer durably plans optional session compaction after delivery.
 type CompactionEnqueuer interface {
-	Enqueue(context.Context, string, memory.FormationSource) error
+	Enqueue(context.Context, string, memory.DeliverySource) error
 	MarkDeliveryFailed(context.Context, string, int64) error
-}
-
-// FormationEnqueuer durably queues optional work after response delivery.
-type FormationEnqueuer interface {
-	Enqueue(context.Context, string, memory.FormationSource) error
-}
-
-// AccessChecker exposes gateway-neutral user moderation checks.
-type AccessChecker interface {
-	BanStatus(canonicalUserID string) (bool, string, error)
 }
 
 // Request is the gateway-neutral representation executed by the shared runtime.
@@ -52,6 +40,9 @@ type Request struct {
 	DisplayName string
 	SessionKey  string
 	ClientID    string
+	// ChatLabel names the transport conversation for the session-context block.
+	// It is untrusted metadata, built by each gateway.
+	ChatLabel string
 
 	IsDirect     bool
 	IsGroup      bool
@@ -62,12 +53,15 @@ type Request struct {
 	// mention, emoji, URL, reply, or attachment transformations. Empty stays empty.
 	PublicUserText string
 	Text           string
-	Images         []llm.InputImage
-	Unsupported    []string
-	Reply          *routing.ReplyContext
+	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
+	Stateless     bool
+	ClientHistory []llm.ChatMessage
+	Images        []llm.InputImage
+	Unsupported   []string
+	Reply         *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
-	// OnAllowed runs after authentication and moderation checks, before fallback, command, or model work.
+	// OnAllowed runs after profile authentication, before fallback, command, or model work.
 	OnAllowed func()
 }
 

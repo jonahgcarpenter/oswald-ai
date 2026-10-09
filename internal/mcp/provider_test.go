@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,12 +13,7 @@ import (
 )
 
 func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	store := testStore(t)
 	addTestUsers(t, store, "user_1", "user_2")
 	ctx := context.Background()
 	for _, cfg := range []ServerConfig{
@@ -32,7 +26,7 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 			t.Fatalf("save %s: %v", cfg.Name, err)
 		}
 	}
-	provider := NewProvider(NewManagerFromStore(store, config.NewLogger(config.LevelError)))
+	provider := NewProvider(newManager(store, config.NewLogger(config.LevelError)))
 	tools := provider.DiscoveryTools(ctx, testPrincipal("user_1"))
 	names := map[string]bool{}
 	for _, tool := range tools {
@@ -58,7 +52,7 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 			t.Fatal("home.tools schema unexpectedly includes limit parameter")
 		}
 	}
-	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "homeassistant", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
+	invalid := identity.Principal{CanonicalUserID: "user_1", Gateway: "imessage", ExternalID: "user_1", Assurance: identity.AssuranceDiscordGateway}
 	if tools := provider.DiscoveryTools(ctx, invalid); len(tools) != 0 {
 		t.Fatalf("invalid principal received discovery tools: %+v", tools)
 	}
@@ -67,14 +61,12 @@ func TestProviderDiscoveryToolsAreScopedToVisibleEnabledServers(t *testing.T) {
 func TestProviderHidesMigratedServerWithoutDescription(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Temporary description.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	_, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Temporary description.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
 	if err != nil {
 		t.Fatalf("save legacy server: %v", err)
 	}
-	if _, err := store.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET description = '' WHERE id = ?`, cfg.ID); err != nil {
-		t.Fatalf("clear migrated description: %v", err)
-	}
-	manager := NewManagerFromStore(store, config.NewLogger(config.LevelError))
+	store.servers[0].Description = ""
+	manager := newManager(store, config.NewLogger(config.LevelError))
 	infos := manager.ServerInfos(ctx, "user_1")
 	if len(infos) != 1 || infos[0].Description != "" {
 		t.Fatalf("migrated server info = %+v", infos)
@@ -97,23 +89,16 @@ func TestProviderFiltersNamesReservedByBuiltinCatalog(t *testing.T) {
 }
 
 func TestProviderDoesNotAdvertisePersistedReservedSoulServer(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	store := testStore(t)
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Legacy tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	_, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "legacy", Description: "Legacy tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
 	if err != nil {
 		t.Fatalf("save legacy server: %v", err)
 	}
-	if _, err := store.db.SQL().ExecContext(ctx, `UPDATE mcp_servers SET name = 'soul' WHERE id = ?`, cfg.ID); err != nil {
-		t.Fatalf("seed legacy reserved server: %v", err)
-	}
+	store.servers[0].Name = "soul"
 
-	provider := NewProvider(NewManagerFromStore(store, config.NewLogger(config.LevelError)))
+	provider := NewProvider(newManager(store, config.NewLogger(config.LevelError)))
 	if tools := provider.DiscoveryTools(ctx, testPrincipal("user_1")); len(tools) != 0 {
 		t.Fatalf("reserved soul server was advertised: %+v", tools)
 	}
@@ -123,19 +108,14 @@ func TestProviderDoesNotAdvertisePersistedReservedSoulServer(t *testing.T) {
 }
 
 func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	store := testStore(t)
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
 	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
 		t.Fatalf("save home: %v", err)
 	}
-	manager := NewManagerFromStore(store, config.NewLogger(config.LevelError))
+	manager := newManager(store, config.NewLogger(config.LevelError))
 	manager.sessions[scopeKey(cfg)] = &server{config: cfg, tools: []ToolSpec{
 		{Name: "home.turn_on", Server: "home", RemoteName: "turn_on"},
 		{Name: "home.weather", Server: "home", RemoteName: "weather"},
@@ -152,19 +132,14 @@ func TestProviderResolveToolsUsesCurrentVisibleCatalog(t *testing.T) {
 }
 
 func TestProviderEntryPointsRejectUnauthenticatedPrincipal(t *testing.T) {
-	store, err := NewStore(filepath.Join(t.TempDir(), "oswald.db"), "12345678901234567890123456789012", config.NewLogger(config.LevelError).Server("test"))
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	store.SetResolverForTest(staticResolver{"example.com": {"93.184.216.34"}})
+	store := testStore(t)
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
 	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: "user_1", Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
 		t.Fatalf("save home: %v", err)
 	}
-	manager := NewManagerFromStore(store, config.NewLogger(config.LevelError))
+	manager := newManager(store, config.NewLogger(config.LevelError))
 	manager.sessions[scopeKey(cfg)] = &server{config: cfg, tools: []ToolSpec{{Name: "home.turn_on", Server: "home", RemoteName: "turn_on"}}}
 	provider := NewProvider(manager)
 	principal := testPrincipal("user_1")
@@ -185,7 +160,7 @@ func TestProviderEntryPointsRejectUnauthenticatedPrincipal(t *testing.T) {
 }
 
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: userID, Assurance: identity.AssuranceHomeAssistantToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 }
 
 func TestSearchToolsReturnsAllToolsWithoutQuery(t *testing.T) {

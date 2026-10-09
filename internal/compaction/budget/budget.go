@@ -1,9 +1,8 @@
 package budget
 
 const (
-	defaultContextWindow   = 32768
-	defaultResponseReserve = 8192
-	defaultSafetyMargin    = 256
+	defaultContextWindow = 32768
+	defaultSafetyMargin  = 256
 )
 
 // CompactionTriggerPercent is the input-pressure threshold for foreground and durable compaction.
@@ -28,21 +27,17 @@ func RecentTailLimit(inputLimit int) int {
 // ContextBudget describes the request-time prompt budget derived from the
 // active model's context window.
 type ContextBudget struct {
-	ContextWindow   int
-	ResponseReserve int
-	SafetyMargin    int
-	PromptLimit     int
+	ContextWindow int
+	SafetyMargin  int
+	PromptLimit   int
 }
 
-// UsableInputLimit returns the model input capacity after output and safety
-// reserves. An explicit prompt limit can further constrain that capacity.
+// UsableInputLimit returns the model input capacity after the safety margin.
+// An explicit prompt limit can further constrain that capacity.
 func (b ContextBudget) UsableInputLimit() int {
 	limit := b.PromptLimit
 	if b.ContextWindow > 0 {
-		contextLimit := b.ContextWindow - b.ResponseReserve
-		if contextLimit < 0 {
-			contextLimit = 0
-		}
+		contextLimit := b.ContextWindow
 		if limit <= 0 || contextLimit < limit {
 			limit = contextLimit
 		}
@@ -54,19 +49,15 @@ func (b ContextBudget) UsableInputLimit() int {
 	return limit
 }
 
-// NewContextBudget derives prompt-budget settings from configured model limits.
-// Non-positive limits use conservative package defaults.
-func NewContextBudget(contextWindow, maxOutputTokens int) ContextBudget {
+// NewContextBudget derives prompt-budget settings from the configured context window.
+// A non-positive window uses the package default; no output capacity is reserved.
+func NewContextBudget(contextWindow int) ContextBudget {
 	budget := ContextBudget{
-		ContextWindow:   defaultContextWindow,
-		ResponseReserve: defaultResponseReserve,
-		SafetyMargin:    defaultSafetyMargin,
+		ContextWindow: defaultContextWindow,
+		SafetyMargin:  defaultSafetyMargin,
 	}
 	if contextWindow > 0 {
 		budget.ContextWindow = contextWindow
-	}
-	if maxOutputTokens > 0 {
-		budget.ResponseReserve = maxOutputTokens
 	}
 	return budget
 }

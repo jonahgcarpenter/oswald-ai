@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -31,8 +30,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -41,43 +40,11 @@ import (
 
 func TestDiscordWebSearchStatusReportsDegradation(t *testing.T) {
 	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:      "web.search",
+		Name:      "web_search",
 		WebSearch: &agent.ToolStreamSearchPayload{Query: "current pricing", IsDegraded: true},
 	})
 	if status.completed != "Searched the web for \"current pricing\" with limited sources." {
 		t.Fatalf("completed status = %q", status.completed)
-	}
-}
-
-func TestDiscordWebFetchStatusDoesNotExposeURLOrContent(t *testing.T) {
-	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:       "web.fetch",
-		Arguments:  map[string]interface{}{"url": "https://example.com/private-path"},
-		ResultText: "private fetched content",
-		WebFetch:   &agent.ToolStreamFetchPayload{Title: "Untrusted title", IsDegraded: true},
-	})
-	combined := status.running + status.completed + status.failed
-	if status.completed != "Fetched the requested public page with limited extraction." {
-		t.Fatalf("completed status = %q", status.completed)
-	}
-	for _, secret := range []string{"private-path", "private fetched content", "Untrusted title"} {
-		if strings.Contains(combined, secret) {
-			t.Fatalf("web fetch status exposed %q: %s", secret, combined)
-		}
-	}
-}
-
-func TestDiscordUserMemorySaveStatusDoesNotExposeCandidateContent(t *testing.T) {
-	status := discordToolStatusFor(&agent.ToolStreamPayload{
-		Name:       "user_memory_save",
-		Arguments:  map[string]interface{}{"evidence": "private evidence"},
-		ResultText: "private result",
-	})
-	combined := status.running + status.completed + status.failed
-	for _, private := range []string{"private evidence", "private result"} {
-		if strings.Contains(combined, private) {
-			t.Fatalf("memory save status exposed %q: %s", private, combined)
-		}
 	}
 }
 
@@ -93,8 +60,11 @@ func TestDiscordHandleDirectMessageSendsReply(t *testing.T) {
 	if len(primary) != 1 {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
+	if len(primary[0].Messages) != 2 || primary[0].Messages[0].Role != "system" || primary[0].Messages[1].Role != "user" {
+		t.Fatalf("expected system policy and current user prompt without file context, got %+v", primary[0].Messages)
+	}
 	last := primary[0].Messages[len(primary[0].Messages)-1]
-	if last.Content != "hello discord" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
+	if last.Content != "hello discord" {
 		t.Fatalf("unexpected prompt %q", last.Content)
 	}
 	if rest.lastMessageContent() != "discord response" || len(rest.editedMessages()) != 0 {
@@ -145,8 +115,8 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "private reasoning"})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search", Arguments: map[string]interface{}{"query": "secret query", "authorization": "Bearer private-token"}}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", ResultText: "private result", DurationMS: 420}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search", Arguments: map[string]interface{}{"query": "secret query", "authorization": "Bearer private-token"}}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", ResultText: "private result", DurationMS: 420}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "post tool reasoning"})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final streamed response is now arriving."})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
@@ -337,12 +307,12 @@ func TestDiscordStreamRemovesAbandonedContinuationBeforeToolProgress(t *testing.
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: strings.Repeat("a", 2000) + "abandoned continuation"})
 	waitForDiscordMessages(t, rest, 2)
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
 	waitForDiscordDeletion(t, rest, "sent-2")
 	waitForDiscordEdit(t, rest, "sent-1", "Searching the web for \"the requested information\"...")
 
 	const finalText = "Final answer after the tool call."
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: finalText})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: finalText}); err != nil {
 		t.Fatal(err)
@@ -468,8 +438,8 @@ func TestDiscordStreamEditsActualContentThroughToolPhases(t *testing.T) {
 	r.stream.editInterval = 5 * time.Millisecond
 
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "First thinking paragraph."})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 25}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", DurationMS: 25}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "Second thinking paragraph."})
 	time.Sleep(20 * time.Millisecond)
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "Authoritative content"})
@@ -565,32 +535,14 @@ func TestDiscordStreamRecoversFinalAnswerAfterStatusEditFailure(t *testing.T) {
 	dg := &Gateway{Token: "token", APIBaseURL: server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
 	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "A commentary preview that is long enough to send."})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web.search"}})
-	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web.search", DurationMS: 10}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "web_search"}})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "web_search", DurationMS: 10}})
 	r.Stream(agent.StreamChunk{Type: agent.ChunkContent, Text: "The final response is long enough to preview."})
 	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final response is long enough to preview."}); err != nil {
 		t.Fatal(err)
 	}
 	if deleteCount != 0 || postCount != 1 || patchCount != 3 {
 		t.Fatalf("delete_count=%d post_count=%d patch_count=%d, want 0, 1, and 3", deleteCount, postCount, patchCount)
-	}
-}
-
-func TestRuntimeInvalidationPurgesOnlyMatchingDiscordReplyContext(t *testing.T) {
-	dg := &Gateway{replyIndex: map[string]replyContext{
-		"session": {SessionKey: "discord:channel:one", SenderID: "one"},
-		"sender":  {SessionKey: "discord:other:one", SenderID: "one"},
-		"foreign": {SessionKey: "discord:channel:two", SenderID: "two"},
-	}}
-	dg.HandleRuntimeInvalidation(invalidation.Event{SessionIDs: []string{"discord:channel:one"}, ExternalIdentities: []string{"discord:one", "imessage:one"}})
-	if _, ok := dg.replyIndex["session"]; ok {
-		t.Fatal("matching session reply context remained")
-	}
-	if _, ok := dg.replyIndex["sender"]; ok {
-		t.Fatal("matching sender reply context remained")
-	}
-	if _, ok := dg.replyIndex["foreign"]; !ok || len(dg.replyIndex) != 1 {
-		t.Fatalf("foreign reply context was purged: %+v", dg.replyIndex)
 	}
 }
 
@@ -739,7 +691,7 @@ func TestDiscordDefersStreamAttachmentsUntilFinalResponse(t *testing.T) {
 	attachment := media.OutputAttachment{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}
 	streamReturned := make(chan struct{})
 	go func() {
-		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "comfyui.text_to_image"}, Attachments: []media.OutputAttachment{attachment}})
+		responder.Stream(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "image_generate"}, Attachments: []media.OutputAttachment{attachment}})
 		close(streamReturned)
 	}()
 	<-streamReturned
@@ -827,8 +779,11 @@ func TestDiscordMentionedGuildMessageStripsMentionAndResolvesMentions(t *testing
 	if len(primary) != 1 {
 		t.Fatalf("expected one LLM request, got %d", len(primary))
 	}
+	if len(primary[0].Messages) != 2 || primary[0].Messages[0].Role != "system" || primary[0].Messages[1].Role != "user" {
+		t.Fatalf("expected system policy and current user prompt without file context, got %+v", primary[0].Messages)
+	}
 	prompt := primary[0].Messages[len(primary[0].Messages)-1].Content
-	if prompt != "hello @Bob" || !strings.Contains(primary[0].Messages[len(primary[0].Messages)-2].Content, "<tenant_profile") {
+	if prompt != "hello @Bob" {
 		t.Fatalf("unexpected prompt %q", prompt)
 	}
 }
@@ -1353,16 +1308,25 @@ func newDiscordTestGateway(t *testing.T, apiBaseURL string) (*Gateway, *broker.B
 	t.Helper()
 	log := config.NewLogger(config.LevelError)
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "oswald.db")
-	memories := memorytest.NewStore(t, dbPath, log)
-	links := accounts.NewService(dbPath, memories, nil, log)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := memory.NewProfileStore(context.Background(), dir, "default", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { memories.Close() })
+	links, err := profiles.NewDirectory(&config.Config{ProfileRoot: dir, ProfileName: "default", DiscordToken: "token", DiscordPolicy: config.AdmissionPolicy{Banned: []string{"456"}}, DiscordGroupRequireMention: true, ProfileRoutes: []config.ProfileRoute{{Platform: "discord", UserID: "123", Profile: "default"}}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
 	soulPath := filepath.Join(dir, "soul.md")
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
-	soulStore := soul.NewStore(soulPath)
+	soulStore := soul.NewProfileStore(dir, "default", soulPath)
 	chat := &discordFakeChatter{}
-	ai := agent.NewAgent(chat, registry.New(log), "test-model", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(chat, registry.New(log), "test-model", "test-provider", soulStore, memories, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands()

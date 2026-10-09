@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,20 +14,21 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 const (
 	sessionHistoryCandidateLimit  = 1000
 	recentToolExposureTurns       = 4
-	automaticRecallTopK           = 4
-	automaticRecallCharLimit      = 2000
 	sessionTurnTTL                = 24 * time.Hour
 	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
@@ -43,11 +45,28 @@ type Agent struct {
 	mcpProvider MCPProvider
 	budget      tokenbudget.ContextBudget
 	model       string
+	provider    string
 	soul        *soul.Store
-	userMemory  *memory.Store
+	userMemory  SessionStore
+	fileMemory  *files.Store
+	imageCache  *imagecache.Cache
 	toolPolicy  governance.GlobalPolicy
 	compactor   ForegroundCompactor
 	log         *config.Logger
+}
+
+// SetImageCache installs the private per-user image cache before requests start.
+func (a *Agent) SetImageCache(cache *imagecache.Cache) {
+	if a != nil {
+		a.imageCache = cache
+	}
+}
+
+// SetFileMemory installs the file-backed memory store before the agent starts serving work.
+func (a *Agent) SetFileMemory(store *files.Store) {
+	if a != nil {
+		a.fileMemory = store
+	}
 }
 
 // SetForegroundCompactor installs the request-local compactor before the agent starts serving work.
@@ -57,15 +76,16 @@ func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 	}
 }
 
-// NewAgent initializes the Agent with an LLM chat client, tool registry, model name,
-// soul store, SQLite user memory store, prompt budget, tool-governance policy,
-// and logger.
+// NewAgent initializes the Agent with an LLM chat client, tool registry, model
+// name and configured provider key, soul store, SQLite user memory store,
+// prompt budget, tool-governance policy, and logger.
 func NewAgent(
 	chatClient llm.Chatter,
 	registry *registry.Registry,
 	model string,
+	provider string,
 	soul *soul.Store,
-	userMemory *memory.Store,
+	userMemory SessionStore,
 	budget tokenbudget.ContextBudget,
 	toolPolicy governance.GlobalPolicy,
 	log *config.Logger,
@@ -81,6 +101,7 @@ func NewAgent(
 		mcpProvider: mcpProvider,
 		budget:      budget,
 		model:       model,
+		provider:    provider,
 		soul:        soul,
 		userMemory:  userMemory,
 		toolPolicy:  toolPolicy,
@@ -100,6 +121,13 @@ func NewAgent(
 func (a *Agent) Process(ctx context.Context, request Request) (response *Response, processErr error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
+	}
+	if !request.Stateless && len(request.ClientHistory) != 0 {
+		return nil, fmt.Errorf("client history requires stateless mode")
+	}
+	historyContext, err := clientHistoryContext(request.ClientHistory)
+	if err != nil {
+		return nil, err
 	}
 	requestID := request.RequestID
 	gateway := request.Principal.Gateway
@@ -162,14 +190,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// Inject the resolved actor so tool handlers derive ownership from the same
 	// principal used by gateways, commands, and the broker.
 	ctx = requestctx.WithPrincipal(ctx, request.Principal)
-	memoryStage := requestctx.NewMemoryStageCollector()
-	ctx = requestctx.WithMemoryStageCollector(ctx, memoryStage)
-	imageSearch := requestctx.NewImageSearchState()
-	ctx = requestctx.WithImageSearchState(ctx, imageSearch)
-	imageFailureText := imageSizeFallback
-	if len(userImages) == 0 {
-		imageFailureText = "I couldn't process the reference images. Please try another search or try again later."
-	}
 	formationSourceText, _ := stripReplyContext(userPrompt)
 	inherited := requestctx.MetadataFromContext(ctx)
 	inherited.RequestID, inherited.SessionID, inherited.Model, inherited.CurrentUserText = requestID, sessionKey, a.model, formationSourceText
@@ -184,67 +204,96 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
-	if strings.EqualFold(strings.TrimSpace(gateway), "homeassistant") {
-		toolExposure.HideBuiltins(toolnames.ComfyUITextToImage, toolnames.ComfyUIImageToImage, toolnames.WebImageSelect)
+	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
+		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
 
-	// Read the operator-managed soul file fresh on every request.
-	soulContent, soulErr := a.soul.Read()
+	// Read the canonical user's operator-managed soul fresh on every request.
+	soulStarted := time.Now()
+	soulContent, soulErr := a.soul.Read(ctx, senderID)
 	if soulErr != nil {
-		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.ErrorField(soulErr))
+		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.F("status", "error"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.ErrorField(soulErr))
+		return nil, fmt.Errorf("read user soul: %w", soulErr)
 	}
+	reqLog.Info("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
 
-	// Keep deployment policy separate from the frozen lower-authority tenant profile.
-	var promptParts []string
-	promptParts = append(promptParts, soulContent)
-	if gatewayPrompt := gatewaySystemPrompt(gateway); gatewayPrompt != "" {
-		promptParts = append(promptParts, gatewayPrompt)
-	}
-	dynamicSystemPrompt := strings.Join(promptParts, "\n\n")
+	// The session-bound memory snapshot joins the operator soul in the system message.
+	dynamicSystemPrompt := soulContent
 	speakerLine := ""
-	profileContent := ""
+	contextBlock := ""
 	sessionGeneration := 0
-	if a.userMemory != nil {
-		profile, err := a.userMemory.ResolveSessionProfile(ctx, senderID, sessionKey, sessionTurnTTL)
+	var sessionStartedAt time.Time
+	if a.userMemory != nil && !request.Stateless {
+		session, err := a.userMemory.ResolveSessionContext(ctx, senderID, sessionKey, sessionTurnTTL)
 		if err != nil {
-			return nil, fmt.Errorf("resolve tenant profile: %w", err)
+			return nil, fmt.Errorf("resolve tenant session: %w", err)
 		} else {
-			speakerLine = profile.SpeakerIntro
-			sessionGeneration = profile.Generation
-			profileContent = profile.Content
-			reqLog.Debug("agent.profile.loaded", "loaded frozen tenant profile",
-				config.F("profile_version", profile.Version),
-				config.F("latest_profile_version", profile.LatestVersion),
-				config.F("profile_fact_count", profile.FactCount),
-				config.F("profile_bytes", profile.Bytes),
-				config.F("session_generation", profile.Generation),
-				config.F("is_profile_new", profile.IsNewVersion),
-				config.F("is_session_new", profile.IsNewSession),
-			)
-			if profile.IsNewVersion {
-				reqLog.Info("agent.profile.version_advanced", "advanced tenant profile version",
-					config.F("profile_version", profile.LatestVersion),
-					config.F("profile_fact_count", profile.LatestFactCount),
-					config.F("profile_bytes", profile.LatestBytes),
-					config.F("status", "ok"),
-				)
-			}
-			if profile.IsNewSession {
-				reqLog.Info("agent.profile.session_bound", "bound tenant profile to session",
-					config.F("profile_version", profile.Version),
-					config.F("session_generation", profile.Generation),
+			speakerLine = session.SpeakerIntro
+			sessionGeneration = session.Generation
+			sessionStartedAt = session.StartedAt
+			reqLog.Debug("agent.session.loaded", "loaded tenant session context",
+				config.F("session_generation", session.Generation),
+				config.F("is_session_new", session.IsNewSession))
+			if session.IsNewSession {
+				reqLog.Info("agent.session.bound", "bound tenant session context",
+					config.F("session_generation", session.Generation),
 					config.F("status", "ok"),
 				)
 			}
 		}
 	}
+	if a.fileMemory != nil {
+		filesStarted := time.Now()
+		var userContent, memoryContent string
+		bound := false
+		if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
+			var err error
+			userContent, memoryContent, bound, err = a.userMemory.SessionFileMemory(ctx, senderID, sessionKey, sessionGeneration)
+			if err != nil {
+				reqLog.Warn("agent.memory.files.bind_failed", "failed to load session file memory", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+				return nil, fmt.Errorf("load session file memory: %w", err)
+			}
+		}
+		if !bound {
+			var err error
+			userContent, memoryContent, err = a.fileMemory.Read(ctx, senderID)
+			if err != nil {
+				reqLog.Warn("agent.memory.files.load_failed", "failed to load private memory files", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+				return nil, fmt.Errorf("read file memory: %w", err)
+			}
+			if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
+				userContent, memoryContent, err = a.userMemory.BindSessionFileMemory(ctx, senderID, sessionKey, sessionGeneration, userContent, memoryContent)
+				if err != nil {
+					reqLog.Warn("agent.memory.files.bind_failed", "failed to bind session file memory", config.F("status", "error"), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.ErrorField(err))
+					return nil, fmt.Errorf("bind session file memory: %w", err)
+				}
+			}
+		}
+		contextBlock = renderFileMemory(userContent, memoryContent)
+		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+	}
+	appendContext := func(block string) {
+		if block == "" {
+			return
+		}
+		if strings.TrimSpace(contextBlock) == "" {
+			contextBlock = block
+		} else {
+			contextBlock += "\n\n" + block
+		}
+	}
+	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
+	if !request.Stateless {
+		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
+	}
+	appendContext(platformNotes(gateway))
 	requestUser := providerUserValue(firstNonEmpty(speakerLine, displayName, senderID))
 	meta := requestctx.MetadataFromContext(ctx)
 	meta.SessionGeneration = sessionGeneration
 	ctx = requestctx.WithMetadata(ctx, meta)
-	if a.userMemory != nil && sessionGeneration > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 && a.registry.HasHandler(imagegenerate.Name) {
 		imagesStarted := time.Now()
 		priorImages, err := a.userMemory.SessionImages(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil {
@@ -255,36 +304,37 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-	var recalledMemories []memory.RecallResult
-	if a.userMemory != nil {
-		recallQuery, _ := stripReplyContext(userPrompt)
-		recallStarted := time.Now()
-		var recallStats memory.RecallStats
-		recalledMemories, recallStats = a.userMemory.Recall(ctx, senderID, recallQuery, memory.RecallRequest{TopK: automaticRecallTopK})
-		if recallStats.LexicalError != nil {
-			reqLog.Warn("agent.user_memory.recall.lexical_degraded", "user-memory lexical recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.LexicalError))
+	if gateway != "openai" && a.registry.HasHandler(imagegenerate.Name) {
+		if a.imageCache == nil {
+			return nil, fmt.Errorf("image cache is unavailable")
 		}
-		if recallStats.SemanticError != nil {
-			reqLog.Warn("agent.user_memory.recall.semantic_degraded", "user-memory semantic recall degraded", config.F("status", "degraded"), config.ErrorField(recallStats.SemanticError))
+		for i := range contextImages {
+			if contextImages[i].Path != "" {
+				if _, _, err := a.imageCache.Resolve(ctx, senderID, contextImages[i].Path); err != nil {
+					return nil, fmt.Errorf("resolve image catalog source: %w", err)
+				}
+				continue
+			}
+			data, err := base64.StdEncoding.DecodeString(contextImages[i].Data)
+			if err != nil {
+				return nil, fmt.Errorf("decode image catalog source: %w", err)
+			}
+			assetID := contextImages[i].ID
+			if contextImages[i].Source != "generated" {
+				assetID = config.NewRequestID()
+			}
+			path, err := a.imageCache.SaveAsset(ctx, senderID, assetID, data, contextImages[i].MIMEType)
+			if err != nil {
+				return nil, fmt.Errorf("cache image catalog source: %w", err)
+			}
+			contextImages[i].Path = path
 		}
-		reqLog.Debug("agent.user_memory.recall.complete", "completed user-memory recall",
-			config.F("lexical_candidate_count", recallStats.LexicalCandidateCount),
-			config.F("semantic_candidate_count", recallStats.SemanticCandidateCount),
-			config.F("merged_candidate_count", recallStats.MergedCandidateCount),
-			config.F("below_threshold_count", recallStats.BelowThresholdCount),
-			config.F("selected_memory_count", recallStats.SelectedCount),
-			config.F("min_selected_score", recallStats.MinSelectedScore),
-			config.F("max_selected_score", recallStats.MaxSelectedScore),
-			config.F("is_lexical_available", recallStats.LexicalAvailable),
-			config.F("is_vector_available", recallStats.SemanticAvailable),
-			config.F("duration_ms", time.Since(recallStarted).Milliseconds()),
-		)
+		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-
 	var recentTurns []memory.SessionTurn
 	var recentToolNames []string
 	var sessionSummary memory.SessionSummary
-	if a.userMemory != nil && sessionGeneration > 0 {
+	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
 		var err error
 		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
 		if err != nil && err != sql.ErrNoRows {
@@ -320,7 +370,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 	var foregroundDebt []memory.SessionTurn
-	if a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
+	if !request.Stateless && a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
 		boundary := sessionSummary.CoveredThroughTurnID
 		var debtErr error
 		foregroundDebt, debtErr = loadForegroundDeliveredDebt(ctx, a.userMemory, senderID, sessionKey, sessionGeneration, boundary)
@@ -332,21 +382,36 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, profileContent, userPrompt, userImages, sessionSummary, minimumTail, recalledMemories, automaticRecallCharLimit, recentTurns, initialCatalog.Tools, inputLimit)
-	if a.userMemory != nil {
-		a.userMemory.RecordRecallUsage(ctx, senderID, promptContext.SelectedRecall)
-	}
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, userPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
 	messages := promptContext.Messages
+	if request.Stateless {
+		if historyContext != "" {
+			messages = append(messages[:len(messages)-1], llm.ChatMessage{Role: "user", Content: historyContext}, messages[len(messages)-1])
+		}
+	}
 	var previousSummary *memory.SessionSummary
 	if sessionSummary.ID > 0 {
 		previousSummary = &sessionSummary
 	}
-	foregroundCompaction := newForegroundCompactionState(a.compactor, inputLimit, dynamicSystemPrompt, profileContent, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
+	compactor := a.compactor
+	if request.Stateless {
+		compactor = nil
+	}
+	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, userPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
-	if len(contextImages) > 0 && gateway != "homeassistant" && a.registry.HasHandler(toolnames.ComfyUIImageToImage) {
+	if len(contextImages) > 0 && a.registry.HasHandler(imagegenerate.Name) {
 		imageContext := sessionImageContext(contextImages, nil)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
+	}
+	if request.Stateless {
+		promptContext.RequiredEstimate = tokenbudget.EstimateRequest(messages, initialCatalog.Tools)
+		promptContext.EstimatedBefore = promptContext.RequiredEstimate
+		promptContext.EstimatedAfter = promptContext.RequiredEstimate
+		promptContext.RequiredOverBudget = promptContext.RequiredEstimate > inputLimit
+		if promptContext.RequiredOverBudget {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 	}
 	if promptContext.RequiredOverBudget {
 		reqLog.Warn("agent.context.over_budget", "prompt still exceeds budget after compaction",
@@ -357,9 +422,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	reqLog.Debug("agent.context.selected", "selected complete session exchanges",
 		config.F("selected_turn_count", promptContext.SelectedTurnCount),
 		config.F("omitted_turn_count", promptContext.OmittedTurnCount),
-		config.F("selected_memory_count", promptContext.SelectedRecallCount),
-		config.F("omitted_memory_count", promptContext.OmittedRecallCount),
-		config.F("recall_chars", promptContext.RecallChars),
 		config.F("is_summary_included", promptContext.SummaryIncluded),
 		config.F("summary_chars", promptContext.SummaryChars),
 		config.F("minimum_tail_count", promptContext.MinimumTailCount),
@@ -408,12 +470,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var generatedImages []requestctx.InputImage
 	var visionGeneratedImages []requestctx.InputImage
 	var generatedAttachmentSlots []int
-	partialImageResponse := func() string {
-		if len(generatedImages) > 0 {
-			return generatedImagePartialResponse
-		}
-		return foundImagePartialResponse
-	}
 	imageHighwater := make(map[string]int)
 	for _, image := range contextImages {
 		if image.VersionHighwater > imageHighwater[image.ImageID] {
@@ -456,6 +512,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		messages = preparedMessages
 		req.Messages = messages
+		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 		if compactionStats.Compacted {
 			reqLog.Info("agent.context.compacted", "compacted active request context",
 				config.F("iteration", iteration), config.F("compacted_unit_count", compactionStats.DebtCount),
@@ -503,14 +562,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if err == nil {
 				// Continue with the response recovered after compaction.
 				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
-			} else if (len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0) && !llm.IsTemporaryOllamaToolParserError(err) {
-				useFallback(partialImageResponse())
+			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
+				useFallback(generatedImagePartialResponse)
 				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
-				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
+				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 				if streamCallback != nil {
-					streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 				}
 			} else if llm.IsTemporaryOllamaToolParserError(err) {
 				// Temporary workaround for an upstream Ollama/Qwen tool-markup parser
@@ -529,7 +588,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					return nil, ctxErr
 				}
 				if err == nil {
-					markSearchImagesInspected(ctx, req.Messages, req.Messages, reqLog)
 					reqLog.Info("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
@@ -544,11 +602,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						config.F("status", "error"),
 						config.ErrorField(err),
 					)
-					if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
+					if len(generatedImages) > 0 {
 						if llm.IsContextLengthExceededError(err) {
 							useFallback(contextCompactionFallback)
 						} else {
-							useFallback(partialImageResponse())
+							useFallback(generatedImagePartialResponse)
 						}
 						goto finalize
 					}
@@ -605,9 +663,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
-			if toolName == toolnames.UserMemorySave {
-				historyBatch.AssistantContent = ""
-			}
 			toolCallID := tc.ID
 			toolStartedAt := time.Now()
 
@@ -622,17 +677,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			policy, advertised := catalog.Policies[toolName]
 			decision := governance.Decision{ReasonCode: iterationDecision.ReasonCode}
 			if iterationDecision.Allowed {
-				fingerprintArgs := tc.Function.Arguments
-				if _, explicit := fingerprintArgs["source_image_id"]; toolName == toolnames.ComfyUIImageToImage && !explicit && len(contextImages) > 0 {
-					// Bind duplicates to the default source at this execution, without
-					// rewriting model arguments or bypassing handler source validation.
-					fingerprintArgs = make(map[string]interface{}, len(tc.Function.Arguments)+1)
-					for key, value := range tc.Function.Arguments {
-						fingerprintArgs[key] = value
-					}
-					fingerprintArgs["source_image_id"] = contextImages[0].ID
-				}
-				decision = toolGovernor.BeforeExecution(toolName, fingerprintArgs, policy, advertised)
+				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
 			}
 			if decision.Allowed {
 				toolExecutionCount++
@@ -641,11 +686,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolMeta.ParentOperationID = toolMeta.OperationID
 				toolMeta.OperationID = config.NewRequestID()
 				reqLog.Debug("agent.tool.start", "starting authorized tool execution", config.F("tool_name", toolName))
-				isGenerated := toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage
+				isGenerated := toolName == imagegenerate.Name
 				var plannedImage requestctx.InputImage
 				selectedSlot := -1
 				if isGenerated {
-					plannedImage, selectedSlot, execErr = planGeneratedImage(tc.Function.Arguments, toolName == toolnames.ComfyUIImageToImage, contextImages, generatedImages)
+					plannedImage, selectedSlot, execErr = planGeneratedImage(tc.Function.Arguments, contextImages, generatedImages)
 					if execErr == nil {
 						if plannedImage.ImageID == "" {
 							plannedImage.ImageID = config.NewRequestID()
@@ -663,86 +708,92 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
 				if execErr == nil && len(result.Attachments) > 0 {
-					candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
-					if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
-						candidate = append([]media.OutputAttachment(nil), outputAttachments...)
-						candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
-					}
-					if result.Outcome != governance.OutcomeProductive {
-						execErr = fmt.Errorf("tool returned attachments without a productive result")
-					} else if isGenerated && len(result.Attachments) != 1 {
-						execErr = fmt.Errorf("generation must return exactly one image")
-					} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
-						execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+					if gateway == "openai" {
+						execErr = fmt.Errorf("attachments are not supported by this gateway")
 					} else {
-						if toolName == toolnames.ComfyUITextToImage || toolName == toolnames.ComfyUIImageToImage {
-							for _, attachment := range result.Attachments {
-								normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
-								if err != nil {
-									execErr = fmt.Errorf("normalize generated image: %w", err)
-									break
-								}
-								image := plannedImage
-								image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
-								image.VersionHighwater = image.Version
-								var metadata map[string]json.RawMessage
-								if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
-									execErr = fmt.Errorf("invalid generated image metadata")
-									break
-								}
-								metadata["source_image_id"], _ = json.Marshal(image.ID)
-								metadata["image_id"], _ = json.Marshal(image.ImageID)
-								metadata["version"], _ = json.Marshal(image.Version)
-								metadata["parent_source_image_id"], _ = json.Marshal(image.ParentSourceImageID)
-								encoded, _ := json.Marshal(metadata)
-								result.Content = string(encoded)
-								visionGeneratedImages = append(visionGeneratedImages, image)
-								if len(visionGeneratedImages) > 4 {
-									visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
-								}
-								variant, _ := tc.Function.Arguments["create_variant"].(bool)
-								if !variant {
+						candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
+						if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
+							candidate = append([]media.OutputAttachment(nil), outputAttachments...)
+							candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
+						}
+						if result.Outcome != governance.OutcomeProductive {
+							execErr = fmt.Errorf("tool returned attachments without a productive result")
+						} else if isGenerated && len(result.Attachments) != 1 {
+							execErr = fmt.Errorf("generation must return exactly one image")
+						} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
+							execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+						} else {
+							if isGenerated {
+								for _, attachment := range result.Attachments {
+									normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
+									if err != nil {
+										execErr = fmt.Errorf("normalize generated image: %w", err)
+										break
+									}
+									image := plannedImage
+									image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
+									image.VersionHighwater = image.Version
+									var metadata map[string]json.RawMessage
+									if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
+										execErr = fmt.Errorf("invalid generated image metadata")
+										break
+									}
+									if a.imageCache == nil {
+										execErr = fmt.Errorf("image cache is unavailable")
+										break
+									}
+									image.Path, err = a.imageCache.SaveAsset(ctx, senderID, image.ID, attachment.Data, attachment.MIMEType)
+									if err != nil {
+										execErr = fmt.Errorf("cache generated image: %w", err)
+										break
+									}
+									for _, key := range []string{"image", "source_image_id", "image_id", "version", "parent_source_image_id"} {
+										delete(metadata, key)
+									}
+									metadata["image"], _ = json.Marshal(image.Path)
+									encoded, _ := json.Marshal(metadata)
+									result.Content = string(encoded)
+									visionGeneratedImages = append(visionGeneratedImages, image)
+									if len(visionGeneratedImages) > 4 {
+										visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
+									}
 									for i := range contextImages {
 										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
 											contextImages[i].ImageID = image.ImageID
 										}
 									}
-								}
-								if selectedSlot >= 0 {
-									generatedImages[selectedSlot] = image
-								} else {
-									generatedImages = append(generatedImages, image)
-									generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
-								}
-								contextImages = append([]requestctx.InputImage{image}, contextImages...)
-								if len(contextImages) > 24 {
-									// Keep selected deliverables editable even after many retries.
-									for i := len(contextImages) - 1; i >= 0; i-- {
-										pinned := false
-										for _, selected := range generatedImages {
-											if selected.ID == contextImages[i].ID {
-												pinned = true
+									if selectedSlot >= 0 {
+										generatedImages[selectedSlot] = image
+									} else {
+										generatedImages = append(generatedImages, image)
+										generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
+									}
+									contextImages = append([]requestctx.InputImage{image}, contextImages...)
+									if len(contextImages) > 24 {
+										// Keep selected deliverables editable even after many retries.
+										for i := len(contextImages) - 1; i >= 0; i-- {
+											pinned := false
+											for _, selected := range generatedImages {
+												if selected.ID == contextImages[i].ID {
+													pinned = true
+													break
+												}
+											}
+											if !pinned {
+												contextImages = append(contextImages[:i], contextImages[i+1:]...)
 												break
 											}
 										}
-										if !pinned {
-											contextImages = append(contextImages[:i], contextImages[i+1:]...)
-											break
-										}
 									}
+									ctx = requestctx.WithInputImages(ctx, contextImages)
+									reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
 								}
-								ctx = requestctx.WithInputImages(ctx, contextImages)
-								reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
+							}
+							if execErr == nil {
+								outputAttachments = candidate
 							}
 						}
-						if execErr == nil {
-							outputAttachments = candidate
-						}
 					}
-				}
-				if execErr != nil && toolName == toolnames.WebImageSelect {
-					id, _ := tc.Function.Arguments["result_id"].(string)
-					imageSearch.Unselect(id)
 				}
 				toolGovernor.RecordResult(toolName, decision, result, execErr)
 				status, outcome := "ok", string(result.Outcome)
@@ -807,9 +858,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
 			if streamCallback != nil {
+				payload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
+				if toolName == websearch.Name && payload.WebSearch != nil {
+					payload.WebSearch.IsDegraded = result.IsDegraded
+				}
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
-					Tool: toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed),
+					Tool: payload,
 				})
 			}
 
@@ -848,16 +903,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if len(historyBatch.Calls) > 0 {
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
-		foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
+		if !request.Stateless {
+			foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
+		}
 		if len(generatedImages) > 0 {
 			imageContext := sessionImageContext(contextImages, visionGeneratedImages)
 			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
 			foregroundCompaction.imageContext = &imageContext
-		}
-		if refs := imageSearch.ActiveReferences(); len(refs) > 0 {
-			referenceContext := searchImageContext(refs)
-			messages = replaceSessionImageContext(messages, foregroundCompaction.searchContext, referenceContext)
-			foregroundCompaction.searchContext = &referenceContext
 		}
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
@@ -885,6 +937,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		messages = preparedMessages
 		finalReq.Messages = messages
+		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
+			return nil, fmt.Errorf("stateless request exceeds model input budget")
+		}
 		if compactionStats.Compacted {
 			reqLog.Info("agent.context.compacted", "compacted active request context before final model call",
 				config.F("compacted_unit_count", compactionStats.DebtCount), config.F("estimated_before", compactionStats.EstimatedBefore),
@@ -920,14 +975,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if llm.IsContextLengthExceededError(err) {
 					useFallback(contextCompactionFallback)
 					goto finalize
-				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
-					useFallback(partialImageResponse())
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
 					goto finalize
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageFailureText}}
+					resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 					}
 				} else {
 					errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
@@ -974,7 +1029,6 @@ finalize:
 		} else if compactionStats.Compacted {
 			messages = preparedMessages
 			retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-			retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
 		} else {
 			retryMessages = preparedMessages
 		}
@@ -984,6 +1038,9 @@ finalize:
 			retryReq := req
 			retryReq.Messages = retryMessages
 			retryReq.Tools = nil
+			if request.Stateless && tokenbudget.EstimateRequest(retryReq.Messages, nil) > inputLimit {
+				return nil, fmt.Errorf("stateless request exceeds model input budget")
+			}
 
 			reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
 				config.F("thinking_chars", len(finalThinking)),
@@ -1004,7 +1061,6 @@ finalize:
 					} else if recoveryStats.Compacted {
 						messages = preparedMessages
 						retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-						retryMessages = foregroundCompaction.fitSearchImages(ctx, retryMessages, nil)
 						retryReq.Messages = retryMessages
 						modelIterations++
 						retryResp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
@@ -1027,14 +1083,14 @@ finalize:
 					if streamCallback != nil {
 						streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
 					}
-				} else if len(generatedImages) > 0 || len(imageSearch.SelectedReferences()) > 0 {
-					useFallback(partialImageResponse())
-					finalContent = partialImageResponse()
+				} else if len(generatedImages) > 0 {
+					useFallback(generatedImagePartialResponse)
+					finalContent = generatedImagePartialResponse
 				} else if imageRetriesExhausted {
 					imageSizeFallbackUsed = true
-					finalContent = imageFailureText
+					finalContent = imageSizeFallback
 					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageFailureText})
+						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
 					}
 				}
 			} else {
@@ -1069,11 +1125,6 @@ finalize:
 		messages = append(messages, lastResp.Message)
 	}
 	userMemoryContent := sessionMemoryUserContent(userPrompt, len(userImages))
-	stagedMemory := memoryStage.Candidates()
-	if len(stagedMemory) > 0 && (a.userMemory == nil || sessionGeneration <= 0) {
-		persistenceStatus = "failed"
-		return nil, fmt.Errorf("persist staged foreground memory: session storage is unavailable")
-	}
 	for i := range generatedImages {
 		generatedImages[i].VersionHighwater = imageHighwater[generatedImages[i].ImageID]
 	}
@@ -1093,22 +1144,17 @@ finalize:
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
-	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 {
+	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
 		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Staged: stagedMemory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
-			if len(stagedMemory) > 0 {
-				return nil, fmt.Errorf("persist staged foreground memory: %w", err)
-			}
 			if len(generatedImages) > 0 {
 				return nil, fmt.Errorf("persist generated images: %w", err)
 			}
-		} else if len(stagedMemory) > 0 && storedTurn.ID == 0 {
-			return nil, fmt.Errorf("persist staged foreground memory: session turn was not stored")
 		}
 		if len(generatedImages) > 0 && storedTurn.ID == 0 {
 			return nil, fmt.Errorf("persist generated images: session turn was not stored")
@@ -1122,7 +1168,7 @@ finalize:
 	}
 
 	responseStatus := "ok"
-	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
+	if temporaryParserFallback || imageSizeFallbackUsed || toolGovernanceStopReason != "" || finalContent == contextCompactionFallback || finalContent == generatedImagePartialResponse {
 		responseStatus = "degraded"
 	}
 	reqLog.Debug("agent.response.detail", "completed agent response",
@@ -1150,7 +1196,7 @@ finalize:
 	if finalContent == emptyResponseFallback && !temporaryParserFallback {
 		responseKind = "empty_fallback"
 	}
-	if finalContent == generatedImagePartialResponse || finalContent == foundImagePartialResponse {
+	if finalContent == generatedImagePartialResponse {
 		responseKind = "image_partial"
 	}
 	return &Response{

@@ -26,7 +26,7 @@ func TestSnapshotAndExecutionTelemetry(t *testing.T) {
 	p := &telemetryProcessor{started: make(chan context.Context, 1), release: make(chan struct{})}
 	b := NewBroker(p, 1, config.NewLogger(config.LevelError))
 	usage := requestctx.NewUsageCollector()
-	req := &Request{RequestID: "req", Usage: usage, Metadata: requestctx.Metadata{OperationID: "operation", ParentOperationID: "parent"}, Principal: identity.Principal{CanonicalUserID: "user", ExternalID: "external", Gateway: "homeassistant", Assurance: identity.AssuranceHomeAssistantToken}, ResponseChan: make(chan Result, 1)}
+	req := &Request{RequestID: "req", Usage: usage, Metadata: requestctx.Metadata{OperationID: "operation", ParentOperationID: "parent"}, Principal: identity.Principal{CanonicalUserID: "user", ExternalID: "external", Gateway: "imessage", Assurance: identity.AssuranceBlueBubblesWebhook}, ResponseChan: make(chan Result, 1)}
 	if err := b.Submit(req); err != nil {
 		t.Fatal(err)
 	}

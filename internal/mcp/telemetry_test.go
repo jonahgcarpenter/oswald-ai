@@ -103,7 +103,7 @@ func TestManagerReportsConnectListAndCloseFailuresWithoutPrivateDetails(t *testi
 	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&output)
 	store := testStore(t)
-	manager := NewManagerFromStore(store, log)
+	manager := newManager(store, log)
 	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: "req_failure", OperationID: "op_parent"})
 	if _, err := manager.ensureConnected(ctx, ServerConfig{Scope: ScopeGlobal, Name: "private_schema_label!", URL: "https://user:private_prose@example.com/private_prose"}); err == nil {
 		t.Fatal("expected rejection")
@@ -112,9 +112,7 @@ func TestManagerReportsConnectListAndCloseFailuresWithoutPrivateDetails(t *testi
 	if err := manager.Close(); err == nil {
 		t.Fatal("expected close error")
 	}
-	if err := store.db.SQL().Close(); err != nil {
-		t.Fatal(err)
-	}
+	store.closed = true
 	manager.ToolSpecs(ctx, "user")
 	NewProvider(manager).DiscoveryTools(ctx, testPrincipal("user"))
 	for _, event := range []string{"mcp.server.connect.complete", "mcp.server.connect_failed", "mcp.server.close_failed", "mcp.server_configs.list_failed"} {

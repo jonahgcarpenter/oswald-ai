@@ -18,18 +18,12 @@ func TestProductionLoggingContract(t *testing.T) {
 	root := filepath.Join("..", "..")
 	fset := token.NewFileSet()
 	// Exact forwarding expressions, not blanket file exceptions. The worker
-	// wrappers' callers are checked below; the other sites select fixed literals.
+	// wrapper's callers are checked below; the other sites select fixed literals.
 	reviewedEvents := map[string]string{
-		"internal/accounts/challenges.go#ConfirmChallenge":          "event",
-		"internal/llm/telemetry.go#beginMeasurement":                "event",
-		"internal/tools/builtin/websearch/telemetry.go#beginSearch": "event",
-		"internal/compaction/service.go#warn":                       "event",
-		"internal/memory/formation/service.go#warn":                 "event",
-		"internal/memory/formation/service.go#drain":                "event",
-		"internal/memory/indexing/service.go#warn":                  "event",
-		"internal/memory/indexing/service.go#health":                "event",
-		// startup.Error.Event and Message are fixed source literals, not Cause.
-		"cmd/agent/main.go#main": "startupErr.Event",
+		"internal/llm/telemetry.go#beginMeasurement":      "event",
+		"internal/providers/web/telemetry.go#BeginSearch": "event",
+		// logFailure forwards fixed source literals supplied by its callers.
+		"internal/startup/serve.go#logFailure": "event",
 	}
 	literal := func(e ast.Expr) (string, bool) {
 		v, ok := e.(*ast.BasicLit)
@@ -110,13 +104,12 @@ func TestProductionLoggingContract(t *testing.T) {
 							}
 						}
 					}
-					wrapper := (rel == "internal/compaction/service.go" || rel == "internal/memory/formation/service.go" || rel == "internal/memory/indexing/service.go") && (sel.Sel.Name == "warn" || sel.Sel.Name == "health")
-					if !loggerReceiver(sel.X) && !wrapper {
+					if !loggerReceiver(sel.X) {
 						return true
 					}
 					switch sel.Sel.Name {
 					case "Fatal":
-						if rel != "cmd/agent/main.go" {
+						if rel != "cmd/oswald-server/main.go" {
 							t.Errorf("%s: Fatal outside main", fset.Position(call.Pos()))
 						}
 					case "Info", "Warn", "Error", "Debug", "warn", "health":

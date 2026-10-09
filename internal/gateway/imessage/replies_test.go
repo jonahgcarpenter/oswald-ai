@@ -349,8 +349,8 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 				msg := threadIncoming()
 				msg.GUID, msg.ThreadOriginatorGUID = anchor.GUID, root.GUID
 				if mode != "bot" {
-					// Rejection must precede account resolution and attachment downloads.
-					g.Links = nil
+					// Profile admission precedes reply lookup; failed reply invocation
+					// must still prevent attachment downloads and model execution.
 					msg.Attachments = []attachment{{GUID: "private-attachment-input", MimeType: "image/png"}}
 				}
 				g.processIncomingMessage(msg)
@@ -466,12 +466,7 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 				if !found || result.IsFromBot || result.IsPredecessor || result.Text != root.Text || calls.Load() != 2 {
 					t.Fatal("invalid anchor did not stop after the validated human root")
 				}
-				var got []map[string]any
-				for _, event := range events() {
-					if event["event"] == "gateway.reply_lookup.complete" {
-						got = append(got, event)
-					}
-				}
+				got := events()
 				if len(got) != 1 {
 					t.Fatalf("measurement count=%d", len(got))
 				}
@@ -580,8 +575,10 @@ func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(messageQueryResponse{Data: result})
 			}))
 			defer server.Close()
-			// Nil account/media services make any preflight side effect a failure.
-			g := &Gateway{BlueBubblesURL: server.URL, Log: config.NewLogger(config.LevelError)}
+			// No broker or media services: invalid reply metadata must not
+			// proceed past invocation preflight after profile admission.
+			log := config.NewLogger(config.LevelError)
+			g := &Gateway{BlueBubblesURL: server.URL, Log: log, Links: imessageProfileDirectory(t, t.TempDir(), log)}
 			g.processIncomingMessage(msg)
 			if calls.Load() > 3 {
 				t.Fatalf("duplicate or unbounded lookup: %d", calls.Load())
@@ -852,12 +849,7 @@ func TestReplyResolverTerminalMeasurements(t *testing.T) {
 					cancel()
 				}
 				g.resolveReply(ctx, threadIncoming(), true, "req-terminal")
-				var got []map[string]any
-				for _, event := range events() {
-					if event["event"] == "gateway.reply_lookup.complete" {
-						got = append(got, event)
-					}
-				}
+				got := events()
 				if len(got) != 1 || got[0]["event"] != "gateway.reply_lookup.complete" || got[0]["level"] != "info" || got[0]["request_id"] != "req-terminal" {
 					t.Fatalf("events=%+v", got)
 				}

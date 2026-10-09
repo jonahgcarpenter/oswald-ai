@@ -58,7 +58,7 @@ func (f *summaryFakeChatter) Chat(ctx context.Context, request llm.ChatRequest, 
 
 func TestForegroundCompactionPreservesOriginAndUsageCollector(t *testing.T) {
 	client := &summaryFakeChatter{arguments: summaryArguments(t, `{"narrative":"Synthetic summary.","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)}
-	compactor := newSummaryTestCompactor(t, client, 8192)
+	compactor := newSummaryTestCompactor(t, client)
 	meta := requestctx.Metadata{RequestID: "origin-request", OperationID: "parent-operation", Workload: "foreground"}
 	collector := requestctx.NewUsageCollector()
 	ctx := requestctx.WithUsageCollector(requestctx.WithMetadata(context.Background(), meta), collector)
@@ -80,7 +80,7 @@ func TestForegroundCompactionPreservesOriginAndUsageCollector(t *testing.T) {
 func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	content := `{"narrative":"Atlas is active.","open_tasks":["ship"],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[]}`
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
-	compactor := newSummaryTestCompactor(t, client, 8192)
+	compactor := newSummaryTestCompactor(t, client)
 	history := memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{{Name: "project.lookup", Status: "succeeded", Result: "Atlas is active", ExecutedAt: "2026-08-28T12:00:00Z"}}}}}
 	artifact, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}}, "")
 	if err != nil {
@@ -99,8 +99,8 @@ func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	if request.Temperature == nil || *request.Temperature != 0 {
 		t.Fatalf("temperature=%v", request.Temperature)
 	}
-	if request.MaxTokens != 8192 || request.Format != "" || !request.Stream {
-		t.Fatalf("max tokens=%d format=%q stream=%t", request.MaxTokens, request.Format, request.Stream)
+	if request.Format != "" || !request.Stream {
+		t.Fatalf("format=%q stream=%t", request.Format, request.Stream)
 	}
 	if len(request.Tools) != 1 || request.Tools[0].Function.Name != sessionSummarySaveToolName {
 		t.Fatalf("tools=%+v", request.Tools)
@@ -116,7 +116,7 @@ func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	if candidates.MinItems != nil || candidates.MaxItems != nil {
 		t.Fatalf("candidate schema=%+v", candidates)
 	}
-	if !strings.Contains(request.Messages[0].Content, "Candidates is always an empty array because durable memory formation is handled separately.") {
+	if !strings.Contains(request.Messages[0].Content, "Candidates is always an empty array. Durable user notes are managed only through the file-memory tool, never through compression.") {
 		t.Fatalf("compaction policy did not separate memory formation: %q", request.Messages[0].Content)
 	}
 	for _, field := range []string{"open_tasks", "commitments", "entities", "decisions", "topic_tags"} {
@@ -142,7 +142,7 @@ func TestLLMCompactorClassifiesInvalidToolOutput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newSummaryTestCompactor(t, test.client, 2048).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+			_, err := newSummaryTestCompactor(t, test.client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 			var invalid *invalidCompactionOutputError
 			if !errors.As(err, &invalid) || invalid.code != test.wantCode {
 				t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -169,7 +169,7 @@ func TestLLMCompactorClassifiesProviderErrors(t *testing.T) {
 		permanent bool
 	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusRequestTimeout, false}, {http.StatusTooManyRequests, false}, {http.StatusServiceUnavailable, false}} {
 		client := &summaryFakeChatter{err: &llm.ChatHTTPError{StatusCode: test.status, Body: "secret reflected content"}}
-		_, err := newSummaryTestCompactor(t, client, 2048).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+		_, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 		if errors.Is(err, errPermanentProvider) != test.permanent {
 			t.Fatalf("status=%d permanent=%v error=%v", test.status, test.permanent, err)
 		}
@@ -179,7 +179,7 @@ func TestLLMCompactorClassifiesProviderErrors(t *testing.T) {
 func TestLLMCompactorRejectsNonemptyCandidates(t *testing.T) {
 	raw := `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[{"source_turn_id":9007199254740993,"statement":"The user works.","evidence":"I work.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.fact","claim_value":"works"}]}`
 	client := &summaryFakeChatter{response: summaryRawToolResponse(sessionSummarySaveToolName, raw)}
-	_, err := newSummaryTestCompactor(t, client, 2048).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+	_, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 	var invalid *invalidCompactionOutputError
 	if !errors.As(err, &invalid) || invalid.code != "invalid_argument_shape" {
 		t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -188,7 +188,7 @@ func TestLLMCompactorRejectsNonemptyCandidates(t *testing.T) {
 
 func TestLLMCompactorRejectsTrailingJSON(t *testing.T) {
 	client := &summaryFakeChatter{arguments: map[string]interface{}{"_raw": `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]} {}`}}
-	compactor := newSummaryTestCompactor(t, client, 2048)
+	compactor := newSummaryTestCompactor(t, client)
 	if _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, ""); err == nil {
 		t.Fatal("expected trailing JSON rejection")
 	}
@@ -197,7 +197,7 @@ func TestLLMCompactorRejectsTrailingJSON(t *testing.T) {
 func TestLLMCompactorAddsReasonAwareStructuredRetryInstructions(t *testing.T) {
 	content := `{"narrative":"Atlas is active.","open_tasks":[],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[]}`
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
-	compactor := newSummaryTestCompactor(t, client, 8192)
+	compactor := newSummaryTestCompactor(t, client)
 	if _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "Atlas", AssistantText: "Noted"}}, "missing_tool_call"); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestLLMCompactorForegroundUsesThreeCorrectiveRetries(t *testing.T) {
 		{response: summaryToolResponse()},
 		{response: valid},
 	}}
-	artifact, err := newSummaryTestCompactor(t, client, 2048).CompactForeground(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "work", AssistantText: "ongoing"}}, 10000)
+	artifact, err := newSummaryTestCompactor(t, client).CompactForeground(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "work", AssistantText: "ongoing"}}, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestLLMCompactorForegroundShrinksProviderRejectedChunk(t *testing.T) {
 		{ID: 1, UserText: "first marker", AssistantText: "first answer"},
 		{ID: 2, UserText: "second marker", AssistantText: "second answer"},
 	}
-	artifact, err := newSummaryTestCompactor(t, client, 2048).CompactForeground(context.Background(), nil, turns, 10000)
+	artifact, err := newSummaryTestCompactor(t, client).CompactForeground(context.Background(), nil, turns, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestLLMCompactorForegroundSubmissionBudgetSpansAllChunks(t *testing.T) {
 	for i := range turns {
 		turns[i] = memory.SessionTurn{ID: int64(i + 1), UserText: "short", AssistantText: "short"}
 	}
-	_, err := newSummaryTestCompactor(t, client, 2048).CompactForeground(context.Background(), nil, turns, 100000)
+	_, err := newSummaryTestCompactor(t, client).CompactForeground(context.Background(), nil, turns, 100000)
 	if err == nil || !strings.Contains(err.Error(), "4-submission budget") || len(client.requests) != foregroundAttemptLimit {
 		t.Fatalf("error=%v request_count=%d", err, len(client.requests))
 	}
@@ -285,7 +285,7 @@ func TestLLMCompactorForegroundReservesCorrectivePromptBudget(t *testing.T) {
 	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{
 		{response: summaryToolResponse()}, {response: valid}, {response: valid},
 	}}
-	if _, err := newSummaryTestCompactor(t, client, 2048).CompactForeground(context.Background(), nil, turns, limit); err != nil {
+	if _, err := newSummaryTestCompactor(t, client).CompactForeground(context.Background(), nil, turns, limit); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.requests) != 3 || messagesContainText(client.requests[0].Messages, "second marker") || !messagesContainText(client.requests[2].Messages, "second marker") {
@@ -302,20 +302,17 @@ func TestLLMCompactorForegroundReservesCorrectivePromptBudget(t *testing.T) {
 }
 
 func TestNewLLMCompactorValidatesDependencies(t *testing.T) {
-	if _, err := NewLLMCompactor(nil, "model", 8192, nil); err == nil {
+	if _, err := NewLLMCompactor(nil, "model", nil); err == nil {
 		t.Fatal("expected missing client error")
 	}
-	if _, err := NewLLMCompactor(&summaryFakeChatter{}, " ", 8192, nil); err == nil {
+	if _, err := NewLLMCompactor(&summaryFakeChatter{}, " ", nil); err == nil {
 		t.Fatal("expected missing model error")
-	}
-	if _, err := NewLLMCompactor(&summaryFakeChatter{}, "model", 0, nil); err == nil {
-		t.Fatal("expected invalid max output tokens error")
 	}
 }
 
-func newSummaryTestCompactor(t *testing.T, client llm.Chatter, maxTokens int) *LLMCompactor {
+func newSummaryTestCompactor(t *testing.T, client llm.Chatter) *LLMCompactor {
 	t.Helper()
-	compactor, err := NewLLMCompactor(client, "model", maxTokens, nil)
+	compactor, err := NewLLMCompactor(client, "model", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

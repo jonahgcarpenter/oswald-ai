@@ -8,58 +8,58 @@ import (
 	"image"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/builtin/comfyui"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 )
 
-func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
+func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		args    []map[string]interface{}
 		uploads []image.Point
+		text    int
 		blocked int
 	}{
 		{
-			name:    "variant differs from default while explicit false is equivalent",
-			args:    []map[string]interface{}{{"source_image_id": "current-1"}, {"source_image_id": "current-1", "create_variant": false}, {"source_image_id": "current-1", "create_variant": true}, {"source_image_id": "current-1", "create_variant": true}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 2,
+			name:    "same explicit selector is duplicate",
+			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": "current-1"}},
+			uploads: []image.Point{image.Pt(2, 3)}, blocked: 1,
 		},
 		{
-			name: "invalid variant values never submit",
-			args: []map[string]interface{}{{"create_variant": "true"}, {"create_variant": nil}, {"create_variant": 1}},
+			name: "invalid selector values never submit",
+			args: []map[string]interface{}{{"image_url": ""}, {"image_url": nil}, {"image_url": 1}},
 		},
 		{
-			name:    "same source changed strength permits retry but same strength blocks",
-			args:    []map[string]interface{}{{"source_image_id": "current-1", "strength": 0.4}, {"source_image_id": "current-1", "strength": 0.6}, {"source_image_id": "current-1", "strength": 0.6}},
+			name:    "same source changed aspect ratio permits retry but same ratio blocks",
+			args:    []map[string]interface{}{{"image_url": "current-1", "aspect_ratio": "square"}, {"image_url": "current-1", "aspect_ratio": "portrait"}, {"image_url": "current-1", "aspect_ratio": "portrait"}},
 			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 1,
 		},
 		{
 			name:    "distinct explicit sources and exact duplicate",
-			args:    []map[string]interface{}{{"source_image_id": "current-1"}, {"source_image_id": "current-2"}, {"source_image_id": "current-1"}},
+			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": "current-2"}, {"image_url": "current-1"}},
 			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, blocked: 1,
 		},
 		{
-			name:    "omitted source advances after each output",
-			args:    []map[string]interface{}{{}, {}, {}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(6, 7), image.Pt(6, 7)},
+			name: "omitted selector always generates from text and duplicate is blocked",
+			args: []map[string]interface{}{{}, {}, {}},
+			text: 1, blocked: 2,
 		},
 		{
-			name:    "implicit and explicit same source are duplicates",
-			args:    []map[string]interface{}{{}, {"source_image_id": "current-1"}, {"source_image_id": "current-2"}, {"source_image_id": "current-2"}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, blocked: 2,
+			name:    "omitted and explicit selectors have different fingerprints",
+			args:    []map[string]interface{}{{}, {"image_url": "current-1"}, {"image_url": "current-2"}, {"image_url": "current-2"}},
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, text: 1, blocked: 1,
 		},
 		{
 			name:    "invalid explicit selectors still reach validation",
-			args:    []map[string]interface{}{{"source_image_id": "current-1"}, {"source_image_id": ""}, {"source_image_id": " current-1 "}, {"source_image_id": nil}, {"source_image_id": 7}, {"source_image_id": "unknown"}, {"source_image_id": "current-2"}},
+			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": ""}, {"image_url": " current-1 "}, {"image_url": nil}, {"image_url": 7}, {"image_url": "current-2"}},
 			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)},
 		},
 	} {
@@ -98,12 +98,12 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 							return
 						}
 						uploads = append(uploads, decoded.Bounds().Size())
-						_ = json.NewEncoder(w).Encode(map[string]string{"name": comfyui.InputFilename, "subfolder": comfyui.InputSubfolder, "type": "input"})
+						_ = json.NewEncoder(w).Encode(map[string]string{"name": comfy_ui.InputFilename, "subfolder": comfy_ui.InputSubfolder, "type": "input"})
 					case "/prompt":
 						submissions++
 						_, _ = w.Write([]byte(`{"prompt_id":"job"}`))
 					case "/history/job":
-						_, _ = w.Write([]byte(`{"job":{"outputs":{"11":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
+						_, _ = w.Write([]byte(`{"job":{"outputs":{"10":{"images":[{"filename":"result.jpg","type":"output"}]},"11":{"images":[{"filename":"result.jpg","type":"output"}]}}}}`))
 					case "/view":
 						w.Header().Set("Content-Type", output.MimeType)
 						_, _ = w.Write(data)
@@ -116,27 +116,48 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 				}))
 				defer server.Close()
 				log := config.NewLogger(config.LevelError)
-				reg, err := registry.NewFromDirectory(filepath.Join("..", "..", "data", "tools"), log)
+				chat := &fakeChatter{}
+				a, _ := newTestAgent(t, chat, nil, nil)
+				cache := a.imageCache
+				reg, err := tools.NewRegistryWithImageCache(&config.Config{
+					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
+				}, nil, nil, cache, log)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := builtin.Register(reg, &config.Config{
-					ComfyUIURL: server.URL, ComfyUIGenerationTimeout: time.Second,
-					ComfyUITextToImageWorkflowPath:  filepath.Join("..", "..", "data", "workflows", "comfyui", "text-image.json"),
-					ComfyUIImageToImageWorkflowPath: filepath.Join("..", "..", "data", "workflows", "comfyui", "image-image.json"),
-				}, nil, nil, log); err != nil {
-					t.Fatal(err)
-				}
-				chat := &fakeChatter{}
+				a.registry = reg
 				var calls []llm.ToolCall
+				var original []byte
+				chat.onChat = func(req llm.ChatRequest) {
+					if original != nil {
+						return
+					}
+					for _, message := range req.Messages {
+						if !strings.HasPrefix(message.Content, imageContextPrefix) {
+							continue
+						}
+						lines := strings.Split(message.Content, "\n")
+						for _, call := range calls {
+							switch call.Function.Arguments["image_url"] {
+							case "current-1":
+								call.Function.Arguments["image_url"] = strings.Split(lines[2], " (")[0]
+							case "current-2":
+								call.Function.Arguments["image_url"] = strings.Split(lines[3], " (")[0]
+							case " current-1 ":
+								call.Function.Arguments["image_url"] = " " + strings.Split(lines[2], " (")[0] + " "
+							}
+						}
+						break
+					}
+					original, _ = json.Marshal(calls)
+				}
 				for i, source := range test.args {
 					args := map[string]interface{}{"prompt": "make it blue"}
 					for key, value := range source {
 						args[key] = value
 					}
-					calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Function: llm.ToolFunction{Name: toolnames.ComfyUIImageToImage, Arguments: args}})
+					calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: args}})
 				}
-				original, _ := json.Marshal(calls)
 				if batch {
 					chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", ToolCalls: calls}})
 				} else {
@@ -145,7 +166,7 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 					}
 				}
 				chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Finished."}})
-				a, _ := newTestAgent(t, chat, nil, reg)
+				a.SetImageCache(cache)
 				response, err := processAgent(a, "source-governance", "discord", "session", "user-1", "User", "edit these images", []llm.InputImage{testInputImage(t, 2, 3), testInputImage(t, 4, 5)}, nil)
 				if err != nil {
 					t.Fatal(err)
@@ -155,7 +176,7 @@ func TestComfyImageGovernanceUsesEffectiveSource(t *testing.T) {
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if submissions != len(test.uploads) || len(uploads) != len(test.uploads) {
+				if submissions != len(test.uploads)+test.text || len(uploads) != len(test.uploads) {
 					t.Fatalf("submissions=%d uploads=%v want=%v", submissions, uploads, test.uploads)
 				}
 				for i, want := range test.uploads {

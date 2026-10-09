@@ -1,19 +1,15 @@
 package discord
 
 import (
-	"context"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // resolveMentions replaces every <@ID> and <@!ID> token in text with @username.
@@ -50,11 +46,15 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		return
 	}
 	log = log.With(config.F("request_id", requestID))
-	ctx := requestctx.WithMetadata(context.Background(), requestctx.Metadata{RequestID: requestID})
 
 	mention1 := fmt.Sprintf("<@%s>", dg.BotID)
 	mention2 := fmt.Sprintf("<@!%s>", dg.BotID)
-	mentionsBot := strings.Contains(msg.Content, mention1) || strings.Contains(msg.Content, mention2)
+	// A mention must be the first thing the sender says in a guild message.
+	trimmedContent := strings.TrimSpace(msg.Content)
+	mentionsBot := strings.HasPrefix(trimmedContent, mention1) || strings.HasPrefix(trimmedContent, mention2)
+	if msg.GuildID != "" && !dg.Links.RequiresMention("discord") {
+		mentionsBot = true
+	}
 	isReplyToBot := msg.ReferencedMessage != nil && msg.ReferencedMessage.Author.ID == dg.BotID
 	replyToID := ""
 	if msg.GuildID != "" {
@@ -90,6 +90,10 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	}
 
 	normalizationStarted := time.Now()
+	principal, err := dg.Links.Resolve("discord", msg.Author.ID, msg.GuildID == "")
+	if err != nil {
+		return
+	}
 	images, unsupported := dg.loadImages(msg.Attachments, log)
 	embedImageCount := 0
 	if len(msg.Embeds) > 0 {
@@ -118,23 +122,6 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	} else {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
 	}
-	normalizedAuthorID, normErr := accounts.NormalizeIdentifier("discord", msg.Author.ID)
-	if normErr != nil {
-		log.Error("gateway.account.normalize_failed", "failed to normalize discord account", config.F("request_id", requestID), config.ErrorField(normErr))
-		if _, err := dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your Discord account identity.", replyToID, log); err != nil {
-			log.Error("gateway.response.failed", "failed to deliver identity error", config.ErrorField(err))
-		}
-		return
-	}
-
-	canonicalUserID, err := dg.Links.EnsureAccount(ctx, "discord", normalizedAuthorID, msg.Author.Username)
-	if err != nil {
-		log.Error("gateway.account.resolve_failed", "failed to resolve discord account", config.F("request_id", requestID), config.ErrorField(err))
-		if _, sendErr := dg.sendMessage(msg.ChannelID, "Sorry, I could not resolve your account identity.", replyToID, log); sendErr != nil {
-			log.Error("gateway.response.failed", "failed to deliver identity error", config.ErrorField(sendErr))
-		}
-		return
-	}
 
 	var reply *routing.ReplyContext
 	if msg.ReferencedMessage != nil {
@@ -154,17 +141,13 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 
 	responder := newRuntimeResponder(dg, requestID, msg.ChannelID, replyToID, sessionKey, msg.Author.ID)
 	gatewayruntime.Execute(gatewayruntime.Request{
-		ReceivedAt: receivedAt,
-		RequestID:  requestID,
-		ChatID:     msg.ChannelID,
-		Principal: identity.Principal{
-			CanonicalUserID: canonicalUserID,
-			Gateway:         "discord",
-			ExternalID:      normalizedAuthorID,
-			Assurance:       identity.AssuranceDiscordGateway,
-		},
+		ReceivedAt:     receivedAt,
+		RequestID:      requestID,
+		ChatID:         msg.ChannelID,
+		Principal:      principal,
 		DisplayName:    msg.Author.Username,
 		SessionKey:     sessionKey,
+		ChatLabel:      dg.chatLabel(msg, log),
 		IsDirect:       msg.GuildID == "",
 		IsGroup:        msg.GuildID != "",
 		IsMention:      mentionsBot,

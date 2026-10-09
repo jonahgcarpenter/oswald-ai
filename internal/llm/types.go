@@ -39,6 +39,7 @@ type ChatMessage struct {
 type ToolParameterProperty struct {
 	Type                 string                           `json:"type"`
 	Description          string                           `json:"description,omitempty"`
+	Default              interface{}                      `json:"default,omitempty"`
 	Enum                 []string                         `json:"enum,omitempty"`
 	Properties           map[string]ToolParameterProperty `json:"properties,omitempty"`
 	Required             []string                         `json:"required,omitempty"`
@@ -91,7 +92,6 @@ type ChatRequest struct {
 	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
 	Temperature       *float64      `json:"temperature,omitempty"`
-	MaxTokens         int           `json:"max_tokens,omitempty"`
 	Format            string        `json:"format,omitempty"`
 	Stream            bool          `json:"stream"`
 }

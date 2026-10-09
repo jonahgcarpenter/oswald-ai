@@ -36,7 +36,6 @@ func TestExecutePropagatesTrustedGroupContextThroughBroker(t *testing.T) {
 		{"ambient", "discord", true, false, false, false, "ambient text"},
 		{"discord DM", "discord", false, true, false, false, "private text"},
 		{"imessage DM", "imessage", false, true, false, false, "private text"},
-		{"HA", "homeassistant", false, true, false, false, "private text"},
 		{"unspecified scope", "discord", false, false, true, false, "private text"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,22 +85,22 @@ func TestExecutePropagatesTrustedGroupContextThroughBroker(t *testing.T) {
 
 func TestExecuteRejectsMalformedGroupContext(t *testing.T) {
 	for _, tc := range []struct {
-		name, chat                  string
-		direct, ha, unauthenticated bool
+		name, chat                      string
+		direct, openai, unauthenticated bool
 	}{
 		{name: "missing chat"},
 		{name: "blank chat", chat: " \t"},
 		{name: "padded chat", chat: " chat "},
 		{name: "conflicting flags", chat: "chat", direct: true},
-		{name: "unsupported gateway", chat: "chat", ha: true},
+		{name: "unsupported gateway", chat: "chat", openai: true},
 		{name: "unauthenticated", chat: "chat", unauthenticated: true},
 	} {
 		for _, text := range []string{"public question", "/ping"} {
 			t.Run(tc.name+text, func(t *testing.T) {
 				log, records := telemetryLogger(t)
 				principal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "external", Assurance: identity.AssuranceDiscordGateway}
-				if tc.ha {
-					principal = testPrincipal("user")
+				if tc.openai {
+					principal = identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}
 				}
 				if tc.unauthenticated {
 					principal.Assurance = identity.AssuranceSelfAsserted

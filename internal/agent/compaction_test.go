@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -15,9 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	toolnames "github.com/jonahgcarpenter/oswald-ai/internal/tools/names"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )
 
@@ -46,8 +43,9 @@ func (f *fakeForegroundCompactor) CompactForeground(_ context.Context, previous 
 func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Work completed so far."}}
 	image := llm.InputImage{MimeType: "image/png", Data: "encoded", Source: "fixture"}
+	fileContext := renderFileMemory("User prefers short answers.", "Project is Atlas.")
 	status := make([]StreamChunk, 0, 1)
-	state := newForegroundCompactionState(compactor, 100, "policy", "profile", "current request", []llm.InputImage{image}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
+	state := newForegroundCompactionState(compactor, 100, "policy", fileContext, "current request", []llm.InputImage{image}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, func(chunk StreamChunk) {
 		status = append(status, chunk)
 	})
 	original := []llm.ChatMessage{
@@ -67,10 +65,10 @@ func TestForegroundCompactionStateInstallsCheckpointAtomically(t *testing.T) {
 	if len(status) != 1 || status[0].Type != ChunkStatus || status[0].Text != foregroundCompactionStatus {
 		t.Fatalf("status=%+v", status)
 	}
-	if len(rebuilt) != 4 || rebuilt[0].Content != "policy" || rebuilt[1].Content != "profile" || !strings.Contains(rebuilt[2].Content, "active_turn_summary") || rebuilt[3].Content != "current request" {
+	if len(rebuilt) != 3 || rebuilt[0].Content != "policy\n\n"+fileContext || !strings.Contains(rebuilt[1].Content, "active_turn_summary") || rebuilt[2].Content != "current request" {
 		t.Fatalf("rebuilt=%+v", rebuilt)
 	}
-	if len(rebuilt[3].Images) != 1 || rebuilt[3].Images[0].Data != image.Data || messagesContain(rebuilt, "old") {
+	if len(rebuilt[2].Images) != 1 || rebuilt[2].Images[0].Data != image.Data || messagesContain(rebuilt, "old") {
 		t.Fatalf("current image or replaced history is wrong: %+v", rebuilt)
 	}
 	if state.hasDebt() {
@@ -109,7 +107,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished after compaction"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.large", Description: "Return a large result", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult(strings.Repeat("result ", 1000)), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -120,7 +118,7 @@ func TestProcessCompactsCompletedToolRoundAndContinues(t *testing.T) {
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
-	response, err := processAgent(agent, "compact-tool", "homeassistant", "session", "user-1", "User", "research this", nil, func(chunk StreamChunk) {
+	response, err := processAgent(agent, "compact-tool", "imessage", "session", "user-1", "User", "research this", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -148,7 +146,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "recovered"}}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +157,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	agent.SetForegroundCompactor(compactor)
 	var chunks []StreamChunk
 
-	response, err := processAgent(agent, "compact-overflow", "homeassistant", "session", "user-1", "User", "continue exactly", nil, func(chunk StreamChunk) {
+	response, err := processAgent(agent, "compact-overflow", "imessage", "session", "user-1", "User", "continue exactly", nil, func(chunk StreamChunk) {
 		chunks = append(chunks, chunk)
 	})
 	if err != nil {
@@ -176,7 +174,7 @@ func TestProcessRecoversProviderContextOverflowWithTransientCheckpoint(t *testin
 	if last.Role != "user" || last.Content != "continue exactly" || !hasCompactionStatus(chunks) {
 		t.Fatalf("current request or status changed: last=%+v chunks=%+v", last, chunks)
 	}
-	if summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session", profile.Generation); !errors.Is(err, sql.ErrNoRows) || summary.ID != 0 {
+	if summary, err := store.LatestSessionSummary(context.Background(), "user-1", "session", profile.Generation); err != nil || summary.ID != 0 {
 		t.Fatalf("foreground checkpoint was persisted: summary=%+v err=%v", summary, err)
 	}
 }
@@ -189,13 +187,13 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	agent, store := newTestAgent(t, chat, nil, nil)
 	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
-	profile, err := store.ResolveSessionProfile(ctx, "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(ctx, "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i <= foregroundDebtPageSize; i++ {
 		if i == 1 {
-			if _, err := memorytest.AppendPendingTurn(ctx, store.Store, "session", "user-1", profile.Generation, "pending", "pending answer", nil, time.Hour); err != nil {
+			if _, err := store.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{UserID: "user-1", SessionID: "session", Generation: profile.Generation, UserText: "pending", AssistantText: "pending answer", TTL: time.Hour}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -205,7 +203,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 	}
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Delivered conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
-	response, err := processAgent(agent, "gap-pages", "homeassistant", "session", "user-1", "User", "continue", nil, nil)
+	response, err := processAgent(agent, "gap-pages", "imessage", "session", "user-1", "User", "continue", nil, nil)
 	if err != nil || response.Response != "continued" || len(compactor.calls) != 1 {
 		t.Fatalf("response=%+v err=%v calls=%d", response, err, len(compactor.calls))
 	}
@@ -223,7 +221,7 @@ func TestProcessCompactsDeliveredHistoryAcrossPendingGapAndPages(t *testing.T) {
 func TestProcessPropagatesCancellationDuringForegroundCompaction(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +233,7 @@ func TestProcessPropagatesCancellationDuringForegroundCompaction(t *testing.T) {
 
 	response, err := agent.Process(ctx, Request{
 		RequestID: "compact-canceled", SessionKey: "session", Prompt: "continue",
-		Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "homeassistant", ExternalID: "user-1", Assurance: identity.AssuranceHomeAssistantToken},
+		Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook},
 	})
 	if !errors.Is(err, context.Canceled) || response != nil || len(chat.requests) != 1 {
 		t.Fatalf("response=%+v err=%v provider_calls=%d", response, err, len(chat.requests))
@@ -249,7 +247,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final after recovery"}}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	if err := registerTestTool(t, reg, registry.Spec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Look up data", Schema: &llm.ToolParameters{Type: "object"}}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult("lookup complete"), nil
 	}); err != nil {
 		t.Fatal(err)
@@ -259,7 +257,7 @@ func TestProcessRecoversProviderOverflowOnGovernanceFinalCall(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "The lookup completed."}}
 	agent.SetForegroundCompactor(compactor)
 
-	response, err := processAgent(agent, "compact-final", "homeassistant", "session", "user-1", "User", "look this up", nil, nil)
+	response, err := processAgent(agent, "compact-final", "imessage", "session", "user-1", "User", "look this up", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +273,7 @@ func TestProcessRecoversProviderOverflowOnEmptyResponseRetry(t *testing.T) {
 		{response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "answer after recovery"}}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
-	profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +283,7 @@ func TestProcessRecoversProviderOverflowOnEmptyResponseRetry(t *testing.T) {
 	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Prior conversation summarized."}}
 	agent.SetForegroundCompactor(compactor)
 
-	response, err := processAgent(agent, "compact-empty", "homeassistant", "session", "user-1", "User", "answer this", nil, nil)
+	response, err := processAgent(agent, "compact-empty", "imessage", "session", "user-1", "User", "answer this", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +312,7 @@ func TestProcessInitialCompactionUsesPressureBeforeHistoryOmission(t *testing.T)
 			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 			a, store := newTestAgent(t, chat, nil, nil)
 			a.budget.PromptLimit = 1000
-			profile, err := store.ResolveSessionProfile(context.Background(), "user-1", "session", time.Hour)
+			profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session", time.Hour)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -351,7 +349,6 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			liveURL := "https://example.com/" + strings.Repeat("private-path", 1000)
 			first := toolCallResponse("fetch", "test.fetch", map[string]interface{}{"url": liveURL})
 			first.Message.Thinking = "private reasoning"
-			first.Message.ToolCalls = append(first.Message.ToolCalls, llm.ToolCall{ID: "stage", Function: llm.ToolFunction{Name: toolnames.UserMemorySave, Arguments: map[string]interface{}{}}})
 			chat := &fakeChatter{outcomes: []fakeChatOutcome{{response: first}, {response: &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}}
 			if mode == "overflow" {
 				chat.outcomes[1] = fakeChatOutcome{err: &llm.ChatHTTPError{StatusCode: 400, Body: "context length exceeded"}}
@@ -359,13 +356,12 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			reg := registry.New(config.NewLogger(config.LevelError))
 			policy := testToolPolicy()
 			policy.History = governance.HistoryPolicy{Mode: governance.HistoryMetadata}
-			if err := registerTestTool(t, reg, registry.Spec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+			if err := registerTestTool(t, reg, testToolSpec{Name: "test.fetch", Description: "Fetch-like evidence"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
 				return governance.Result{Content: liveResult, Outcome: governance.OutcomeProductive, Attachments: []media.OutputAttachment{{Filename: "result.png", MIMEType: "image/png", Data: []byte("private attachment bytes")}}}, nil
 			}); err != nil {
 				t.Fatal(err)
 			}
 			a, store := newTestAgent(t, chat, nil, reg)
-			registerStagingTool(t, reg, store.Store, false)
 			a.budget.PromptLimit = 1000
 			if mode == "overflow" {
 				a.budget.PromptLimit = 100000
@@ -399,12 +395,8 @@ func TestProcessForegroundEvidenceAndFallbackPersistence(t *testing.T) {
 			if strings.Contains(string(encoded), "private reasoning") || strings.Contains(string(encoded), "private attachment bytes") {
 				t.Fatal("compactor received reasoning or attachment bytes")
 			}
-			artifact, err := store.SessionTurnForegroundMemory(context.Background(), "user-1", response.SourceTurnID)
-			if err != nil || len(artifact.Candidates) != 1 {
-				t.Fatalf("artifact=%+v err=%v", artifact, err)
-			}
 			turns, err := store.RecentSessionTurns("user-1", "session", 1, 1)
-			if err != nil || len(turns) != 1 || turns[0].AssistantText != response.Response || len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 2 {
+			if err != nil || len(turns) != 1 || turns[0].AssistantText != response.Response || len(turns[0].ToolHistory.Batches) != 1 || len(turns[0].ToolHistory.Batches[0].Calls) != 1 {
 				t.Fatalf("turns=%+v err=%v", turns, err)
 			}
 			encoded, _ = json.Marshal(turns)

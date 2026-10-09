@@ -15,13 +15,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/memorytest"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
@@ -67,7 +65,7 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 
 	llmResponder := &fakeResponder{}
-	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsMention: true, Text: "hello"}, deps, llmResponder)
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsMention: true, Text: "hello"}, deps, llmResponder)
 	if outcome.Action != routing.ActionLLM || llmResponder.agent == nil || llmResponder.agent.Response != "agent response" {
 		t.Fatalf("unexpected llm outcome=%+v responder=%+v", outcome, llmResponder)
 	}
@@ -76,18 +74,54 @@ func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
 	}
 }
 
-func TestExecuteSilentlyIgnoresBannedUsers(t *testing.T) {
+func TestExecuteForwardsStatelessHistoryWithoutCompaction(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &statelessRuntimeProcessor{requests: make(chan agent.Request, 1)}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	history := []llm.ChatMessage{{Role: "assistant", Content: "previous answer"}}
+	principal := testPrincipal("user")
+	principal.Gateway = "openai"
+	principal.ExternalID = identity.LocalOpenAIIdentifier
+	principal.Assurance = identity.AssuranceLocalLoopback
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "next question", Stateless: true, ClientHistory: history}, Dependencies{Broker: b, Log: log, Compaction: compaction}, responder)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID != 0 || compaction.enqueueCalled || compaction.failureMarked {
+		t.Fatalf("stateless delivery outcome=%+v response=%+v compaction=%+v", outcome, responder.agent, compaction)
+	}
+	forwarded := <-processor.requests
+	if !forwarded.Stateless || len(forwarded.ClientHistory) != 1 || forwarded.ClientHistory[0].Content != "previous answer" || forwarded.Prompt != "next question" {
+		t.Fatalf("runtime lost stateless request fields: %+v", forwarded)
+	}
+}
+
+func TestExecuteOpenAIRejectsAgentAttachments(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(responseRuntimeProcessor{response: &agent.Response{Response: "answer", Attachments: []media.OutputAttachment{{Filename: "image.png", MIMEType: "image/png", Data: []byte("image")}}}}, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}
+	responder := &fakeResponder{}
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "draw", Stateless: true}, Dependencies{Broker: b, Log: log}, responder)
+	if outcome.Err == nil || outcome.Reason != "unsupported_attachments" || responder.agent != nil || responder.agentErr == "" {
+		t.Fatalf("unexpected attachment delivery: outcome=%+v responder=%+v", outcome, responder)
+	}
+}
+
+func TestExecuteSilentlyIgnoresUnavailableProfiles(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	deps.Access = &fakeAccess{banned: true, reason: "spam"}
+	deps.ForProfile = func(string) (Dependencies, bool) { return Dependencies{}, false }
 
 	for _, text := range []string{"/ping", "hello", " "} {
 		t.Run(text, func(t *testing.T) {
 			responder := &fakeResponder{}
 			admitted := false
 			outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: text, OnAllowed: func() { admitted = true }}, deps, responder)
-			if outcome.Action != routing.ActionIgnore || outcome.Reason != "user_banned" || outcome.Err != nil || admitted ||
+			if outcome.Action != routing.ActionIgnore || outcome.Reason != "profile_unavailable" || outcome.Err != nil || admitted ||
 				responder.started || responder.fallback != "" || responder.command.Text != "" || responder.agent != nil || responder.agentErr != "" {
 				t.Fatalf("unexpected banned outcome=%+v responder=%+v admitted=%t", outcome, responder, admitted)
 			}
@@ -112,16 +146,14 @@ func TestExecuteOnAllowedRunsForCommandsAndFallbacks(t *testing.T) {
 	}
 }
 
-func TestExecuteUsesPrincipalCanonicalUserForAccess(t *testing.T) {
+func TestExecuteUsesTrustedProfileOwnerForCommands(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
-
-	Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "/ping"}, deps, &fakeResponder{})
-	if access.userID != "canonical-user" {
-		t.Fatalf("access user ID = %q, want canonical-user", access.userID)
+	responder := &fakeResponder{}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("configured-profile"), Text: "/ping"}, deps, responder)
+	if responder.command.Text != "pong:configured-profile:/ping" {
+		t.Fatal("command changed trusted profile ownership")
 	}
 }
 
@@ -199,50 +231,44 @@ func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
 	}
 }
 
-func TestExecutePublishesCommandInvalidationAfterEveryDeliveryAttempt(t *testing.T) {
-	event := invalidation.Event{ExternalIdentities: []string{"homeassistant:subject"}, SessionIDs: []string{"session"}, CloseConnections: true}
+func TestExecuteReportsCommandDeliveryFailure(t *testing.T) {
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
 		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
-			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+			return commands.Result{Text: "completed"}, nil
 		},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bus := invalidation.NewBus()
 	responder := &fakeResponder{}
-	published := 0
-	bus.Subscribe(func(got invalidation.Event) {
-		published++
-		if responder.command.Text != "deleted" || !got.CloseConnections {
-			t.Fatalf("invalidation published before delivery or with wrong event: response=%+v event=%+v", responder.command, got)
-		}
-	})
-	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
-	if published != 1 {
-		t.Fatalf("published=%d want 1", published)
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if responder.command.Text != "completed" {
+		t.Fatal("command response was not delivered")
 	}
 	responder.sendErr = errors.New("offline")
-	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError), RuntimeInvalidationBus: bus}, responder)
-	if published != 2 || !errors.Is(outcome.Err, responder.sendErr) {
-		t.Fatalf("failed delivery invalidation count=%d outcome=%+v", published, outcome)
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if !errors.Is(outcome.Err, responder.sendErr) {
+		t.Fatal("command delivery failure was discarded")
 	}
 }
 
-func TestExecuteEnqueuesFormationOnlyAfterResponseDelivery(t *testing.T) {
+func TestExecuteEnqueuesCompactionForPersistedTurnAfterDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
 	responder := &fakeResponder{}
-	enqueuer := &fakeFormationEnqueuer{responder: responder}
-	deps.Formation = enqueuer
-	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if outcome.Err != nil || !enqueuer.called || enqueuer.userID != "user" || enqueuer.source.TurnID <= 0 {
-		t.Fatalf("outcome=%+v enqueuer=%+v", outcome, enqueuer)
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	deps.Compaction = compaction
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID <= 0 {
+		t.Fatalf("outcome=%+v response=%+v", outcome, responder.agent)
 	}
-	if !enqueuer.responseDelivered {
-		t.Fatal("formation was enqueued before response delivery")
+	if !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" ||
+		compaction.source.RequestID != "req" || compaction.source.SessionID != "discord:dm:123" ||
+		compaction.source.TurnID != responder.agent.SourceTurnID || compaction.source.SessionGeneration != responder.agent.SessionGeneration ||
+		compaction.source.Model != responder.agent.Model {
+		t.Fatalf("compaction bookkeeping after delivery: %+v", compaction)
 	}
 }
 
@@ -255,17 +281,17 @@ func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
 	responder := &fakeResponder{}
 	compaction := &fakeCompactionEnqueuer{responder: responder}
 	deps := Dependencies{Broker: b, Log: log, Compaction: compaction}
-	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
-	if !compaction.enqueueCalled || !compaction.responseDelivered || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
 		t.Fatalf("compaction enqueue=%+v", compaction)
 	}
 
 	failedResponder := &fakeResponder{sendErr: errors.New("offline")}
 	failed := &fakeCompactionEnqueuer{responder: failedResponder}
 	deps.Compaction = failed
-	Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
-	if failed.enqueueCalled || !failed.failureMarked || failed.source.TurnID != 77 {
-		t.Fatalf("failed delivery bookkeeping = %+v", failed)
+	outcome = Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
+	if !errors.Is(outcome.Err, failedResponder.sendErr) || failed.enqueueCalled || !failed.failureMarked || !failed.failureAfterSend || failed.userID != "user" || failed.source.TurnID != 77 {
+		t.Fatalf("failed delivery outcome=%+v bookkeeping=%+v", outcome, failed)
 	}
 }
 
@@ -273,13 +299,11 @@ func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
 	responder := &fakeResponder{}
 
 	outcome := Execute(Request{RequestID: "req", Text: "/ping"}, deps, responder)
-	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
-		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v", outcome, responder)
 	}
 }
 
@@ -287,15 +311,13 @@ func TestExecuteRejectsUnauthenticatedPrincipalBeforeOwnedOperations(t *testing.
 	log := config.NewLogger(config.LevelError)
 	deps, shutdown := testDependencies(t, log)
 	defer shutdown()
-	access := &fakeAccess{}
-	deps.Access = access
 	responder := &fakeResponder{}
 	principal := testPrincipal("user")
 	principal.Assurance = identity.AssuranceSelfAsserted
 
 	outcome := Execute(Request{RequestID: "req", Principal: principal, Text: "/ping"}, deps, responder)
-	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" || access.userID != "" {
-		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v access=%+v", outcome, responder, access)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v", outcome, responder)
 	}
 }
 
@@ -369,7 +391,7 @@ func TestExecuteRunsOutOfBandStopAheadOfActiveLaneRequest(t *testing.T) {
 	}
 }
 
-func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing.T) {
+func TestExecuteHoldsResolvedProfileFencesThroughDelivery(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	b := broker.NewBroker(nil, 4, log)
 	b.Start()
@@ -387,16 +409,15 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	}()
 	<-activeStarted
 
-	event := invalidation.Event{SessionIDs: []string{"target-session"}}
 	commandStarted := make(chan struct{})
 	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
-		DefinitionValue: commands.Definition{Name: "deleteuser", UserExclusive: true},
+		DefinitionValue: commands.Definition{Name: "synthetic", UserExclusive: true},
 		ResolveFenceTargetsFunc: func(_ context.Context, req commands.Request) ([]string, error) {
 			return []string{req.Args[0]}, nil
 		},
 		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
 			close(commandStarted)
-			return commands.Result{Text: "deleted", Invalidation: &event}, nil
+			return commands.Result{Text: "completed"}, nil
 		},
 	}})
 	if err != nil {
@@ -407,18 +428,9 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 		fakeResponder: &fakeResponder{}, broker: b, target: target,
 		laterTargetStarted: laterTargetStarted,
 	}
-	bus := invalidation.NewBus()
-	heldAtBus := false
-	bus.Subscribe(func(invalidation.Event) {
-		select {
-		case <-laterTargetStarted:
-		case <-time.After(30 * time.Millisecond):
-			heldAtBus = true
-		}
-	})
 	done := make(chan Outcome, 1)
 	go func() {
-		done <- Execute(Request{Principal: actor, SessionKey: "admin-session", Text: "/deleteuser target"}, Dependencies{Broker: b, Commands: service, Log: log, RuntimeInvalidationBus: bus}, responder)
+		done <- Execute(Request{Principal: actor, SessionKey: "synthetic-session", Text: "/synthetic target"}, Dependencies{Broker: b, Commands: service, Log: log}, responder)
 	}()
 	select {
 	case <-commandStarted:
@@ -443,8 +455,8 @@ func TestExecuteHoldsResolvedUserFencesThroughDeliveryAndInvalidation(t *testing
 	case <-time.After(time.Second):
 		t.Fatal("target command did not complete")
 	}
-	if !responder.heldAtSend || !heldAtBus {
-		t.Fatalf("fence held at send=%t bus=%t", responder.heldAtSend, heldAtBus)
+	if !responder.heldAtSend {
+		t.Fatal("profile fence released before delivery")
 	}
 	select {
 	case <-laterTargetStarted:
@@ -528,30 +540,17 @@ func (pingHandler) Execute(_ context.Context, req commands.Request) (commands.Re
 	return commands.Result{Text: "pong:" + req.Principal.CanonicalUserID + ":" + req.Raw}, nil
 }
 
-type fakeAccess struct {
-	banned bool
-	reason string
-	userID string
-}
-
-type fakeFormationEnqueuer struct {
-	responder         *fakeResponder
-	called            bool
-	responseDelivered bool
-	userID            string
-	source            memory.FormationSource
-}
-
 type fakeCompactionEnqueuer struct {
 	responder         *fakeResponder
 	enqueueCalled     bool
 	failureMarked     bool
+	failureAfterSend  bool
 	responseDelivered bool
 	userID            string
-	source            memory.FormationSource
+	source            memory.DeliverySource
 }
 
-func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
+func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.DeliverySource) error {
 	f.enqueueCalled = true
 	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
 	f.userID = userID
@@ -561,33 +560,28 @@ func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, sourc
 
 func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID string, turnID int64) error {
 	f.failureMarked = true
+	f.failureAfterSend = f.responder.agent != nil && f.responder.sendErr != nil
 	f.responseDelivered = false
 	f.userID = userID
 	f.source.TurnID = turnID
 	return nil
 }
 
-func (f *fakeFormationEnqueuer) Enqueue(_ context.Context, userID string, source memory.FormationSource) error {
-	f.called = true
-	f.responseDelivered = f.responder.agent != nil
-	f.userID = userID
-	f.source = source
-	return nil
-}
-
 type responseRuntimeProcessor struct{ response *agent.Response }
+
+type statelessRuntimeProcessor struct{ requests chan agent.Request }
+
+func (p *statelessRuntimeProcessor) Process(_ context.Context, req agent.Request) (*agent.Response, error) {
+	p.requests <- req
+	return &agent.Response{Response: "answer"}, nil
+}
 
 func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
 	return p.response, nil
 }
 
-func (a *fakeAccess) BanStatus(userID string) (bool, string, error) {
-	a.userID = userID
-	return a.banned, a.reason, nil
-}
-
 func testPrincipal(userID string) identity.Principal {
-	return identity.Principal{CanonicalUserID: userID, Gateway: "homeassistant", ExternalID: "external-" + userID, Assurance: identity.AssuranceHomeAssistantToken}
+	return identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: "external-" + userID, Assurance: identity.AssuranceBlueBubblesWebhook}
 }
 
 type runtimeFakeChatter struct{}
@@ -635,19 +629,15 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
 		t.Fatalf("write soul fixture: %v", err)
 	}
-	soulStore := soul.NewStore(soulPath)
-	dbPath := filepath.Join(dir, "users")
-	db, err := database.Open(dbPath, log)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	soulStore := soul.NewProfileStore(dir, "user", soulPath)
+	store, err := memory.NewProfileStore(context.Background(), dir, "user", log)
 	if err != nil {
-		t.Fatalf("open account database: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := db.SQL().Exec(`INSERT INTO account_users (canonical_user_id) VALUES (?)`, "user"); err != nil {
-		db.Close() // nolint:errcheck
-		t.Fatalf("seed account user: %v", err)
-	}
-	db.Close() // nolint:errcheck
-	memory := memorytest.NewStore(t, dbPath, log)
-	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", soulStore, memory, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", "test-provider", soulStore, store, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
 	b := broker.NewBroker(ai, 1, log)
 	b.Start()
 	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
@@ -656,6 +646,6 @@ func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
 	}
 	return Dependencies{Broker: b, Commands: commandService, Log: log}, func() {
 		b.Shutdown()
-		memory.Close() // nolint:errcheck
+		store.Close() // nolint:errcheck
 	}
 }

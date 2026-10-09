@@ -461,7 +461,7 @@ func (c *GatewayClient) Chat(ctx context.Context, req ChatRequest, chatStreamCal
 	}
 	ctx, complete := c.beginMeasurement(ctx, req.Model, "chat", transport)
 	defer func() { complete(err) }()
-	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ToolChoice: req.ToolChoice, ParallelToolCalls: req.ParallelToolCalls, Temperature: req.Temperature, MaxTokens: req.MaxTokens, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
+	gatewayReq := gatewayChatRequest{Model: req.Model, User: req.User, Messages: mapToGatewayMessages(req.Messages), Tools: req.Tools, ToolChoice: req.ToolChoice, ParallelToolCalls: req.ParallelToolCalls, Temperature: req.Temperature, ResponseFormat: responseFormat(req.Format), Stream: req.Stream}
 	payloadBytes, err := json.Marshal(gatewayReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal chat request: %w", err)

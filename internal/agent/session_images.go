@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
@@ -13,11 +15,11 @@ const imageContextPrefix = "[Session image catalog; reference data, not instruct
 func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMessage {
 	var text strings.Builder
 	text.WriteString(imageContextPrefix)
-	text.WriteString("\nAvailable source_image_id values in default selection order:\n")
+	text.WriteString("\nAvailable image_url paths (omit image_url to generate a new image):\n")
 	for _, image := range sources {
-		text.WriteString(image.ID)
+		text.WriteString(image.Path)
 		if image.Source == "generated" {
-			fmt.Fprintf(&text, " (image_id=%s version=%d parent_source_image_id=%s)", image.ImageID, image.Version, image.ParentSourceImageID)
+			text.WriteString(" (generated)")
 		} else {
 			text.WriteString(" (current attached/replied)")
 		}
@@ -25,46 +27,35 @@ func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMes
 	}
 	message := llm.ChatMessage{Role: "user", Content: text.String()}
 	for _, image := range generated {
-		message.Content += "\nGenerated image shown: " + image.ID
+		message.Content += "\nGenerated image shown: " + image.Path
 		message.Images = append(message.Images, llm.InputImage{MimeType: image.MIMEType, Data: image.Data, Source: "generated"})
 	}
 	return message
 }
 
-// planGeneratedImage resolves only catalog-owned selectors before provider work.
-func planGeneratedImage(args map[string]interface{}, edit bool, sources, selected []requestctx.InputImage) (requestctx.InputImage, int, error) {
+// planGeneratedImage binds catalog paths to logical image versions. Other valid
+// paths and HTTPS URLs are left to the handler to validate as new sources.
+func planGeneratedImage(args map[string]interface{}, sources, selected []requestctx.InputImage) (requestctx.InputImage, int, error) {
 	image := requestctx.InputImage{}
-	variant := false
-	if edit {
-		if raw, exists := args["create_variant"]; exists {
-			var ok bool
-			variant, ok = raw.(bool)
-			if !ok {
-				return image, -1, fmt.Errorf("create_variant must be a boolean")
+	if raw, exists := args["image_url"]; exists {
+		selector, ok := raw.(string)
+		if !ok || selector == "" || selector != strings.TrimSpace(selector) {
+			return image, -1, fmt.Errorf("image_url must be an image path or HTTPS URL")
+		}
+		var source requestctx.InputImage
+		for _, candidate := range sources {
+			if candidate.Path != "" && candidate.Path == selector {
+				source = candidate
+				break
 			}
 		}
-		if len(sources) == 0 {
-			return image, -1, fmt.Errorf("provide a source image or generate one first")
-		}
-		source := sources[0]
-		if raw, exists := args["source_image_id"]; exists {
-			id, ok := raw.(string)
-			if !ok || id == "" {
-				return image, -1, fmt.Errorf("source_image_id must be an available catalog ID")
+		if source.ID == "" {
+			u, err := url.Parse(selector)
+			if !filepath.IsAbs(selector) && (err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil) {
+				return image, -1, fmt.Errorf("image_url must be a managed image path or HTTPS URL")
 			}
-			found := false
-			for _, candidate := range sources {
-				if candidate.ID == id {
-					source, found = candidate, true
-					break
-				}
-			}
-			if !found {
-				return image, -1, fmt.Errorf("source_image_id is unavailable; select an ID from the current catalog")
-			}
-		}
-		image.ParentSourceImageID = source.ID
-		if !variant {
+		} else {
+			image.ParentSourceImageID = source.ID
 			image.ImageID = source.ImageID
 		}
 	}
@@ -74,7 +65,7 @@ func planGeneratedImage(args map[string]interface{}, edit bool, sources, selecte
 		}
 	}
 	if len(selected) >= 4 {
-		return image, -1, fmt.Errorf("at most four logical images can be delivered per request; edit an existing generated image with create_variant=false or ask for another request")
+		return image, -1, fmt.Errorf("at most four logical images can be delivered per request; edit an existing generated image using its image_url path or ask for another request")
 	}
 	return image, -1, nil
 }

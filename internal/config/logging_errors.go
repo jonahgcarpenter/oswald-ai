@@ -35,6 +35,10 @@ func ErrorCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	var configErr *ConfigError
+	if errors.As(err, &configErr) && configErr != nil && configErr.Code != "" {
+		return configErr.Code
+	}
 	// Inspect only numeric driver codes. SQLite messages can contain SQL, paths,
 	// and user data. Handle both the driver's value form and wrapped pointers.
 	var storage sqlite3.Error

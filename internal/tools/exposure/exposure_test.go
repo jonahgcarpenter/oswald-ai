@@ -15,9 +15,9 @@ func TestExposureTrimsAndDeduplicatesToolNames(t *testing.T) {
 	if !exposure.ExposedMCPTools()["github.get_issue"] {
 		t.Fatal("mutating exposed tools snapshot changed request state")
 	}
-	exposure.HideBuiltins(" comfyui.image_to_image ", "")
+	exposure.HideBuiltins(" image_generate ", "")
 	visibility := exposure.Visibility()
-	if len(visibility.HiddenBuiltins) != 1 || !visibility.HiddenBuiltins["comfyui.image_to_image"] {
+	if len(visibility.HiddenBuiltins) != 1 || !visibility.HiddenBuiltins["image_generate"] {
 		t.Fatalf("unexpected hidden builtins: %+v", visibility.HiddenBuiltins)
 	}
 }

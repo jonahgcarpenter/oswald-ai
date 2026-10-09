@@ -1,677 +1,186 @@
-# AGENTS.md - Oswald AI Developer Reference
+# AGENTS.md — Oswald Developer Reference
 
-This is the implementation and contributor reference for the current codebase. `README.md` describes the product and user commands. `.env.example` is the canonical application environment-variable inventory; sample values are not necessarily runtime defaults. Source code, permanent migrations, and tests define behavior when documentation disagrees.
+Source, the operator-approved `internal/database/schema.sql`, and tests define implemented behavior. Keep this reference current when changing architecture, authorization, persistence, provider contracts, or operational limits.
 
-Keep this document current when changing architecture, authorization, persistence, provider contracts, or operational limits. Describe implemented behavior, not planned features. Preserve documentation of compatibility paths that still read persisted data; do not maintain a history of removed features here.
+## Change Discipline
 
-## README Editing Policy
+- Do not edit `README.md` unless the user explicitly requests README changes. Update contributor documentation here instead.
+- Preserve operator configuration, credentials, souls, memory, cache, databases, and unrelated working-tree changes. Never test against live credentials or a runtime database.
+- Database changes require explicit user approval: tables, columns, indexes, triggers, constraints, versions, persisted JSON representations, field meanings, and moves between SQLite and filesystem persistence. Describe exact changes, data implications, and verification before implementation. Approval never authorizes deleting an operator database.
+- Use the smallest correct cohesive change; group files by responsibility, not arbitrary size. Avoid generic utility packages and unnecessary service/interface layers.
+- Use `gofmt`, standard-library/third-party/internal import groups, exported API doc comments, context-first cancelable APIs, wrapped causes, typed errors, and explicit failure/state transitions.
+- Only `main` exits or logs fatal errors. Domain/startup APIs return errors after cleanup. Preserve resource ownership, rollback, row iteration checks, exact-token leases, delivery gates, and generation fences.
+- Preserve external tool names, JSON fields, commands, routes, environment references, log keys, and persisted formats during internal refactors. Do not add compatibility APIs solely for obsolete fixtures.
 
-Do not edit `README.md` unless the user explicitly requests README changes. Feature work, bug fixes, refactors, and general documentation updates do not imply permission to modify it. This includes formatting, typo fixes, and automatic documentation synchronization. Keep implementation and contributor documentation current in `AGENTS.md` instead; mention any needed README updates without making them unless explicitly authorized.
+## Build and Verification
 
-## Project And Verification
-
-Oswald is a Go application with one iterative LLM-backed agent, exposed through Discord, iMessage/BlueBubbles, and an optional Home Assistant WebSocket gateway. Discord and iMessage accept current-turn images; Home Assistant accepts text only. There is no JavaScript, TypeScript, or frontend application in this repository.
-
-The module declares Go 1.25.7. SQLite, sqlite-vec, and image decoding include native/CGO dependencies. Use a working C/C++ toolchain, CGO, and the `sqlite_fts5` build tag. Discord GIFV extraction additionally uses `ffmpeg` and `ffprobe`.
+This is a Go application, not a JavaScript/frontend project. The module declares Go 1.25.7. SQLite and image codecs need CGO and a C/C++ toolchain; use the `sqlite_fts5` build tag. Discord GIFV extraction needs `ffmpeg` and `ffprobe`.
 
 ```bash
-go run -tags sqlite_fts5 ./cmd/agent/main.go
 go build -tags sqlite_fts5 ./...
 go test -tags sqlite_fts5 ./...
 go test -race -tags sqlite_fts5 ./...
 go vet -tags sqlite_fts5 ./...
-gofmt -w .
 git diff --check
 ```
 
-Run focused tests while editing and the full suite for cross-package changes. Use `-count=1` when an uncached run is needed. A different installed Go toolchain can be overridden per command with `GOTOOLCHAIN=go1.25.7`. Do not run the real application to test a refactor against local credentials or the production database.
-
-The checked-in release workflow, `.github/workflows/docker-image.yml`, runs tagged tests before building and publishing the container on published releases. It does not currently enforce race, vet, or formatting checks on every PR; run those locally when appropriate.
-
-## Directory Ownership
-
-Use shallow domain grouping. Separate files by responsibility within a package before creating new packages. Subpackages are justified by distinct ownership or dependency direction, not by an arbitrary line-count limit.
-
-```text
-cmd/agent/                    Process entry, signals, final exit handling
-data/
-  memory/soul/                Operator-managed system prompt
-  tools/                      Markdown builtin tool schemas
-  workflows/comfyui/          Supported operator workflow templates
-  database/                  Runtime database, not test fixtures
-internal/
-  accounts/                  Identity resolution, linking, moderation, merge coordination
-  agent/                     Foreground loop, prompt assembly, streaming, tool execution
-  broker/                    FIFO lanes, exclusive fences, cancellation, model priority
-  commands/                  Slash-command parsing, dispatch, middleware, adapters
-    builtin/                 Command composition and help
-    accountlinking/          Connect/disconnect adapters, not account infrastructure
-    bootstrap/               First-administrator command
-    globalmemory/ mcp/ memories/ session/ stop/ usermanagement/
-  compaction/                Foreground/background model compactor and durable planner
-    budget/                  Token estimates, input capacity, pressure and tail policy
-  config/                    Environment loading, fixed policy, logging, sanitization
-  database/                  SQLite opening, migrations, low-level account persistence
-    migrations/              Immutable released SQL files
-    maintenance/             Serialized maintenance worker
-  gateway/
-    routing/                 Transport-neutral admission and prompt construction
-    runtime/                 Shared command/agent execution and delivery handling
-    discord/ homeassistant/ imessage/
-  identity/                  Dependency-light authenticated-principal contracts
-  llm/                       Provider-neutral types and model gateway HTTP client
-  mcp/                       Configuration, encryption, sessions, schemas, execution
-  media/                     Shared image/video normalization and output attachments
-  memory/                    Transactional user-memory/session/job/index storage
-    policy/                  Pure evidence validation and activation policy
-    extraction/              Private user-memory model calls and decoding
-    formation/               Durable post-delivery formation worker
-    global/                  Administrator-curated global-memory store and retrieval
-    indexing/                Derived-index lifecycle worker
-    memorytest/              Shared fixtures imported only by tests
-  shared/                    Directory grouping only, not a Go package
-    requestctx/              Request metadata, principal, images, exposure, staging
-    lease/                   Renewable lease heartbeat
-    invalidation/            In-process authorization/gateway-cache invalidation
-  soul/                      Read-only system-prompt loader
-  startup/                   Application assembly, ordered cleanup, startup output
-  tools/
-    names/                   All twelve stable builtin tool-name constants
-    exposure/                Request-local tool visibility
-    governance/              Duplicate, per-tool, and request-wide limits
-    registry/                Markdown schemas and builtin handler registration
-    builtin/                 Tool adapters and tool-specific provider implementations
-```
-
-### Dependency Rules
-
-- `internal/startup` is the composition root. It imports domain packages; domain packages must not import it. `main` should not assemble stores, workers, tools, or gateways.
-- Shared account functionality belongs in `accounts`, not `commands/accountlinking`. User/global-memory storage belongs in `memory`, not builtin tool handlers. Commands and tools adapt their respective entry points to those services.
-- Keep transaction-fenced candidate publication, job/outbox changes, account merges, and deletion together. Do not turn an atomic operation into independent service commits to achieve a directory split.
-- Worker packages depend on stores, never the reverse. `memory` must not import `memory/formation` or `memory/indexing`; `database` must not import `database/maintenance`.
-- Token-budget policy belongs under `compaction/budget`. The agent assembles prompts using that policy; `llm` owns wire token fields and provider usage telemetry. Budget estimators depend on LLM types, so the LLM client must not import the budget package back.
-- Concrete gateways are composed by `gateway/bootstrap.go`. They use `gateway/routing` and `gateway/runtime` without importing the parent composition package. Neither `main` nor `startup` should import concrete gateways directly.
-- `shared` is not a utility facade. Import `shared/requestctx`, `shared/lease`, or `shared/invalidation` directly. Do not add a generic `utils`, `common`, or forwarding package for unrelated functions.
-- `tools/names` stays dependency-free. The builtin registry and MCP provider remain separate; the agent combines them into an advertised request catalog. Do not make builtin handlers import the parent `tools` composition package.
-- Web and ComfyUI clients are currently tool-specific implementations under `tools/builtin`. Move functionality into a domain package when it has shared ownership, not simply because it is reusable in theory.
-- `memory/memorytest` is test support, never a production dependency. Same-package memory tests use private local fixtures to avoid importing their parent through the test-support package.
-
-### File And API Names
-
-- Prefer responsibility-based files: `session_delivery.go`, `candidate_store.go`, `account_merge.go`, `replies.go`. Avoid dumping unrelated behavior into `store.go`, `types.go`, or `helpers.go`.
-- `agent/agent.go` owns the main loop. Its context, compaction coordination, streaming, tools, tool history, and image retries are separate files in the same package; do not fragment the state machine into unnecessary services.
-- `accounts/service.go` owns construction/lifecycle; `identity.go`, `moderation.go`, `identifiers.go`, and `challenges.go` own their named responsibilities.
-- `llm/types.go` contains provider-neutral contracts; `llm/gateway_wire.go` contains private wire representations.
-- `memory/formation_jobs.go` persists work; `memory/formation` runs it. Likewise, `memory/compaction_jobs.go` persists compaction jobs while `compaction` plans and executes them.
-- Names must distinguish pending versus delivered, staging versus publication, paging versus complete results, and deactivation/retirement versus deletion. Keep `Tx` suffixes where callers supply the transaction.
-- Prefer a named input struct for a multi-field write, as in `AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{...})`, rather than an expanding positional API or feature suffix chain.
-- Use descriptive test and fixture names, not issue numbers or retired production API names. Release/version names remain appropriate for actual migration and artifact compatibility tests.
-
-## Code Style And Change Discipline
-
-These are requirements for new and changed code, not guarantees that every existing implementation conforms.
-
-- Use `gofmt`. Group imports as standard library, third-party, then internal; use aliases only when they disambiguate package names or prevent shadowing.
-- Prefer the smallest correct change. Keep cohesive code in one function/package unless extraction improves a real boundary or removes meaningful duplication. Do not add repository/service/interface layers merely for symmetry.
-- Add doc comments to exported APIs. Comments should explain invariants, ownership, units, or non-obvious decisions, not restate assignments. Keep error paths and state transitions explicit.
-- Use `context.Context` as the first argument to cancelable work and propagate cancellation. Detached contexts are reserved for deliberately independent worker lifetimes and bounded cleanup/durable bookkeeping; document why they are needed.
-- Wrap errors with `%w` when the caller must retain the cause. Use typed/sentinel errors and `errors.Is`/`errors.As` for behavioral decisions rather than matching human-readable text.
-- Only `main` calls `Fatal` or exits the process. Domain and startup APIs return errors after required cleanup. Report recoverable degradation with structured warnings; do not panic for routine runtime failures.
-- Make transaction and lock ownership clear. Defer rollback, close rows/resources, check iteration errors, and keep tenant/source/lease predicates in the transaction that performs a mutation.
-- Keep persisted units explicit: UTF-8 bytes, runes, tokens, durations, and row-selection bounds are not interchangeable. Do not truncate inside a UTF-8 sequence or split a conversation exchange to fit a prompt.
-- Preserve model-visible names, JSON fields, error codes, log event/metric keys, commands, routes, environment variables, and persisted artifact formats during internal renames. Exported Go-field renames may change implicit JSON; inspect serialization before renaming.
-- Do not add backward-compatibility aliases without a concrete persisted-data or external-consumer requirement. Do not delete active compatibility decoders just because new work uses another format.
-- Keep unrelated user changes intact. Never commit credentials, local databases, generated media, or real transcript fixtures. Update `.env.example` with actual configuration changes and this file with contract changes.
-
-## Test Contract
-
-Tests must run without project secrets or live LLM, Discord, BlueBubbles, MCP, Brave, SearXNG, ComfyUI, or embedding services.
-
-- Use fake model clients/transports, `httptest` servers, temporary files/databases, injected clocks, and explicit synthetic principals and credentials.
-- Use `memory/memorytest` for external-package memory fixtures. Keep generation fencing and explicit pending-to-delivered transitions; do not introduce parallel SQL writers to bypass production publication. Direct SQL fixtures are appropriate for deliberate migration/corruption/invariant tests.
-- Keep helpers in `_test.go` unless shared test packages require otherwise. Production code must not import test helpers or expose compatibility APIs solely to preserve old fixtures.
-- Prefer channels over sleeps for lifecycle tests. Join fake goroutines, close stores, restore environment changes, and keep concurrent log captures synchronized.
-- Configuration tests must not depend on a developer's `.env` or inherited secrets. Avoid printing complete config structs in failure messages.
-- Startup tests use private per-call database-path, registry, and gateway seams. Do not start real listeners to test `startup.Run`.
-- Test both callback-present and callback-absent model calls, pending/failed/delivered turns, stale leases, account-merge fences, fallback retrieval, and disabled tools when changing those paths.
-- Retain failure and rollback coverage during refactors. Passing compilation alone does not establish SQL, wire, delivery, or authorization equivalence.
-
-## Startup And Shutdown
-
-`cmd/agent/main.go` loads config, calls the terminal-gated banner, creates the logger, registers interrupt/SIGTERM handling, and calls `startup.Run(ctx, cfg, log, stdout)`. It releases signal registration before final fatal logging.
-
-`startup/app.go` validates required model settings and assembles components in this order:
-
-1. LLM client, context budget, and soul loader.
-2. User-memory, global-memory, MCP, and account database handles; MCP manager and account service.
-3. Bootstrap command service; a process-local code and printed instructions are created only when no administrator exists.
-4. Indexing and immediate-then-periodic maintenance workers.
-5. Builtin registry, MCP provider, private memory extractor, formation service, and shared compactor/compaction service.
-6. Agent, then broker workers, command service, invalidation bus, and enabled gateways.
-7. Formation/compaction low-priority gates and worker starts, then gateway goroutines.
-
-Cleanup is registered as resources are acquired and runs on both ordinary shutdown and partial initialization failure. The order is **maintenance, broker, formation, compaction, indexing, MCP clients, accounts DB, MCP DB, global-memory DB, user-memory DB**. It is intentionally not reverse acquisition order.
-
-- Startup returns `startup.Error` with the original event, message, and cause only after cleanup. MCP close failures are warnings; database close errors are discarded here and do not replace initialization errors.
-- Startup logs build metadata and initialization/cleanup phase boundaries. `app.shutdown.complete` follows every acquired resource's cleanup callback, including partial initialization failure, and reports cleanup duration and reason. It does not establish a gateway-stop/readiness contract.
-- Signal cancellation triggers cleanup; it is not the parent of every worker context. Worker `Stop` methods must complete before their databases close.
-- Before ordinary cleanup, startup calls the optional `StopOutbound` gateway hook. Discord cancels delivery waiters and joins its outbound worker before broker command drain. This is not a websocket/listener shutdown or a join of all runtime acknowledgement bookkeeping.
-- Pre-cancellation and explicit initialization-boundary checks return normally. Cancellation does not interrupt every initializer or override every simultaneous initialization error.
-- Gateway `Start` failures are logged asynchronously. There is no readiness handshake or graceful gateway-stop interface. Real listeners may outlive `Run` until process exit; it is not a restartable in-process application API.
-- `startup/banner.go` prints the fixed UTF-8 wordmark and URL in bright-magenta ANSI only to terminal stdout. Banner failures are ignored; the banner is not readiness.
-- `startup/bootstrap.go` prints nonempty bootstrap instructions to the supplied writer even without a terminal. Codes are never structured-log fields. Claiming from authenticated Discord, iMessage, or Home Assistant is supported.
-
-## Requests, Routing, And Accounts
-
-Gateways normalize messages, attachments, replies, external identities, and conversation scope. `accounts` resolves canonical ownership; `identity.Principal` carries canonical user, external identity, gateway, and assurance. `shared/requestctx` propagates that principal, correlation metadata, current images, exposure state, and bounded foreground-memory staging.
-
-`gateway/routing.Decide` chooses ignore, command, model submission, or direct fallback. `gateway/runtime.Execute` handles the admitted operation and gateway-specific responder.
-
-- Private conversations do not require mentions. Ordinary group messages require a mention or a recognized reply to Oswald. Group slash-command attempts require a mention even when replying to Oswald.
-- Command handlers do not receive private/group scope. `/connect`, `/bootstrap`, and other admitted authenticated commands can run in groups; codes and responses may be visible there.
-- Reply enrichment can include quoted text, replied-to images within remaining slots, unsupported labels, or unavailable-message markers. Incomplete Discord references can be ignored during preflight before later lookup occurs. iMessage resolves uncached references before admission and can recognize a human-rooted thread continuation through its immediately preceding conversational message; unresolved or ambiguous references do not grant mention-free invocation.
-- Shared routing checks for empty assembled input, including reply and unsupported-file notes. Home Assistant rejects blank text earlier; iMessage ignores payloads without text or attachments.
-- Runtime requires authentication and checks bans before admitted commands/model work and authenticated empty fallbacks. Banned requests are silently ignored without delivery, command/model work, or iMessage read/typing indicators; their rejected terminal summary is still logged. Uninvoked messages and unauthenticated empty fallbacks return earlier. A ban is not a universal execution-time recheck or cancellation of already-admitted work.
-- The command dispatcher validates principals but does not enforce `AdminOnly` metadata by itself. Builtin assembly installs admin middleware; `/mcp global` and `/stop all` check authorization explicitly.
-- Admin authorization re-resolves the external account. Account mutations and memory commands have additional ownership/fencing rules; do not assume every handler refreshes ownership identically. `/reset` and user MCP commands use the carried canonical ID.
-
-### Broker And Command Scheduling
-
-`broker` schedules normal operations in FIFO lanes keyed by canonical user and session. Only the lane head occupies a worker. The outstanding-work limit is ten plus the effective worker count, including active and queued scheduled work; nonpositive worker configuration becomes one. Agent saturation produces a fallback, while scheduled commands can be rejected with an error response rather than blocking indefinitely.
-
-- User-exclusive command fences protect account-wide operations. Connect confirmation can fence both participants; delete-user fences its target. Fences remain held through response delivery and invalidation, not just handler execution.
-- Accepted commands use independent execution contexts and drain during shutdown. Agent work is cancelable through broker lifecycle contexts.
-- `/stop` runs out of band and cancels only the current session's active agent request, preserving queued prompts. Admin `/stop all` cancels active and queued agent work, not commands or durable background jobs.
-- Formation and compaction share one low-priority model permit. It is admitted only with no outstanding foreground work; accepted foreground work cancels its active context so the durable job can refund/defer.
-
-### Account And Command Contracts
-
-User commands are `/help`, `/connect`, `/disconnect`, `/reset`, `/stop`, `/memories`, `/bootstrap`, and `/mcp`. Administrative operations include `/stop all`, `/users`, `/user`, `/admin`, `/unadmin`, `/ban`, `/unban`, `/deleteuser`, `/global-memory`, and `/mcp global`. See command definitions and README for exact argument syntax.
-
-- Account-link challenges last ten minutes. Store hashes, expiry, and consumption/replay identity, not plaintext codes. A new outgoing challenge invalidates the user's prior active one.
-- The initiator's canonical account remains the owner after a merge; admin status is preserved if either participant is admin. Reject banned participants, conflicting accounts for the same gateway, and conflicting user MCP names. Frozen session-profile selection follows the separate generation/snapshot rules below.
-- Confirmation atomically moves accounts, memory/session state, jobs, summaries, and reencrypted MCP ownership before deleting the losing user. Verify loser-owned rows are absent before commit. Same-confirmer replay can return the prior result without another merge.
-- `/disconnect` cannot remove the final account. An administrator cannot unadmin, ban, or delete themselves.
-- `/bootstrap` promotes the submitting account's currently resolved owner only while no administrator exists. Its process-local code is consumed after a successful update; restart replaces it only while no admin exists.
-- `/memories list` exports all active, unexpired memories with stated/inferred/unknown origin labels, not just the model list limit. `/memories observations` exports live temporary observations and expiry. `/memories suppress <id>`, `/memories suppressions`, and `/memories unsuppress <rule-id>` manage identified-claim suppression. All use the existing authenticated user-exclusive command path and UTF-8-safe multipart bounds; export fails rather than returning a partial list. Correction remains conversational, not a separate command.
-- `/memories forget <id>` requires a positive decimal ID and physically deletes the memory, candidates, affected profile references, and physical/queued derived-index state. Source conversation and summaries remain.
-- `/memories forget all` uses `ResetUserDataPreservingAccount`: delete learned memory, candidates, observations, suppression rules, assessment inputs/receipts, user MCP config, session turns/summaries/jobs, derived serving state, and account-link challenges; reset session generations while retaining account identity, linked accounts, moderation, speaker intro, and high-water bookkeeping.
-- `/reset` advances one tenant/session generation, deletes its turns, summaries, formation/compaction work, and binds the latest profile. Durable user facts remain.
-- Invalidation clears relevant gateway caches. Disconnect/delete-user can request closure of matching Home Assistant sockets; forget-all does not currently request connection closure.
-
-## Agent And Context Management
-
-`Agent.Process` receives `agent.Request` and returns `agent.Response`. Prompt assembly is in `agent/context.go`; tool/catalog/history helpers, image retry, streaming, and active-loop compaction coordination are separate files in that package.
-
-1. Load the soul fresh, add trusted gateway instructions, resolve the frozen tenant profile, and retrieve tenant-scoped durable recall.
-2. Load the latest summary and delivered recent exchanges for the session generation. Independently query recent successful MCP names for continuity.
-3. Assemble required deployment policy, profile, current text/images, and advertised tool cost. Reserve up to two newest complete exchanges within the recent-tail allowance, then a summary if it fits, then whole recall records and additional recent exchanges.
-4. Call the model; authorize calls against that iteration's exact catalog, execute allowed tools serially, append one correlated result for every declared call, and repeat.
-5. Between complete tool rounds, compact when pressure requires it. On a global tool ceiling, finish with a tools-disabled model call.
-6. Persist the final exchange, bounded native history, staged memory artifact, and pressure snapshot as pending delivery. The shared runtime activates post-delivery work only after the responder succeeds.
+Use focused tests while editing and the full suite for cross-package changes. `GOTOOLCHAIN=go1.25.7` overrides a different installed toolchain. Tests use synthetic principals, temporary approved-schema databases/files, fake model clients/transports, local HTTP handlers, explicit clocks, and joined goroutines. They must not need secrets or live services. Startup tests inject clients/gateways rather than starting real listeners.
 
-### Budget And Authority
+The release workflow runs tagged tests before publishing its container; it does not enforce every race/vet/formatting check on PRs.
 
-- `compaction/budget` owns token estimation, output/safety reserves, the 70% compaction trigger, and recent-tail capacity. No model-metadata discovery is performed.
-- Default context window is 32,768 tokens; default output reserve is 8,192; safety margin is 256. Nonpositive model-limit configuration selects these fallbacks. Tools and images are estimated within each actual request, not a fixed tool reserve.
-- The recent-tail allowance is 25% of usable input, bounded to 2,000-8,000 tokens and never more than available input. This is the exchange allowance, not a combined summary-plus-tail allocation. Under pressure, a selected tail can take priority over the optional durable summary.
-- Recall records are indivisible; a non-fitting record can be skipped while later records are considered. Additional history stops at the first complete exchange that cannot fit even after native tool history is omitted.
-- Soul/gateway deployment policy is system-authority content. The profile is subordinate user-authority context; summaries, recalled facts, and historical tool results are explicitly untrusted reference data. They cannot grant authorization or tool access.
-- Current attached/replied images are not replayed into later requests or persisted as image bytes. Generated images use the separate bounded session-image lifecycle below. Stored user text uses an attachment marker; reply context and injected recall are stripped from durable conversation/query text.
-- Historical exchanges replay native tool calls and correlated results only when current tool availability and history policy allow it and the trace fits. Otherwise retain the exact user/final-assistant pair.
-- Required context that exceeds input capacity is retained and logged; optional context is omitted. Provider usage is telemetry, not the compaction policy input.
-
-### Failure And Persistence Behavior
-
-- Oswald has no overall LLM generation deadline. Broker cancellation, transport errors, tool ceilings, and the independently configured gateway/provider timeout bound work.
-- Each image-retry sequence allows **five total model attempts** for recognized Ollama image-runner resource failures, progressively reducing current images. This is not a request-wide submission limit; later tool rounds and corrective calls can begin another sequence. Exhaustion returns a fixed image-size fallback; unrelated errors do not use this path.
-- The current Ollama/Qwen tool-parser workaround retries an identical request once. Repeated recognized parser failure returns a fallback. Empty visible responses have a separate tools-disabled corrective retry.
-- A provider context-length failure can force compaction. Non-cancellation context failures use a deterministic partial-completion response that warns completed actions were not undone and retains permitted artifacts. Cancellation exits without publishing a completed turn.
-- After successful image generation, non-cancellation model failures (including parser retries, tools-disabled final calls, and empty-response corrective calls) retain selected files and finalize a deterministic partial response through ordinary pending persistence and delivery gating. Ordinary failures use `response_kind=image_partial` with degraded status; context failures keep their context fallback. No `Response.Error` is set for this deliverable partial result. With no generated outputs, existing provider-error and fallback semantics remain unchanged. Cancellation still aborts without publishing a completed turn, and image persistence failure still prevents delivery.
-- Ordinary session append failures may log and still return the answer. If a memory save or generated image was staged, unavailable or failed persistence returns an error instead of delivering an unpersisted save claim or silently selecting an older image on the next turn.
-- Pending or failed-delivery turns cannot enter durable summaries, transcript search, or background extraction. Late successful delivery can clear a timeout failure and restore eligibility.
-
-## Memory And Compaction
-
-| Layer | Canonical Location | Write Authority |
-| --- | --- | --- |
-| Soul | `data/memory/soul/soul.md` | Operator filesystem access only |
-| Global facts about Oswald | `global_memories` | Administrator commands |
-| Durable user facts | `memory_entries` and candidate evidence | Post-delivery formation |
-| Conversation continuity | `sessions`, `session_turns`, `session_summaries` | Agent persistence and validated compaction |
-
-### Durable User Memory
-
-- Ownership is the canonical user, shared across linked accounts. Addressed group turns deliberately use the sender's private memory; groups do not create a shared memory tenant.
-- Categories are `identity`, `communication_preferences`, `durable_preferences`, `projects`, `relationships`, `environment`, and `notes`.
-- `user_memory_save` stages at most five current-turn observations; it does not publish canonical memory inline. Evidence is model-assessed as a direct statement or inference with finite confidence from 0 to 1.
-- Retained `pattern-v1` extraction receives a frozen window of two to eight delivered user turns. It returns at most three patterns, each supported by two to five distinct whole-turn observations including the newest anchor. Current `assessment-v1` uses the separate frozen anchor/observation contract below. Repetition provides corroboration, not a fixed confidence increment.
-- Current formation validates structure, source membership, exact evidence, category-compatible claim identity, tenant ownership, delivery, and leases. It does not apply regex semantic rejection of credentials, directives, negations, quotations, or third-party content. Do not document those classes as categorically unsavable.
-- Confidence below 0.35 remains proposed evidence; approved evidence can publish or reinforce a canonical claim. An approved candidate without a published memory link can be blocked by a stronger conflicting claim. Sensitivity is retained independently and does not prompt conversational confirmation.
-- Stable `(claim_slot, claim_value)` identity consolidates equivalent evidence. Same-turn reconciliation does not double-count. Canonical statement, confidence, and provenance come from one selected assessment, never independent confidence/provenance maxima. Legacy `.fact` slots are multi-valued; current assessments carry explicit cardinality.
-- `provenance_type` determines serving authority: `user_statement` is user-direct, `model_inference` is model-derived, otherwise unknown. Inference is labeled possible below 0.5, likely below 0.8, and high-confidence at or above 0.8.
-- Candidate insertion/reconciliation, publication/reinforcement, supersession, profile advancement, and index outbox changes commit together under lease/source fencing. Derived FTS/vector writes are asynchronous.
-
-### Profiles And Retrieval
-
-- Profiles compile eligible active, unexpired long-term facts into at most 2,000 **bytes**. Identity/communication facts need confidence at least 0.8; durable preferences/environment need at least 0.9. Other categories are not profile facts. `tenant-profile-v4` quotes each fact's nonempty assessment context alongside its statement as one indivisible budgeted record and includes context in the digest. Ordinary active sessions keep their frozen renderer/content; correction repair uses the current renderer.
-- Normal publication does not refresh an already-bound profile. New, expired, or reset sessions bind the latest version. Explicit deletion recompiles affected snapshots; this can include other newly eligible facts.
-- Account merge preserves frozen snapshots, remaps generation collisions and profile versions, and retains high-water marks. It is not an automatic refresh of every active conversation to the unified profile.
-- `sessions` stores the frozen text, digest, renderer, speaker intro, source memory IDs, and version/generation high-water. Fact count comes from the checked source-ID JSON array; byte size comes from frozen UTF-8 text.
-- Automatic recall combines lexical FTS5 and optional semantic sqlite-vec results, then applies relevance thresholds, confidence/importance/recency/authority ranking, duplicate suppression, diversity, and output limits. Failure of one channel does not relax tenant filtering.
-- `user_memory_search` uses the hybrid engine for deeper recall; `user_memory_list` lists active facts. `session_transcript_search` is lexical search over complete delivered exchanges. Private requests retain exact authenticated tenant/session/generation scope and permitted persisted tool history. Discord channel/thread and iMessage group requests search public prompts and final replies across participants in the exact gateway/chat, never hidden tool traces or enriched model input (including the caller's own). Each source session and the caller's session must be active, unexpired, and generation-matched independently. Defaults are five results, maximum ten, within a 12,000-byte result-accounting cap.
-- Group provenance and original transport user text are captured before mention, embed, reply, attachment, or model enrichment and written immutably with new turns. Empty public text stays empty; it never falls back to internal prompt text. Legacy turns remain unshared without backfill. Group excerpts contain only public user/final-assistant records and canonical speaker/turn attribution, omitting raw source session IDs. Scope comes from trusted request metadata, not tool arguments or session-key parsing. Ambient messages remain unpersisted; session history, profiles, compaction, and broker lanes remain user-scoped. Source reset/deletion/expiry removes eligibility, but cannot erase already delivered responses or copies recalled into another turn.
-- Global memory is not automatically injected. `global_memory_search` retrieves administrator-curated deployment/implementation facts and returns bounded newline-delimited JSON. Both derived channels may fall back to a bounded canonical scan. Global additions normalize/deduplicate and enforce 1,000 runes; they do not filter credentials or instruction-like content.
-
-### Durable Formation
-
-Current `assessment-v1` replaces new pattern jobs and covers every eligible delivered anchor, including a one-turn conversation. Storage freezes the anchor and up to seven earlier turn IDs at enqueue. Under an exact live lease it then freezes at most two recent context exchanges, up to six relevant distinct-source observations, up to twenty canonical memories with revisions, and up to twenty suppression rules. Selection ranks bounded canonical pools (100 live observations, 100 recent memories plus explicit foreground targets, 100 recent active rules) using lexical overlap and recency; publication still checks all matching rules. It excludes current/future-turn observations. Retries reuse the frozen selection. Prior assistant responses and staged foreground candidates are interpretation/deduplication context only. Trusted timestamps accompany source text; fresh evidence must be a contiguous anchor-user span (public prompt for group turns). Referenced observations may support a broader claim with a different identity, but must belong to frozen tenant membership, remain unexpired, and come from distinct sources other than the anchor. Exact attribution does not establish semantic entailment.
-
-Foreground v3 and background assessment batches use one transaction for proposals, observations, publication, retirement, evidence links, profile repair, and replay receipts. Original v2 artifacts and old extractor contracts retain their decoders. New foreground correction/retirement requires direct current evidence and a target ID/revision obtained through recall/search/list; missing metadata is retryable tool feedback, not a staged publication promise. Search/list expose canonical revision, claim identity, and assessment context. There is no extra required foreground model call, and temporary observations are not automatically injected into foreground profiles.
-
-- `memory_observations` retains at most five admitted observations per source turn, 100 live rows per owner, and 128 KiB of observation text/claim fields per owner. Default lifetime is seven days, maximum thirty, measured from the trusted source turn timestamp rather than worker execution. At capacity, evict oldest automatic observations first; automatic admissions cannot evict explicit `remember` observations. Per-turn hash receipts retain the five-admission ceiling across eviction and foreground/background writes. Admitted observations survive source-session reset and ordinary source expiry; maintenance deletes expired observations independently. Forget-all/account deletion removes them. Replay receipts retain hashes, not expired evidence text.
-- Corrections and retirements require a target ID and expected revision. Missing, inactive, or revision-stale targets reject the item rather than forcing immutable-artifact retries. Newer same-claim assessments replace one coherent tuple, including lower confidence, while preserving direct authority against automatic inference downgrades. Newer source-turn ordering prevents delayed assessments from overwriting newer canonical state. `assessment_context` persists temporal context; `retired_at` and `retirement_reason` distinguish explicit retirement, replacement, and confidence falling below serving eligibility while retaining the legacy status CHECK. Retirement never invents an opposite fact. Changed canonical assessments and inactive/deleted profile sources repair affected frozen copies.
-- `memory_suppressions` blocks exact canonical claim identities on current and retained legacy publication paths. Suppression physically deletes matching canonical entries, linked candidates, matching observations, and physical/queued derived-index artifacts through the shared hard-delete transaction routine, retaining the rule and repairing profiles. Unsuppression permits new source evidence, not old replay; inactive source cutoffs also protect correction, retirement, automatic replacement, and explicit deletion. Observation-to-memory evidence links are tenant-checked and capped at five. Account merge moves observations, receipts, frozen inputs, rules, and evidence relationships, consolidates duplicate rules, reapplies suppression, and enforces the combined observation bounds.
-- `memory.assessment.applied` reports committed transaction counts without payloads; formation owns terminal job reporting. Maintenance includes committed `observation_deleted_count`, `assessment_receipt_deleted_count`, and `observation_receipt_deleted_count` in its sweep measurement and row-operation total. Hash receipts are collected in bounded batches only after the non-reusable source turn is absent and no live retained observation or nonterminal frozen observation-dependent job needs them. Rollbacks do not report receipt deletions as committed.
-
-Suppression and cutoff matching treats underscores and spaces as compatible value separators without removing other punctuation; slots still match exactly. Revision-target corrections carry the exact target ID through publication, never a legacy normalized-statement lookup. The common proposal/publication boundary also rejects retained artifacts older than an assessed canonical claim. During merge, inactive cutoffs remove stale canonical copies but preserve an explicitly retained current assessment by its trusted source turn ID; source metadata comes from the selected coherent tuple rather than an independent maximum. Unchanged reinforcement does not refresh an already-bound profile. Frozen inputs remain bounded to 1 MiB; stale targets removed during merge are rejected, not resolved through an ID-alias layer.
-
-`memory/formation` orchestrates jobs; `memory/formation_jobs.go` and `memory/candidate_store.go` own transactional state.
-
-- Model-backed formation has **three durable provider-submission credits**, reserved immediately before invocation. Successful submissions consume credit too. Operational failures and the one invalid-output corrective retry share that budget.
-- Current extraction forces one private `user_memory_assess` call, `tool_choice = "required"`, no parallel tool calls, temperature 0, and an output cap of the lesser of 4,096 tokens and the resolved reserve. Input is bounded by 6,000 estimated tokens and the configured model's usable capacity, including prompt/schema costs. It projects contiguous source prefixes and whole optional records, flags omissions, and validates fresh output against the exact projected text/IDs. INFO `user_memory.formation.input.projected` reports safe input/omission counts. Invalid output gets at most one reason-aware corrective retry; prior raw model output is not replayed. Retained pattern jobs keep their old private tool and whole-turn contract, including the 1,000-rune evidence rejection limit.
-- Persist the first valid decoded artifact for idempotent replay. Replaying it does not invoke the model. Local `agent_save` jobs do not consume provider credit and retain bounded storage retry behavior.
-- Renewable exact-token leases begin at five minutes. Publication requires a live exact lease; retry/skip release paths retain exact-token ownership checks even after natural expiry.
-- Intentional foreground preemption refunds the reserved submission, restores the claimed attempt, and durably defers work regardless of remote acceptance. Startup backfill considers missing jobs only for eligible delivered turns from the preceding 24 hours.
-
-### Session Compaction
-
-`compaction.NewLLMCompactor` supplies the shared model-backed compactor. `compaction/service.go` plans/runs durable jobs; `agent/compaction.go` installs request-local checkpoints; `memory` stores jobs, summaries, and delivery state.
-
-- `AppendPendingSessionTurn(ctx, SessionTurnWrite)` writes a generation-fenced exchange and immutable history, staged memory, pressure, and outbox artifacts. Pressure requires nonnegative tokens, a positive limit, and a nonblank version. Persistence is not delivery acknowledgement.
-- At 70% estimated usable-input pressure, durable planning pins a campaign target through the newest eligible delivered exchange. Jobs cover at most 64 exchanges; successful partial checkpoints continue the campaign even if pressure falls.
-- Each job pins model/generator contracts. One queued/running/retry job per tenant/session/generation prevents overlap; failed contracts and uncompactable complete-exchange receipts suppress repeated work until the contract or scope changes.
-- `PageDeliveredSessionTurnsAfter` pages ascending IDs across pending gaps for foreground history. Advance its exclusive boundary to the last returned ID. `CompactionWindowAfter` instead respects pending-delivery barriers and reports the eligible total/newest ID independently of page size.
-- Durable jobs have four provider submissions and up to three structured-output corrective retries within those four credits. Permanent provider 4xx failures skip immediately except 408, 425, and 429. Foreground compaction also shares four submissions across its chunks/retries.
-- Compaction artifact saves, first summary publication, and successful/skipped completion require the caller's exact live lease token, even after same-owner renewal or reclaim. The worker serializes renewal with submission reservation and carries the final renewed token into publication or preemption bookkeeping. Replaying an already-published summary remains an idempotent scope-checked read, not permission to complete a job under a stale lease.
-- Compaction uses a silent synchronous stream, one required `session_summary_save` tool call, no parallel calls, temperature 0, and the resolved output limit. Provider schema omits grammar-expensive cardinality/string-length constraints; local validation still enforces limits.
-- A summary contains narrative, open tasks, commitments, entities, decisions, topic tags, covered range, and ordered source IDs. Narrative is bounded to 8,000 runes; arrays to 50 items each, items to 1,000 runes, aggregate structured text to 16,000 runes, and encoded artifact to 40,000 bytes.
-- Foreground compaction includes delivered post-checkpoint exchanges and completed active tool rounds, using live model-visible arguments/results rather than durable-history truncation. Reasoning and attachment bytes are excluded. Install a checkpoint only after validation; keep the old context on failure.
-- Durable summaries do not delete covered transcripts or publish user memories. Active-generation transcripts remain searchable after compaction.
-
-### Persisted Compatibility
-
-Retained `formation-v4` jobs/artifacts still use their single-turn decoder and stricter legacy evidence policy. Current pattern and foreground behavior must not be inferred from those legacy rejection rules.
-
-New compaction output requires an empty `candidates` array. Persisted summary artifacts retain a legacy candidate field: decoding still validates structural and size bounds, but summary publication neither evaluates those candidates as new user evidence nor publishes them. Keep these decoders and the existing artifact version/JSON contracts while stored data can require them.
-
-## SQLite, Indexing, And Retention
-
-The canonical database is `config.DefaultDatabasePath`, currently `data/database/oswald.db` relative to the working directory. Accounts, MCP, global memory, and user memory open separate handles to it. Initialization is serialized by a process schema mutex.
-
-- Permanent SQL migrations are embedded, semantically ordered `vMAJOR.MINOR.PATCH.sql` files. Current history is `v4.0.0` through `v4.0.13`, fourteen ledger rows. Sequence numbers are application order, not release versions; SHA-256 protects release name plus SQL.
-- Accept empty databases or an exact applied prefix of that registry. Reject nonempty ledgerless/development schemas and checksum drift without modifying canonical schema/data. There is no pre-v4 importer.
-- Apply missing migrations on one connection in one `BEGIN IMMEDIATE` transaction with foreign-key actions temporarily disabled, check foreign keys before commit, and restore enforcement afterward. Never edit a released migration.
-- `durable_jobs` contains typed formation, compaction, and derived-index work. Job-kind checks and tenant/source/lease predicates are part of the persistence contract, not redundant metadata.
-- Canonical state remains authoritative when indexes are absent. Derived kinds are `memory_fts`, `transcript_fts`, `memory_vector`, `global_memory_fts`, and `global_memory_vector`.
-- Canonical mutations enqueue outbox work transactionally. Indexing applies it to relevant live/building revisions, validates canonical version and ownership, and retries without weakening filters.
-- Rebuild into generated shadow tables, validate physical dimension/schema/model, exact canonical and valid indexed counts, tenant joins, memory eligibility, and delivered active-generation transcript eligibility, then atomically switch the live pointer. Failed shadows do not replace working indexes.
-- Transcript FTS schema 3 adds public prompt and group provenance columns. Group matching uses only public prompt/final-answer columns plus exact canonical scope and indexed-content checks. Persisted schema-2 live indexes remain writable and privately searchable during rebuild; group search is unavailable until schema 3 is published. Public answers and provenance are immutable; legacy rows cannot be opted into sharing by later updates.
-- Generated names must match their recorded kind/revision before publication or cleanup. Retained revision metadata preserves high-water and prevents name reuse.
-- Indexing reconciles at startup and polls every 30 seconds plus mutation wakeups. During model replacement, semantic queries use the old live model until publication; that model must remain accessible. Embedding dimension is cached after the first successful probe until restart.
-
-An unset, empty, or whitespace-only `LLM_GATEWAY_EMBEDDING_MODEL` disables all embedding submissions, including updates to previously persisted vector indexes. The indexing worker retires live/building user/global vector revisions while continuing lexical indexing and acknowledging queued changes. Tables remain subject to ordinary retired-index retention; re-enabling embeddings rebuilds from current canonical data rather than reusing potentially stale vectors. INFO `index.vector.disabled` reports committed retired revision counts and duration only when revisions change; storage failure emits WARN `index.vector.disable_failed`. No retirement measurement is synthesized after a failed update.
-
-`config.DefaultRetentionPolicy()` supplies these code-owned values; environment overrides are not supported. Tests can inject policies.
-
-| Policy | Value |
-| --- | --- |
-| Retired/failed physical index-table retention | 168 hours |
-| Session inactivity | 24 hours |
-| Pending delivery timeout | 15 minutes |
-| Successful/skipped job history | 168 hours |
-| Dead-job and unpublished-candidate history | 720 hours |
-| Account-link challenge cleanup grace | 24 hours after expiry |
-| Maintenance schedule | Immediately, then hourly |
-| Minimum database optimize interval | 24 hours |
-| Rows selected per maintenance operation | 100 |
-
-- Expired user memories are hidden on reads. Maintenance marks due active rows expired, blanks their statement/claim identity, retains the canonical row and remaining metadata, and queues index deletion. Explicit forget is physical deletion; expiry is not equivalent.
-- Session-serving queries require a matching active, unexpired generation. Delivered turns remain usable for that session lifetime even if the turn's own expiry has passed. Expiry cleanup removes artifacts but retains inactive session bookkeeping/high-water rows.
-- Inactive compaction work can first be retired/skipped and detached from summaries, with terminal retention applied later. Do not equate every cleanup count with immediate row deletion.
-- Keep active-generation failed-contract compaction receipts and one newest successful upsert receipt per still-eligible canonical entity. They prevent repeated failing compaction and needless reindexing, respectively.
-- Maintenance is serialized but not one atomic sweep: expiry cleanup, further canonical retention, and derived/database hygiene have separate commit/error boundaries. Later failure does not roll back earlier committed cleanup. Batch size bounds selected rows per operation, not a whole-category or whole-sweep deletion total.
-- SQLite uses foreign keys, `secure_delete=ON`, WAL, `synchronous=NORMAL`, a five-second busy timeout, immediate write locks, and a 1,000-page automatic WAL checkpoint. Sweeps perform a passive checkpoint, `incremental_vacuum(100)` only if already in incremental-vacuum mode, and `PRAGMA optimize` when due.
-
-### Backups And Container Paths
-
-Use SQLite online `.backup`, or stop Oswald before copying the database together with any WAL/SHM companions. A live copy of the main file alone is unsafe. Keep the exact MCP encryption key separately. Restore while stopped, remove stale destination WAL/SHM files, and require `PRAGMA integrity_check` to return `ok` plus an empty `PRAGMA foreign_key_check` before restart. External backups and logs need independent retention/access controls; application deletion cannot erase their copies.
-
-The Docker working directory is `/home/oswald-ai/`, so the default database resolves to `/home/oswald-ai/data/database/oswald.db`. The image also creates `/data/database`, but that is not the configured application path. Mount/persist the path actually used. `EXPOSE 8000` neither configures a gateway nor publishes a host port. The image runs as the nonroot `oswald-ai` user and includes `ffmpeg` and SQLite runtime tools.
-
-## Tools And MCP
-
-Builtin names live in `tools/names/names.go`; its contract test pins all twelve strings and their exact correspondence with loaded Markdown schema names. Private formation/compaction tools are not builtin catalog entries.
-
-| Tool | Enablement | Execution / Failure / Unproductive Limits | Durable History |
-| --- | --- | --- | --- |
-| `time.current` | Always | 0 / 0 / 0 | Full |
-| `user_memory_save` | Always | 2 / 0 / 0 | Metadata |
-| `user_memory_search` | Always | 0 / 0 / 0 | Full |
-| `user_memory_list` | Always | 0 / 0 / 0 | Full |
-| `session_transcript_search` | Always | 0 / 0 / 0 | Full |
-| `global_memory_search` | Always | 0 / 0 / 0 | Full |
-| `web.search` | Brave or SearXNG configured | 0 / 2 / 2 | Full |
-| `web.fetch` | Same enablement as search | 4 / 2 / 2 | Metadata |
-| `web.image_search` | Brave configured; available on Home Assistant | 2 / 2 / 2 | Metadata |
-| `web.image_select` | Brave configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
-| `comfyui.text_to_image` | ComfyUI configured; hidden from Home Assistant | 0 / 0 / 0 | Metadata |
-| `comfyui.image_to_image` | ComfyUI configured; hidden from Home Assistant even when an image exists | 0 / 0 / 0 | Metadata |
-
-Zero disables a per-tool guard; it does not bypass global limits. Full history is bounded and searchable; metadata-only fetch/save/image results are not persisted as full model/tool content. Default per-call durable-history bounds are 16 KiB of arguments and 16,000 result runes; the complete trace has additional aggregate bounds.
-
-- `governance.DefaultGlobalPolicy()` caps requests at 50 actual handler executions and 30 model responses containing tool calls. There is no request-wide consecutive-failure guard.
-- Authorize against the exact catalog advertised for that iteration. Discovery cannot authorize another call in the same model-emitted batch. Complete every declared call with a correlated result, including blocked calls, before finishing with tools disabled.
-- Duplicate detection hashes the name and canonical normalized arguments. Successful/unproductive calls retain fingerprints; execution errors release them for exact retry. Per-tool exhaustion hides only that tool.
-- Image-to-image duplicate detection includes the effective source ID, explicit strength, and `create_variant` (omitted equals false). The agent resolves an omitted selector from its current default source before fingerprinting each call, so a newly generated default permits another identical edit prompt. Explicit selectors remain exact-match values and still undergo handler validation; identical prompts targeting the same source with the same strength and variant mode remain duplicates, while changed strength permits a retry. Omitted strength remains distinct from an explicit value. Text-to-image duplicate detection remains prompt-based.
-- `user_memory_save` has two executions and a five-candidate request-wide staging cap. The model is instructed to use the second call for retryable corrections; runtime does not enforce that every second call is semantically a correction.
-- Current time is not injected automatically: use `time.current` when needed. It accepts IANA zones/UTC and rejects host-dependent `Local`.
-- The registry loads schemas and owns builtin handlers/policies/disabled-name reservations. Invalid individual Markdown specs are logged/skipped; required handler registration can then fail startup. MCP tools are supplied separately and combined by the agent.
-
-### MCP Configuration And Exposure
-
-- MCP is generic; GitHub-specific capabilities come from a configured remote server, not a dedicated GitHub integration in Oswald.
-- User servers belong to one canonical user. Global servers are visible to all eligible users and use shared configured remote credentials, not per-user delegated OAuth. Global management commands require administrator authorization; remote writes are not admin-only merely because the server is global.
-- `/mcp add <name> <https-url> [auth-bearer=<token>] [header:<name>=<value>] <description>` and `/mcp global add ...` save/update the complete configuration and invalidate the cached connection.
-- Names are 2-40 lowercase ASCII characters, starting with a letter and continuing with letters, digits, or underscores; `soul` is reserved. Descriptions are trimmed, 1-500 runes, and reject controls. The stored description is used unchanged for `<server>.tools`; command tokenization may normalize input whitespace.
-- `mcp_servers` stores plaintext descriptions/metadata and AES-256-GCM-encrypted URLs and headers. A fresh nonce is used per encryption; associated data binds scope, owner, server name, and field. Account merge reencrypts for the winner. The key is required even without configured servers.
-- Servers without descriptions are hidden until updated. Successful MCP tools from the latest four delivered exchanges can be pre-exposed if still available to the user, independently of the summary boundary.
-- Remote sessions are not opened at application startup. Discovery, testing, execution, and catalog assembly can connect lazily; assembling exposed tools may connect to all enabled described servers visible to that user.
-- Discovery exposes matching names request-locally, then bounds its result listing. A large listing can omit names already exposed. Both discovery and remote-result envelopes are bounded to 16,000 runes after receipt/flattening, not by an equivalent HTTP-body cap.
-- Remote read and write tools are eligible without annotation-based mutation filtering, subject to reserved-name, identifier, and simplified-schema checks. Remote `tools` is reserved. Fully qualified names must fit 64 bytes.
-- MCP schema projection is not full JSON Schema support: it forwards compatible top-level object parameters, required flags, bounded descriptions, and safe string enums. Unsupported identifiers/types, malformed schemas, and non-string enums can hide tools; nested schemas and combinators are not faithfully preserved.
-- Only `streamable_http` connection handling is implemented. Stored `sse` configuration is rejected when connection is attempted. The HTTP client has a 30-second timeout; initial session connection has a separate 30-second context deadline, not one total discovery/execution deadline. Non-text results may be JSON-flattened, not converted to gateway attachments.
-
-**MCP network limitation:** URL validation requires HTTPS without userinfo and checks resolved addresses at save/connection setup against private, loopback, link-local, multicast, and unspecified classes. It does not provide `web.fetch`'s full special-range filtering, validated-IP dialing, proxy exclusion, or redirect revalidation. The default HTTP transport can resolve again/use proxies, and configured headers are reapplied to redirected requests. Treat MCP endpoints and catalogs as trusted operator/user configuration; do not claim DNS-rebinding or cross-origin credential-forwarding protection is implemented.
-
-### Web Providers
-
-For `web.search`, `websearch/normalize.go` is provider-neutral. Queries are limited to 400 runes/50 words; provider bodies to 2 MiB; the first 50 source-ordered candidates are normalized into at most eight results, at most two per hostname, within a 16 KiB model envelope. Optional integer `results` selects an upper bound of 1-8 returned records, default five. Invalid explicit values are rejected before provider invocation. This limits the returned records before envelope accounting, not the provider candidate pool; intentional count limiting is not degradation and does not trigger fallback to fill a short result set. Remove known tracking parameters, fragments, and duplicate URLs. Result URLs/text are untrusted; search normalization is not the direct-fetch DNS security boundary. The following provider fallback/retry behavior applies to `web.search`, not image search.
-
-- Brave uses `POST https://api.search.brave.com/res/v1/llm/context`, API version `2026-07-31`, US English, spellcheck, SafeSearch off, balanced relevance, eight requested URLs, and an approximate 3,072-token context budget. The shared client allows 50 attempts per rolling second and a 30-second per-attempt timeout.
-- Brave retries once only for explicit 408, eligible short-window 429, or selected 5xx responses. Ambiguous transport failures/timeouts, long quota windows, and malformed/oversized successes are not retried because a metered request may already have completed. Redirects are not followed.
-- SearXNG uses the configured HTTP(S) base path plus `/search`, JSON, `en-US`, general category, and first page. Engine selection/weighting is deployment-owned. It has an eight-second attempt timeout, at most one retry, and same-origin-only redirects; private SearXNG deployment addresses are permitted.
-- With both providers, Brave is primary; SearXNG runs after failure or no usable result. Failure makes fallback output degraded; clean emptiness does not. Partial engine failures and truncation are reflected in bounded results, not raw backend errors.
-- Search queries, URLs, provider bodies, rate-limit headers, and credentials must not be logged. Bounded successful search arguments/results can still enter full session tool history.
-
-`web.fetch` accepts public HTTP on port 80 or HTTPS on port 443. It validates every DNS answer, dials an exact validated IP, disables environment proxies and connection reuse, rejects userinfo/secret-like query keys/local or special destinations, and revalidates up to three redirects without HTTPS downgrade.
-
-Fetch has a 15-second overall deadline, bounded headers, a 2 MiB direct decoded-body cap, and a 16 KiB model envelope. It extracts HTML/XHTML, plain text, and JSON; recognized public X/Twitter status URLs try the public oEmbed endpoint first with guarded direct fallback. It cannot render JavaScript, bypass authentication/challenges, or extract PDF/binary media. Arguments/results use metadata-only durable history.
-
-### Image Search
-
-`web.image_search` uses only Brave's `GET https://api.search.brave.com/res/v1/images/search` with the existing `BRAVE_API_KEY`, explicit `safesearch=off`, US English, and spellcheck. It has no SearXNG fallback or automatic provider retry; the provider client has a 30-second timeout within a 45-second handler deadline. Queries are bounded to 400 runes/50 words and provider responses to 2 MiB. Without a Brave key, both image tools are disabled even when SearXNG is configured.
-
-- `shared/requestctx.ImageSearchState` owns a catalog for one agent request: two search executions including failures, four unique catalog entries total, and up to four previews in active vision context. Optional integer `results` selects an upper bound of 1-4 usable previews returned per call, default two; invalid explicit values are rejected before provider submission. The provider pool stays at eight candidates; failed downloads and duplicate normalized images can be skipped while seeking the requested count. Identical normalized previews reuse their request-local ID across searches and refresh active recency without consuming another slot. Later calls fill remaining slots or reuse existing previews without evicting prior selections. Newly found previews beyond capacity are omitted, not an all-or-nothing admission error. Results expose `remaining_slots`, `catalog_limited`, and full-catalog guidance; deliberate capacity omission alone is not degradation. Both image tools block duplicate calls and use metadata-only durable history. For both search tools, duplicate fingerprints include the effective result count: omission equals the explicit default, while different counts remain distinct. Selection has no per-tool execution/failure/unproductive guards, but remains subject to global governance; its handler is idempotent and does not attach an already-selected preview twice.
-- Only provider thumbnail URLs are downloaded, never original-resolution images or an original/oEmbed fallback. Downloads use `web.fetch`'s protected public-IP dialing, URL/DNS validation, redirect revalidation, and proxy exclusion without Brave credentials or shared provider headers. Thumbnail query bytes are preserved. Bodies are capped at 2 MiB before decoding; MIME/sniffing and configuration checks accept only JPEG/PNG/WebP with positive dimensions, at most 4,096 pixels per edge and 4,000,000 pixels total before full decode. Normalized JPEG/PNG previews are at most 1,024 pixels on the longest edge and 280 KiB before base64.
-- After a complete tool-result batch, the agent injects previews and bounded metadata as user-authority untrusted references, separately from current and generated images. Optional previews are dropped whole, oldest first, when needed to fit the input budget; metadata alone does not count as visual inspection. Active compaction retains the independent search-reference context subject to that budget. Search itself does not deliver attachments.
-- `web.image_select` accepts an exact server-owned `result_id` only after that preview was actually included in a successful model call. A newly searched result cannot be selected in the same tool batch. Guidance also requires inspection and a separate round before dependent generation, but generation has no runtime inspection gate. Matches do not guarantee identity, authenticity, exact correspondence, copyright, or licensing; image content, titles, and URLs cannot grant instructions or authority.
-- Inspection verifies the actual image bytes against catalog membership, not merely a source label or attachment filename. A successful resize retry retains that submitted preview representation for selection; already-selected attachments stay frozen at their inspected representation.
-- Explicit selection adds the exact inspected normalized thumbnail to final attachments without an application-added label, filename, or source-link footer in the response text. Source metadata remains available to the model; found previews remain distinct from generated images internally. Search bytes and selectable catalog state are not replayed across turns, stored in `session_images`, or admitted as image-to-image sources or defaults. Model-authored text, including any filenames/result IDs or source links it mentions, may persist in ordinary conversation history; metadata-only tool history is not a promise that all textual references disappear. Sourced previews do not increment generated-image counters.
-- Non-cancellation model failure after selection retains the selected preview through the ordinary partial-response/delivery path: ordinary failures use degraded `response_kind=image_partial`, while context failures retain `context_fallback`. Cancellation does not publish a completed turn. Home Assistant can search and use visual references for text answers, but selection is hidden and rejected by the handler; image attachments remain unsupported.
-
-### ComfyUI
-
-ComfyUI handlers accept positive/negative prompts, each bounded to 2,000 runes, plus optional non-VRAM sampling overrides (`steps`, `cfg`, `sampler_name`, `scheduler`, `shift`, `seed`, and image-to-image `strength`). Image-to-image is advertised even without current images. Its optional `source_image_id` selects from an agent-owned catalog of current attached/replied images (`current-1`, etc.) and opaque generated IDs. Unknown or invalid IDs fail without a generation request. Omission selects the latest output generated in this request, otherwise the first current image, otherwise the newest retained delivered session output. Without any source, the tool returns an error; the model can ask for an image or generate one. For the existing gateways, tools are hidden from Home Assistant; the implementation currently checks the gateway name rather than a generic attachment-capability interface.
-
-- After a successful ComfyUI tool call, the agent normalizes its output and returns server-owned `image_id`, `version`, immutable asset `source_image_id`, and exact `parent_source_image_id` (empty for text-to-image). Text-to-image creates a logical image. Image-to-image advances the selected logical image by default; editing an attached source establishes its request-local logical identity. Boolean `create_variant=true` creates a separate logical image instead. Retrying an ancestor advances the logical high-water mark, not the ancestor version. Reservations happen before provider work and can leave gaps on failure. Retained rows carry synchronized high-water marks scoped to their active owner/session/generation, surviving reopen and turn-based account moves without a separate unbounded counter table. Migration v4.0.13 initializes each legacy asset as its own logical image at version one. Counters disappear with the last retained asset; unavailable logical IDs cannot be selected to resurrect them.
-- Up to four latest normalized outputs, including intermediate drafts, are injected as user-authority reference images after each complete tool-result batch. This context survives active compaction and uses existing image retries and token estimation. Current images remain separate, so active model input can include four current plus four generated images. The active edit catalog holds at most 24 assets, evicting oldest unselected sources while pinning selected deliverables. Same-request edits can select retained intermediate assets without waiting for delivery.
-- Final delivery selects the latest successful version of each logical image produced THIS request in first-production order, preserving unrelated attachments and their relative positions. Loaded sources are not automatically delivered. A fifth logical deliverable is rejected with actionable tool feedback before provider submission; edits of selected logical images remain allowed. Failed edits leave prior successes selected. Agent tool chunks carry status but no attachments; Discord also ignores chunk attachments, sending only the authoritative final inventory through its existing retry worker.
-- Selected images are persisted in successful generation order, independently of attachment delivery order. Descending stored ordinals therefore load the most recently generated selected asset first: producing A, B, then A-v2 delivers A-v2 followed by B, but the next omitted-source edit defaults to A-v2.
-- `session_images` stores actual normalized PNG/JPEG BLOBs (not original full-resolution outputs), at most 280 KiB each, four per turn and eight per canonical-user/session across generations (at most 2,240 KiB). ONLY selected final request outputs are written atomically with the pending turn, with logical/version/parent metadata. Oldest assets are evicted on insertion and ownership moves, including pending assets in the bound; failed new deliveries can therefore displace old assets. Image bytes never enter durable tool history, summaries, or transcript indexes; metadata-only tool history also omits source IDs. Model-authored text or transient compaction evidence may still mention IDs. Prior assets are advertised as IDs, not automatically injected as vision input, and their bytes are available to the edit handler.
-- Prior outputs require a delivered, nonfailed turn in the exact owner/session/current active generation, and unexpired session and source-turn TTL (normally 24 hours from generation). Turn-linked ownership follows account merges and generation remapping, not transport IDs. Reset, forget-all, account deletion, and source-turn deletion cascade to bytes; maintenance also deletes expired image rows in bounded batches even when transcripts remain active. Ordinary memory-fact deletion does not delete session images. As with other transient artifacts, no source survives reset or becomes group-shared through transcript search. Existing backups and ComfyUI's own output files are outside this deletion boundary.
-- INFO `agent.images.loaded`, `.generated`, and `.stored` report safe image counts, normalized byte sizes, load duration, and pending storage outcomes without image IDs or payloads. Generated `image_count` remains the active vision count; `selected_image_count` and `catalog_image_count` distinguish final selection from editable assets. Load/normalization/storage failures retain existing warning/tool/request outcome reporting. Maintenance reports committed direct expiry deletions as `session_image_deleted_count`; turn-cascade deletions are covered by the parent turn lifecycle, not counted again as direct image deletions.
-
-- Workflows are operator-owned templates subject to fixed graph/model validation, not arbitrary API graphs. Both checked-in templates are SD3.5-Large-Turbo GGUF graphs and pin `sd3.5_large_turbo-Q5_0.gguf`, `clip_l.safetensors`, `t5-v1_1-xxl-encoder-Q5_K_M.gguf`, `diffusion_pytorch_model.safetensors`, and CLIP `type=sd3`.
-- The model may tune sampling only: `steps` 1-50, `cfg` 0-10, `sampler_name` and `scheduler` from the supported enums, SD3 `shift` 0.1-10, `seed` 0-4294967295, and image-to-image `strength` 0.1-0.9. Omission preserves the operator template. Dimensions, batch size, and model/CLIP/VAE weight selection are operator-owned and not model-visible, so request tuning cannot raise VRAM or swap the model.
-- The checked-in text-to-image template defaults to `euler`/`sgm_uniform`, 4 steps, CFG 1, `shift` 3, 1024x1024, and batch one. The image-to-image template defaults to `euler`/`sgm_uniform`, 4 steps, CFG 1, `shift` 3, denoise 0.55, and routes `LoadImage` through an `ImageScale` node to a fixed 1024x1024 before `VAEEncode`, bounding edit VRAM to the operator configuration. Validation accepts operator dimensions that are multiples of 64 from 64 to 1024 and within 1024x1024. Tool guidance favors concise subject-first descriptions with distinguishing visual features and targeted negatives instead of generic quality keywords. These defaults are not a measured quality guarantee.
-- Runtime replaces prompts, a fresh random seed (or the explicit `seed`), and the current image reference, and applies the requested sampling overrides on a deep copy. An explicit image-to-image `strength` maps directly to sampler denoise; explicit values must be finite JSON numbers in the inclusive 0.1-0.9 range, and text-to-image rejects a denoise override, otherwise the request fails before submission. Existing INFO `provider.comfyui.stage.complete` measurements carry numeric effective `strength` for image-to-image, including template-selected values, without prompts.
-- Downloaded outputs accept PNG/JPEG/GIF/WebP, at most 8 MiB, with each dimension positive and at most 8,192 pixels. Validation uses MIME checks and `image.DecodeConfig`, not full image decoding.
-- One client serializes upload, submission, polling, output download, detached `/free` cleanup, and permit release. The configured generation timeout starts after permit acquisition; permit waiting remains caller-cancelable. Cleanup has a separate ten-second bound and may mark a valid output degraded on failure.
-- `/free` unloads models globally, so require a dedicated or exclusively serialized ComfyUI instance. Full-resolution output uses ephemeral Oswald attachments; normalized copies use the active vision context and bounded session store above, never durable tool history. This does not imply files are deleted from ComfyUI's storage.
-
-## Gateways And Media
-
-| Gateway | Transport And Identity | Session Key |
-| --- | --- | --- |
-| Discord | Reconnecting Gateway WebSocket plus REST; Discord author identity | DM: `discord:dm:<author-id>`; guild/thread: `discord:<channel-id>:<author-id>` |
-| iMessage | Authenticated `/bluebubbles/webhook` and BlueBubbles REST; normalized phone/email handle | DM: `imessage:dm:<sender-id>`; group: `imessage:<chat-guid>:<sender-id>` |
-| Home Assistant | Bearer-authenticated `/homeassistant/ws`; trusted HA service asserts user ID | `homeassistant:<ha-user-id>:<conversation-id>` |
-
-- Discord ignores bots, maintains heartbeat/resume/reconnection, resolves mentions, downloads attachments, and reconstructs replies. Its stream state machine displays thinking/tool/compaction activity, then cursor previews and finalized chunks under the 2,000-unit message limit. Authoritative final delivery reconciles streamed messages. Tool results remain hidden; builtin status exposes purpose-specific fields and MCP primitive arguments are bounded/secret-key-filtered.
-- Discord final answers, errors, fallbacks, and command responses share one process-local FIFO delivery worker. The head is attempted immediately; transient network/read failures, HTTP 408/429/5xx, and attempt timeouts retry with 1-second exponential backoff capped at 30 seconds. Admission is bounded to 20 pending responses including the active head and 80 MiB of retained attachment data. Every entry has an independent five-minute deadline from admission, including waiting time, and each attempt has a 15-second context bound. Later final responses cannot bypass the head. Overflow, expiry, permanent failure, and shutdown return errors through the existing responder/runtime acknowledgement; successful delivery returns normally and activates the existing post-delivery path. Agent generation is already released by the broker before delivery; scheduled commands can retain their existing lane/fences while waiting. There is no connectivity monitor, configuration override, or restart persistence.
-- Discord recovery retains lifecycle IDs, finalized chunks, attachment progress, and stable per-create `nonce`/`enforce_nonce` values for JSON and multipart creates. Transient final-edit failures never trigger delete/replacement; missing messages (404) retain replacement handling. Preview failures disable further previews instead of replaying intermediate updates. Discord documents nonce uniqueness only over the past few minutes, not an exact five-minute guarantee, so this is best-effort duplicate suppression rather than exactly-once delivery after ambiguous POSTs. Partial messages already delivered are not rolled back on terminal failure. INFO `gateway.outbound.admitted`, `.retry`, `.rejected`, and `.complete` report safe request correlation, counts, attachment bytes, delays, and outcomes without content or Discord identifiers; these are delivery operations, not extra addressed requests.
-- Discord JSON and multipart 429 responses retain numeric `Retry-After` header or JSON `retry_after` delays. Recovery waits for at least that delay (even above the ordinary 30-second backoff cap) unless the entry expires or shutdown cancels it. Permanent attachment failure does not suppress final text, but remains a delivery failure after text delivery; transient text retries preserve chunk progress. Agent error responses finalize as text-only responses independently of the interrupted generation's attachment inventory.
-- iMessage validates the BlueBubbles password through accepted password/guid query parameters or `x-password`, `x-guid`, `x-bluebubbles-guid` headers. It caches contacts/reply metadata, sends typing indicators, and delivers only the final response with a fallback send method. Cross-session replies provide quoted context, not a switch to another sender's session.
-- `BLUEBUBBLES_DM_MENTION=true` silently ignores iMessage DMs without `<@Oswald>`, `@Oswald`, or plain `Oswald` before reply lookup, attachment download, account resolution, or read/typing indicators. The default is false, preserving mention-free DMs; group invocation is unchanged. Invalid configured boolean values fail config loading.
-- iMessage outbound group text remains threaded through the private API when available, with the existing plain-send fallback. Ordinary mention-less group replies first resolve the referenced message in the exact chat, using cache then REST as needed. An explicit conflicting `replyToGuid` is not replaced by the thread root. If the validated incoming REST record exposes a distinct `replyToGuid` omitted from the webhook, that target is resolved directly in the same chat; a human, unavailable, or ineligible target does not fall back to a predecessor. When only a human-rooted thread reference is available, a validated incoming message anchors a parameterized query for the immediately preceding conversational message in that chat/thread. The query compares raw SQLite creation dates with ROWID tie-breaking, excludes current/future messages, includes the root, and excludes reactions/system/service events without skipping intervening human messages. Thread-part values match exactly when known; absent parts do not match a different known part. Missing ordering data fails closed. If the predecessor is bot-authored, the reply invokes Oswald and its enrichment is labeled preceding-thread context, not proof of the selected bubble. This is chronological continuation, not exact UI reply-target reconstruction.
-- iMessage reply resolution has one shared five-second deadline, a 1 MiB cap per REST response, two-row query bounds, and no pagination. Results must affirmatively match the requested GUID/chat; the predecessor query also pins the incoming GUID/ROWID and validates thread scope. REST bot recognition assumes the dedicated Messages account's `isFromMe`, requires usable content and a zero error field, and rejects known corruption/retraction; delivery receipts are not required. One resolution result is reused before account creation, attachment downloads, contact enrichment, or indicators. Unmentioned group commands remain rejected without reply lookup; DMs and mentions can proceed with unavailable reply context. No new Oswald database state is introduced.
-- Home Assistant requires exactly one bearer Authorization header, rejects Origin headers, sends `ready` with protocol version 1, reads one strict JSON text request, executes it, and closes. Multiple connections per user are possible. Unknown fields, binary input, anonymous users, missing conversation IDs, and blank text are rejected.
-- HA incoming frames are bounded to 128 KiB with a 15-second first-message deadline. It streams correlated thinking/content/tool-call/tool-result frames and attempts at most one terminal result/error; disconnects/read/write failures can prevent delivery. Disconnect is not wired to foreground cancellation. Agent status chunks are suppressed; text command attachments are returned inline, while binary/image attachments are unsupported.
-
-### Media Bounds
-
-| Resource | Bound / Behavior |
-| --- | --- |
-| Current-turn images | At most four |
-| Encoded source image | At most 10 MiB each |
-| Accepted source formats | JPEG, PNG, GIF, WebP, HEIC/HEIF, including sequence MIME variants |
-| Normalized input | JPEG or PNG; longest edge at most 2,560 pixels; encoded payload at most 280 KiB before base64 |
-| Animated GIF | Sampled contact-sheet image |
-| Discord GIFV | 10 MiB source payload, 20-second extraction deadline, up to four sampled frames via ffmpeg/ffprobe, with static-preview fallback |
-| Output attachments | At most 8 MiB each, ten files, 80 MiB total |
-
-Validate downloaded bytes using metadata, MIME/sniffing, and format signatures. Preserve transparency with PNG; otherwise normalize to JPEG. Unsupported or unusable attachments become bounded prompt notes rather than raw binary model input. Output filenames must be basenames without separators/controls, no more than 255 bytes, and unique within the response.
-
-Source decoding precedes resizing, and animated GIF uses full animation decoding. Encoded-byte and output-dimension limits do **not** establish a strict peak decoded-memory or animation-frame bound. General files, audio, and arbitrary video inputs are not supported.
-
-## Model Gateway Transport
-
-`llm/gateway.go` maps provider-neutral types through `gateway_wire.go`. The agent always requests streaming model transport, independently of tools or gateway progress callbacks:
-
-| Request | Transport |
-| --- | --- |
-| Foreground with stream callback: Discord and Home Assistant | Synchronous streaming `POST /v1/chat/completions` |
-| Foreground without progress callback: iMessage | Silent synchronous streaming `POST /v1/chat/completions`; final response only to the user |
-| Private extraction and compaction | Silent synchronous chat stream |
-| Embeddings | `POST /v1/async/embeddings`, authenticated status polling |
-
-Tool rounds, retries, and final tools-disabled calls retain streaming transport. The client assembles silent streams into complete responses; iMessage does not send intermediate text, reasoning, or tool activity. Its existing typing indicators, final attachment/text delivery, reply threading, and delivery acknowledgement are unchanged. Silent streams also allow foreground priority to close the active background HTTP request immediately.
+## Architecture and Ownership
 
-- Embeddings still require the Bifrost async contract and a Logs Store configured for async routes when enabled. The low-level client retains async chat support for explicit non-streaming requests, but foreground agent calls do not use it. Polling defaults to one second; Oswald does not set a total LLM-client timeout or an overall agent generation deadline. Each model invocation creates a separate stream (or, for an explicit non-streaming client call, a separate async job); there is no shared async job spanning agent tool rounds. Streaming does not bypass upstream provider or proxy timeouts.
-- Async IDs are process-local, not persisted. Cancellation/restart after submission may leave remote jobs running until completion or the provider's independently configured timeout; no async cancellation endpoint is implemented here.
-- Current-turn images use OpenAI-compatible image URL content blocks. Provider-reported thinking, content, usage, and finish reasons are mapped separately.
-- `MODEL_MAX_OUTPUT_TOKENS` reserves foreground response capacity but does not send a foreground `max_tokens` cap. Private extraction/compaction send the resolved value as `max_tokens`.
+- `cmd/oswald`: operator CLI binary; parses argv, calls `internal/cli.Run`, and owns process exit.
+- `cmd/oswald-server`: service binary; selects the root, delegates to `startup.Serve`, and owns process exit.
+- `internal/cli`: operator command dispatch and exit-code mapping. Each command group is a subdirectory (`internal/cli/setup`, `internal/cli/start`, `internal/cli/profiles`). The server binaries never import this tree.
+- `internal/startup`: sole composition root; profile agents, stores, providers, tools, workers, shared broker, gateways, ordered cleanup.
+- `internal/config`: strict YAML, private profile environments, interpolation, retention, safe structured logging.
+- `internal/profiles`: immutable trusted transport-to-profile routing; no account persistence or administration.
+- `internal/identity`: dependency-light authenticated principal/resolver contracts. `CanonicalUserID` now carries the trusted profile name; retain this field and log key for correlation contracts.
+- `internal/agent`: iterative foreground loop; context, streaming, tools/history, image retries, request-local compaction in separate responsibility files.
+- `internal/broker`: FIFO conversation lanes, profile fences, cancellation, bounded admission, global foreground priority.
+- `internal/commands`: composition/adapters for `/help`, `/new`, `/stop` only.
+- `internal/database`: exact approved-schema initialization and SQLite handle ownership; no migrations or account APIs.
+- `internal/memory`: profile-local sessions, delivery/history/image metadata, compression receipts/campaigns, maintenance. `memory/files` owns immediate private file edits.
+- `internal/compaction`: synchronous model compactor and durable profile worker. `compaction/budget` owns token estimates, capacity, pressure, tail policy; it depends on LLM contracts, not vice versa.
+- `internal/gateway`: composition; concrete Discord/iMessage/OpenAI packages depend on `gateway/routing` and `gateway/runtime`, not their parent composition package.
+- `internal/mcp`: lazy profile-configured discovery, schema projection, execution; no database/encryption configuration store or MCP command.
+- `internal/media`: shared normalization/attachments; `media/imagecache` owns private cached images and expiry worker.
+- `internal/soul`: read-only current profile policy with default-template fallback. Runtime never copies, migrates, edits, or deletes operator souls; only `oswald profile create` copies the root template into a new profile as its starting policy.
+- `internal/tools`: builtin composition. Each group owns stable name, description, schema, handler/policy; `registry`, `exposure`, and `governance` remain independent.
+- `internal/providers/web/{brave,searxng}` and `providers/image_generate/comfy_ui`: backend implementations, never import tool packages.
+- `internal/shared/{requestctx,lease}`: narrow contracts; `shared` is directory grouping, not a utility facade.
 
-## Environment Configuration
+Account/admin/bootstrap/link commands, moderation/ban hooks, principal refresh, account invalidation, API keys, migration machinery, legacy fact/formation stores, staging, derived-index workers, and transcript-search tooling are removed. No old database importer or automatic upgrade exists.
 
-These are the 23 application variables loaded by `config.Load`. Defaults below are code defaults; explicitly empty strings generally differ from unset values.
+## Operator Profile Configuration
 
-| Variable | Default / Purpose |
-| --- | --- |
-| `HOME_ASSISTANT_AUTH_TOKEN` | Empty; at least 32 bytes after trimming whitespace when enabling HA |
-| `HOME_ASSISTANT_LISTEN_PORT` | Empty; valid port required with HA token |
-| `BLUEBUBBLES_LISTEN_PORT` | Empty; valid webhook port |
-| `BLUEBUBBLES_URL` | Empty; absolute HTTP(S) base without credentials/query/fragment |
-| `BLUEBUBBLES_PASSWORD` | Empty; webhook and API credential |
-| `BLUEBUBBLES_DM_MENTION` | `false`; when true, iMessage DMs require an Oswald mention |
-| `DISCORD_TOKEN` | Empty; enables Discord when nonblank |
-| `MCP_CONFIG_ENCRYPTION_KEY` | Required at startup; base64-encoded or raw 32-byte AES key |
-| `LLM_GATEWAY_URL` | `http://localhost:8080` when unset |
-| `LLM_GATEWAY_MODEL` | Required nonempty route/model name |
-| `LLM_GATEWAY_EMBEDDING_MODEL` | Empty disables semantic indexing/retrieval |
-| `LLM_GATEWAY_API_KEY` | Optional bearer authentication |
-| `LLM_GATEWAY_VIRTUAL_KEY` | Optional `x-bf-vk` routing header |
-| `MODEL_CONTEXT_WINDOW` | 0 selects budget fallback |
-| `MODEL_MAX_OUTPUT_TOKENS` | 0 selects output-reserve/private-call fallback |
-| `BRAVE_API_KEY` | Empty disables Brave web search and both image search/selection tools |
-| `SEARXNG_URL` | Empty disables SearXNG |
-| `COMFYUI_URL` | Empty disables image generation |
-| `COMFYUI_TEXT_TO_IMAGE_WORKFLOW` | `data/workflows/comfyui/text-image.json` |
-| `COMFYUI_IMAGE_TO_IMAGE_WORKFLOW` | `data/workflows/comfyui/image-image.json` |
-| `COMFYUI_GENERATION_TIMEOUT` | Positive Go duration; default 2m |
-| `WORKER_POOL_SIZE` | 1; nonpositive values normalized to one by broker |
-| `LOG_LEVEL` | `info`; unknown values fall back to info |
+`.oswald/` is the default/global root. It owns `config.yaml`, private `.env`, `SOUL.md`, `memories/`, `.cache/images/`, and `state.db`. First install is seeded explicitly with `oswald setup`, which creates missing entries only (`0700` root and `profiles/`, `0600` `config.yaml`/`.env`/`SOUL.md`), enables the loopback API on the default profile, and never overwrites operator content; `oswald start` then runs the service. Named profiles live at `.oswald/profiles/<name>/` with the same profile-local resources and optional `config.yaml` overrides, and are provisioned explicitly with `oswald profile create <name>`. Create scaffolds the private directory (`.env`, minimal `config.yaml` limited to the four override keys, an initialized approved-schema `state.db`, and a copy of the root `SOUL.md`); it never overwrites an existing profile and rolls back partial state. `oswald profile delete <name>` refuses `default`, warns about dangling `profile_routes`, requires a plain `y`/`yes` confirmation, and removes only that subtree. The CLI never edits global configuration. Missing roots are not auto-created by the server. The complete supported configuration surface is defined in code as the `oswald setup` default; former application-setting environment variables are not a deployment interface.
 
-- Invalid/incomplete gateway settings disable that gateway; startup fails if none are configured correctly. Ports must be integers from 1 through 65535.
-- Invalid/empty integer text uses parser fallbacks. An explicitly empty/invalid/nonpositive ComfyUI duration fails config loading even if image tools are disabled. Malformed nonempty ComfyUI URLs fail config loading; malformed nonempty SearXNG URLs fail tool initialization.
-- `.env.example` currently supplies HA/BlueBubbles ports and a nonempty ComfyUI URL as deployment examples. Copying that URL opts into ComfyUI; it is not the empty code default.
-- Retention, maintenance, global tool limits, database/soul/schema paths, and per-tool limits are code-owned. Do not document retired environment overrides as supported. Standard-library environment behavior, such as proxies on default HTTP transports, is separate from this inventory.
+Global YAML owns shared listeners, routes, admission policy, and inherited provider/model/tool/MCP defaults. Named YAML cannot override shared settings. Merge raw YAML before interpolation, then resolve each profile independently. A named profile inherits the default profile's `.env` values and overrides them with its own `profiles/<name>/.env`. Process variables, including explicitly empty values, take precedence. Loading never mutates the process environment.
 
-## Structured Logging
+Disabled platforms are pruned before interpolation, so a platform turned off never requires its credentials; unknown keys and unsupported platform names inside a disabled block are still rejected. Interpolation still happens for every other value in the document, so remove an absent credential reference (or give it a default) rather than relying on a feature being disabled.
 
-The issue126 monitoring contract applies to all code and future contributions: operational data must be available at the default INFO threshold, even when no current dashboard or immediate consumer needs it. Instrument meaningful operation boundaries, outcomes, counts, latency, usage, and health rather than every line or payload. DEBUG may add safe diagnostics, but must not be the only source of required monitoring. The implementation details below describe current behavior; the contributor rules also govern new work.
+Supported interpolation expressions: `${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:?message}`/`${VAR?message}`, and `$$`. Bare missing variables fail safely with a classified configuration error. Loading never mutates the process environment.
 
-Production logs are single-line JSON on stderr. Ingest stderr only. Human-readable banner/bootstrap output is stdout and can contain a bootstrap secret; exclude it from ordinary log ingestion, or apply a separate secret-safe filter if the collector cannot separate streams. Container TTYs merge streams and expose ANSI output. No additional application environment variables or database schema are required for this logging contract.
+Configuration failures surface as classified diagnostics. A failed load logs `error_code` with a fixed classification (for example `config_variable_missing`, `config_key_unknown`, `config_model_endpoint_invalid`, `config_platform_unsupported`, `config_dir_unavailable`) plus validated `config_path`, `config_source`, and `config_variable` fields naming the schema path, artifact, and referenced variable only. Configuration values and error text are never logged.
 
-### Schema And Safety
+Config files are bounded to 256 KiB and reject symlinks, aliases, duplicate/unknown keys, and excessive nesting. Dotenv files must be private regular files. Profile names are bounded safe lowercase ASCII identifiers; `default` is reserved. Routes map transport-authenticated identities to existing profiles, normalize `bluebubbles` to internal `imessage`, and fall back to the default profile when no route matches. Explicit default routes need no multiplexing; named routes require it. Platform admission uses `allowed_users` (empty admits every routed identity) and `banned_users` (always rejected first, everywhere); admission is checked before attachment/reply work. Multiple configured identities can share one profile and its memory without linking accounts.
 
-`internal/config/logging.go`, `logging_fields.go`, and `logging_errors.go` define the output boundary. Every record has `ts`, `level`, `service`, `log_type`, `component`, `event`, `msg`, `log_schema_version`, `instance_id`, and `record_kind`. Schema version is `1`, service is `oswald-ai`, and log type is `server` or `agent`. The root logger generates an instance ID shared by its scoped children. `record_kind` defaults to `event`; callers override it with `measurement` for individual operations, `summary` for aggregate outcomes, or `snapshot` for point-in-time gauges.
+## SQLite State and Delivery
 
-- Use `log.Server(component)` for transport, startup, storage, broker, registry, and provider infrastructure. Use `log.Agent(component, requestID, canonicalUserID, gateway, model)` for request-scoped agent behavior: five string arguments, with no session argument. Request-scoped infrastructure also carries `request_id`; use `requestctx.LogFields` for available canonical/server-generated correlation.
-- Events, components, and messages must be fixed developer-owned text. Use stable dotted event names and `config.F` with literal field keys. String keys require review in `stringLogFields`; the source must also allowlist or validate the actual values, not merely their keys. A syntactically valid label can still be private content. The output string filter is not a secret detector.
-- Reviewed string labels are bounded to 256 UTF-8 bytes; invalid or oversized generic labels become `redacted`. Static messages are bounded to 1,024 bytes. Records are limited to 16 KiB; supported scalar arrays/slices retain at most 16 items. Safe numeric/bool metrics remain extensible. Named and unnamed scalar primitives are read without invoking custom string or JSON methods. Unknown string keys and private keys are omitted; unsupported objects, nonfinite numbers, or invalid/oversized payloads produce `logger.marshal_failed` with safe available correlation instead of serializing arbitrary objects.
-- `config.ErrorField` emits only a fixed `error_code`, never raw error text. Typed SQLite numeric driver codes select storage classifications without logging SQLite messages. Do not restore `RawErrorField` or raw-error fields. `SafeErrorText` is for user responses only, not log content; unknown errors intentionally lose their details in logs.
-- Safety applies equally at INFO and DEBUG. Never log prompts, responses, reasoning, tool arguments/results, URLs, external identities, phone numbers, email addresses, raw session/chat keys, image/base64 bytes, credentials, bootstrap codes, or duplicate fingerprints. Canonical user IDs and gateway names are allowed. Use reviewed operational labels, counts, sizes, durations, and reason codes instead of private content.
-- IDs end in `_id`, counts in `_count`, durations in `_ms`, text sizes in `_chars`, and booleans begin with `is_`. Preserve existing units and historical keys when renaming Go counters. Keep numeric fields numeric in JSON. `status` is `ok`, `error`, `rejected`, `retry`, or `degraded`; `outcome` supplies additional meaning, such as `canceled`. Intentional cancellation is not itself an operational failure.
+`database.OpenState` initializes an empty profile `state.db` transactionally with one version-1 `schema_version` row. It compares all schema objects, including generated ones, against the supplied baseline. SQL-token normalization ignores formatting/comments, not quoted literals. Existing incompatible/version-drifted/object-drifted databases, foreign-key violations, unsafe ancestors/files/sidecars, and pre-cancellation fail closed without rebuilding, deleting, or upgrading operator data.
 
-### Measurement Boundaries
+The approved application tables are `schema_version`, `system_prompts`, `sessions`, `messages`, `session_model_usage`, `state_meta`, `gateway_routing`, `gateway_hygiene_state`, `conversation_generations`, `gateway_heartbeats`, `compression_locks`, `session_turn_leases`, and `async_delegations`. Keep the operator DDL unchanged unless separately approved.
 
-`internal/llm/telemetry.go` owns one INFO `provider.gateway.chat.complete` or `provider.gateway.embed.complete` measurement per `Chat`/`Embed` invocation, including error and cancellation returns. These provider records are the authoritative observed token meter across foreground rounds, retries, formation, compaction, and indexing. Their `operation` values are `chat` and `embedding`, respectively. A call is not necessarily a submission: `is_submitted` is true only when a submission attempt is made, not during pre-submission validation/cancellation. Async status polls are not extra model submissions.
+`memory.ProfileStore` owns one trusted profile. Sessions use profile name, source, session key; `conversation_generations` preserves reset/expiry high-water fencing. Version-1 `sessions.origin_json` carries generation/TTL. Both user and assistant message rows remain inactive until successful delivery. Assistant message IDs identify complete exchanges. Late success can repair failed sends and invalidates summaries/campaigns/receipts that could have omitted the repaired turn; late failure cannot undo success.
 
-- `is_usage_reported` means at least one numeric usage field was reported, not that all usage is known. `is_usage_complete` requires success and available nonnegative prompt/total counts, plus completion counts for chat. `is_usage_invalid` marks observed negative usage. Only reported nonnegative token fields are logged; missing fields are not invented as zero or calculated from other fields.
-- Cancellation/error can leave observed usage partial or unknown. A later invalid negative report does not erase a previously observed valid count. `internal/shared/requestctx/telemetry.go` collects only reported valid nonnegative counts, separating chat and embedding meters. A zero aggregate without its reported/complete flags does not prove zero remote work. Missing remote usage and collector loss prevent claims of complete billing or exactly-once ingestion.
-- `duration_ms` is invocation wall time, including provider wait, network, and async polling, not raw decode time. `effective_output_tps` is reported completion tokens divided by that duration. `time_to_first_output_ms` is present only when streaming thinking/content is observable; it is not an async estimate or a first-tool-call timestamp.
-- Provider per-call tokens, gateway `request_*` aggregates, and broker `execution_*` aggregates are different views of overlapping work. Never add all three levels together. Use provider records for observed usage totals, gateway summaries for addressed-request delivery, and execution summaries for actual processor completion.
+Bounded version-1 `state_meta` records include:
+- `oswald:v1:files:<session-id>`: first-writer-wins frozen USER/MEMORY pair. Both string fields are required; incomplete/corrupt snapshots fail closed.
+- `oswald:v1:turn:<session-id>:<assistant-id>`: correlated user message ID, bounded native tool history, successful tool names, prompt pressure, delivery state, generated-image references.
+- Profile summary/compression receipt/campaign keys: durable validated artifacts, source ranges, retries, exact leases, credits, and campaign high-water.
 
-`internal/gateway/runtime/executor.go` emits one INFO `gateway.request.received` after authentication and access checks admit a prompt or command, and one INFO `gateway.request.complete` per addressed runtime operation. Ignored messages do not become these request events. Pre-runtime transport/authentication rejections are separate gateway diagnostics, not admitted prompts. A runtime fallback or rejection can have a completion with `is_admitted=false` and no received record.
+`/new` is bookkeeping only: it ends the conversation's open session (`end_reason='new_session'`) and advances generation, leaving the transcript and metadata in place. The next turn opens a fresh session from zero and re-captures the current memory files; memory files are never changed by the command. Nothing eager-deletes prior sessions — they remain delivered and searchable until ordinary TTL expiry sweeps them (messages deleted, generation high-water kept). Supplied FTS triggers index inactive pending messages too; every search consumer joins canonical delivered state (`messages.active=1`) and never exposes pending rows. FTS alone never authorizes exposure.
 
-`request_kind` is `prompt`, `command`, or `fallback`. `prompt_type` is `text`, `text_image`, `image`, `unsupported`, or `empty`, classified from inbound content before generated reply/context enrichment. Completion includes `duration_ms`, `queue_wait_ms`, `agent_duration_ms`, `delivery_duration_ms`, separate `execution_status`, `delivery_status`, `persistence_status`, and request tool/model/embedding counters with usage flags. Delivery timing in `internal/gateway/runtime/telemetry.go` covers response sends, not indicators or durable post-delivery bookkeeping.
+SQLite uses foreign keys, secure delete, WAL, synchronous NORMAL, a five-second busy timeout, immediate transactions, and a 1,000-page automatic checkpoint. Maintenance runs immediately then hourly, selects at most 100 expired sessions and 100 timed-out pending exchanges per transaction, preserves generation bookkeeping, marks pending delivery failed after fifteen minutes, and separately performs a passive WAL checkpoint. Session inactivity is 24 hours. Counts reflect committed work only.
 
-Stop can return immediately with broker result `ExecutionComplete=false`, before the current provider call reports usage. The gateway summary then has `is_execution_complete=false`, incomplete usage flags, and `persistence_status=unknown`; its counters can omit late work. `internal/broker/telemetry.go` emits `broker.request.execution.complete` on actual `Process` return, with eventual `execution_*` totals even after gateway completion. The execution snapshot is separate from the response, retaining counters when completion has an error and a nil response. Do not delay cancellation or add a goroutine just to wait for telemetry. `is_execution_complete` certifies processor return, not complete remote usage or delivery.
+## Startup and Shutdown
 
-`internal/agent/agent.go` emits `agent.response.complete` for generation outcome and `agent.tool.complete` for each actual handler execution, with tool name/scope, operation correlation, duration, status/outcome, and bounded reason code. `agent.tool.blocked` records governance/authorization blocking separately; it is not an execution. Provider-specific tool diagnostics do not count as another tool execution. Request error rates come from terminal `gateway.request.complete` status, not the number of ERROR logs: `gateway.request.failed` is a separate diagnostic for the same failed operation.
+`startup.Serve` loads configuration, prints the terminal-only bright-magenta UTF-8 banner, creates the logger, installs signal handling, and calls `startup.Run`; both `oswald start` and `oswald-server` use it. No stores/workers/gateways are assembled in `main` or `internal/cli`.
 
-`agent.tool.transcript.searched` is one INFO measurement per transcript-handler invocation, including empty, rejected, failed, and canceled searches. It reports `is_group`, returned count, duration, status/outcome, and available request correlation without chat IDs, query text, participant lists, or transcript content. Count actual tool executions using `agent.tool.complete`, not both events.
+Startup validates the immutable directory, then initializes profiles in sorted order: approved state store, maintenance, file/soul/cache stores, builtin registry, model client, shared foreground/background compactor, lazy profile MCP manager/provider, agent, cache expiry worker. It then assembles the shared foreground broker, profile commands, low-priority compression workers, and configured gateways with profile-selected runtime dependencies.
 
-`agent.tool.web.search.complete` is one INFO measurement per text-search handler invocation, including rejection, empty/degraded results, errors, and cancellation. It reports the validated `requested_result_count` when available, actual returned `result_count`, `is_search_invoked`, duration, status/outcome, and available correlation without queries or result content. Searcher invocation does not establish remote submission; provider measurements retain their existing submission/candidate semantics. Count tool executions with `agent.tool.complete`, not both events.
+Ordinary and partial-failure cleanup stop outbound delivery, cache/maintenance workers, broker, compression workers, MCP sessions, then databases. Workers join before stores close. Startup errors return only after cleanup. `app.profile.initialized` reports safe profile ownership. `app.shutdown.complete` reports acquired-resource cleanup, not listener readiness or a full websocket shutdown contract. Gateway start failures are asynchronous logs; listeners can outlive `Run` until process exit. This is not an in-process restart API.
 
-`provider.web.image_search.complete` is one INFO measurement per image-search handler invocation, including pre-submission rejection, empty/degraded results, errors, and cancellation. It reports `is_submitted`, `candidate_count`, loaded `image_count`, `failed_count`, `attempted_download_count`, `downloaded_image_bytes` (normalized bytes before deduplication), validated `requested_result_count` and `is_catalog_limited` when available, `duration_ms`, status/outcome, and available request/operation/parent correlation without queries, URLs, titles, image IDs/payloads, or credentials. INFO `agent.images.references.inspected` counts catalog-matched references included in each successful model call; this establishes input exposure, not semantic recognition. INFO `agent.images.references.omitted` counts whole previews dropped by each context-budget adjustment. These are search-preview counts, not generated-image counts. Count executions of both image tools with generic `agent.tool.complete`, not by adding the provider or reference measurements to it.
+## Agent, Memory, and Budget
 
-### Background And Health
+The agent reads the current operator profile soul on each request, falling back to `.oswald/SOUL.md` without copying. Souls are regular safe files bounded to 1 MiB. Profile roots are existing private directories; reject symlinks and wrong ownership. No model tool edits policy.
 
-`gateway.reply_lookup.complete` is one INFO measurement per iMessage reply-resolution invocation, with request correlation, duration, status/outcome, and cache, remote, direct, predecessor, not-found, rejection, and error counts. `phase` identifies `reference`, `anchor`, `direct_target`, or `predecessor`; fixed `reason_code` values distinguish missing metadata, scope/ordering/thread mismatches, non-conversational messages, ineligible bot targets, and lookup failures. Remote counts describe logical lookup/query operations, not individual HTTP attempts (a direct lookup can use query then GET fallback). It includes no message/thread/chat GUIDs, sender addresses, content, URLs, or provider error payloads. Resolution is not an admitted agent request; use the existing gateway runtime summaries for request counts. No resolver measurement is emitted for an unmentioned group command rejected without lookup.
+On a conversation's first model turn, capture USER/MEMORY; subsequent turns read the frozen pair. New/fresh sessions capture latest files; restart alone does not reset state. File edits commit immediately, even if later model/storage/delivery work fails, and do not change the active session's frozen system prompt. Stateless API reads fresh once per request. Files are never populated from removed legacy facts.
 
-Supplemental iMessage diagnostics require `LOG_LEVEL=debug`: `gateway.message.routing` records preflight admission/ignore, mention/command flags, reference-field presence, lookup attempted/found, and final bot recognition; `gateway.message.ignored` includes reference-field presence and, for preflight rejection, recognition flags. `gateway.reply_lookup.decision` reports the terminal phase, recognition result, predecessor flags, and specific eligibility reason (human/cached non-bot, missing send-error metadata, failed send, corruption, retraction, or unusable content), or the terminal lookup/rejection reason when resolution fails. `gateway.reply_lookup.http.complete` reports each HTTP attempt's duration, numeric status (zero before a response), query-versus-direct flag, and fixed failure classification, including timeout/cancellation, transport, HTTP status, body read/size, and malformed JSON. `gateway.reply_lookup.response.rejected` distinguishes provider-envelope errors, ambiguous rows, and row-limit violations after HTTP decoding. Correlate these with the existing INFO summaries using `request_id`; they do not introduce additional admitted requests or change routing. All diagnostics omit content, identifiers, URLs, credentials, and raw errors; a missing webhook remains outside their visibility.
+The system message contains soul, complete nonempty MEMORY then USER PROFILE blocks, a server-local runtime block (conversation start, current date with a trust-over-start directive, model, provider key, platform), a Current Session Context block (containing untrusted metadata), and a final trusted per-platform notes block (capability limits and formatting guidance for Discord/iMessage). The runtime block is required context and is always rebuilt per request; stateless requests omit the conversation-start line. The session-context block is derived from gateway-supplied conversation labels and omitted when no label is set (stateless/API). Model-editable files have system-role influence by operator choice; text cannot grant server-side tool authorization. Summaries/tool history are explicitly untrusted lower-authority reference data. Current/replied images are not durably replayed. Reply enrichment is stripped from stored user text; reasoning is never persisted in conversation/tool history.
 
-The DEBUG reply decision also retains `bot_eligibility_reason` separately from `reason_code`, so a later thread/anchor rejection does not hide an already-evaluated authorship failure. Its values are fixed classifications, with `not_evaluated` when no target was evaluated.
+`USER.md` is limited to 1,375 Unicode runes; `MEMORY.md` to 2,200, including `\n§\n` separators. Entries must be nonempty UTF-8 and cannot contain a standalone separator line. Prompt blocks include complete contents, integer capacity percentage, and rune counts. Missing files are empty. Reads use atomic-replacement visibility but do not form one cross-file point-in-time snapshot.
 
-Workload values are `foreground`, `formation`, `compaction`, `indexing`, `maintenance`, and `system`. `memory_formation` is a `job_kind`, not a workload. Formation and compaction services use fresh attempt operation IDs, workload, job ID/kind, canonical ownership, and available persisted source-request/turn correlation. Workers do not fabricate gateway external identities; gateway and parent-operation information unavailable in persisted jobs is not reconstructed from private session keys. Foreground compaction overrides workload while preserving the request's usage collector and parent operation.
+`memory` requires the authenticated owner and exact target `user`/`memory`. Supply either one action or 1–20 ordered operations. Add requires content; replace requires unique-entry old text and content/new_text (`content` wins); remove requires old text only. Replace/remove select exactly one entry, not arbitrary substrings for partial writes. One batch is atomic for one target; stable private per-target flock files, re-read, validation, synced temporary file, rename, directory sync prevent competing-writer loss. No cross-file/SQLite/delivery transaction exists. External editors must follow the locks. Capacity errors return current entries for consolidation; success returns updated contents and counts. The description mentions `skill_manage`, which is not registered.
 
-`internal/memory/formation/service.go` logs formation completion only after durable completion succeeds, including local saves, empty extraction, and artifact replay. Retry APIs return the successfully persisted state; `internal/compaction/service.go` uses stored submission/artifact state for retry/dead reporting rather than attempt-count guesses. Worker cancellation/preemption/refund outcomes are INFO; independent storage failures remain warnings.
+Budget defaults: 32,768 context, 256-token safety margin, no reserved output tokens, 70% compression trigger. Tools/images are estimated per actual request. Recent-tail allowance is 25% of usable input, bounded 2,000–8,000 and available input. Prefer up to two newest complete exchanges, then optional summary, then older complete exchanges. Never split an exchange or truncate required file context. Provider usage is telemetry, not pressure-policy input. Required oversize context is retained/logged; optional context omitted. Stateless API instead rejects required/current context that cannot fit and never compacts/truncates client history.
 
-`broker.health` is an INFO snapshot at broker lifecycle boundaries and every 30 seconds, with worker, queued, active, outstanding, capacity, oldest-queued-age, accepting, and background-active fields. `internal/memory/indexing/service.go` uses its existing 30-second indexing schedule for `memory.jobs.health`, `index.availability`, and `app.health`. A busy serialized indexing cycle can delay these snapshots. Snapshot reads share a scoped five-second timeout; failed reads emit diagnostic WARNs and omit unavailable data rather than claim zero backlogs.
+Tool authorization uses the exact iteration catalog; discovery cannot authorize another call in the same emitted batch. Execute serially and append a correlated result for every declared call, including blocked ones. Global limits are 50 actual handler executions and 30 model responses containing calls; final completion then uses tools disabled. Successful/unproductive fingerprints persist, execution errors release for exact retries. Zero per-tool limits disable only per-tool guards.
 
-Job gauges include queued/active/retry/dead/succeeded/skipped counts and `expired_lease_count`. `oldest_ready_age_ms` measures queued/retry time past `available_at`, not job creation age. Index availability is INFO when available and WARN when degraded. Failed rebuilds are WARN with no invented coverage/counts; successful rebuilds report validated live counts. Process gauges include goroutines, heap bytes, GC count, and `is_last_maintenance_known`. Last successful maintenance is process-local and unknown after restart until a sweep succeeds; `last_maintenance_age_ms` is omitted while unknown.
+No overall generation deadline exists. All model calls use synchronous streaming, silent when no callback (iMessage/compaction). No `max_tokens` is sent. Cancellation interrupts provider work; upstream/provider/tool deadlines still apply. Recognized Ollama image resource failures allow five attempts per retry sequence with progressively fewer current images. Qwen parser failure retries the identical request once; empty visible output has a separate tools-disabled corrective call. Context failures may force transient foreground compression. Non-cancellation failures after successful image generation deliver deterministic partial text with selected images through ordinary pending/delivery gating; cancellation never publishes a completed turn. Image persistence failure prevents delivery. Ordinary nonimage append errors may log and still return an answer.
 
-`internal/database/maintenance/service.go` reports every sweep at INFO or WARN, including unchanged sweeps: immediately at worker start, then hourly under the default policy. Successful ordinary sweeps emit INFO `maintenance.sweep.complete`; live-index degradation and failed phases emit WARN, and cancellation emits INFO. Counts include only committed mutations, retaining earlier committed phase counts if a later transaction rolls back. `rows_changed` counts committed operations, not distinct rows. Do not synthesize a successful zero-count summary after failure. `internal/database/migrations.go` logs migration application at INFO only after commit and foreign-key restoration, with applied count and prior/target release; unchanged opens are silent. `internal/startup/app.go` reports build metadata, initialization/cleanup boundaries, and `app.shutdown.complete` after acquired-resource cleanup, without implying gateway readiness or graceful listener shutdown.
+## Compression
 
-### Contributor Rules
+Foreground compression checkpoints only validated complete tool rounds, uses current model-visible arguments/results, omits reasoning/attachment bytes, and retains old context on failure. Durable `compaction.ProfileService` runs after delivery and every 30 seconds behind the shared broker's foreground-priority gate.
 
-- Add safe INFO-level monitoring alongside every new operational path, even if nobody queries it today. Use bounded summaries and periodic gauges rather than payloads or hot-loop noise. WARN/ERROR diagnostics remain visible at the INFO threshold; DEBUG is supplemental only.
-- Assign one owner to each terminal measurement/summary and emit it exactly once on all applicable success, failure, cancellation, rejection, empty-result, and replay paths. Distinguish attempts, retries, committed mutations, delivery outcomes, and final execution outcomes. Do not duplicate error diagnostics across layers or count diagnostics as additional operations.
-- Propagate available request/operation/parent/job correlation and canonical ownership; never manufacture unavailable identity metadata. Record unknown/incomplete states explicitly. Preserve immediate cancellation, transaction/lease fencing, and committed-only counts rather than changing behavior to improve a metric.
-- Test emission counts, levels, correlation, field types, missing/partial/negative usage, nil-response errors, late cancellation, rollback, and private-data canaries at INFO and DEBUG when changing those paths. `internal/config/logging_contract_test.go` is a limited AST guard for recognized logger/config-field conventions, not a general analyzer or proof of safety. Keep runtime logging boundary tests and source-value review.
-- Keep Loki index labels low-cardinality: service, level, log type, component, event, optionally gateway. Request/operation/instance/user/job IDs, tool names, model names, and numeric measurements remain JSON fields, not high-cardinality ingestion labels. Query-time extraction/grouping does not require promoting them to index labels. Preserve the schema and document changed event semantics here.
+Chunks contain at most 64 complete delivered exchanges and fit actual model input budget; pending delivery is a barrier. Version-1 campaigns pin a delivered high-water target across partial checkpoints. Retry ranges remain fixed if newer turns arrive. `compression_locks` use five-minute renewable exact tokens. Receipts retain four provider credits, corrective feedback, immutable artifacts, completion/dead state. Saved artifacts recover after restart without another credit; preemption refunds only before artifact save. Publication atomically validates exact live lease, complete delivered range and unchanged source text, then writes summary/completion. Oversized complete exchanges get dead receipts. Scope scans page by conversation key to avoid starvation; health reports retry/ready/dead/succeeded/expired-lease counts.
 
-### LogQL Recipes
+The model uses silent synchronous streaming, temperature 0, no parallel calls, and one required `session_summary_save` call. Summaries contain narrative, tasks, commitments, entities, decisions, topics, ordered source IDs and covered range. Bounds: narrative 8,000 runes; arrays 50 items; items 1,000 runes; aggregate structured text 16,000 runes; encoded artifact 40,000 bytes. The nested `candidates` wire field remains in version-1 artifacts but active compression requires it empty. No fact extraction/publication exists. Summaries never delete covered transcript or publish notes.
 
-These examples assume the collector promotes `service` to a Loki label, so `{service="oswald-ai"}` selects stderr JSON records. Adjust that selector to the environment. Other fields are extracted at query time; use canonical `user_id`, never external identity. Filter `__error__=""` after JSON parsing and again after numeric `unwrap` to exclude parse/conversion errors. Windows and grouping are examples, not dashboards or ingestion guarantees.
+## MCP and Tools
 
-1. Admitted prompt count over one hour, by gateway, canonical user, and inbound prompt type (excludes commands):
+Operators configure `mcp.servers.<name>`: HTTPS URL, description, optional `streamable_http` transport, headers, enabled (default true). Names: 2–40 lowercase ASCII characters starting with a letter; `soul` reserved. Description: trimmed 1–500 runes, no controls; at most 32 servers/32 headers, values at most 8,192 bytes, no newline/NUL. Restart reloads configuration. Inherited servers become independent profile-owned connections/credentials; no runtime global administration or encryption key.
 
-```logql
-sum by (gateway, user_id, prompt_type) (count_over_time({service="oswald-ai"} | json | __error__="" | event="gateway.request.received" | request_kind="prompt" | is_admitted="true" [1h]))
-```
+Sessions connect lazily during discovery/catalog/execution, never at startup. Successful remote tool names in latest four delivered exchanges can be pre-exposed when still available. Discovery is request-local; output listing may omit names already exposed when large. Discovery/remote flattened envelopes are bounded to 16,000 runes after receipt, not a body cap. Read/write remote tools are eligible; remote `tools` reserved; qualified names fit 64 bytes. Projection supports compatible top-level object parameters, required flags, bounded descriptions, safe string enums, not full nested JSON Schema. HTTP and initial connection each have separate 30-second bounds. Shutdown closes sessions and fences late cache publication.
 
-2. Admitted addressed-request p95 end-to-end latency in milliseconds:
+MCP network validation rejects userinfo and resolved private/loopback/link-local/multicast/unspecified addresses at setup. It does NOT implement validated-IP dialing, proxy exclusion, redirect revalidation, or complete special-range filtering; default transport can re-resolve/use proxies and forward configured headers on redirects. Endpoints/catalogs are trusted operator configuration, not a comprehensive SSRF boundary.
 
-```logql
-quantile_over_time(0.95, {service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" | unwrap duration_ms | __error__="" [5m]) by (gateway)
-```
+Builtin inventory: `memory` always (metadata history, no per-tool guards); `session_search` always when a profile store is present (full searchable history, unproductive limit 2, `BlockDuplicates`), returning delivered messages only from the authenticated owner's profile and excluding the live conversation's own lineage; `web_search` when Brave/SearXNG configured (full history, failure/unproductive limits 2/2); `image_generate` when ComfyUI configured, hidden for the API (metadata history, no per-tool guards). Native history has 16 KiB arguments/16,000 result-rune per-call bounds and 64 KiB aggregate encoded trace bound. Builtin definitions and ComfyUI graphs are compiled Go, not runtime JSON files.
 
-3. Observed chat total tokens, including reported usage from failed/canceled calls; calls reporting only prompt/completion counts cannot contribute a total:
+`session_search` exposes stored messages with no model summarization. Four shapes are inferred from arguments: `query` (discovery, FTS5 over delivered user/assistant content, deduplicated by session lineage, BM25 ranked with optional newest/oldest bias, adaptive top-result hydration), `session_id` + `around_message_id` (scroll window, clamped 1–20 each side), `session_id` alone (bounded head/tail read resolving `@session:<profile>/<id>` links), and no arguments (recent sessions). Every query joins `messages.active=1` so pending rows never surface even though the FTS triggers index them; generation equality is intentionally not required, because `/new` leaves prior sessions as searchable history. Reads are scoped to the authenticated owner's profile and fail closed across profiles. The live conversation's session lineage is excluded from all shapes (discovery, browse) and rejected for scroll/read, since that content is already in context. Message content is rune-capped (4000 window, 2000 message, 1200 bookend) with `content_truncated`/`original_content_chars` flags, and the whole envelope is bounded under 14,000 runes. `link` values are `@session:<owner>/<id>`, written verbatim by the model. Never log query text or message content.
 
-```logql
-sum by (user_id, gateway, model, workload) (sum_over_time({service="oswald-ai"} | json | __error__="" | event="provider.gateway.chat.complete" | operation="chat" | is_usage_reported="true" | total_tokens!="" | unwrap total_tokens | __error__="" [1h]))
-```
+Web search: query 400 runes/50 words; provider bodies 2 MiB; normalize first 50 candidates into at most 50, two per hostname, 16 KiB complete model envelope. Optional integer limit 1–100, default five, is an upper bound, not a promise. Strip tracking/fragments/duplicates; result destinations are untrusted. Wrapper is `<untrusted_tool_result source="web_search">` with warning and escaped JSON exactly `success:true,data.web`; entries contain title/url/description/1-based position only. Empty web is `[]`; degradation is status/telemetry, not extra JSON fields.
 
-4. Mean per-call effective output TPS for chat calls with complete usage (not fleet decode throughput):
+Brave: POST LLM context endpoint, version `2026-07-31`, US English, spellcheck, SafeSearch off, balanced, eight URLs, approximate 3,072-token budget, 50 attempts/rolling second, 30-second attempt timeout, no redirects. Retry once for explicit 408, eligible short-window 429, selected 5xx; never retry ambiguous metered transport/malformed successes. SearXNG: configured base plus `/search`, first-page JSON general/en-US, eight-second attempts, one retry, same-origin redirects; private deployment addresses allowed. Brave primary, SearXNG fallback on failure/no usable results; clean empty fallback is not degraded. Never log queries, URLs, bodies, headers, credentials.
 
-```logql
-avg_over_time({service="oswald-ai"} | json | __error__="" | event="provider.gateway.chat.complete" | operation="chat" | is_usage_complete="true" | effective_output_tps!="" | unwrap effective_output_tps | __error__="" [5m]) by (model)
-```
+## Images and ComfyUI
 
-5. Actual tool executions by name, excluding blocked calls:
+`image_generate` exposes only required prompt, optional landscape/square/portrait ratio, optional `image_url`. Prompt nonblank, ≤2,000 runes, no unknown fields. Omitted source means text generation, never implicit edit. Source must be public HTTPS or an authenticated owner's unexpired cache path; arbitrary local/other-profile files rejected. HTTPS imports have pinned public-IP dialing, no proxy, bounded size/time and redirect revalidation. Results expose absolute private cache path, not public URL/internal identity/version.
 
-```logql
-sum by (tool_name) (count_over_time({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" [1h]))
-```
+At most four latest normalized outputs become active user-reference vision images after each tool batch; up to four current plus four generated inputs. Editable catalog bound 24; selected deliverables pinned. Final delivery chooses latest successful version of each logical image produced this request in first-production order. Fifth logical deliverable is rejected before provider submission; edits remain allowed. Failed edits preserve prior successes. Stable cache selectors retain logical identity/high-water across turns; counters reserve before provider work and may leave gaps. Persist selected outputs in generation order, independently of delivery order.
 
-6. Tool execution failure fraction by name (canceled/degraded outcomes are not `status=error`):
+State stores at most four image references/exchange and eight/session, including pending. Only delivered active-generation unexpired references load. Cache files expire after 24 hours; missing/expired files cannot be reconstructed from SQLite. Image bytes are not BLOBs, history, summaries, or FTS. Reads normalize cache originals to bounded model inputs. Session expiry removes metadata; files may survive until private cache expiry. Cache worker runs immediately then hourly, only matching regular files, joins before shutdown. Operator backups and ComfyUI storage are outside deletion boundary.
 
-```logql
-sum by (tool_name) (rate({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" | status="error" [5m]))
-/
-sum by (tool_name) (rate({service="oswald-ai"} | json | __error__="" | event="agent.tool.complete" [5m]))
-```
+ComfyUI graphs: SD3.5 Large Turbo, GGUF UNet `sd3.5_large_turbo-Q5_0.gguf`, dual CLIP `clip_l.safetensors`/`t5-v1_1-xxl-encoder-Q5_K_M.gguf`, VAE `diffusion_pytorch_model.safetensors`. ModelSamplingSD3 shift 3, euler/sgm_uniform, four steps, CFG 1, batch one, fresh seed, empty negative prompt. Landscape 1280×720, square 1024², portrait 720×1280. Image edits Lanczos/center crop, default denoise .75; transformations do not guarantee localized preservation. Dedicated serialized instance required: `/free` globally unloads models. Generation timeout starts after caller-cancelable permit acquisition; detached cleanup has ten-second bound. Output PNG/JPEG/GIF/WebP ≤8 MiB, dimensions ≤8192, MIME/DecodeConfig validated.
 
-7. Admitted request failure fraction by gateway, based on terminal summaries rather than ERROR-line counts:
+## Gateways
 
-```logql
-sum by (gateway) (rate({service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" | status="error" [5m]))
-/
-sum by (gateway) (rate({service="oswald-ai"} | json | __error__="" | event="gateway.request.complete" | is_admitted="true" [5m]))
-```
+Discord/iMessage accept current images; the API gateway is text-only. Private messages need no mention by default. Ordinary group messages require configured mention policy or recognized bot reply; group commands still require mentions. A mention must be the first thing the sender says (leading whitespace trimmed): Discord checks leading native `<@ID>`/`<@!ID>` tokens, while BlueBubbles uses `mention_pattern` regexes anchored at the start (default `@?Oswald\b`); a matched leading mention is stripped before the model call. `require_mention` (default true) gates group/guild invocation only. Transport scope/reply context does not alter sender ownership. Commands receive authenticated profiles; no administration role. `/stop` cancels current active conversation work, preserves queued prompts; `/stop all` rejected.
 
-8. Latest queued-job gauge per kind and instance, not the sum of historical snapshots:
+Sessions: Discord DM `discord:dm:<author>` or group `discord:<channel>:<author>`; iMessage DM `imessage:dm:<sender>` or group `imessage:<chat>:<sender>`. Each gateway derives an untrusted conversation label for the system prompt: DMs use `"DM with <display name>"`; Discord groups fetch the channel/guild name (`GET /channels/{id}`, `GET /guilds/{id}`) and iMessage groups fetch the chat name (`GET /api/v1/chat/{guid}`), cached one hour and degrading to `"group channel"`/`"group chat"` on failure. Fetches run after preflight admission, log only status/HTTP code (never names or IDs), and names are sanitized and bounded before rendering. Broker lanes use profile/conversation with a fixed single worker and outstanding capacity ten plus that worker; the upstream model backend owns request queuing. Scheduled commands drain independently on shutdown; agent work is lifecycle-cancelable. Foreground work preempts low-priority compression.
 
-```logql
-last_over_time({service="oswald-ai"} | json event="event", job_kind="job_kind", instance_id="instance_id", queued_count="queued_count" | __error__="" | event="memory.jobs.health" | unwrap queued_count | __error__="" [5m]) by (job_kind, instance_id)
-```
+Discord streams status/previews under its 2,000-unit limit; final inventory reconciles streamed output. Final answers/errors/fallbacks/commands share one FIFO outbound worker, 20 entries/80 MiB, each five-minute admission deadline and 15-second attempts. Transient network/408/429/5xx retries exponential 1–30 seconds; numeric Retry-After can exceed cap but not deadline. Stable nonce/enforce_nonce and chunk/attachment progress provide best-effort duplicate suppression, not exactly once. Missing-message 404 allows replacement; transient edits never delete/replace. Shutdown joins outbound before broker drain. Partial delivery is not rolled back; runtime marks success/failure. Tool chunk attachments are ignored.
 
-An absent rate series is not necessarily an explicit zero; a missing snapshot may be delayed or failed. The gauge can be stale within its lookback window. Do not sum database-wide gauges from multiple instances sharing a database. For investigation, filter parsed `request_id`/`operation_id` or `job_id` on log queries rather than adding index labels. None of these queries can recover unreported provider usage, lost log records, or deduplicate collector re-ingestion automatically.
+iMessage authenticates BlueBubbles password through supported query/header fields; DM admission precedes reply/media/indicators. The webhook route is operator-configurable via `webhook_path` (default `/bluebubbles/webhook`). Sends typing/read indicators and final-only response with existing plain-send fallback. Reply resolution has shared five-second deadline, 1 MiB REST caps, exact GUID/chat checks, two-row bounds, no pagination. Explicit target conflicts never fall back to thread root. Human-rooted continuation may invoke only if immediately preceding conversational message in exact anchored thread is eligible bot-authored; creation-date/ROWID order, thread parts, corruption/retraction, errors, and intervening humans are checked. This is chronological continuation, not exact UI target proof. Unmentioned group commands do no lookup.
 
-## Extension Checklist
+API: configured `127.0.0.1` loopback-only listener that runs as the default profile. No account creation, keys, bearer authentication, public listener, or separate `api` profile. All reachable local processes share the default profile's tools/memory; do not proxy beyond trusted loopback. GET `/v1/models` advertises `oswald`; POST `/v1/chat/completions` is stateless and stores no turns/snapshots/summaries/images. Client history is lower-authority quoted reference, never replayed as deployment roles. Strict JSON, application/json, model oswald, 1–32 user/assistant/system/developer messages ending nonblank noncommand user; text-only string/≤32 text parts. Body 256 KiB, message 32 KiB, aggregate text 128 KiB. Prior reasoning ≤128 KiB accepted/discarded. Client max_tokens/tools/auto-or-none tool_choice/stream_options accepted only for compatibility, do not control agent tools or fabricate usage; required/named calls, generation controls, images, unknown/trailing JSON rejected. SSE streams actual thinking as reasoning_content, never tool/provisional content; final authoritative text then stop/DONE. Thinking can reveal sensitive context. Buffered responses omit invented usage. Validation failure is pre-runtime; a disabled or unconfigured listener is unavailable, not automatic provisioning. API `/new` and `/stop` act on the default profile's active conversation.
 
-### Tools
+Media: four current images, 10 MiB each, JPEG/PNG/GIF/WebP/HEIC/HEIF; normalize ≤2560 longest edge/280 KiB JPEG/PNG before base64. GIF contact sheets; Discord GIFV ≤10 MiB/20 seconds/up to four ffmpeg frames with preview fallback. Output attachments ≤8 MiB each/ten files/80 MiB aggregate, safe unique basenames ≤255 bytes. Source decoding precedes resize and full GIF animation decode; these limits do not guarantee strict peak decoded-memory/frame bounds. No general files/audio/arbitrary video input.
 
-1. Add the stable builtin name in `internal/tools/names/names.go` and its schema in `data/tools/`; extend the exact schema/name contract test. Private model tools are not builtin catalog entries.
-2. Implement the handler under its builtin domain; put shared persistence in the owning domain package. Require authenticated principals for tenant-sensitive work and derive ownership from context, not model arguments.
-3. Register explicit governance, argument normalization, and durable-history policy in `internal/tools/builtin/register.go`. Update stream-status rendering if needed without exposing sensitive arguments/results.
-4. Cover enablement, validation, permissions, duplicate/failure behavior, cancellation, bounded output, and advertised schema. Update the inventory here and configuration examples only if configuration changes.
+## Monitoring and Security
 
-### Commands And Gateways
+All meaningful operations need safe default-INFO monitoring, including errors/cancellation/rejection/empty/replay, with exactly one terminal owner. Fixed developer-owned event/messages; literal reviewed field keys; counts/units numeric; safe bounded labels. Never log prompts, answers, reasoning, tool payloads, URLs, transport identities, session/chat keys, images, credentials, dotenv contents, or raw errors. Canonical profile `user_id` and generated request/operation correlation are allowed. Use `config.ErrorField` for fixed codes; `SafeErrorText` is for user responses only. DEBUG has identical safety requirements.
 
-1. Commands belong under `internal/commands` adapters and register through builtin composition. `AdminOnly` is metadata: install middleware or enforce authorization explicitly. Sensitive fence resolvers must authorize themselves because resolution precedes middleware execution.
-2. Use broker fences for canonical-user mutations and test them through delivery/invalidation. Out-of-band handlers cannot implement `FenceTargetResolver`; `HandlerFunc` implements that interface, so `/stop`-style commands need a dedicated handler type.
-3. New gateways implement `gateway.Service`, normalize inbound requests, resolve authenticated principals, and provide `runtime.Responder`. Add assurance validity tests and wire construction only in `gateway/bootstrap.go`.
-4. Verify group routing, reply handling, cancellation, delivery acknowledgement, attachments, and streaming. Attachment support is not yet a generic gateway capability contract; update tool visibility deliberately for a new text-only gateway.
+Production stderr is single-line JSON; stdout banner is not a log stream. Schema 1 includes ts/level/service/log_type/component/event/msg/instance_id/record_kind. Service `oswald-ai`; log_type server/agent; kinds event/measurement/summary/snapshot. String labels ≤256 UTF-8 bytes, messages ≤1024 bytes, records ≤16 KiB, scalar lists ≤16. Unknown/private string keys omitted; unsupported/nonfinite fields produce safe marshal-failure diagnostics. Output filtering is not a secret detector; source-value review remains mandatory.
 
-### Persistence And Policy
+Use `log.Server(component)` for infrastructure and `log.Agent(component, requestID, profileName, gateway, model)` for request agent work. Propagate `requestctx.LogFields` and operation/job correlation without fabricating unavailable transport metadata. IDs `_id`, counts `_count`, durations `_ms`, text sizes `_chars`, booleans `is_`. Status ok/error/rejected/retry/degraded; canceled is outcome, not automatically error.
 
-1. Add exactly one new semantically named SQL migration for a schema release. Never modify released SQL or add a pre-v4 importer implicitly.
-2. Preserve tenant/source/delivery/lease checks, foreign keys, JSON references, non-reusable IDs/high-water, and atomic outbox writes. Add fresh, supported-prefix, checksum-rejection, rollback, foreign-key, concurrent-open, and reopen coverage.
-3. Version persisted artifact changes explicitly and retain decoders needed by existing v4 data. Do not rename JSON/schema/tool/log contracts as a side effect of Go cleanup.
-4. Keep profile compilation deterministic, make current and retained legacy policy distinctions explicit, and test merge/reset/deletion/replay paths with any memory change.
-5. Soul changes are operator filesystem edits to `data/memory/soul/soul.md`, applied on the next request; no model tool may mutate that policy.
+- `provider.gateway.chat.complete`/`.embed.complete`: one invocation meter, including errors/cancellation. is_submitted means submission attempted, not successful remote completion. Async status polls are not extra submissions. Log only observed valid nonnegative usage; reported is not complete; missing fields never invented. Complete requires success and all required numeric counts. Duration is full wall time; effective_output_tps divides completion tokens by it; first output only for observed thinking/content. Retained explicit embedding/async client APIs are not live indexing paths.
+- `gateway.request.received` and `.complete`: admitted runtime operation and addressed terminal delivery summary. Pre-runtime rejects are separate diagnostics. Completion separates execution/delivery/persistence, timings, tool/model totals, reported/complete flags. Stop can return before provider completes; `is_execution_complete=false` and incomplete totals are honest.
+- `broker.request.execution.complete`: actual processor return, eventual execution totals, not delivery or complete remote billing. Never add provider, request, and execution aggregates together.
+- `agent.response.complete`, `agent.tool.complete`: generation and actual handler outcomes. `agent.tool.blocked` is not an execution. Provider/tool diagnostics are not extra executions.
+- `agent.memory.files.loaded`/load_failed/bind_failed: safe counts and frozen/fresh state, never file contents. `agent.tool.web.search.complete`: requested/returned counts, invocation flag, duration/outcome, never query/results.
+- `gateway.reply_lookup.complete`: safe bounded phase/reason/cache/remote/direct/predecessor counts, no identifiers or text. Logical remote operations are not HTTP attempts.
+- `broker.health`: lifecycle/30-second gauges, outstanding/capacity/queue age/foreground/background state. Compression health and maintenance/cache sweeps report safe gauges/committed counts and cancellation without invented successful zeros.
+- `mcp.profile.configured`: owner/server count only; no endpoints/headers. `app.profile.initialized`/`app.shutdown.complete`: resource lifecycle, not readiness.
+
+Test emission counts, INFO levels, scalar types, correlation, partial/negative usage, nil-response errors, late cancellation, rollback, and private canaries. The logging AST guard is limited, not proof of safe values. Loki labels should stay low-cardinality (service/level/log_type/component/event/optional gateway); parse user/request/job/model/tool fields at query time. Missing gauge/rate series is not proven zero; logs cannot recover unreported usage, lost records, or exactly-once ingestion.
+
+## Backups and Extensions
+
+Back up global/profile config, private dotenv credentials, souls, memory, and every profile's state.db. Use SQLite online backup or stop before copying database plus WAL/SHM; a live main-file-only copy is unsafe. Restore while stopped and check integrity/foreign keys. No MCP encryption key or API bearer key exists. Cache is short-lived, not durable backup. Old operator files/databases are not auto-moved/deleted by this redesign.
+
+Image binaries live in `/opt/oswald` (on `PATH`); the default configuration root is `/home/oswald/.oswald`, owned by the nonroot `oswald` service user, and the working directory is `/home/oswald`, so mount the data volume there. `EXPOSE` does not configure or publish listeners, and the loopback API is not reachable from the host. The image includes ffmpeg and SQLite tools.
+
+For tools: add group-owned definition/handler/policy, register composition, authenticate profile ownership from context, test advertised schema/governance/cancellation/output bounds, update inventory. For gateways: compose only through gateway bootstrap, enforce routing before expensive work, test admission/replies/ownership/streaming/delivery/attachments. For persistence: obtain exact approval first, retain schema/JSON/lease/generation/delivery contracts, and cover fresh/reopen/drift/rollback/concurrency/isolation/recovery. Never replace failed verification with compatibility shims or deletion of operator state.

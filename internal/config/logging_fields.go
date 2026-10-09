@@ -31,9 +31,7 @@ var stringLogFields = map[string]bool{
 	"job_state": true, "formation_purpose": true, "generator_version": true, "extractor_version": true,
 	"input_type": true, "prompt_type": true, "finish_reason": true, "transport": true,
 	"phase": true, "reason_code": true, "response_kind": true, "request_kind": true,
-	// Fixed bot-authorship classifications from the iMessage reply resolver.
-	"bot_eligibility_reason": true,
-	"execution_status":       true, "delivery_status": true, "persistence_status": true, "record_kind": true,
+	"execution_status": true, "delivery_status": true, "persistence_status": true, "record_kind": true,
 	"done_reason": true, "job_kind": true, "entity_kind": true, "index_kind": true,
 	"revision_state": true, "source": true, "server_name": true, "identity_assurance": true,
 	"build_version": true, "build_revision": true, "go_version": true, "cleanup_reason": true,
@@ -48,6 +46,11 @@ var stringLogFields = map[string]bool{
 	// and MCP config ID (not its URL or remote client/account identity).
 	"challenge_id": true,
 	"server_id":    true,
+	// Operator configuration diagnostics: validated schema paths, artifact
+	// labels, and referenced environment variable names, never their values.
+	"config_path":     true,
+	"config_source":   true,
+	"config_variable": true,
 }
 
 var privateLogFields = map[string]bool{
@@ -176,7 +179,7 @@ func logScalar(key string, value any) (any, bool, bool) {
 			}
 			for _, gateway := range strings.Split(v, ",") {
 				switch strings.TrimSpace(gateway) {
-				case "discord", "imessage", "homeassistant":
+				case "discord", "imessage", "openai":
 				default:
 					return "redacted", true, true
 				}

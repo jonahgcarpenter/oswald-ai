@@ -13,12 +13,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY cmd/ ./cmd/
-COPY data/tools/ ./data/tools/
-COPY data/workflows/ ./data/workflows/
-COPY data/memory/soul/soul.md ./data/memory/soul/soul.md
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-agent ./cmd/agent/main.go
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald ./cmd/oswald
+RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-server ./cmd/oswald-server
 
 FROM debian:bookworm-slim
 
@@ -33,19 +31,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system oswald-group && useradd --system --gid oswald-group oswald-ai
-RUN mkdir -p /data/database && chown -R oswald-ai:oswald-group /data
+RUN groupadd --system oswald-group && useradd --system --gid oswald-group --home-dir /home/oswald --no-create-home oswald
 
-WORKDIR /home/oswald-ai/
+# Home directory for the service user; operator data lives in its .oswald root.
+RUN install -d -m 0755 -o oswald -g oswald-group /home/oswald
+RUN install -d -m 0700 -o oswald -g oswald-group /home/oswald/.oswald
 
-COPY --from=builder --chown=oswald-ai:oswald-group /app/oswald-agent .
+# Binaries live in /opt/oswald, owned by root and read-only to the service user.
+COPY --from=builder /app/oswald /opt/oswald/oswald
+COPY --from=builder /app/oswald-server /opt/oswald/oswald-server
 
-RUN chmod +x ./oswald-agent
+ENV PATH="/opt/oswald:${PATH}"
 
-COPY --from=builder --chown=oswald-ai:oswald-group /app/data/ ./data/
-
-USER oswald-ai
+USER oswald
+WORKDIR /home/oswald
 
 EXPOSE 8000
 
-CMD ["./oswald-agent"]
+CMD ["oswald-server"]

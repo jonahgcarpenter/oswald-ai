@@ -10,19 +10,26 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // Execute applies shared routing policy, command handling, and broker submission.
 func Execute(req Request, deps Dependencies, responder Responder) (outcome Outcome) {
+	if deps.ForProfile != nil {
+		selected, ok := deps.ForProfile(req.Principal.CanonicalUserID)
+		if !ok || !req.Principal.Authenticated() {
+			deps.Log.Server("gateway.runtime").Info("gateway.profile.rejected", "rejected unavailable profile", config.F("status", "rejected"))
+			return Outcome{Action: routing.ActionIgnore, Reason: "profile_unavailable"}
+		}
+		deps = selected
+	}
 	if req.RequestID == "" {
 		req.RequestID = config.NewRequestID()
 	}
 	gateway := "unknown"
 	switch req.Principal.Gateway {
-	case "discord", "imessage", "homeassistant":
+	case "discord", "imessage", "openai":
 		gateway = req.Principal.Gateway
 	}
 	log := deps.Log.Server("gateway.runtime", config.F("gateway", gateway))
@@ -192,22 +199,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		workCtx = requestctx.WithMetadata(workCtx, meta)
 	}
 
-	if deps.Access != nil {
-		isBanned, _, err := deps.Access.BanStatus(userID)
-		if err != nil {
-			executionStatus = "error"
-			responseKind = "error"
-			sendErr := responder.SendAgentError(config.SafeErrorText(err))
-			if sendErr != nil {
-				log.Debug("gateway.send.failed", "failed to send access error response", config.F("request_id", req.RequestID), config.ErrorField(sendErr))
-			}
-			return Outcome{Action: decision.Action, Reason: "access_check_failed", Err: err}
-		}
-		if isBanned {
-			responseKind = "ignored"
-			return Outcome{Action: routing.ActionIgnore, Reason: "user_banned"}
-		}
-	}
 	if req.OnAllowed != nil {
 		req.OnAllowed()
 	}
@@ -281,9 +272,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 				}
 				sendErr = responder.SendCommandResponse(response)
 				deliveryAttempted = true
-				if response.Invalidation != nil && deps.RuntimeInvalidationBus != nil {
-					deps.RuntimeInvalidationBus.Publish(*response.Invalidation)
-				}
 				return commandErr
 			}
 			if deps.Broker != nil && !definition.OutOfBand {
@@ -368,30 +356,21 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	)
 
 	brokerReq := &broker.Request{
-		Usage:        usage,
-		Metadata:     meta,
-		RequestID:    req.RequestID,
-		ChatID:       req.ChatID,
-		Principal:    req.Principal,
-		DisplayName:  req.DisplayName,
-		SessionKey:   req.SessionKey,
-		IsDirect:     req.IsDirect,
-		Prompt:       decision.Prompt,
-		Images:       decision.Images,
-		StreamFunc:   req.StreamFunc,
-		ResponseChan: make(chan broker.Result, 1),
-	}
-	if resolver, ok := deps.Access.(interface {
-		ResolvePrincipal(identity.Principal) (string, error)
-	}); ok {
-		brokerReq.RefreshPrincipal = func(principal identity.Principal) (identity.Principal, error) {
-			resolvedUserID, err := resolver.ResolvePrincipal(principal)
-			if err != nil {
-				return identity.Principal{}, err
-			}
-			principal.CanonicalUserID = resolvedUserID
-			return principal, nil
-		}
+		Usage:         usage,
+		Metadata:      meta,
+		RequestID:     req.RequestID,
+		ChatID:        req.ChatID,
+		Principal:     req.Principal,
+		DisplayName:   req.DisplayName,
+		SessionKey:    req.SessionKey,
+		ChatLabel:     req.ChatLabel,
+		IsDirect:      req.IsDirect,
+		Prompt:        decision.Prompt,
+		Stateless:     req.Stateless,
+		ClientHistory: req.ClientHistory,
+		Images:        decision.Images,
+		StreamFunc:    req.StreamFunc,
+		ResponseChan:  make(chan broker.Result, 1),
 	}
 	submitErr := deps.Broker.Submit(brokerReq)
 	if submitErr != nil {
@@ -428,6 +407,11 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 
 	if result.Response != nil {
+		if req.Principal.Gateway == "openai" && len(result.Response.Attachments) != 0 {
+			err := errors.New("attachments are not supported by this gateway")
+			responder.SendAgentError(config.SafeErrorText(err))
+			return Outcome{Action: decision.Action, Reason: "unsupported_attachments", Err: err}
+		}
 		model = result.Response.Model
 		toolExecutionCount, toolBlockedCount = result.Response.ToolExecutionCount, result.Response.ToolBlockedCount
 		if result.Response.Kind != "" {
@@ -461,19 +445,8 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
-		if deps.Formation != nil && result.Response.SourceTurnID > 0 {
-			source := memory.FormationSource{
-				RequestID: req.RequestID, SessionID: req.SessionKey,
-				SessionGeneration: result.Response.SessionGeneration,
-				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
-				ExtractorVersion: memory.FormationExtractorVersion,
-			}
-			if enqueueErr := deps.Formation.Enqueue(context.Background(), userID, source); enqueueErr != nil {
-				log.Warn("user_memory.formation.job.enqueue_failed", "failed to enqueue post-turn user-memory formation", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
-			}
-		}
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
-			source := memory.FormationSource{
+			source := memory.DeliverySource{
 				RequestID: req.RequestID, SessionID: req.SessionKey,
 				SessionGeneration: result.Response.SessionGeneration,
 				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,

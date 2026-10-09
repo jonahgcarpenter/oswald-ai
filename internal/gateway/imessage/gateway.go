@@ -3,13 +3,13 @@ package imessage
 import (
 	"net"
 	"net/http"
+	"regexp"
 	"sync"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/invalidation"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 // Name returns the human-readable gateway name.
@@ -27,25 +27,34 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if g.contactNames == nil {
 		g.contactNames = make(map[string]contactNameCacheEntry)
 	}
+	if g.chatNames == nil {
+		g.chatNames = make(map[string]chatNameCacheEntry)
+	}
 	g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(webhookPath, g.handleWebhook)
+	mux.HandleFunc(g.listenPath(), g.handleWebhook)
 
 	listener, err := net.Listen("tcp", ":"+g.Port)
 	if err != nil {
 		return err
 	}
-	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", webhookPath))
+	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", g.listenPath()))
 	return http.Serve(listener, mux)
+}
+
+// listenPath returns the configured webhook route, falling back to the built-in
+// default for directly constructed gateways.
+func (g *Gateway) listenPath() string {
+	if g.WebhookPath != "" {
+		return g.WebhookPath
+	}
+	return defaultWebhookPath
 }
 
 func (g *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := g.Runtime
 	deps.Broker = g.Broker
-	if deps.Access == nil {
-		deps.Access = g.Links
-	}
 	if deps.Log == nil {
 		deps.Log = g.Log
 	}
@@ -57,8 +66,9 @@ type Gateway struct {
 	Port                string
 	BlueBubblesURL      string
 	BlueBubblesPassword string
-	DMMention           bool
-	Links               *accounts.Service
+	WebhookPath         string
+	MentionPatterns     []*regexp.Regexp
+	Links               identity.Resolver
 	Runtime             gatewayruntime.Dependencies
 	Log                 *config.Logger
 	Broker              *broker.Broker
@@ -71,6 +81,8 @@ type Gateway struct {
 	messageIndex        map[string]messageContext
 	contactMu           sync.RWMutex
 	contactNames        map[string]contactNameCacheEntry
+	chatNameMu          sync.RWMutex
+	chatNames           map[string]chatNameCacheEntry
 }
 
 func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {
@@ -78,31 +90,4 @@ func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {
 		return scoped[0]
 	}
 	return g.Log.Server("gateway.imessage", config.F("gateway", "imessage"))
-}
-
-// HandleRuntimeInvalidation purges message and contact context owned by the invalidated tenant.
-func (g *Gateway) HandleRuntimeInvalidation(event invalidation.Event) {
-	sessions := make(map[string]bool, len(event.SessionIDs))
-	for _, sessionID := range event.SessionIDs {
-		sessions[sessionID] = true
-	}
-	senders := make(map[string]bool)
-	const prefix = "imessage:"
-	for _, external := range event.ExternalIdentities {
-		if len(external) > len(prefix) && external[:len(prefix)] == prefix {
-			senders[external[len(prefix):]] = true
-		}
-	}
-	g.messageMu.Lock()
-	for id, ctx := range g.messageIndex {
-		if sessions[ctx.SessionKey] || senders[ctx.SenderID] {
-			delete(g.messageIndex, id)
-		}
-	}
-	g.messageMu.Unlock()
-	g.contactMu.Lock()
-	for senderID := range senders {
-		delete(g.contactNames, senderID)
-	}
-	g.contactMu.Unlock()
 }

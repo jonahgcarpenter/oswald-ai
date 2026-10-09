@@ -8,14 +8,17 @@ type Assurance string
 const (
 	// AssuranceSelfAsserted identifies an unverified identity supplied by a client.
 	AssuranceSelfAsserted Assurance = "self_asserted"
-	// AssuranceHomeAssistantToken identifies a user asserted by the configured Home Assistant service.
-	AssuranceHomeAssistantToken Assurance = "home_assistant_token"
 	// AssuranceDiscordGateway identifies a Discord user asserted by Discord's gateway.
 	AssuranceDiscordGateway Assurance = "discord_gateway"
 	// AssuranceBlueBubblesWebhook identifies an iMessage sender asserted by an
 	// authenticated BlueBubbles webhook.
 	AssuranceBlueBubblesWebhook Assurance = "bluebubbles_webhook"
+	// AssuranceLocalLoopback identifies the process-local OpenAI HTTP listener.
+	AssuranceLocalLoopback Assurance = "local_loopback"
 )
+
+// LocalOpenAIIdentifier is the fixed account identity for the loopback listener.
+const LocalOpenAIIdentifier = "local"
 
 // Principal is the resolved actor for one request. CanonicalUserID is the only
 // field used for tenant ownership; ExternalID remains transport-facing identity.
@@ -33,12 +36,12 @@ func (p Principal) Valid() bool {
 		return false
 	}
 	switch p.Gateway {
-	case "homeassistant":
-		return p.Assurance == AssuranceHomeAssistantToken
 	case "discord":
 		return p.Assurance == AssuranceDiscordGateway
 	case "imessage":
 		return p.Assurance == AssuranceBlueBubblesWebhook
+	case "openai":
+		return p.Assurance == AssuranceLocalLoopback && p.ExternalID == LocalOpenAIIdentifier
 	}
 	return false
 }
@@ -50,7 +53,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceHomeAssistantToken, AssuranceDiscordGateway, AssuranceBlueBubblesWebhook:
+	case AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback:
 		return true
 	default:
 		return false

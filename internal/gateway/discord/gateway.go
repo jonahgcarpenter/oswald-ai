@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
@@ -26,6 +26,9 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 	log := dg.log()
 	if dg.replyIndex == nil {
 		dg.replyIndex = make(map[string]replyContext)
+	}
+	if dg.labelNames == nil {
+		dg.labelNames = make(map[string]labelNameCacheEntry)
 	}
 	dg.setHeartbeatAcked(true)
 
@@ -55,9 +58,6 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 func (dg *Gateway) runtimeDependencies() gatewayruntime.Dependencies {
 	deps := dg.Runtime
 	deps.Broker = dg.Broker
-	if deps.Access == nil {
-		deps.Access = dg.Links
-	}
 	if deps.Log == nil {
 		deps.Log = dg.Log
 	}
@@ -69,7 +69,7 @@ type Gateway struct {
 	Token          string
 	BotID          string
 	Broker         *broker.Broker
-	Links          *accounts.Service
+	Links          identity.Resolver
 	Runtime        gatewayruntime.Dependencies
 	Log            *config.Logger
 	APIBaseURL     string
@@ -77,6 +77,8 @@ type Gateway struct {
 	VideoFrames    media.VideoFrameExtractor
 	replyMu        sync.RWMutex
 	replyIndex     map[string]replyContext
+	labelMu        sync.RWMutex
+	labelNames     map[string]labelNameCacheEntry
 	sessionMu      sync.RWMutex
 	sessionID      string
 	resumeURL      string

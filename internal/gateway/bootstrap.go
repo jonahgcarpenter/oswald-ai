@@ -6,34 +6,26 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/accounts"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/discord"
-	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/homeassistant"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/imessage"
+	"github.com/jonahgcarpenter/oswald-ai/internal/gateway/openai"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
-func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
+func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeDeps gatewayruntime.Dependencies, log *config.Logger) ([]Service, error) {
 	gatewayLog := log.Server("gateway.bootstrap")
-	services := make([]Service, 0, 3)
-	homeAssistantTokenSet := strings.TrimSpace(cfg.HomeAssistantAuthToken) != ""
-	homeAssistantPortSet := strings.TrimSpace(cfg.HomeAssistantListenPort) != ""
-	if homeAssistantTokenSet && homeAssistantPortSet {
-		homeAssistantGateway, err := homeassistant.New(cfg.HomeAssistantListenPort, cfg.HomeAssistantAuthToken, links, runtimeDeps, log)
+	services := make([]Service, 0, 4)
+	if strings.TrimSpace(cfg.OpenAIListenPort) != "" {
+		api, err := openai.New(cfg.OpenAIListenPort, links, runtimeDeps, cfg.LLMGatewayModel, log)
 		if err != nil {
-			gatewayLog.Warn("gateway.homeassistant.config_invalid", "home assistant gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
+			gatewayLog.Warn("gateway.openai.config_invalid", "openai gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
 		} else {
-			services = append(services, homeAssistantGateway)
-			if runtimeDeps.RuntimeInvalidationBus != nil {
-				runtimeDeps.RuntimeInvalidationBus.Subscribe(homeAssistantGateway.HandleRuntimeInvalidation)
-			}
+			services = append(services, api)
 		}
-	} else {
-		gatewayLog.Debug("gateway.homeassistant.disabled", "home assistant gateway is disabled", config.F("is_token_set", homeAssistantTokenSet), config.F("is_port_set", homeAssistantPortSet))
 	}
-
 	discordToken := strings.TrimSpace(cfg.DiscordToken)
 	if discordToken != "" {
 		discordGateway := &discord.Gateway{
@@ -43,9 +35,6 @@ func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeD
 			Log:     log,
 		}
 		services = append(services, discordGateway)
-		if runtimeDeps.RuntimeInvalidationBus != nil {
-			runtimeDeps.RuntimeInvalidationBus.Subscribe(discordGateway.HandleRuntimeInvalidation)
-		}
 	} else {
 		gatewayLog.Debug("gateway.discord.disabled", "discord gateway is disabled", config.F("is_token_set", false))
 	}
@@ -62,15 +51,13 @@ func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeD
 				Port:                port,
 				BlueBubblesURL:      baseURL,
 				BlueBubblesPassword: cfg.BlueBubblesPassword,
-				DMMention:           cfg.BlueBubblesDMMention,
+				WebhookPath:         cfg.BlueBubblesWebhookPath,
+				MentionPatterns:     cfg.BlueBubblesMentionPatterns,
 				Links:               links,
 				Runtime:             runtimeDeps,
 				Log:                 log,
 			}
 			services = append(services, iMessageGateway)
-			if runtimeDeps.RuntimeInvalidationBus != nil {
-				runtimeDeps.RuntimeInvalidationBus.Subscribe(iMessageGateway.HandleRuntimeInvalidation)
-			}
 		}
 	} else {
 		gatewayLog.Debug("gateway.imessage.disabled", "imessage gateway is disabled", config.F("is_port_set", blueBubblesPortSet), config.F("is_url_set", blueBubblesURLSet), config.F("is_password_set", blueBubblesPasswordSet))
@@ -86,6 +73,12 @@ func NewServicesFromConfig(cfg *config.Config, links *accounts.Service, runtimeD
 	)
 
 	return services, nil
+}
+
+// OpenAIEnabled reports whether the configured port can enable the loopback listener.
+func OpenAIEnabled(cfg *config.Config) bool {
+	port, err := strconv.Atoi(strings.TrimSpace(cfg.OpenAIListenPort))
+	return err == nil && port >= 1 && port <= 65535
 }
 
 func validateBlueBubblesConfig(portValue, urlValue string) (string, string, error) {

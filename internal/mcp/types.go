@@ -71,7 +71,7 @@ type ServerInfo struct {
 	Reason      string
 }
 
-// ServerConfig is a decrypted MCP server configuration loaded from storage.
+// ServerConfig is a resolved, in-memory MCP connection configuration.
 type ServerConfig struct {
 	ID          string
 	Scope       string
@@ -82,18 +82,6 @@ type ServerConfig struct {
 	URL         string
 	Headers     map[string]string
 	Enabled     bool
-}
-
-type storedServerConfig struct {
-	ID                string
-	Scope             string
-	OwnerUserID       string
-	Name              string
-	Description       string
-	Transport         string
-	URLCiphertext     string
-	HeadersCiphertext string
-	Enabled           bool
 }
 
 type server struct {

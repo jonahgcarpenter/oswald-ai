@@ -8,7 +8,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 const (
@@ -34,7 +33,6 @@ type foregroundCompactionState struct {
 	lastArtifact  memory.SummaryArtifact
 	hasCheckpoint bool
 	imageContext  *llm.ChatMessage
-	searchContext *llm.ChatMessage
 	log           *config.Logger
 }
 
@@ -45,11 +43,11 @@ type foregroundCompactionStats struct {
 	EstimatedAfter  int
 }
 
-func newForegroundCompactionState(compactor ForegroundCompactor, inputLimit int, deploymentPolicy, profileContent, currentPrompt string, currentImages []llm.InputImage, previous *memory.SessionSummary, debt []memory.SessionTurn, stream func(StreamChunk)) *foregroundCompactionState {
-	prefix := []llm.ChatMessage{{Role: "system", Content: deploymentPolicy}}
-	if profileContent != "" {
-		prefix = append(prefix, llm.ChatMessage{Role: "user", Content: profileContent})
+func newForegroundCompactionState(compactor ForegroundCompactor, inputLimit int, deploymentPolicy, contextBlock, currentPrompt string, currentImages []llm.InputImage, previous *memory.SessionSummary, debt []memory.SessionTurn, stream func(StreamChunk)) *foregroundCompactionState {
+	if contextBlock != "" {
+		deploymentPolicy += "\n\n" + contextBlock
 	}
+	prefix := []llm.ChatMessage{{Role: "system", Content: deploymentPolicy}}
 	return &foregroundCompactionState{
 		compactor: compactor, inputLimit: inputLimit, prefix: prefix,
 		current:  llm.ChatMessage{Role: "user", Content: currentPrompt, Images: append([]llm.InputImage(nil), currentImages...)},
@@ -79,7 +77,6 @@ func (s *foregroundCompactionState) hasDebt() bool {
 func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.ChatMessage, tools []llm.Tool, force bool) ([]llm.ChatMessage, foregroundCompactionStats, error) {
 	stats := foregroundCompactionStats{EstimatedBefore: budget.EstimateRequest(messages, tools)}
 	if s == nil || !s.hasDebt() || s.compactor == nil || s.inputLimit <= 0 {
-		messages = s.fitSearchImages(ctx, messages, tools)
 		stats.EstimatedAfter = budget.EstimateRequest(messages, tools)
 		return messages, stats, nil
 	}
@@ -104,14 +101,6 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	if s.imageContext != nil {
 		rebuilt = append(rebuilt, *s.imageContext)
 	}
-	if s.searchContext != nil {
-		if state := requestctx.ImageSearchStateFromContext(ctx); state != nil {
-			restored := searchImageContext(state.ActiveReferences())
-			s.searchContext = &restored
-		}
-		rebuilt = append(rebuilt, *s.searchContext)
-	}
-	rebuilt = s.fitSearchImages(ctx, rebuilt, tools)
 	s.previous = &memory.SessionSummary{
 		Narrative: artifact.Narrative, OpenTasks: artifact.OpenTasks,
 		Commitments: artifact.Commitments, Entities: artifact.Entities,
@@ -126,7 +115,7 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	return rebuilt, stats, nil
 }
 
-func loadForegroundDeliveredDebt(ctx context.Context, store *memory.Store, userID, sessionID string, generation int, afterTurnID int64) ([]memory.SessionTurn, error) {
+func loadForegroundDeliveredDebt(ctx context.Context, store SessionStore, userID, sessionID string, generation int, afterTurnID int64) ([]memory.SessionTurn, error) {
 	if store == nil || generation <= 0 {
 		return nil, nil
 	}

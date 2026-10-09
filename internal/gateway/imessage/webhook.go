@@ -84,9 +84,6 @@ func (g *Gateway) logIgnoredMessage(reason, eventType string, msg webhookMessage
 		config.F("is_from_me", msg.IsFromMe),
 		config.F("has_text", strings.TrimSpace(msg.Text) != ""),
 		config.F("attachment_count", len(msg.Attachments)),
-		config.F("has_reply_to_guid", msg.ReplyToGUID != ""),
-		config.F("has_thread_originator_guid", msg.ThreadOriginatorGUID != ""),
-		config.F("has_thread_originator_part", msg.ThreadOriginatorPart != ""),
 	}
 	baseFields = append(baseFields, fields...)
 	g.log().Debug("gateway.message.ignored", "ignored imessage message", baseFields...)

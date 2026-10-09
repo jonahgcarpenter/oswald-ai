@@ -5,12 +5,10 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 )
 
 type helpHandler struct {
 	commands *commands.Service
-	auth     commands.PrincipalAuthorizer
 }
 
 func (h helpHandler) Definition() commands.Definition {
@@ -18,10 +16,7 @@ func (h helpHandler) Definition() commands.Definition {
 }
 
 func (h helpHandler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
-	definitions, err := h.visibleDefinitions(req.Principal)
-	if err != nil {
-		return commands.Result{}, err
-	}
+	definitions := h.commands.Definitions()
 	if len(req.Args) > 0 {
 		want := strings.TrimPrefix(strings.TrimSpace(req.Args[0]), "/")
 		for _, definition := range definitions {
@@ -47,26 +42,6 @@ func (h helpHandler) Execute(_ context.Context, req commands.Request) (commands.
 		lines = append(lines, line)
 	}
 	return commands.Result{Text: strings.Join(lines, "\n")}, nil
-}
-
-func (h helpHandler) visibleDefinitions(principal identity.Principal) ([]commands.Definition, error) {
-	definitions := h.commands.Definitions()
-	isAdmin, err := commands.IsPrincipalAdmin(h.auth, principal)
-	if err != nil {
-		return nil, err
-	}
-	return filterAdminDefinitions(definitions, isAdmin), nil
-}
-
-func filterAdminDefinitions(definitions []commands.Definition, includeAdmin bool) []commands.Definition {
-	filtered := make([]commands.Definition, 0, len(definitions))
-	for _, definition := range definitions {
-		if definition.AdminOnly && !includeAdmin {
-			continue
-		}
-		filtered = append(filtered, definition)
-	}
-	return filtered
 }
 
 func renderHelpFor(definition commands.Definition) string {

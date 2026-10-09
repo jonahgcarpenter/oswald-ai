@@ -24,25 +24,22 @@ func TestCompletedRequestEstimateCannotBeNegative(t *testing.T) {
 	}
 }
 
-func TestNewContextBudgetUsesConfiguredLimitsAndFallbacks(t *testing.T) {
+func TestNewContextBudgetUsesContextWindowAndSafetyMargin(t *testing.T) {
 	tests := []struct {
 		name                 string
 		contextWindow        int
-		maxOutputTokens      int
 		wantContextWindow    int
-		wantResponseReserve  int
 		wantUsableInputLimit int
 	}{
-		{name: "configured", contextWindow: 10000, maxOutputTokens: 999, wantContextWindow: 10000, wantResponseReserve: 999, wantUsableInputLimit: 8745},
-		{name: "defaults", wantContextWindow: 32768, wantResponseReserve: 8192, wantUsableInputLimit: 24320},
-		{name: "context configured", contextWindow: 16000, wantContextWindow: 16000, wantResponseReserve: 8192, wantUsableInputLimit: 7552},
-		{name: "output configured", maxOutputTokens: 2048, wantContextWindow: 32768, wantResponseReserve: 2048, wantUsableInputLimit: 30464},
-		{name: "negative values", contextWindow: -1, maxOutputTokens: -1, wantContextWindow: 32768, wantResponseReserve: 8192, wantUsableInputLimit: 24320},
+		{name: "configured", contextWindow: 10000, wantContextWindow: 10000, wantUsableInputLimit: 9744},
+		{name: "defaults", wantContextWindow: 32768, wantUsableInputLimit: 32512},
+		{name: "context configured", contextWindow: 16000, wantContextWindow: 16000, wantUsableInputLimit: 15744},
+		{name: "negative value", contextWindow: -1, wantContextWindow: 32768, wantUsableInputLimit: 32512},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			budget := NewContextBudget(tt.contextWindow, tt.maxOutputTokens)
-			if budget.ContextWindow != tt.wantContextWindow || budget.ResponseReserve != tt.wantResponseReserve || budget.UsableInputLimit() != tt.wantUsableInputLimit {
+			budget := NewContextBudget(tt.contextWindow)
+			if budget.ContextWindow != tt.wantContextWindow || budget.UsableInputLimit() != tt.wantUsableInputLimit {
 				t.Fatalf("unexpected budget: %+v", budget)
 			}
 		})
@@ -50,16 +47,16 @@ func TestNewContextBudgetUsesConfiguredLimitsAndFallbacks(t *testing.T) {
 }
 
 func TestContextBudgetCannotExceedCapacity(t *testing.T) {
-	budget := NewContextBudget(100, 100)
+	budget := NewContextBudget(100)
 	if budget.UsableInputLimit() != 0 {
 		t.Fatalf("budget must not exceed actual capacity: %+v", budget)
 	}
 }
 
 func TestContextBudgetCapsExplicitLimitAtContextCapacity(t *testing.T) {
-	budget := ContextBudget{ContextWindow: 8000, ResponseReserve: 2000, PromptLimit: 7000, SafetyMargin: 250}
-	if got := budget.UsableInputLimit(); got != 5750 {
-		t.Fatalf("UsableInputLimit() = %d, want 5750", got)
+	budget := ContextBudget{ContextWindow: 8000, PromptLimit: 7000, SafetyMargin: 250}
+	if got := budget.UsableInputLimit(); got != 6750 {
+		t.Fatalf("UsableInputLimit() = %d, want 6750", got)
 	}
 
 	budget = ContextBudget{PromptLimit: 4000, SafetyMargin: 250}

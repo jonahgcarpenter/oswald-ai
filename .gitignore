@@ -1,6 +1,2 @@
-# Golang
 tmp/ 
-.env
-
-# database
-*.db*
+.oswald/
