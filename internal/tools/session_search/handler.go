@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +55,10 @@ func NewHandler(store *memory.ProfileStore) func(context.Context, map[string]int
 			return governance.Result{}, err
 		}
 		owner := principal.CanonicalUserID
-		liveSessionID := liveSession(ctx, store, owner)
+		liveSessionID, err := liveSession(ctx, store, owner)
+		if err != nil {
+			return governance.Result{}, fmt.Errorf("session_search: resolve live session: %w", err)
+		}
 		sessionID, hasSession := stringArg(args, "session_id")
 		anchor, hasAnchor := intArg(args, "around_message_id")
 		_, hasQuery := stringArg(args, "query")
@@ -84,29 +88,43 @@ func NewHandler(store *memory.ProfileStore) func(context.Context, map[string]int
 
 // liveSession resolves the active conversation's session id for exclusion.
 // A missing metadata session or no active row yields "", excluding nothing.
-func liveSession(ctx context.Context, store *memory.ProfileStore, owner string) string {
+func liveSession(ctx context.Context, store *memory.ProfileStore, owner string) (string, error) {
 	meta := requestctx.MetadataFromContext(ctx)
 	if meta.SessionID == "" || meta.SessionGeneration <= 0 {
-		return ""
+		return "", nil
 	}
-	id, err := store.ActiveSessionID(ctx, owner, meta.SessionID, meta.SessionGeneration)
-	if err != nil {
-		return ""
-	}
-	return id
+	return store.ActiveSessionID(ctx, owner, meta.SessionID, meta.SessionGeneration)
 }
 
 func rejectUnknownFields(args map[string]interface{}) error {
 	for key := range args {
 		switch key {
-		case "query", "limit", "sort", "detail", "after", "before", "exclude_session_ids", "session_id", "around_message_id", "window", "role_filter":
+		case "query", "sort", "detail", "after", "before", "session_id", "role_filter":
+			if _, ok := args[key].(string); !ok {
+				return fmt.Errorf("session_search: %s must be a string", key)
+			}
+		case "limit", "around_message_id", "window":
+			if _, ok := intArg(args, key); !ok {
+				return fmt.Errorf("session_search: %s must be an integer", key)
+			}
+		case "exclude_session_ids":
+			if _, ok := args[key].([]interface{}); !ok {
+				return errors.New("session_search: exclude_session_ids must be an array")
+			}
 		default:
 			return fmt.Errorf("session_search: unknown argument %q", key)
 		}
 	}
-	if raw, exists := args["role_filter"]; exists {
-		if _, ok := raw.(string); !ok {
-			return errors.New("session_search: role_filter must be a string")
+	if value, ok := stringArg(args, "session_id"); ok && strings.TrimSpace(value) == "" {
+		return errors.New("session_search: session_id must not be blank")
+	}
+	if raw, exists := stringArg(args, "role_filter"); exists {
+		for _, role := range strings.Split(raw, ",") {
+			switch strings.TrimSpace(role) {
+			case "user", "assistant", "tool":
+			default:
+				return errors.New("session_search: role_filter must contain user, assistant, or tool")
+			}
 		}
 	}
 	return nil
@@ -140,14 +158,14 @@ func parseDiscovery(args map[string]interface{}) (discoveryArgs, error) {
 	}
 	now := time.Now().UTC()
 	if after, ok := stringArg(args, "after"); ok && strings.TrimSpace(after) != "" {
-		bound, err := parseBoundary(after, now, false)
+		bound, err := parseBoundary(after, now)
 		if err != nil {
 			return parsed, fmt.Errorf("session_search: invalid after value")
 		}
 		parsed.After = &bound
 	}
 	if before, ok := stringArg(args, "before"); ok && strings.TrimSpace(before) != "" {
-		bound, err := parseBoundary(before, now, true)
+		bound, err := parseBoundary(before, now)
 		if err != nil {
 			return parsed, fmt.Errorf("session_search: invalid before value")
 		}
@@ -169,13 +187,16 @@ func parseDiscovery(args map[string]interface{}) (discoveryArgs, error) {
 			parsed.Exclude = append(parsed.Exclude, value)
 		}
 	}
-	parsed.Roles = roleSet(args, false)
+	parsed.Roles = roleSet(args)
+	if parsed.After != nil && parsed.Before != nil && !parsed.After.Before(*parsed.Before) {
+		return parsed, errors.New("session_search: after must precede before")
+	}
 	return parsed, nil
 }
 
 // roleSet parses a comma-separated role list; discovery defaults to
 // user,assistant because stored tool output is usually noise.
-func roleSet(args map[string]interface{}, toolOnly bool) map[string]bool {
+func roleSet(args map[string]interface{}) map[string]bool {
 	if raw, ok := stringArg(args, "role_filter"); ok && strings.TrimSpace(raw) != "" {
 		set := map[string]bool{}
 		for _, role := range strings.Split(raw, ",") {
@@ -188,23 +209,17 @@ func roleSet(args map[string]interface{}, toolOnly bool) map[string]bool {
 			return set
 		}
 	}
-	if toolOnly {
-		return map[string]bool{"tool": true}
-	}
 	return map[string]bool{"user": true, "assistant": true}
 }
 
 // parseBoundary interprets an ISO date/datetime or a relative duration such as
 // 7d, 24h, or 2w. A before/after date-only value resolves to UTC midnight.
-func parseBoundary(value string, now time.Time, before bool) (time.Time, error) {
+func parseBoundary(value string, now time.Time) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, errors.New("empty boundary")
 	}
 	if duration, ok := relativeDuration(value); ok {
-		if before {
-			return now.Add(-duration), nil
-		}
 		return now.Add(-duration), nil
 	}
 	if len(value) <= 10 {
@@ -227,18 +242,20 @@ func relativeDuration(value string) (time.Duration, bool) {
 	if err != nil || amount <= 0 {
 		return 0, false
 	}
-	switch unit {
-	case 'h':
-		return time.Duration(amount) * time.Hour, true
-	case 'd':
-		return time.Duration(amount) * 24 * time.Hour, true
-	default:
-		return time.Duration(amount) * 7 * 24 * time.Hour, true
+	factor := time.Hour
+	if unit == 'd' {
+		factor *= 24
+	} else if unit == 'w' {
+		factor *= 7 * 24
 	}
+	if int64(amount) > math.MaxInt64/int64(factor) {
+		return 0, false
+	}
+	return time.Duration(amount) * factor, true
 }
 
 func discover(ctx context.Context, store *memory.ProfileStore, owner string, parsed discoveryArgs) (governance.Result, error) {
-	sessions, err := store.DiscoverySessions(ctx, owner, memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude, LiveSessionID: parsed.LiveSessionID})
+	sessions, err := store.DiscoverySessions(ctx, owner, memory.SearchFilter{Query: parsed.Query, Limit: parsed.Limit, Sort: parsed.Sort, After: parsed.After, Before: parsed.Before, Exclude: parsed.Exclude, Roles: parsed.Roles, LiveSessionID: parsed.LiveSessionID})
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
@@ -251,7 +268,11 @@ func discover(ctx context.Context, store *memory.ProfileStore, owner string, par
 
 func scroll(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID, sessionID string, anchor int64, window int) (governance.Result, error) {
 	if liveSessionID != "" {
-		if shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID); err == nil && shared {
+		shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID)
+		if err != nil {
+			return governance.Result{}, fmt.Errorf("session_search: resolve session lineage: %w", err)
+		}
+		if shared {
 			return governance.Result{}, errors.New("session_search: scroll rejected: anchor lives in the current session lineage (already in your active context)")
 		}
 	}
@@ -259,7 +280,7 @@ func scroll(ctx context.Context, store *memory.ProfileStore, owner, liveSessionI
 	if err != nil {
 		return governance.Result{}, fmt.Errorf("session_search: %w", err)
 	}
-	response, err := buildScroll(owner, store.Profile(), sessionID, anchor, window, before, anchorMessage, after)
+	response, err := buildScroll(ctx, store, owner, sessionID, anchor, max(minWindow, min(window, maxWindow)), before, anchorMessage, after)
 	if err != nil {
 		return governance.Result{}, err
 	}
@@ -268,7 +289,11 @@ func scroll(ctx context.Context, store *memory.ProfileStore, owner, liveSessionI
 
 func read(ctx context.Context, store *memory.ProfileStore, owner, liveSessionID, sessionID string) (governance.Result, error) {
 	if liveSessionID != "" {
-		if shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID); err == nil && shared {
+		shared, err := store.SharesLineage(ctx, owner, liveSessionID, sessionID)
+		if err != nil {
+			return governance.Result{}, fmt.Errorf("session_search: resolve session lineage: %w", err)
+		}
+		if shared {
 			return governance.Result{}, errors.New("session_search: read rejected: session is the current lineage (already in your active context)")
 		}
 	}
@@ -324,9 +349,12 @@ func intArg(args map[string]interface{}, key string) (int64, bool) {
 	case int:
 		return int64(value), true
 	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || value != math.Trunc(value) || value >= float64(math.MaxInt64) || value < float64(math.MinInt64) {
+			return 0, false
+		}
 		return int64(value), true
 	case float32:
-		return int64(value), true
+		return intArg(map[string]interface{}{key: float64(value)}, key)
 	}
 	return 0, false
 }

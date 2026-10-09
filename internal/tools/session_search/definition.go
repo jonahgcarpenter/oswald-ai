@@ -19,7 +19,7 @@ func Definition() llm.ToolDefinition {
 			},
 			"limit": {
 				Type:        "integer",
-				Description: "Discovery shape only. Max sessions to return (default 3, max 10). Bump to 5-10 when the topic likely spans several sessions and you want to pick the right one to scroll into.",
+				Description: "Discovery and browse shapes. Max sessions to return (default 3, max 10). Bump to 5-10 when the topic likely spans several sessions and you want to pick the right one to scroll into.",
 			},
 			"sort": {
 				Type:        "string",
@@ -33,11 +33,11 @@ func Definition() llm.ToolDefinition {
 			},
 			"after": {
 				Type:        "string",
-				Description: "Discovery shape only. Inclusive lower bound on message time. ISO date/datetime (e.g. 2026-06-01) or relative duration (7d, 24h, 2w = within the last N). Use only when the user names a time frame. sort is a ranking bias, not a bound.",
+				Description: "Discovery shape only. Inclusive lower bound on session start time. ISO date/datetime (e.g. 2026-06-01) or relative duration (7d, 24h, 2w = within the last N). Use only when the user names a time frame. sort is a ranking bias, not a bound.",
 			},
 			"before": {
 				Type:        "string",
-				Description: "Discovery shape only. Exclusive upper bound on message time. ISO date/datetime (a date-only value is midnight UTC that day) or relative duration (7d = older than a week). Use only when the user names a time frame.",
+				Description: "Discovery shape only. Exclusive upper bound on session start time. ISO date/datetime (a date-only value is midnight UTC that day) or relative duration (7d = older than a week). Use only when the user names a time frame.",
 			},
 			"exclude_session_ids": {
 				Type:        "array",
@@ -46,7 +46,7 @@ func Definition() llm.ToolDefinition {
 			},
 			"session_id": {
 				Type:        "string",
-				Description: "Scroll shape. Session to read inside. Use the session_id returned from a prior discovery call. Must be paired with around_message_id.",
+				Description: "Session to read, using the session_id returned from discovery or browse, or the id segment of an @session link. Alone reads the session; pair with around_message_id to scroll. Only the authenticated profile is accessible.",
 			},
 			"around_message_id": {
 				Type:        "integer",
@@ -58,7 +58,7 @@ func Definition() llm.ToolDefinition {
 			},
 			"role_filter": {
 				Type:        "string",
-				Description: "Optional. Comma-separated roles to include. Discovery defaults to 'user,assistant'. Pass 'user,assistant,tool' only when inspecting stored tool output.",
+				Description: "Discovery match roles only, not surrounding context. Comma-separated roles, default 'user,assistant'. Pass 'user,assistant,tool' or 'tool' to match searchable stored tool output. Read and scroll also include bounded native tool traces, without image bytes or reasoning.",
 			},
 		}},
 	}

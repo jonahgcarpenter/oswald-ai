@@ -3,6 +3,7 @@ package session_search
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -187,5 +188,117 @@ func TestRoleFilterAndTemporalBounds(t *testing.T) {
 	}
 	if _, err := NewHandler(store)(ctx, map[string]interface{}{"query": "alpha", "after": "not-a-date"}); err == nil {
 		t.Fatal("invalid temporal bound accepted")
+	}
+}
+
+func TestDiscoveryReturnsBothSidesAndReadIncludesNativeTraces(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	generation := resolveGeneration(t, store)
+	key := "discord:dm:123"
+	deliver(t, store, generation, key, "opening", "opening answer")
+	trace := memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{{Name: "web_search", HistoryMode: "full", Arguments: map[string]interface{}{"query": "deployment"}, Result: "toolneedle connection refused", Status: "succeeded", SearchResult: true}}}}}
+	turn, err := store.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{UserID: "alice", SessionID: key, Generation: generation, UserText: "matchneedle", AssistantText: "answer", History: trace, Pressure: memory.SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	deliver(t, store, generation, key, "following", "following answer")
+	id := sessionIDForKey(t, store, key)
+	for _, args := range []map[string]interface{}{
+		{"query": "matchneedle", "role_filter": "user"},
+		{"query": "toolneedle", "role_filter": "tool"},
+		{"session_id": id},
+		{"session_id": id, "around_message_id": turn.ID},
+	} {
+		result, err := NewHandler(store)(ctx, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"opening", "following answer", "tool_history", "toolneedle connection refused", "web_search", "deployment"} {
+			if !strings.Contains(result.Content, want) {
+				t.Fatalf("%v missing %q: %s", args, want, result.Content)
+			}
+		}
+	}
+	if result := run(t, store, ctx, map[string]interface{}{"query": "toolneedle"}); result["count"].(float64) != 0 {
+		t.Fatal("tool-only text matched default roles")
+	}
+	if result := run(t, store, ctx, map[string]interface{}{"query": "matchneedle", "role_filter": "assistant"}); result["count"].(float64) != 0 {
+		t.Fatal("assistant-only filter matched user content")
+	}
+	// These counts represent messages outside the returned window, not the
+	// number already included on each side of the anchor.
+	scroll := run(t, store, ctx, map[string]interface{}{"session_id": id, "around_message_id": turn.ID, "window": 1})
+	if scroll["messages_before"].(float64) != 2 || scroll["messages_after"].(float64) != 1 {
+		t.Fatalf("incorrect remainder counts: %+v", scroll)
+	}
+	messages := scroll["messages"].([]interface{})
+	next := messages[len(messages)-1].(map[string]interface{})["id"]
+	forward := run(t, store, ctx, map[string]interface{}{"session_id": id, "around_message_id": next, "window": 1})
+	if forward["around_message_id"] != next {
+		t.Fatal("scroll pagination lost boundary anchor")
+	}
+}
+
+func TestSearchRejectsInvalidArgumentTypesAndRoleFilters(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	for _, args := range []map[string]interface{}{
+		{"query": 1}, {"session_id": ""}, {"session_id": 1},
+		{"query": "docker", "role_filter": "reasoning"},
+		{"query": "docker", "role_filter": "user,bogus"},
+		{"query": "docker", "after": "999999999999h"},
+		{"query": "docker", "after": "2026-06-02", "before": "2026-06-01"},
+		{"window": 1.5}, {"around_message_id": math.NaN()},
+		{"limit": math.Inf(1)}, {"profile": "bob"},
+	} {
+		if _, err := NewHandler(store)(ctx, args); err == nil {
+			t.Fatalf("invalid arguments accepted: %v", args)
+		}
+	}
+}
+
+func TestLargeReadAndScrollKeepModeAndNavigation(t *testing.T) {
+	store, ctx := newSearchFixture(t)
+	generation := resolveGeneration(t, store)
+	large := strings.Repeat("界", 6000)
+	var anchor int64
+	for i := 0; i < 15; i++ {
+		id := deliver(t, store, generation, "discord:dm:123", large, large)
+		if i == 7 {
+			anchor = id
+		}
+	}
+	id := sessionIDForKey(t, store, "discord:dm:123")
+	for _, args := range []map[string]interface{}{{"session_id": id}, {"session_id": id, "around_message_id": anchor, "window": 20}} {
+		result, err := NewHandler(store)(ctx, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len([]rune(result.Content)) > envelopeRunes {
+			t.Fatal("oversized envelope")
+		}
+		var response struct {
+			Mode      string        `json:"mode"`
+			Truncated bool          `json:"truncated"`
+			Messages  []messageJSON `json:"messages"`
+		}
+		if err := json.Unmarshal([]byte(result.Content), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Mode == "truncated" || !response.Truncated || len(response.Messages) == 0 {
+			t.Fatal("oversized result discarded its mode/navigation")
+		}
+		foundAnchor := false
+		for _, message := range response.Messages {
+			if !message.ContentTruncated || message.OriginalContentChars != 6000 {
+				t.Fatal("lost original Unicode content size")
+			}
+			foundAnchor = foundAnchor || message.Anchor && message.ID == anchor
+		}
+		if response.Mode == "scroll" && !foundAnchor {
+			t.Fatal("size bounding removed scroll anchor")
+		}
 	}
 }

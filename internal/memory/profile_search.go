@@ -8,17 +8,6 @@ import (
 	"time"
 )
 
-// SearchHit identifies one delivered message matched by a session search.
-type SearchHit struct {
-	SessionID string
-	MessageID int64
-	Role      string
-	Content   string
-	Timestamp time.Time
-	Snippet   string
-	Rank      float64
-}
-
 // SearchSession is one deduplicated session lineage returned by discovery.
 type SearchSession struct {
 	SessionID      string
@@ -35,12 +24,14 @@ type SearchSession struct {
 
 // SearchMessage is one delivered message rendered in a window or transcript.
 type SearchMessage struct {
-	ID        int64
-	Role      string
-	Content   string
-	ToolName  string
-	ToolCalls string
-	Timestamp time.Time
+	ID         int64
+	Role       string
+	Content    string
+	ToolName   string
+	ToolCalls  string
+	ToolCallID string
+	History    ToolHistory
+	Timestamp  time.Time
 }
 
 // SessionSummaryRecord describes one delivered session for browse results.
@@ -59,7 +50,9 @@ const (
 	// searchEligible is the delivery and profile filter shared by every shape.
 	// Generation equality is intentionally not required: /new keeps prior
 	// sessions as searchable history, and nothing eager-deletes delivered rows.
-	searchEligible = `m.active=1 AND s.profile_name=?`
+	searchEligible       = `m.active=1 AND s.profile_name=?`
+	searchMessageColumns = `m.id,m.role,COALESCE(m.content,''),COALESCE(m.tool_name,''),COALESCE(m.tool_calls,''),COALESCE(m.tool_call_id,''),m.timestamp,COALESCE(v.value,'')`
+	searchMessageJoin    = ` FROM messages m JOIN sessions s ON s.id=m.session_id LEFT JOIN state_meta v ON m.role='assistant' AND v.key=('oswald:v1:turn:'||m.session_id||':'||m.id) `
 )
 
 // SearchFilter bounds a discovery query.
@@ -70,6 +63,8 @@ type SearchFilter struct {
 	After   *time.Time
 	Before  *time.Time
 	Exclude []string
+	// Roles controls matching, not surrounding context. Nil defaults to user and assistant.
+	Roles map[string]bool
 	// LiveSessionID is the active conversation's session id; it and its lineage
 	// are omitted because that content is already in the model's live context.
 	LiveSessionID string
@@ -88,110 +83,7 @@ func (s *ProfileStore) DiscoverySessions(ctx context.Context, owner string, filt
 	if filter.Limit <= 0 || filter.Limit > 40 {
 		filter.Limit = 8
 	}
-	excluded, err := s.excludedLineage(ctx, owner, filter.Exclude)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.addLiveLineage(ctx, owner, filter.LiveSessionID, excluded); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.SQL().QueryContext(ctx, `
-SELECT m.session_id, m.id, m.role, COALESCE(m.content,''), m.timestamp,
-       snippet(messages_fts, 0, '[', ']', '…', 24) AS snip
-FROM messages_fts
-JOIN messages m ON m.id = messages_fts.rowid
-JOIN sessions s ON s.id = m.session_id
-WHERE messages_fts MATCH ? AND `+searchEligible+`
-ORDER BY bm25(messages_fts) LIMIT ?`, filter.Query, owner, filter.Limit*4)
-	if err != nil {
-		return nil, err
-	}
-	var hits []SearchHit
-	for rows.Next() {
-		var hit SearchHit
-		var timestamp float64
-		if err := rows.Scan(&hit.SessionID, &hit.MessageID, &hit.Role, &hit.Content, &timestamp, &hit.Snippet); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		hit.Timestamp = secondsToTime(timestamp)
-		hits = append(hits, hit)
-	}
-	iterationErr := rows.Err()
-	rows.Close()
-	if iterationErr != nil {
-		return nil, iterationErr
-	}
-	return s.rankLineages(ctx, owner, hits, filter, excluded)
-}
-
-// rankLineages resolves each hit to its lineage root, keeps the strongest hit
-// per lineage, applies temporal bounds and exclusions, and hydrates metadata.
-func (s *ProfileStore) rankLineages(ctx context.Context, owner string, hits []SearchHit, filter SearchFilter, excluded map[string]bool) ([]SearchSession, error) {
-	type lineageHit struct {
-		hit     SearchHit
-		sortKey time.Time
-	}
-	best := map[string]lineageHit{}
-	order := make([]string, 0, len(hits))
-	for _, hit := range hits {
-		root, err := s.lineageRoot(ctx, owner, hit.SessionID)
-		if err != nil {
-			return nil, err
-		}
-		if root == "" || excluded[root] {
-			continue
-		}
-		if filter.After != nil && hit.Timestamp.Before(*filter.After) {
-			continue
-		}
-		if filter.Before != nil && !hit.Timestamp.Before(*filter.Before) {
-			continue
-		}
-		current, ok := best[root]
-		if !ok {
-			order = append(order, root)
-			best[root] = lineageHit{hit: hit, sortKey: hit.Timestamp}
-			continue
-		}
-		if filter.Sort == "newest" && hit.Timestamp.After(current.sortKey) {
-			best[root] = lineageHit{hit: hit, sortKey: hit.Timestamp}
-		} else if filter.Sort == "oldest" && hit.Timestamp.Before(current.sortKey) {
-			best[root] = lineageHit{hit: hit, sortKey: hit.Timestamp}
-		}
-	}
-	if filter.Sort == "newest" || filter.Sort == "oldest" {
-		descending := filter.Sort == "newest"
-		for i := 1; i < len(order); i++ {
-			for j := i; j > 0; j-- {
-				left, right := best[order[j-1]].sortKey, best[order[j]].sortKey
-				swap := (descending && right.After(left)) || (!descending && right.Before(left))
-				if !swap {
-					break
-				}
-				order[j-1], order[j] = order[j], order[j-1]
-			}
-		}
-	}
-	if len(order) > filter.Limit {
-		order = order[:filter.Limit]
-	}
-	results := make([]SearchSession, 0, len(order))
-	for _, root := range order {
-		entry := best[root]
-		summary, err := s.sessionSummary(ctx, owner, root)
-		if err != nil {
-			return nil, err
-		}
-		if summary == nil {
-			continue
-		}
-		summary.MatchMessageID = entry.hit.MessageID
-		summary.MatchedRole = entry.hit.Role
-		summary.Snippet = entry.hit.Snippet
-		results = append(results, *summary)
-	}
-	return results, nil
+	return s.discoverIndexed(ctx, owner, filter)
 }
 
 // addLiveLineage marks the live conversation's lineage root as excluded so
@@ -267,7 +159,7 @@ func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*S
 	var summary SearchSession
 	var started, last sql.NullFloat64
 	var title, model sql.NullString
-	err := s.db.SQL().QueryRowContext(ctx, `SELECT id, source, COALESCE(model,''), COALESCE(title,''), started_at, COALESCE(last_activity_at, started_at), COALESCE(message_count,0) FROM sessions WHERE id=? AND profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount)
+	err := s.db.SQL().QueryRowContext(ctx, `SELECT s.id,s.source,COALESCE(s.model,''),COALESCE(s.title,''),s.started_at,COALESCE(s.last_activity_at,s.started_at),(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id AND m.active=1) FROM sessions s WHERE s.id=? AND s.profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -282,7 +174,7 @@ func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*S
 }
 
 // SessionWindow returns an anchored slice of delivered messages around anchorID.
-// window is clamped to [1,20]. Delivery and generation fencing always apply.
+// window is clamped to [1,20]. Only delivered rows from this session apply.
 func (s *ProfileStore) SessionWindow(ctx context.Context, owner, sessionID string, anchorID int64, window int) (before []SearchMessage, anchor *SearchMessage, after []SearchMessage, err error) {
 	if owner != s.profile {
 		return nil, nil, nil, errors.New("invalid profile search scope")
@@ -296,27 +188,61 @@ func (s *ProfileStore) SessionWindow(ctx context.Context, owner, sessionID strin
 	if anchorID <= 0 {
 		return nil, nil, nil, errors.New("anchor message is required")
 	}
-	root, err := s.lineageRoot(ctx, owner, sessionID)
-	if err != nil || root == "" {
-		return nil, nil, nil, errors.New("session not found in this profile")
-	}
-	anchor, err = s.messageByID(ctx, owner, anchorID)
-	if err != nil || anchor == nil {
-		return nil, nil, nil, errors.New("anchor message not found in this profile")
-	}
-	before, err = s.windowMessages(ctx, owner, anchorID, window, false)
+	id, err := s.resolveSearchSession(ctx, owner, sessionID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	after, err = s.windowMessages(ctx, owner, anchorID, window, true)
+	if id == "" {
+		return nil, nil, nil, errors.New("session not found in this profile")
+	}
+	anchor, err = s.messageByID(ctx, owner, id, anchorID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if anchor == nil {
+		return nil, nil, nil, errors.New("anchor message not found in this profile")
+	}
+	before, err = s.windowMessages(ctx, owner, id, anchorID, window, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	after, err = s.windowMessages(ctx, owner, id, anchorID, window, true)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return before, anchor, after, nil
 }
 
-func (s *ProfileStore) messageByID(ctx context.Context, owner string, id int64) (*SearchMessage, error) {
-	row := s.db.SQL().QueryRowContext(ctx, `SELECT m.id, m.role, COALESCE(m.content,''), COALESCE(m.tool_name,''), COALESCE(m.tool_calls,''), m.timestamp FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id=? AND `+searchEligible, id, owner)
+// SessionWindowRemainder counts delivered messages outside a returned window.
+// Boundary ids must be from the requested session, just like scroll anchors.
+func (s *ProfileStore) SessionWindowRemainder(ctx context.Context, owner, sessionID string, firstID, lastID int64) (before, after int, err error) {
+	if owner != s.profile || firstID <= 0 || lastID < firstID {
+		return 0, 0, errors.New("invalid profile search window")
+	}
+	id, err := s.resolveSearchSession(ctx, owner, sessionID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if id == "" {
+		return 0, 0, errors.New("session not found in this profile")
+	}
+	var boundaries int
+	err = s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(m.id<?),0),COALESCE(SUM(m.id>?),0) FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.session_id=? AND `+searchEligible+` AND (m.id IN (?,?) OR m.id<? OR m.id>?)`, firstID, lastID, id, owner, firstID, lastID, firstID, lastID).Scan(&boundaries, &before, &after)
+	if err != nil {
+		return 0, 0, err
+	}
+	want := 2
+	if firstID == lastID {
+		want = 1
+	}
+	if boundaries-before-after != want {
+		return 0, 0, errors.New("window boundaries not found in session")
+	}
+	return before, after, nil
+}
+
+func (s *ProfileStore) messageByID(ctx context.Context, owner, sessionID string, id int64) (*SearchMessage, error) {
+	row := s.db.SQL().QueryRowContext(ctx, `SELECT `+searchMessageColumns+searchMessageJoin+`WHERE m.session_id=? AND m.id=? AND `+searchEligible, sessionID, id, owner)
 	message, err := scanSearchMessage(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -327,12 +253,12 @@ func (s *ProfileStore) messageByID(ctx context.Context, owner string, id int64) 
 	return &message, nil
 }
 
-func (s *ProfileStore) windowMessages(ctx context.Context, owner string, anchorID int64, limit int, forward bool) ([]SearchMessage, error) {
+func (s *ProfileStore) windowMessages(ctx context.Context, owner, sessionID string, anchorID int64, limit int, forward bool) ([]SearchMessage, error) {
 	comparison, order := "<", "DESC"
 	if forward {
 		comparison, order = ">", "ASC"
 	}
-	rows, err := s.db.SQL().QueryContext(ctx, `SELECT m.id, m.role, COALESCE(m.content,''), COALESCE(m.tool_name,''), COALESCE(m.tool_calls,''), m.timestamp FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.id `+comparison+` ? AND `+searchEligible+` ORDER BY m.id `+order+` LIMIT ?`, anchorID, owner, limit)
+	rows, err := s.db.SQL().QueryContext(ctx, `SELECT `+searchMessageColumns+searchMessageJoin+`WHERE m.session_id=? AND m.id `+comparison+` ? AND `+searchEligible+` ORDER BY m.id `+order+` LIMIT ?`, sessionID, anchorID, owner, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -364,19 +290,29 @@ func (s *ProfileStore) SessionTranscript(ctx context.Context, owner, sessionID s
 	if owner != s.profile {
 		return nil, nil, 0, errors.New("invalid profile search scope")
 	}
-	root, err := s.lineageRoot(ctx, owner, sessionID)
-	if err != nil || root == "" {
-		return nil, nil, 0, errors.New("session not found in this profile")
-	}
-	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COALESCE(message_count,0) FROM sessions WHERE id=? AND profile_name=?`, root, owner).Scan(&count); err != nil {
+	id, err := s.resolveSearchSession(ctx, owner, sessionID)
+	if err != nil {
 		return nil, nil, 0, err
 	}
-	first, err = s.transcriptChunk(ctx, owner, root, head, false)
+	if id == "" {
+		return nil, nil, 0, errors.New("session not found in this profile")
+	}
+	if head < 1 || tail < 0 || head > 100 || tail > 100 {
+		return nil, nil, 0, errors.New("invalid transcript bounds")
+	}
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.session_id=? AND `+searchEligible, id, owner).Scan(&count); err != nil {
+		return nil, nil, 0, err
+	}
+	firstLimit := head
+	if count <= head+tail {
+		firstLimit = count
+	}
+	first, err = s.transcriptChunk(ctx, owner, id, firstLimit, false)
 	if err != nil {
 		return nil, nil, 0, err
 	}
 	if count > head+tail {
-		last, err = s.transcriptChunk(ctx, owner, root, tail, true)
+		last, err = s.transcriptChunk(ctx, owner, id, tail, true)
 		if err != nil {
 			return nil, nil, 0, err
 		}
@@ -389,7 +325,7 @@ func (s *ProfileStore) transcriptChunk(ctx context.Context, owner, sessionID str
 	if descending {
 		order = "DESC"
 	}
-	rows, err := s.db.SQL().QueryContext(ctx, `SELECT m.id, m.role, COALESCE(m.content,''), COALESCE(m.tool_name,''), COALESCE(m.tool_calls,''), m.timestamp FROM messages m JOIN sessions s ON s.id=m.session_id WHERE m.session_id=? AND `+searchEligible+` ORDER BY m.id `+order+` LIMIT ?`, sessionID, owner, limit)
+	rows, err := s.db.SQL().QueryContext(ctx, `SELECT `+searchMessageColumns+searchMessageJoin+`WHERE m.session_id=? AND `+searchEligible+` ORDER BY m.id `+order+` LIMIT ?`, sessionID, owner, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -417,23 +353,40 @@ func (s *ProfileStore) transcriptChunk(ctx context.Context, owner, sessionID str
 
 // RecentSessions returns the most recently active delivered sessions.
 func (s *ProfileStore) RecentSessions(ctx context.Context, owner string, limit int) ([]SessionSummaryRecord, error) {
+	return s.recentSessions(ctx, owner, "", limit)
+}
+
+func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
 	if owner != s.profile {
 		return nil, errors.New("invalid profile search scope")
 	}
 	if limit <= 0 || limit > 40 {
 		limit = 8
 	}
+	roots, err := s.searchLineageRoots(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	liveRoot := roots[liveSessionID]
+	if liveSessionID != "" && liveRoot == "" {
+		liveRoot, err = s.lineageRoot(ctx, owner, liveSessionID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	rows, err := s.db.SQL().QueryContext(ctx, `
 SELECT s.id, s.source, COALESCE(s.model,''), COALESCE(s.title,''),
-       s.started_at, COALESCE(s.last_activity_at, s.started_at), COALESCE(s.message_count,0),
+       s.started_at, COALESCE(s.last_activity_at, s.started_at), (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id AND m.active=1),
        COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id AND m.active=1 ORDER BY m.id LIMIT 1),'')
 FROM sessions s
-WHERE s.profile_name=?
-ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT ?`, owner, limit)
+WHERE s.profile_name=? AND s.source IN ('discord','imessage')
+AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.active=1)
+ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`, owner)
 	if err != nil {
 		return nil, err
 	}
 	var records []SessionSummaryRecord
+	seen := make(map[string]bool)
 	for rows.Next() {
 		var record SessionSummaryRecord
 		var started, last float64
@@ -443,7 +396,15 @@ ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC LIMIT ?`, owner, limit)
 		}
 		record.StartedAt = secondsToTime(started)
 		record.LastActive = secondsToTime(last)
+		root := roots[record.SessionID]
+		if root == "" || root == liveRoot || seen[root] {
+			continue
+		}
+		seen[root] = true
 		records = append(records, record)
+		if len(records) == limit {
+			break
+		}
 	}
 	iterationErr := rows.Err()
 	rows.Close()
@@ -458,10 +419,18 @@ type scanFunc func(dest ...any) error
 func scanSearchMessage(scan scanFunc) (SearchMessage, error) {
 	var message SearchMessage
 	var timestamp float64
-	if err := scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.ToolCalls, &timestamp); err != nil {
+	var encoded string
+	if err := scan(&message.ID, &message.Role, &message.Content, &message.ToolName, &message.ToolCalls, &message.ToolCallID, &timestamp, &encoded); err != nil {
 		return message, err
 	}
 	message.Timestamp = secondsToTime(timestamp)
+	if encoded != "" {
+		history, err := searchExchangeHistory(encoded)
+		if err != nil {
+			return message, err
+		}
+		message.History = history
+	}
 	return message, nil
 }
 
@@ -480,11 +449,25 @@ func (s *ProfileStore) SessionSummaryFor(ctx context.Context, owner, id string) 
 	if owner != s.profile {
 		return nil, errors.New("invalid profile search scope")
 	}
-	root, err := s.lineageRoot(ctx, owner, id)
-	if err != nil || root == "" {
+	resolved, err := s.resolveSearchSession(ctx, owner, id)
+	if err != nil {
+		return nil, err
+	}
+	if resolved == "" {
 		return nil, errors.New("session not found in this profile")
 	}
-	return s.sessionSummary(ctx, owner, root)
+	return s.sessionSummary(ctx, owner, resolved)
+}
+
+// resolveSearchSession resolves a concrete id (or existing conversation key),
+// never its parent: lineage is for deduplication, not transcript redirection.
+func (s *ProfileStore) resolveSearchSession(ctx context.Context, owner, id string) (string, error) {
+	var resolved string
+	err := s.db.SQL().QueryRowContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND (id=? OR session_key=?) ORDER BY (id=?) DESC,started_at DESC LIMIT 1`, owner, id, id, id).Scan(&resolved)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return resolved, err
 }
 
 // ActiveSessionID returns the current open session id for a conversation and
@@ -527,33 +510,5 @@ func (s *ProfileStore) SharesLineage(ctx context.Context, owner, left, right str
 // RecentSessionsExcluding returns recent delivered sessions with the live
 // conversation's lineage omitted.
 func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
-	records, err := s.RecentSessions(ctx, owner, limit+1)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(liveSessionID) == "" {
-		if len(records) > limit {
-			records = records[:limit]
-		}
-		return records, nil
-	}
-	liveRoot, err := s.lineageRoot(ctx, owner, liveSessionID)
-	if err != nil {
-		return nil, err
-	}
-	filtered := records[:0]
-	for _, record := range records {
-		root, err := s.lineageRoot(ctx, owner, record.SessionID)
-		if err != nil {
-			return nil, err
-		}
-		if root != "" && root == liveRoot {
-			continue
-		}
-		filtered = append(filtered, record)
-		if len(filtered) == limit {
-			break
-		}
-	}
-	return filtered, nil
+	return s.recentSessions(ctx, owner, liveSessionID, limit)
 }

@@ -19,15 +19,18 @@ const (
 )
 
 type messageJSON struct {
-	ID                   int64   `json:"id"`
-	Role                 string  `json:"role"`
-	Content              string  `json:"content"`
-	ToolName             string  `json:"tool_name,omitempty"`
-	ToolCalls            string  `json:"tool_calls,omitempty"`
-	Timestamp            float64 `json:"timestamp"`
-	Anchor               bool    `json:"anchor,omitempty"`
-	ContentTruncated     bool    `json:"content_truncated,omitempty"`
-	OriginalContentChars int     `json:"original_content_chars,omitempty"`
+	ID                   int64               `json:"id"`
+	Role                 string              `json:"role"`
+	Content              string              `json:"content"`
+	ToolName             string              `json:"tool_name,omitempty"`
+	ToolCalls            string              `json:"tool_calls,omitempty"`
+	ToolCallID           string              `json:"tool_call_id,omitempty"`
+	ToolHistory          *memory.ToolHistory `json:"tool_history,omitempty"`
+	ToolHistoryTruncated bool                `json:"tool_history_truncated,omitempty"`
+	Timestamp            float64             `json:"timestamp"`
+	Anchor               bool                `json:"anchor,omitempty"`
+	ContentTruncated     bool                `json:"content_truncated,omitempty"`
+	OriginalContentChars int                 `json:"original_content_chars,omitempty"`
 }
 
 type discoverResultJSON struct {
@@ -58,6 +61,7 @@ type discoverEnvelope struct {
 	Results          []discoverResultJSON `json:"results"`
 	LinkHint         string               `json:"link_hint"`
 	Message          string               `json:"message,omitempty"`
+	Truncated        bool                 `json:"truncated,omitempty"`
 }
 
 type browseResultJSON struct {
@@ -107,6 +111,7 @@ type scrollEnvelope struct {
 	MessagesBefore  int           `json:"messages_before"`
 	MessagesAfter   int           `json:"messages_after"`
 	Messages        []messageJSON `json:"messages"`
+	Truncated       bool          `json:"truncated,omitempty"`
 }
 
 const linkHint = "When referring the user to a session, write its `link` value verbatim inline mid-sentence; it renders as a titled link."
@@ -157,32 +162,45 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 	}
 	before, anchor, after, err := store.SessionWindow(ctx, owner, session.SessionID, session.MatchMessageID, defaultWindow)
 	if err != nil {
-		return result, nil
+		return result, err
 	}
 	if !hydrate {
 		if anchor != nil {
 			result.Messages = []messageJSON{toJSON(*anchor, true, messageContentRunes)}
 		}
-		return result, nil
+		result.MessagesBefore, result.MessagesAfter, err = windowRemainder(ctx, store, owner, session.SessionID, result.Messages)
+		return result, err
 	}
 	result.Detail = "full"
-	result.MessagesBefore = len(before)
-	result.MessagesAfter = len(after)
 	for _, message := range before {
 		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes))
 	}
 	if anchor != nil {
 		result.Messages = append(result.Messages, toJSON(*anchor, true, windowContentRunes))
 	}
-	result.BookendStart, result.BookendEnd = bookends(ctx, store, owner, session.SessionID)
+	for _, message := range after {
+		result.Messages = append(result.Messages, toJSON(message, false, windowContentRunes))
+	}
+	result.MessagesBefore, result.MessagesAfter, err = windowRemainder(ctx, store, owner, session.SessionID, result.Messages)
+	if err != nil {
+		return result, err
+	}
+	result.BookendStart, result.BookendEnd, err = bookends(ctx, store, owner, session.SessionID)
+	if err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
 // bookends returns the first and last delivered messages of a session.
-func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID string) ([]messageJSON, []messageJSON) {
-	first, last, count, err := store.SessionTranscript(ctx, owner, sessionID, 2, 2)
+func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID string) ([]messageJSON, []messageJSON, error) {
+	first, last, count, err := store.SessionTranscript(ctx, owner, sessionID, 3, 3)
 	if err != nil || count == 0 {
-		return nil, nil
+		return nil, nil, err
+	}
+	if len(last) == 0 && len(first) > 3 {
+		last = first[max(3, len(first)-3):]
+		first = first[:3]
 	}
 	start := make([]messageJSON, 0, len(first))
 	for _, message := range first {
@@ -192,11 +210,11 @@ func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID 
 	for _, message := range last {
 		end = append(end, toJSON(message, false, bookendContentRunes))
 	}
-	return start, end
+	return start, end, nil
 }
 
-func buildScroll(owner, profile, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
-	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, AroundMessageID: anchor, Window: window, MessagesBefore: len(before), MessagesAfter: len(after), Messages: []messageJSON{}}
+func buildScroll(ctx context.Context, store *memory.ProfileStore, owner, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
+	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, AroundMessageID: anchor, Window: window, Messages: []messageJSON{}}
 	for _, message := range before {
 		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes))
 	}
@@ -206,7 +224,19 @@ func buildScroll(owner, profile, sessionID string, anchor int64, window int, bef
 	for _, message := range after {
 		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes))
 	}
+	var err error
+	envelope.MessagesBefore, envelope.MessagesAfter, err = windowRemainder(ctx, store, owner, sessionID, envelope.Messages)
+	if err != nil {
+		return "", err
+	}
 	return marshalBounded(envelope)
+}
+
+func windowRemainder(ctx context.Context, store *memory.ProfileStore, owner, sessionID string, messages []messageJSON) (int, int, error) {
+	if len(messages) == 0 {
+		return 0, 0, nil
+	}
+	return store.SessionWindowRemainder(ctx, owner, sessionID, messages[0].ID, messages[len(messages)-1].ID)
 }
 
 func buildRead(owner string, summary *memory.SearchSession, sessionID string, count int, first, last []memory.SearchMessage) (string, error) {
@@ -249,12 +279,51 @@ func buildBrowse(owner string, records []memory.SessionSummaryRecord) (string, e
 
 func toJSON(message memory.SearchMessage, anchor bool, limit int) messageJSON {
 	content, truncated := clampRunes(message.Content, limit)
-	rendered := messageJSON{ID: message.ID, Role: message.Role, Content: content, ToolName: message.ToolName, ToolCalls: clampToolCalls(message.ToolCalls), Timestamp: toEpoch(message.Timestamp), Anchor: anchor}
+	rendered := messageJSON{ID: message.ID, Role: message.Role, Content: content, ToolName: message.ToolName, ToolCalls: clampToolCalls(message.ToolCalls), ToolCallID: message.ToolCallID, Timestamp: toEpoch(message.Timestamp), Anchor: anchor}
+	if len(message.History.Batches) > 0 {
+		history, omitted := boundedSearchHistory(message.History, limit)
+		rendered.ToolHistory, rendered.ToolHistoryTruncated = &history, omitted
+	}
 	if truncated {
 		rendered.ContentTruncated = true
 		rendered.OriginalContentChars = utf8.RuneCountInString(message.Content)
 	}
 	return rendered
+}
+
+// boundedSearchHistory keeps call/result pairs together inside a message. IDs
+// remain canonical message anchors; native trace rounds are nested, never fake
+// transcript rows with invented SQLite message ids.
+func boundedSearchHistory(source memory.ToolHistory, limit int) (memory.ToolHistory, bool) {
+	history := memory.EmptyToolHistory()
+	remaining := 50
+	omitted := false
+	for _, batch := range source.Batches {
+		assistant, cut := clampRunes(batch.AssistantContent, limit)
+		omitted = omitted || cut
+		kept := memory.ToolHistoryBatch{AssistantContent: assistant}
+		for _, call := range batch.Calls {
+			if remaining == 0 {
+				omitted = true
+				continue
+			}
+			remaining--
+			result, cut := clampRunes(call.Result, min(limit, 1000))
+			call.Result, call.ResultTruncated = result, call.ResultTruncated || cut
+			omitted = omitted || cut || call.ResultTruncated || call.ArgumentsTruncated
+			arguments, err := json.Marshal(call.Arguments)
+			if err != nil || utf8.RuneCountInString(string(arguments)) > min(limit, bookendContentRunes) {
+				call.Arguments = map[string]interface{}{}
+				call.ArgumentsTruncated = true
+				omitted = true
+			}
+			kept.Calls = append(kept.Calls, call)
+		}
+		if len(kept.Calls) > 0 {
+			history.Batches = append(history.Batches, kept)
+		}
+	}
+	return history, omitted
 }
 
 // clampToolCalls bounds stored tool-call JSON, which is reference data only.
@@ -280,9 +349,8 @@ func clampRunes(value string, limit int) (string, bool) {
 	return string(runes[:limit]), true
 }
 
-// marshalBounded encodes the envelope and, if it exceeds the rune budget,
-// drops bookends then lower-ranked results until it fits. It never emits
-// truncated JSON; the final fallback is a structurally valid stub.
+// marshalBounded progressively reduces optional context and text while retaining
+// anchors, navigation ids, and explicit truncation flags. Never slice JSON.
 func marshalBounded(value any) (string, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -291,19 +359,71 @@ func marshalBounded(value any) (string, error) {
 	if utf8.RuneCountInString(string(encoded)) <= envelopeRunes {
 		return string(encoded), nil
 	}
-	if envelope, ok := value.(discoverEnvelope); ok {
-		for len(envelope.Results) > 1 {
-			envelope.Results = envelope.Results[:len(envelope.Results)-1]
-			envelope.Count = len(envelope.Results)
-			last := &envelope.Results[len(envelope.Results)-1]
-			last.BookendStart, last.BookendEnd = nil, nil
-			encoded, err = json.Marshal(envelope)
-			if err != nil {
-				return "", err
+	for _, limit := range []int{1000, 500, 200, 64} {
+		switch envelope := value.(type) {
+		case discoverEnvelope:
+			envelope.Truncated = true
+			envelope.Results = append([]discoverResultJSON(nil), envelope.Results...)
+			for i := range envelope.Results {
+				result := &envelope.Results[i]
+				result.BookendStart, result.BookendEnd = nil, nil
+				result.Messages = shrinkMessages(result.Messages, limit)
+				result.Snippet = clamp(result.Snippet, limit)
 			}
-			if utf8.RuneCountInString(string(encoded)) <= envelopeRunes {
-				return string(encoded), nil
+			value = envelope
+		case readEnvelope:
+			envelope.Truncated = true
+			envelope.Messages = shrinkMessages(envelope.Messages, limit)
+			value = envelope
+		case scrollEnvelope:
+			envelope.Truncated = true
+			envelope.Messages = shrinkMessages(envelope.Messages, limit)
+			value = envelope
+		case browseEnvelope:
+			envelope.Results = append([]browseResultJSON(nil), envelope.Results...)
+			for i := range envelope.Results {
+				envelope.Results[i].Preview = clamp(envelope.Results[i].Preview, limit)
 			}
+			value = envelope
+		}
+		encoded, err = json.Marshal(value)
+		if err != nil {
+			return "", err
+		}
+		if utf8.RuneCountInString(string(encoded)) <= envelopeRunes {
+			return string(encoded), nil
+		}
+	}
+	// Structural overhead may still exceed the budget for very many tool calls.
+	// Preserve canonical navigation and at least the anchor/first+last messages.
+	for {
+		changed := false
+		switch envelope := value.(type) {
+		case discoverEnvelope:
+			if len(envelope.Results) > 1 {
+				envelope.Results = envelope.Results[:len(envelope.Results)-1]
+				envelope.Count = len(envelope.Results)
+				changed = true
+			} else if len(envelope.Results) == 1 {
+				envelope.Results[0].Messages, changed = reduceMessages(envelope.Results[0].Messages)
+			}
+			value = envelope
+		case readEnvelope:
+			envelope.Messages, changed = reduceMessages(envelope.Messages)
+			value = envelope
+		case scrollEnvelope:
+			envelope.Messages, changed = reduceMessages(envelope.Messages)
+			value = envelope
+		}
+		if !changed {
+			break
+		}
+		encoded, err = json.Marshal(value)
+		if err != nil {
+			return "", err
+		}
+		if utf8.RuneCountInString(string(encoded)) <= envelopeRunes {
+			return string(encoded), nil
 		}
 	}
 	stub := map[string]any{"success": true, "mode": "truncated", "message": "Session search result exceeded the size bound; narrow the query, reduce limit, or read a single session."}
@@ -312,4 +432,41 @@ func marshalBounded(value any) (string, error) {
 		return "", err
 	}
 	return string(stubbed), nil
+}
+
+func shrinkMessages(messages []messageJSON, limit int) []messageJSON {
+	result := append([]messageJSON(nil), messages...)
+	for i := range result {
+		message := &result[i]
+		text, cut := clampRunes(message.Content, limit)
+		if cut {
+			if !message.ContentTruncated {
+				message.OriginalContentChars = utf8.RuneCountInString(message.Content)
+			}
+			message.Content, message.ContentTruncated = text, true
+		}
+		if message.ToolHistory != nil {
+			history, omitted := boundedSearchHistory(*message.ToolHistory, limit)
+			message.ToolHistory, message.ToolHistoryTruncated = &history, message.ToolHistoryTruncated || omitted
+		}
+	}
+	return result
+}
+
+func reduceMessages(messages []messageJSON) ([]messageJSON, bool) {
+	if len(messages) > 2 {
+		remove := len(messages) / 2
+		if messages[remove].Anchor {
+			remove--
+		}
+		return append(messages[:remove:remove], messages[remove+1:]...), true
+	}
+	for i := range messages {
+		if messages[i].ToolHistory != nil && len(messages[i].ToolHistory.Batches) > 0 {
+			messages[i].ToolHistory = nil
+			messages[i].ToolHistoryTruncated = true
+			return messages, true
+		}
+	}
+	return messages, false
 }
