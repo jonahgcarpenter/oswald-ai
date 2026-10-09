@@ -17,12 +17,17 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger) error {
 	bootstrapLog := log.Server("tool.bootstrap")
+	visionPolicy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}
+	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandler(cache))); err != nil {
+		return fmt.Errorf("register vision_analyze tool: %w", err)
+	}
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
 	if comfyURL == "" {
 		if err := reg.DisableBuiltin(imagegenerate.Name); err != nil {

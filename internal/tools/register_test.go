@@ -19,6 +19,7 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -103,8 +104,9 @@ func TestRegisterCatalogOmitsRemovedMemoryTools(t *testing.T) {
 func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	reg := newTestRegistry(t, testConfig())
 	want := map[string]bool{
-		websearch.Name:  true,
-		toolmemory.Name: true,
+		visionanalyze.Name: true,
+		websearch.Name:     true,
+		toolmemory.Name:    true,
 	}
 	got := map[string]bool{}
 	for _, tool := range reg.LLMTools() {
@@ -122,6 +124,18 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 	// reserved name must stay hidden and handler-less.
 	if _, shown := visibleTestTool(reg, sessionsearch.Name); shown || reg.HasHandler(sessionsearch.Name) {
 		t.Fatal("session_search advertised without a profile store")
+	}
+}
+
+func TestVisionRegisteredWithoutComfyUIAndUsesMetadataHistory(t *testing.T) {
+	reg := newTestRegistry(t, &config.Config{})
+	tool, visible := visibleTestTool(reg, visionanalyze.Name)
+	policy, configured := reg.Policy(visionanalyze.Name)
+	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || !policy.BlockDuplicates || policy.MaxFailures != 2 || policy.History.Mode != governance.HistoryMetadata || policy.History.SearchResult {
+		t.Fatal("vision tool was not independently registered with bounded metadata-only policy")
+	}
+	if reg.HasHandler(imagegenerate.Name) {
+		t.Fatal("vision registration enabled unconfigured image generation")
 	}
 }
 
@@ -319,6 +333,9 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		wantFailures := 0
 		if name == websearch.Name {
 			wantUnproductive = 2
+			wantFailures = 2
+		}
+		if name == visionanalyze.Name {
 			wantFailures = 2
 		}
 		if policy.MaxExecutions != wantExecutions {

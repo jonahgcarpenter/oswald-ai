@@ -18,6 +18,49 @@ import (
 
 const reflectedSoulCanary = "SOUL_CANARY_DO_NOT_LOG_OR_RETURN"
 
+func TestGatewayClientPostsImageInsideCorrelatedToolResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"id":"job-vision","status":"completed","status_code":200,"result":{"choices":[{"message":{"role":"assistant","content":"Visible."}}]}}`))
+			return
+		}
+		var body struct {
+			Messages []struct {
+				Role       string          `json:"role"`
+				ToolCallID string          `json:"tool_call_id"`
+				Content    json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(body.Messages) != 2 || body.Messages[0].Role != "assistant" || body.Messages[1].Role != "tool" || body.Messages[1].ToolCallID != "vision" {
+			t.Errorf("unexpected message correlation: %+v", body.Messages)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var parts []gatewayContentPart
+		if err := json.Unmarshal(body.Messages[1].Content, &parts); err != nil || len(parts) != 2 || parts[0].Text != "Question: Inspect" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,abc123" {
+			t.Errorf("tool content lacks image: parts=%+v err=%v", parts, err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"id":"job-vision","status":"pending"}`))
+	}))
+	defer server.Close()
+	client := newTestGatewayClient(server.URL, "test-key", "test-virtual-key", config.NewLogger(config.LevelError))
+	_, err := client.Chat(context.Background(), ChatRequest{Model: "test-model", Messages: []ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "vision", Function: ToolFunction{Name: "vision_analyze"}}}},
+		{Role: "tool", ToolCallID: "vision", Content: "Question: Inspect", Images: []InputImage{{MimeType: "image/png", Data: "abc123"}}},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGatewayClientChatPostsRequestAndParsesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/async/chat/completions" && r.URL.Path != "/v1/async/chat/completions/job-1" {

@@ -45,15 +45,15 @@ func publicIP(ip netip.Addr) bool {
 	return true
 }
 
-func validURL(raw string) (*url.URL, error) {
+func validImageURL(raw string, allowHTTP bool) (*url.URL, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.User != nil || strings.Contains(raw, "#") || u.Hostname() == "" || u.Hostname() == "." {
-		return nil, errors.New("invalid HTTPS image URL")
+	if err != nil || (u.Scheme != "https" && !(allowHTTP && u.Scheme == "http")) || u.Opaque != "" || u.User != nil || strings.Contains(raw, "#") || u.Hostname() == "" || u.Hostname() == "." {
+		return nil, errors.New("invalid image URL")
 	}
 	if port := u.Port(); port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
-			return nil, errors.New("invalid HTTPS port")
+			return nil, errors.New("invalid image URL port")
 		}
 	}
 	return u, nil
@@ -71,8 +71,29 @@ func (c *Cache) importHTTPS(ctx context.Context, userID, rawURL string, lookup f
 	if !userName.MatchString(userID) {
 		return "", nil, "", errors.New("invalid user ID")
 	}
-	if _, err := validURL(rawURL); err != nil {
+	// The existing import deadline includes both download and cache publication.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	data, mime, err := downloadImage(ctx, rawURL, false, lookup, dial, tlsConfig)
+	if err != nil {
 		return "", nil, "", err
+	}
+	path, err := c.Save(ctx, userID, data, mime)
+	if err != nil {
+		return "", nil, "", err
+	}
+	return path, data, mime, nil
+}
+
+// DownloadPublicImage reads a bounded HTTP/HTTPS image without caching it.
+// It pins public-IP dialing, disables proxies, and revalidates redirects.
+func DownloadPublicImage(ctx context.Context, rawURL string) ([]byte, string, error) {
+	return downloadImage(ctx, rawURL, true, net.DefaultResolver.LookupNetIP, nil, nil)
+}
+
+func downloadImage(ctx context.Context, rawURL string, allowHTTP bool, lookup func(context.Context, string, string) ([]netip.Addr, error), dial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config) ([]byte, string, error) {
+	if _, err := validImageURL(rawURL, allowHTTP); err != nil {
+		return nil, "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -88,11 +109,11 @@ func (c *Cache) importHTTPS(ctx context.Context, userID, rawURL string, lookup f
 		}
 		ips, err := lookup(ctx, "ip", host)
 		if err != nil || len(ips) == 0 {
-			return nil, errors.New("HTTPS hostname resolution failed")
+			return nil, errors.New("image hostname resolution failed")
 		}
 		for _, ip := range ips {
 			if !publicIP(ip) {
-				return nil, errors.New("HTTPS destination is not public")
+				return nil, errors.New("image destination is not public")
 			}
 		}
 		pinned := net.JoinHostPort(ips[0].String(), port)
@@ -107,32 +128,34 @@ func (c *Cache) importHTTPS(ctx context.Context, userID, rawURL string, lookup f
 		}
 		// net/http otherwise forwards the previous URL as Referer, including its query.
 		req.Header.Del("Referer")
-		_, err := validURL(req.URL.String())
+		if !allowHTTP && req.URL.Scheme != "https" {
+			return errors.New("image redirect requires HTTPS")
+		}
+		if req.URL.Scheme == "http" && via[len(via)-1].URL.Scheme == "https" {
+			return errors.New("image redirect cannot downgrade HTTPS")
+		}
+		_, err := validImageURL(req.URL.String(), allowHTTP)
 		return err
 	}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("download image: %w", err)
+		return nil, "", fmt.Errorf("download image: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || resp.ContentLength > media.MaxOutputAttachmentBytes {
-		return "", nil, "", errors.New("image download rejected")
+		return nil, "", errors.New("image download rejected")
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxOutputAttachmentBytes+1))
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
 	mime, _, err := validate(data, resp.Header.Get("Content-Type"))
 	if err != nil {
-		return "", nil, "", err
+		return nil, "", err
 	}
-	path, err := c.Save(ctx, userID, data, mime)
-	if err != nil {
-		return "", nil, "", err
-	}
-	return path, data, mime, nil
+	return data, mime, nil
 }

@@ -8,13 +8,19 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 )
 
 func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result governance.Result, execErr error, toolContent string, executedAt time.Time) memory.ToolHistoryCall {
+	args := tc.Function.Arguments
+	if tc.Function.Name == visionanalyze.Name || tc.Function.Name == imagegenerate.Name {
+		args = imageCheckpointArguments(args)
+	}
 	call := memory.ToolHistoryCall{
 		Name:        strings.TrimSpace(tc.Function.Name),
 		HistoryMode: string(governance.HistoryFull),
-		Arguments:   tc.Function.Arguments,
+		Arguments:   args,
 		Status:      "succeeded",
 		Outcome:     string(result.Outcome),
 		ReasonCode:  result.ReasonCode,

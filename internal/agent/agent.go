@@ -23,6 +23,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
@@ -205,7 +206,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		toolExposure.HideBuiltins(imagegenerate.Name)
+		toolExposure.HideBuiltins(imagegenerate.Name, visionanalyze.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -304,7 +305,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-	if gateway != "openai" && a.registry.HasHandler(imagegenerate.Name) {
+	if gateway != "openai" && len(contextImages) > 0 && (a.registry.HasHandler(imagegenerate.Name) || a.registry.HasHandler(visionanalyze.Name)) {
 		if a.imageCache == nil {
 			return nil, fmt.Errorf("image cache is unavailable")
 		}
@@ -402,7 +403,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
 	foregroundCompaction.log = reqLog
 	if len(contextImages) > len(userImages) && a.registry.HasHandler(imagegenerate.Name) {
-		imageContext := sessionImageContext(contextImages, nil)
+		imageContext := sessionImageContext(contextImages)
 		messages = append(messages, imageContext)
 		foregroundCompaction.imageContext = &imageContext
 	}
@@ -470,7 +471,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var lastResp *llm.ChatResponse
 	var outputAttachments []media.OutputAttachment
 	var generatedImages []requestctx.InputImage
-	var visionGeneratedImages []requestctx.InputImage
+	generatedPreviewCount := 0
 	var generatedAttachmentSlots []int
 	imageHighwater := make(map[string]int)
 	for _, image := range contextImages {
@@ -709,6 +710,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if execErr == nil {
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
+				if execErr == nil && len(result.Images) > 0 {
+					if toolName != visionanalyze.Name || gateway == "openai" || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
+						execErr = fmt.Errorf("tool returned unsupported model images")
+					}
+				}
 				if execErr == nil && len(result.Attachments) > 0 {
 					if gateway == "openai" {
 						execErr = fmt.Errorf("attachments are not supported by this gateway")
@@ -727,7 +733,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						} else {
 							if isGenerated {
 								for _, attachment := range result.Attachments {
-									normalized, err := media.NormalizeInputImageFromBytes(nil, attachment.MIMEType, attachment.Data, "generated")
+									normalized, err := media.NormalizeVisionImage(ctx, attachment.Data, attachment.MIMEType, nil)
 									if err != nil {
 										execErr = fmt.Errorf("normalize generated image: %w", err)
 										break
@@ -749,16 +755,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										execErr = fmt.Errorf("cache generated image: %w", err)
 										break
 									}
-									for _, key := range []string{"image", "source_image_id", "image_id", "version", "parent_source_image_id"} {
-										delete(metadata, key)
-									}
-									metadata["image"], _ = json.Marshal(image.Path)
-									encoded, _ := json.Marshal(metadata)
-									result.Content = string(encoded)
-									visionGeneratedImages = append(visionGeneratedImages, image)
-									if len(visionGeneratedImages) > 4 {
-										visionGeneratedImages = visionGeneratedImages[len(visionGeneratedImages)-4:]
-									}
+									preview := normalized.Image
+									preview.Source = "generated"
+									preview.Geometry = &llm.ImageGeometry{SourceWidth: normalized.OriginalWidth, SourceHeight: normalized.OriginalHeight, Width: normalized.Width, Height: normalized.Height}
+									result.Images = []llm.InputImage{preview}
+									result.Content = imagegenerate.ResultText(image.Path, preview.Geometry, normalized.DecodedFormat == "gif")
+									generatedPreviewCount = min(generatedPreviewCount+1, maxToolResultImages)
 									for i := range contextImages {
 										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
 											contextImages[i].ImageID = image.ImageID
@@ -788,7 +790,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										}
 									}
 									ctx = requestctx.WithInputImages(ctx, contextImages)
-									reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", len(visionGeneratedImages)), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
+									reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
 								}
 							}
 							if execErr == nil {
@@ -870,11 +872,16 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				})
 			}
 
+			var toolImages []llm.InputImage
+			if decision.Allowed && execErr == nil {
+				toolImages = result.Images
+			}
 			messages = append(messages, llm.ChatMessage{
 				Role:       "tool",
 				ToolName:   toolName,
 				ToolCallID: toolCallID,
 				Content:    toolContent,
+				Images:     toolImages,
 			})
 			historyPolicy := policy.History.Effective()
 			if !advertised {
@@ -908,11 +915,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if !request.Stateless {
 			foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
 		}
-		if len(generatedImages) > 0 {
-			imageContext := sessionImageContext(contextImages, visionGeneratedImages)
-			messages = replaceSessionImageContext(messages, foregroundCompaction.imageContext, imageContext)
-			foregroundCompaction.imageContext = &imageContext
-		}
+		messages = boundImageToolResults(messages)
+		foregroundCompaction.imageToolRounds = retainedImageToolRounds(messages)
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",

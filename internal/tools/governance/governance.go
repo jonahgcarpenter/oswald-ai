@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
@@ -27,6 +28,8 @@ type Result struct {
 	ReasonCode  string
 	IsDegraded  bool
 	Attachments []media.OutputAttachment
+	// Images are request-local model inputs, never outbound attachments or history.
+	Images []llm.InputImage `json:"-"`
 }
 
 // HistoryMode controls how much of a completed tool call may be retained in

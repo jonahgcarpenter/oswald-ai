@@ -303,6 +303,11 @@ func resizeInputImages(images []llm.InputImage, scaleFor func(image.Image) float
 			Source:            input.Source,
 			IsGIFContactSheet: input.IsGIFContactSheet,
 		}
+		if input.Geometry != nil {
+			geometry := *input.Geometry
+			geometry.Width, geometry.Height = width, height
+			resized[i].Geometry = &geometry
+		}
 	}
 	return resized, nil
 }

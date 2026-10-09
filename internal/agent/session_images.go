@@ -21,7 +21,7 @@ func promptWithAttachedImages(prompt string, images []requestctx.InputImage) str
 	return prompt
 }
 
-func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMessage {
+func sessionImageContext(sources []requestctx.InputImage) llm.ChatMessage {
 	var text strings.Builder
 	text.WriteString(imageContextPrefix)
 	text.WriteString("\nAvailable image_url paths (omit image_url to generate a new image):\n")
@@ -38,12 +38,7 @@ func sessionImageContext(sources, generated []requestctx.InputImage) llm.ChatMes
 		}
 		text.WriteByte('\n')
 	}
-	message := llm.ChatMessage{Role: "user", Content: text.String()}
-	for _, image := range generated {
-		message.Content += "\nGenerated image shown: " + image.Path
-		message.Images = append(message.Images, llm.InputImage{MimeType: image.MIMEType, Data: image.Data, Source: "generated"})
-	}
-	return message
+	return llm.ChatMessage{Role: "user", Content: text.String()}
 }
 
 // planGeneratedImage binds catalog paths to logical image versions. Other valid
@@ -81,24 +76,4 @@ func planGeneratedImage(args map[string]interface{}, sources, selected []request
 		return image, -1, fmt.Errorf("at most four logical images can be delivered per request; edit an existing generated image using its image_url path or ask for another request")
 	}
 	return image, -1, nil
-}
-
-func replaceSessionImageContext(messages []llm.ChatMessage, previous *llm.ChatMessage, imageContext llm.ChatMessage) []llm.ChatMessage {
-	remove := -1
-	if previous != nil {
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].Role == "user" && messages[i].Content == previous.Content {
-				remove = i
-				break
-			}
-		}
-	}
-	result := make([]llm.ChatMessage, 0, len(messages)+1)
-	for i, message := range messages {
-		if i == remove {
-			continue
-		}
-		result = append(result, message)
-	}
-	return append(result, imageContext)
 }

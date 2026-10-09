@@ -21,19 +21,20 @@ type ForegroundCompactor interface {
 }
 
 type foregroundCompactionState struct {
-	compactor     ForegroundCompactor
-	inputLimit    int
-	prefix        []llm.ChatMessage
-	current       llm.ChatMessage
-	previous      *memory.SessionSummary
-	debt          []memory.SessionTurn
-	nextTurnID    int64
-	currentInDebt bool
-	stream        func(StreamChunk)
-	lastArtifact  memory.SummaryArtifact
-	hasCheckpoint bool
-	imageContext  *llm.ChatMessage
-	log           *config.Logger
+	compactor       ForegroundCompactor
+	inputLimit      int
+	prefix          []llm.ChatMessage
+	current         llm.ChatMessage
+	previous        *memory.SessionSummary
+	debt            []memory.SessionTurn
+	nextTurnID      int64
+	currentInDebt   bool
+	stream          func(StreamChunk)
+	lastArtifact    memory.SummaryArtifact
+	hasCheckpoint   bool
+	imageContext    *llm.ChatMessage
+	imageToolRounds []llm.ChatMessage
+	log             *config.Logger
 }
 
 type foregroundCompactionStats struct {
@@ -101,6 +102,7 @@ func (s *foregroundCompactionState) prepare(ctx context.Context, messages []llm.
 	if s.imageContext != nil {
 		rebuilt = append(rebuilt, *s.imageContext)
 	}
+	rebuilt = append(rebuilt, s.imageToolRounds...)
 	s.previous = &memory.SessionSummary{
 		Narrative: artifact.Narrative, OpenTasks: artifact.OpenTasks,
 		Commitments: artifact.Commitments, Entities: artifact.Entities,

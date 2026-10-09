@@ -15,13 +15,22 @@ type ToolCall struct {
 	Function ToolFunction `json:"function"`
 }
 
-// InputImage is a validated image payload attached to a user request.
+// ImageGeometry describes request-local source coordinates and displayed dimensions.
+// Region, when present, is [x1, y1, x2, y2] with exclusive upper coordinates.
+type ImageGeometry struct {
+	SourceWidth, SourceHeight int
+	Width, Height             int
+	Region                    *[4]int
+}
+
+// InputImage is a validated image payload attached to a model message.
 // Data must contain base64-encoded normalized image bytes.
 type InputImage struct {
-	MimeType          string `json:"mime_type,omitempty"`
-	Data              string `json:"data"`
-	Source            string `json:"source,omitempty"`
-	IsGIFContactSheet bool   `json:"-"`
+	MimeType          string         `json:"mime_type,omitempty"`
+	Data              string         `json:"data"`
+	Source            string         `json:"source,omitempty"`
+	IsGIFContactSheet bool           `json:"-"`
+	Geometry          *ImageGeometry `json:"-"`
 }
 
 // ChatMessage is a single turn in a conversation.

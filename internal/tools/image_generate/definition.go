@@ -9,7 +9,7 @@ const Name = "image_generate"
 func Definition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        Name,
-		Description: "Generate an image from a text description, or transform an existing image by supplying image_url. For transformations, describe the complete desired final image and the details to retain. Editing affects the whole image and may change faces, geometry, or other details; exact preservation and localized edits are not guaranteed. Returns the generated image as a private absolute file path in the image field, with the image delivered as an attachment.",
+		Description: "Generate an image from a text description, or transform an existing image by supplying image_url. For transformations, describe the complete desired final image and the details to retain. Editing affects the whole image and may change faces, geometry, or other details; exact preservation and localized edits are not guaranteed. Returns the image directly in the tool result with its private absolute cache path and source dimensions. The model preview may be downscaled; the latest successful original version is delivered as an attachment with the final response.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{

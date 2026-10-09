@@ -12,13 +12,14 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
 
 // BuiltinDefinitions returns every Go-owned builtin tool definition in
 // registration order.
 func BuiltinDefinitions() []llm.ToolDefinition {
-	return []llm.ToolDefinition{toolmemory.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition()}
+	return []llm.ToolDefinition{toolmemory.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition()}
 }
 
 // NewRegistryFromConfig creates a Registry with Go definitions and configured

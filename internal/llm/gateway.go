@@ -144,9 +144,6 @@ func mapToGatewayMessages(msgs []ChatMessage) []gatewayMessage {
 		bm := gatewayMessage{Role: m.Role}
 		if m.Role == "tool" {
 			bm.ToolCallID = m.ToolCallID
-			bm.Content = m.Content
-			result[i] = bm
-			continue
 		}
 		if len(m.Images) > 0 {
 			parts := make([]gatewayContentPart, 0, 1+len(m.Images))
