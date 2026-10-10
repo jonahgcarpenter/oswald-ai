@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1202,6 +1204,48 @@ finalize:
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
+	// Session-row attributes are resolved before persistence. The system
+	// prompt ledger stores the exact rendered system message alongside its
+	// hex SHA-256, matching operator data.
+	sessionModel := strings.TrimSpace(a.model)
+	if lastResp != nil && strings.TrimSpace(lastResp.Model) != "" {
+		sessionModel = strings.TrimSpace(lastResp.Model)
+	}
+	modelConfig, _ := json.Marshal(map[string]any{"gateway_runtime": map[string]any{"provider": strings.TrimSpace(a.provider), "base_url": strings.TrimSpace(a.billingBaseURL), "api_mode": "chat_completions"}})
+	systemPromptText := ""
+	if len(promptContext.Messages) > 0 && promptContext.Messages[0].Role == "system" {
+		systemPromptText = promptContext.Messages[0].Content
+	}
+	systemPromptHash := ""
+	if systemPromptText != "" {
+		sum := sha256.Sum256([]byte(systemPromptText))
+		systemPromptHash = hex.EncodeToString(sum[:])
+	}
+	chatType := "group"
+	if request.IsDirect {
+		chatType = "dm"
+	}
+	// The response kind doubles as the session activity description. It is
+	// computed before persistence because it only reads settled loop outputs.
+	responseKind := "answer"
+	if toolGovernanceStopReason != "" {
+		responseKind = "tool_limit"
+	}
+	if temporaryParserFallback {
+		responseKind = "parser_fallback"
+	}
+	if imageSizeFallbackUsed {
+		responseKind = "image_fallback"
+	}
+	if finalContent == contextCompactionFallback {
+		responseKind = "context_fallback"
+	}
+	if finalContent == emptyResponseFallback && !temporaryParserFallback {
+		responseKind = "empty_fallback"
+	}
+	if finalContent == generatedImagePartialResponse {
+		responseKind = "image_partial"
+	}
 	// Attachments-only turns (MEDIA tokens stripped all visible text) still
 	// persist so delivery gating and history stay consistent.
 	if (finalContent != "" || len(outputAttachments) > 0) && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
@@ -1217,7 +1261,7 @@ finalize:
 			completionTokens = lastResp.CompletionTokens
 		}
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, AssistantFinishReason: finishReason, AssistantReasoning: finalThinking, AssistantReasoningContent: finalThinking, AssistantTokenCount: completionTokens, UserPlatformMessageID: request.PlatformMessageID, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, AssistantFinishReason: finishReason, AssistantReasoning: finalThinking, AssistantReasoningContent: finalThinking, AssistantTokenCount: completionTokens, UserPlatformMessageID: request.PlatformMessageID, Model: sessionModel, BillingProvider: strings.TrimSpace(a.provider), BillingBaseURL: strings.TrimSpace(a.billingBaseURL), ModelConfig: string(modelConfig), ChatID: strings.TrimSpace(request.ChatID), ChatType: chatType, ChatDisplayName: strings.TrimSpace(request.ChatDisplayName), Platform: strings.TrimSpace(gateway), TransportProfile: strings.TrimSpace(request.TransportProfile), PlatformUserID: strings.TrimSpace(request.Principal.ExternalID), PlatformDisplayName: strings.TrimSpace(displayName), SystemPromptHash: systemPromptHash, SystemPromptText: systemPromptText, ActivityDescription: responseKind, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(generatedImages) > 0 {
@@ -1247,26 +1291,6 @@ finalize:
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("status", responseStatus),
 	)
-
-	responseKind := "answer"
-	if toolGovernanceStopReason != "" {
-		responseKind = "tool_limit"
-	}
-	if temporaryParserFallback {
-		responseKind = "parser_fallback"
-	}
-	if imageSizeFallbackUsed {
-		responseKind = "image_fallback"
-	}
-	if finalContent == contextCompactionFallback {
-		responseKind = "context_fallback"
-	}
-	if finalContent == emptyResponseFallback && !temporaryParserFallback {
-		responseKind = "empty_fallback"
-	}
-	if finalContent == generatedImagePartialResponse {
-		responseKind = "image_partial"
-	}
 	return &Response{
 		Kind:              responseKind,
 		Model:             a.model,

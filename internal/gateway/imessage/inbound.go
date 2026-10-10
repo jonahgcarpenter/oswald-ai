@@ -164,6 +164,14 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	}
 	g.rememberInboundMessage(msg, sessionKey, normalizedSenderID, displayName)
 
+	// The plain conversation name rides alongside the formatted chat label
+	// for the session origin record: peer name in DMs, chat name in groups.
+	chatDisplayName := displayName
+	if isGroup {
+		if name := g.chatName(chat.GUID); name != "" {
+			chatDisplayName = name
+		}
+	}
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
 		RequestID:  requestID,
@@ -184,9 +192,13 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		Text:              textWithoutMention,
 		PublicUserText:    publicUserText,
 		PlatformMessageID: msg.GUID,
-		Images:            images,
-		Unsupported:       unsupported,
-		Reply:             reply,
+		ChatDisplayName:   chatDisplayName,
+		// Adapters are process-global: the receiving credential always
+		// belongs to the reserved default profile.
+		TransportProfile: "default",
+		Images:           images,
+		Unsupported:      unsupported,
+		Reply:            reply,
 		OnAllowed: func() {
 			g.startProcessingIndicators(chat.GUID, requestID)
 		},

@@ -54,11 +54,15 @@ type Request struct {
 	Prompt      string
 	// PlatformMessageID is the untrusted inbound transport message identifier.
 	PlatformMessageID string
-	Stateless         bool
-	ClientHistory     []llm.ChatMessage
-	Images            []llm.InputImage
-	StreamFunc        func(agent.StreamChunk)
-	ResponseChan      chan Result
+	// ChatDisplayName is the untrusted plain conversation name.
+	ChatDisplayName string
+	// TransportProfile names the profile owning the receiving adapter.
+	TransportProfile string
+	Stateless        bool
+	ClientHistory    []llm.ChatMessage
+	Images           []llm.InputImage
+	StreamFunc       func(agent.StreamChunk)
+	ResponseChan     chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -288,7 +292,7 @@ func (b *Broker) Submit(req *Request) error {
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
-			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID,
+			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
 		if cause := context.Cause(w.ctx); cause != nil {

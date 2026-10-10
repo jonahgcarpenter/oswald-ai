@@ -421,6 +421,8 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		ChatLabel:         req.ChatLabel,
 		IsDirect:          req.IsDirect,
 		PlatformMessageID: req.PlatformMessageID,
+		ChatDisplayName:   req.ChatDisplayName,
+		TransportProfile:  req.TransportProfile,
 		Prompt:            decision.Prompt,
 		Stateless:         req.Stateless,
 		ClientHistory:     req.ClientHistory,

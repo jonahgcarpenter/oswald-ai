@@ -65,8 +65,10 @@ type SearchFilter struct {
 	Exclude []string
 	// Roles controls matching, not surrounding context. Nil defaults to user and assistant.
 	Roles map[string]bool
-	// LiveSessionID is the active conversation's session id; it and its lineage
-	// are omitted because that content is already in the model's live context.
+	// LiveSessionID is the active conversation's session id; it and the
+	// sessions forked from it are omitted. Older lineage generations predate
+	// the live conversation and remain recallable, deduped to one entry per
+	// lineage root.
 	LiveSessionID string
 	// GroupSource and GroupID constrain discovery to one group conversation
 	// (for example one Discord channel or iMessage chat). Both must be set
@@ -140,20 +142,46 @@ func (s *ProfileStore) DiscoverySessions(ctx context.Context, owner string, filt
 	return s.discoverIndexed(ctx, owner, filter)
 }
 
-// addLiveLineage marks the live conversation's lineage root as excluded so
-// already-in-context content is never recalled.
-func (s *ProfileStore) addLiveLineage(ctx context.Context, owner, liveSessionID string, excluded map[string]bool) error {
-	if strings.TrimSpace(liveSessionID) == "" {
-		return nil
+// lineageSubtree returns the live session plus every session descended from
+// it. Older generations predate the live conversation and stay visible;
+// forks extend it and are omitted with it. The identifier may be a session
+// id or key; unknown identifiers exclude nothing.
+func (s *ProfileStore) lineageSubtree(ctx context.Context, owner, live string) (map[string]bool, error) {
+	subtree := map[string]bool{}
+	if strings.TrimSpace(live) == "" {
+		return subtree, nil
 	}
-	root, err := s.lineageRoot(ctx, owner, liveSessionID)
+	id, err := s.resolveSearchSession(ctx, owner, live)
+	if err != nil || id == "" {
+		return subtree, err
+	}
+	rows, err := s.db.SQL().QueryContext(ctx, `SELECT id,COALESCE(parent_session_id,'') FROM sessions WHERE profile_name=?`, owner)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if root != "" {
-		excluded[root] = true
+	defer rows.Close()
+	children := make(map[string][]string)
+	for rows.Next() {
+		var child, parent string
+		if err := rows.Scan(&child, &parent); err != nil {
+			return nil, err
+		}
+		children[parent] = append(children[parent], child)
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	queue := []string{id}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if subtree[current] {
+			continue
+		}
+		subtree[current] = true
+		queue = append(queue, children[current]...)
+	}
+	return subtree, nil
 }
 
 // excludedLineage expands inspected session ids into their full lineage roots.
@@ -421,12 +449,11 @@ func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID 
 	if err != nil {
 		return nil, err
 	}
-	liveRoot := roots[liveSessionID]
-	if liveSessionID != "" && liveRoot == "" {
-		liveRoot, err = s.lineageRoot(ctx, owner, liveSessionID)
-		if err != nil {
-			return nil, err
-		}
+	// Only the live session and the sessions forked from it are omitted;
+	// older generations are delivered history and remain browsable.
+	subtree, err := s.lineageSubtree(ctx, owner, liveSessionID)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.db.SQL().QueryContext(ctx, `
 SELECT s.id, s.source, COALESCE(s.model,''), COALESCE(s.title,''),
@@ -451,7 +478,7 @@ ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`, owner)
 		record.StartedAt = secondsToTime(started)
 		record.LastActive = secondsToTime(last)
 		root := roots[record.SessionID]
-		if root == "" || root == liveRoot || seen[root] {
+		if root == "" || seen[root] || subtree[record.SessionID] {
 			continue
 		}
 		seen[root] = true
@@ -562,7 +589,8 @@ func (s *ProfileStore) SharesLineage(ctx context.Context, owner, left, right str
 }
 
 // RecentSessionsExcluding returns recent delivered sessions with the live
-// conversation's lineage omitted.
+// conversation and its forks omitted. Lineage mates dedupe to one entry per
+// lineage root.
 func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
 	return s.recentSessions(ctx, owner, liveSessionID, limit)
 }

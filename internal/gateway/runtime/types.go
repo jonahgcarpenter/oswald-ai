@@ -56,6 +56,13 @@ type Request struct {
 	// PlatformMessageID is the untrusted inbound transport message identifier
 	// (Discord message id, BlueBubbles message GUID). Empty when unavailable.
 	PlatformMessageID string
+	// ChatDisplayName is the untrusted plain conversation name recorded in the
+	// session origin record. Empty omits it.
+	ChatDisplayName string
+	// TransportProfile names the profile owning the receiving adapter,
+	// credential, and allowlist. Adapters are process-global today, so inbound
+	// gateway traffic always arrives as the reserved default profile.
+	TransportProfile string
 	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage

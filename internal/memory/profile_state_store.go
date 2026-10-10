@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,7 +214,16 @@ func (s *ProfileStore) ResolveSessionContext(ctx context.Context, owner, key str
 		if err != nil {
 			return result, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,source,user_id,session_key,profile_name,transport_profile,started_at,last_activity_at,origin_json) VALUES(?,?,?,?,?,?,?,?,?)`, config.NewRequestID(), source, owner, key, owner, owner, now, now, string(origin)); err != nil {
+		// Link the new session to its most recent ended predecessor, preserving
+		// the conversation lineage across resets and expiry.
+		var parent any
+		var parentID string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND source=? AND session_key=? AND ended_at IS NOT NULL ORDER BY ended_at DESC, started_at DESC LIMIT 1`, owner, source, key).Scan(&parentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, err
+		} else if err == nil {
+			parent = parentID
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,source,user_id,session_key,profile_name,parent_session_id,started_at,last_activity_at,origin_json) VALUES(?,?,?,?,?,?,?,?,?)`, config.NewRequestID(), source, owner, key, owner, parent, now, now, string(origin)); err != nil {
 			return result, err
 		}
 		result.IsNewSession = true
@@ -342,6 +352,18 @@ type messageToolCall struct {
 	Function messageToolCallFunction `json:"function"`
 }
 
+// isHexDigest reports whether value is lowercase hexadecimal, the canonical
+// encoding for stored SHA-256 digests.
+func isHexDigest(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < '0' || (c > '9' && c < 'a') || c > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
 // nullString stores empty strings as NULL so sparse detail columns keep the
 // operator null distribution instead of empty-string sentinels.
 func nullString(value string) any {
@@ -453,6 +475,62 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	platformMessageID := strings.TrimSpace(input.UserPlatformMessageID)
 	if !utf8.ValidString(platformMessageID) || len(platformMessageID) > 512 {
 		return result, errors.New("invalid profile exchange platform message id")
+	}
+	model := strings.TrimSpace(input.Model)
+	if !utf8.ValidString(model) || len(model) > 256 {
+		return result, errors.New("invalid profile exchange model")
+	}
+	for _, field := range []string{input.BillingProvider, input.BillingBaseURL} {
+		if !utf8.ValidString(field) || len(field) > 512 {
+			return result, errors.New("invalid profile exchange billing scope")
+		}
+	}
+	if input.ModelConfig != "" && (!utf8.ValidString(input.ModelConfig) || len(input.ModelConfig) > 8192 || !json.Valid([]byte(input.ModelConfig))) {
+		return result, errors.New("invalid profile exchange model config")
+	}
+	chatID := strings.TrimSpace(input.ChatID)
+	chatType := strings.TrimSpace(input.ChatType)
+	chatDisplayName := strings.TrimSpace(input.ChatDisplayName)
+	platform := strings.TrimSpace(input.Platform)
+	if !utf8.ValidString(chatID) || len(chatID) > 512 || !utf8.ValidString(chatType) || len(chatType) > 32 {
+		return result, errors.New("invalid profile exchange chat identity")
+	}
+	if chatType != "" && chatType != "dm" && chatType != "group" {
+		return result, errors.New("invalid profile exchange chat type")
+	}
+	if !utf8.ValidString(chatDisplayName) || utf8.RuneCountInString(chatDisplayName) > 256 {
+		return result, errors.New("invalid profile exchange chat display name")
+	}
+	if !utf8.ValidString(platform) || len(platform) > 64 {
+		return result, errors.New("invalid profile exchange platform")
+	}
+	transportProfile := strings.TrimSpace(input.TransportProfile)
+	if transportProfile != "" && transportProfile != "default" && !config.ValidProfileName(transportProfile) {
+		return result, errors.New("invalid profile exchange transport profile")
+	}
+	platformUserID := strings.TrimSpace(input.PlatformUserID)
+	if !utf8.ValidString(platformUserID) || len(platformUserID) > 512 {
+		return result, errors.New("invalid profile exchange platform user id")
+	}
+	platformDisplayName := strings.TrimSpace(input.PlatformDisplayName)
+	if !utf8.ValidString(platformDisplayName) || utf8.RuneCountInString(platformDisplayName) > 256 {
+		return result, errors.New("invalid profile exchange platform display name")
+	}
+	systemPromptHash := strings.TrimSpace(input.SystemPromptHash)
+	if systemPromptHash != "" && (len(systemPromptHash) != 64 || !isHexDigest(systemPromptHash)) {
+		return result, errors.New("invalid profile exchange system prompt hash")
+	}
+	if systemPromptHash != "" && !utf8.ValidString(input.SystemPromptText) {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if systemPromptHash == "" && input.SystemPromptText != "" {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if len(input.SystemPromptText) > 1024*1024 {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if !utf8.ValidString(input.ActivityDescription) || utf8.RuneCountInString(input.ActivityDescription) > 256 {
+		return result, errors.New("invalid profile exchange activity description")
 	}
 	for _, batch := range input.History.Batches {
 		if !utf8.ValidString(batch.AssistantContent) || len(batch.AssistantContent) > 128*1024 {
@@ -569,12 +647,28 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	if _, err := tx.ExecContext(ctx, `INSERT INTO state_meta(key,value) VALUES(?,?)`, exchangeKey(id, turnID), string(encoded)); err != nil {
 		return result, err
 	}
+	// Ledger the rendered system prompt before referencing it: the sessions
+	// foreign key is enforced per statement. Rows dedupe on the hash.
+	if systemPromptHash != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO system_prompts(hash,prompt) VALUES(?,?) ON CONFLICT(hash) DO NOTHING`, systemPromptHash, input.SystemPromptText); err != nil {
+			return result, err
+		}
+	}
 	// One exchange owns the contiguous id range from its user row through its
 	// final assistant row: the broker serializes one execution per
 	// conversation, so no same-session rows can interleave this range.
 	totalRows := int64(2 + len(input.History.Batches) + toolResultRows)
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count=message_count+?,tool_call_count=tool_call_count+?,last_activity_at=? WHERE id=?`, totalRows, toolResultRows, seconds, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count=message_count+?,tool_call_count=tool_call_count+?,last_activity_at=?,model=?,model_config=?,billing_provider=?,billing_base_url=?,chat_id=?,chat_type=?,user_id=?,display_name=?,transport_profile=?,system_prompt_hash=?,last_activity_description=?,last_activity_provenance='unknown' WHERE id=?`,
+		totalRows, toolResultRows, seconds,
+		nullString(model), nullString(input.ModelConfig), nullString(strings.TrimSpace(input.BillingProvider)), nullString(strings.TrimSpace(input.BillingBaseURL)),
+		nullString(chatID), nullString(chatType), nullString(platformUserID), nullString(platformDisplayName), nullString(transportProfile),
+		nullString(systemPromptHash), nullString(strings.TrimSpace(input.ActivityDescription)), id); err != nil {
 		return result, err
+	}
+	if platform != "" || chatID != "" || platformUserID != "" {
+		if err := s.mergeSessionOrigin(ctx, tx, id, input.UserID, platform, chatID, chatType, chatDisplayName, platformUserID, platformDisplayName); err != nil {
+			return result, err
+		}
 	}
 	if err := s.boundImages(ctx, tx, id); err != nil {
 		return result, err
@@ -666,7 +760,90 @@ func (s *ProfileStore) markDelivery(ctx context.Context, owner string, turnID in
 	if _, err := tx.ExecContext(ctx, `UPDATE state_meta SET value=? WHERE key=?`, string(encodedState), exchangeKey(id, turnID)); err != nil {
 		return err
 	}
+	if delivered {
+		if err := s.refreshSessionLedger(ctx, tx, id); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
+}
+
+// mergeSessionOrigin records gateway conversation identity into the session
+// origin record while preserving the generation fence fields it already
+// carries. Operator data holds the same platform keys; any other keys already
+// present are retained byte-indifferently.
+func (s *ProfileStore) mergeSessionOrigin(ctx context.Context, tx *sql.Tx, id, owner, platform, chatID, chatType, chatName, userID, userName string) error {
+	var encoded sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT origin_json FROM sessions WHERE id=?`, id).Scan(&encoded); err != nil {
+		return err
+	}
+	record := map[string]any{}
+	if encoded.Valid && strings.TrimSpace(encoded.String) != "" {
+		if err := json.Unmarshal([]byte(encoded.String), &record); err != nil {
+			return errors.New("invalid session origin record")
+		}
+	}
+	set := func(key, value string) {
+		if value != "" {
+			record[key] = value
+		}
+	}
+	set("platform", platform)
+	set("chat_id", chatID)
+	set("chat_name", chatName)
+	set("chat_type", chatType)
+	set("user_id", userID)
+	set("user_name", userName)
+	record["profile"] = owner
+	merged, err := json.Marshal(record)
+	if err != nil || len(merged) > 8192 {
+		return errors.New("invalid session origin record")
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET origin_json=? WHERE id=?`, string(merged), id)
+	return err
+}
+
+// refreshSessionLedger recomputes a session's delivered usage counters and
+// tool-set hash from durable rows, so late delivery repairs the aggregates.
+// Only the main chat task feeds the token counters, matching operator data.
+func (s *ProfileStore) refreshSessionLedger(ctx context.Context, tx *sql.Tx, id string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
+ input_tokens=COALESCE((SELECT SUM(input_tokens) FROM session_model_usage WHERE session_id=? AND task=''),0),
+ output_tokens=COALESCE((SELECT SUM(output_tokens) FROM session_model_usage WHERE session_id=? AND task=''),0),
+ api_call_count=COALESCE((SELECT SUM(api_call_count) FROM session_model_usage WHERE session_id=? AND task=''),0)
+ WHERE id=?`, id, id, id, id); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT tool_name FROM messages WHERE session_id=? AND role='tool' AND tool_name IS NOT NULL AND tool_name<>'' ORDER BY tool_name`, id)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var toolSet any
+	if len(names) > 0 {
+		encoded, err := json.Marshal(names)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(encoded)
+		digest := hex.EncodeToString(sum[:])
+		toolSet = digest
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET tool_names=? WHERE id=?`, toolSet, id)
+	return err
 }
 
 // MarkSessionTurnDelivered publishes the exchange's rows together, including late success.

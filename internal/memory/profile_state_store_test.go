@@ -3,7 +3,10 @@ package memory
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -476,5 +479,191 @@ func TestDisplayIdentityDedupeKey(t *testing.T) {
 		t.Fatal("empty identity malformed")
 	} else if same := displayIdentity("tool", nil, 1, nil, nil, nil); string(same) == string(got) {
 		t.Fatal("NULL content collided with empty content")
+	}
+}
+
+func TestAppendWritesSessionRowAttributes(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Creation leaves transport ownership unset; the first append records the
+	// receiving adapter instead of the runtime profile.
+	created, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createdTransport sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT transport_profile FROM sessions WHERE id=?`, created).Scan(&createdTransport); err != nil {
+		t.Fatal(err)
+	}
+	if createdTransport.Valid {
+		t.Fatalf("creation set transport profile: %q", createdTransport.String)
+	}
+	prompt := "rendered system prompt"
+	sum := sha256.Sum256([]byte(prompt))
+	hash := hex.EncodeToString(sum[:])
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "hello", AssistantText: "done",
+		Model: "test-model", BillingProvider: "custom", BillingBaseURL: "https://models.example/v1",
+		ModelConfig: `{"gateway_runtime":{"provider":"custom","base_url":"https://models.example/v1","api_mode":"chat_completions"}}`,
+		ChatID:      "channel-1", ChatType: "group", Platform: "discord", ChatDisplayName: "general",
+		TransportProfile: "default", PlatformUserID: "+15550001111", PlatformDisplayName: "Alice",
+		SystemPromptHash: hash, SystemPromptText: prompt, ActivityDescription: "answer",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model, modelConfig, billingProvider, billingBaseURL, chatID, chatType, platformUserID, platformDisplayName, transportProfile, promptHash, activity, provenance sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT model,model_config,billing_provider,billing_base_url,chat_id,chat_type,user_id,display_name,transport_profile,system_prompt_hash,last_activity_description,last_activity_provenance FROM sessions WHERE id=?`, id).Scan(
+		&model, &modelConfig, &billingProvider, &billingBaseURL, &chatID, &chatType, &platformUserID, &platformDisplayName, &transportProfile, &promptHash, &activity, &provenance); err != nil {
+		t.Fatal(err)
+	}
+	if model.String != "test-model" || billingProvider.String != "custom" || billingBaseURL.String != "https://models.example/v1" {
+		t.Fatalf("model/billing mismatch: %+v", model)
+	}
+	if !json.Valid([]byte(modelConfig.String)) {
+		t.Fatalf("model config is not JSON: %q", modelConfig.String)
+	}
+	if chatID.String != "channel-1" || chatType.String != "group" || platformUserID.String != "+15550001111" || platformDisplayName.String != "Alice" {
+		t.Fatalf("chat identity mismatch: %q %q %q %q", chatID.String, chatType.String, platformUserID.String, platformDisplayName.String)
+	}
+	if transportProfile.String != "default" {
+		t.Fatalf("transport profile mismatch: %q", transportProfile.String)
+	}
+	if promptHash.String != hash || activity.String != "answer" || provenance.String != "unknown" {
+		t.Fatalf("prompt/activity mismatch: %q %q %q", promptHash.String, activity.String, provenance.String)
+	}
+	var stored string
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT prompt FROM system_prompts WHERE hash=?`, hash).Scan(&stored); err != nil || stored != prompt {
+		t.Fatalf("system prompt not ledgered: %v", err)
+	}
+	var origin string
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT origin_json FROM sessions WHERE id=?`, id).Scan(&origin); err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(origin), &record); err != nil {
+		t.Fatalf("origin is not JSON: %v", err)
+	}
+	// Generation fencing survives the merge; platform identity joins it.
+	if record["version"] != float64(1) || record["generation"] != float64(session.Generation) || record["ttl_seconds"] == nil {
+		t.Fatalf("fence fields lost: %s", origin)
+	}
+	want := map[string]string{"platform": "discord", "chat_id": "channel-1", "chat_name": "general", "chat_type": "group", "user_id": "+15550001111", "user_name": "Alice", "profile": "alice"}
+	for key, value := range want {
+		if record[key] != value {
+			t.Fatalf("origin[%s]=%v want %q: %s", key, record[key], value, origin)
+		}
+	}
+	// A second turn reuses the prompt row instead of duplicating it.
+	if _, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "again", AssistantText: "done", Model: "test-model", SystemPromptHash: hash, SystemPromptText: prompt,
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	var promptRows int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM system_prompts`).Scan(&promptRows); err != nil || promptRows != 1 {
+		t.Fatalf("prompt rows=%d err=%v", promptRows, err)
+	}
+	bad := SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "bad", AssistantText: "done", Model: "m", TransportProfile: "not a profile!",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}}
+	if _, err := s.AppendPendingSessionTurn(ctx, bad); err == nil {
+		t.Fatal("invalid transport profile accepted")
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeliveryRefreshesSessionLedger(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{
+		{Name: "web_search", ProviderCallID: "call-1", Arguments: map[string]interface{}{}, Result: "r1", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		{Name: "memory", ProviderCallID: "call-2", Arguments: map[string]interface{}{}, Result: "r2", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	}}}}
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "hello", AssistantText: "done", History: history, Model: "m",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := ModelUsageRecord{SessionID: key, UserID: "alice", Generation: session.Generation, Model: "m", ApiCalls: 2, PromptTokens: 100, CompletionTokens: 10}
+	if err := s.RecordModelUsage(ctx, usage); err != nil {
+		t.Fatal(err)
+	}
+	compression := usage
+	compression.Task = "compression"
+	compression.PromptTokens, compression.CompletionTokens = 50, 5
+	if err := s.RecordModelUsage(ctx, compression); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	var input, output, calls int
+	var toolSet sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT input_tokens,output_tokens,api_call_count,tool_names FROM sessions WHERE id=?`, id).Scan(&input, &output, &calls, &toolSet); err != nil {
+		t.Fatal(err)
+	}
+	if input != 100 || output != 10 || calls != 2 {
+		t.Fatalf("ledger rollup counted non-chat tasks: in=%d out=%d calls=%d", input, output, calls)
+	}
+	encoded, _ := json.Marshal([]string{"memory", "web_search"})
+	sum := sha256.Sum256(encoded)
+	if toolSet.String != hex.EncodeToString(sum[:]) {
+		t.Fatalf("tool set hash mismatch: %q", toolSet.String)
+	}
+}
+
+func TestNewSessionLinksParent(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ActiveSessionID(ctx, "alice", key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Generation != 2 {
+		t.Fatalf("generation=%d", session.Generation)
+	}
+	second, err := s.ActiveSessionID(ctx, "alice", key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parent sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id=?`, second).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent.String != first {
+		t.Fatalf("parent=%q want %q", parent.String, first)
 	}
 }
