@@ -54,7 +54,7 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 		}
 		if err == nil {
 			if attempt > 1 {
-				log.Debug("agent.model.image_retry_recovered", "model recovered after image resize", config.F("attempt_count", attempt), config.F("status", "ok"))
+				log.Debug("agent.model.image_retry_recovered", "model recovered after image resize", config.F("attempt_count", attempt))
 			}
 			return resp, nil, false
 		}

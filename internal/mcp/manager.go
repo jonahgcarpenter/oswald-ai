@@ -289,7 +289,7 @@ func (m *Manager) closeSession(closeFn func() error) error {
 	if err != nil {
 		m.log.Warn("mcp.server.close_failed", "failed to close MCP session", append(fields, config.F("status", "degraded"), config.ErrorField(err))...)
 	} else {
-		m.log.Debug("mcp.server.close.complete", "closed MCP session", append(fields, config.F("status", "ok"))...)
+		m.log.Debug("mcp.server.close.complete", "closed MCP session", fields...)
 	}
 	return err
 }

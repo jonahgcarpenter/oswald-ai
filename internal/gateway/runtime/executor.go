@@ -182,6 +182,16 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			f = append(f, config.F("model", model))
 		}
 		log.Debug("gateway.request.complete", "completed addressed gateway request", f...)
+		if terminalErr == nil {
+			terminalErr = outcome.Err
+		}
+		completionError := config.Field{}
+		if status == "error" || status == "rejected" {
+			completionError = config.ErrorField(terminalErr)
+			if terminalErrorCode != "" {
+				completionError = config.F("error_code", terminalErrorCode)
+			}
+		}
 		if isAdmitted {
 			// Success is implicit: ok outcomes and completed execution are
 			// omitted so a present field always means something.
@@ -196,6 +206,9 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			if !isExecutionComplete {
 				completion = append(completion, config.F("is_execution_complete", isExecutionComplete))
 			}
+			if completionError.Key != "" {
+				completion = append(completion, completionError)
+			}
 			if kind == "prompt" {
 				completion = append(completion,
 					config.F("tool_count", toolExecutionCount),
@@ -207,15 +220,8 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 				log.Info("command.completed", "completed command", completion...)
 			}
 		}
-		if terminalErr == nil {
-			terminalErr = outcome.Err
-		}
 		if status == "error" {
-			errorField := config.ErrorField(terminalErr)
-			if terminalErrorCode != "" {
-				errorField = config.F("error_code", terminalErrorCode)
-			}
-			log.Warn("gateway.request.failed", "gateway request failed", append(fields(), config.F("status", "error"), errorField)...)
+			log.Warn("gateway.request.failed", "gateway request failed", append(fields(), config.F("status", "error"), completionError)...)
 		}
 	}()
 
@@ -492,7 +498,6 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("session_id", req.SessionKey),
 			config.F("profile", userID),
 			config.F("response_chars", len(result.Response.Response)),
-			config.F("status", "ok"),
 		)
 		if deps.Compaction != nil && result.Response.SourceTurnID > 0 {
 			source := memory.DeliverySource{

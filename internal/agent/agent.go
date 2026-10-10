@@ -221,7 +221,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.F("status", "error"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.ErrorField(soulErr))
 		return nil, fmt.Errorf("read user soul: %w", soulErr)
 	}
-	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
+	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))))
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
 	dynamicSystemPrompt := soulContent
@@ -242,9 +242,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				config.F("is_session_new", session.IsNewSession))
 			if session.IsNewSession {
 				reqLog.Debug("agent.session.bound", "bound tenant session context",
-					config.F("session_generation", session.Generation),
-					config.F("status", "ok"),
-				)
+					config.F("session_generation", session.Generation))
 			}
 		}
 	}
@@ -276,7 +274,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		contextBlock = renderFileMemory(userContent, memoryContent)
-		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()))
 	}
 	appendContext := func(block string) {
 		if block == "" {
@@ -304,7 +302,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Warn("agent.images.load_failed", "failed to load session images", config.F("status", "degraded"), config.ErrorField(err))
 		} else {
 			contextImages = append(contextImages, priorImages...)
-			reqLog.Debug("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()), config.F("status", "ok"))
+			reqLog.Debug("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()))
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
@@ -520,7 +518,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Debug("agent.context.compacted", "compacted active request context",
 				config.F("iteration", iteration), config.F("compacted_unit_count", compactionStats.DebtCount),
 				config.F("estimated_before", compactionStats.EstimatedBefore), config.F("estimated_after", compactionStats.EstimatedAfter),
-				config.F("prompt_budget", inputLimit), config.F("status", "ok"))
+				config.F("prompt_budget", inputLimit))
 		}
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
@@ -562,7 +560,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			if err == nil {
 				// Continue with the response recovered after compaction.
-				reqLog.Debug("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
+				reqLog.Debug("agent.model.context_retry_recovered", "model recovered after context compaction")
 			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
 				useFallback(generatedImagePartialResponse)
 				goto finalize
@@ -649,7 +647,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
-			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration), config.F("status", "ok"))
+			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
 		iterationDecision := toolGovernor.BeginToolIteration()
@@ -788,7 +786,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										}
 									}
 									ctx = requestctx.WithInputImages(ctx, contextImages)
-									reqLog.Debug("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
+									reqLog.Debug("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)))
 								}
 							}
 							if execErr == nil {
@@ -942,7 +940,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if compactionStats.Compacted {
 			reqLog.Debug("agent.context.compacted", "compacted active request context before final model call",
 				config.F("compacted_unit_count", compactionStats.DebtCount), config.F("estimated_before", compactionStats.EstimatedBefore),
-				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit), config.F("status", "ok"))
+				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit))
 		}
 
 		modelIterations++
@@ -1102,7 +1100,7 @@ finalize:
 					finalThinking += retryResp.Message.Thinking
 				}
 				if strings.TrimSpace(finalContent) != "" {
-					reqLog.Debug("agent.response.empty_retry_recovered", "model recovered after empty response", config.F("status", "ok"))
+					reqLog.Debug("agent.response.empty_retry_recovered", "model recovered after empty response")
 				}
 			}
 		}
@@ -1160,7 +1158,7 @@ finalize:
 		if storedTurn.ID > 0 {
 			persistenceStatus = "pending"
 			if len(generatedImages) > 0 {
-				reqLog.Debug("agent.images.stored", "stored pending session images", config.F("image_count", len(generatedImages)), config.F("status", "ok"))
+				reqLog.Debug("agent.images.stored", "stored pending session images", config.F("image_count", len(generatedImages)))
 			}
 		}
 	}

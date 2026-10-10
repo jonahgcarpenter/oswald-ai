@@ -317,6 +317,7 @@ func (b *Broker) Submit(req *Request) error {
 		}
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("profile", req.Principal.CanonicalUserID),
 			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
 		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
 		return err

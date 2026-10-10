@@ -76,7 +76,7 @@ func (r *runtimeResponder) sendAndRemember(text string) error {
 	if err != nil {
 		return err
 	}
-	r.gateway.log().Debug("gateway.response.sent", "sent imessage response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("response_chars", len(text)), config.F("status", "ok"))
+	r.gateway.log().Debug("gateway.response.sent", "sent imessage response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("response_chars", len(text)))
 	r.gateway.rememberBotMessage(messageGUID, r.sessionKey, r.chatGUID, r.senderID, text)
 	return nil
 }

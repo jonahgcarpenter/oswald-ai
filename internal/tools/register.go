@@ -33,7 +33,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		if err := reg.DisableBuiltin(imagegenerate.Name); err != nil {
 			return fmt.Errorf("failed to disable %s tool: %w", imagegenerate.Name, err)
 		}
-		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled image generation because no server is configured", config.F("tool_name", imagegenerate.Name), config.F("status", "ok"))
+		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled image generation because no server is configured", config.F("tool_name", imagegenerate.Name))
 	} else {
 		textWorkflow, err := comfy_ui.NewWorkflow(comfy_ui.TextToImage)
 		if err != nil {
@@ -92,7 +92,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		if err := reg.DisableBuiltin(websearch.Name); err != nil {
 			return fmt.Errorf("failed to disable %s tool: %w", websearch.Name, err)
 		}
-		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled web search because no search provider is configured", config.F("tool_name", websearch.Name), config.F("status", "ok"))
+		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled web search because no search provider is configured", config.F("tool_name", websearch.Name))
 	}
 	if searcher != nil {
 		searchPolicy := toolPolicy(2, normalizeWebSearchArgs)
