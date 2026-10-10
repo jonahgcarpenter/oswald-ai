@@ -20,8 +20,11 @@ const replyLookupBodyLimit = 1 << 20
 
 var errInvalidReplyResponse = errors.New("invalid reply response")
 
-// Select exactly one conversational predecessor before checking authorship. Raw
-// SQLite dates preserve nanoseconds; ROWID breaks ties without API sort support.
+// Select the newest conversational message in the anchored thread that is
+// strictly older than the incoming reply, then let the caller check authorship.
+// Raw SQLite dates preserve nanoseconds; ROWID breaks ties without API sort
+// support. Thread part matching tolerates an omitted part on either side, since
+// BlueBubbles and macOS can disagree about part metadata for the same thread.
 // The root belongs to its thread even though its own thread origin is NULL.
 const threadPredecessorSQL = `message.ROWID = (
  SELECT p.ROWID FROM message AS p JOIN message AS a ON a.guid = :anchor
@@ -30,16 +33,10 @@ const threadPredecessorSQL = `message.ROWID = (
  AND COALESCE(a.thread_originator_part, '') = :part
  AND EXISTS (SELECT 1 FROM chat_message_join aj JOIN chat ac ON ac.ROWID = aj.chat_id WHERE aj.message_id = a.ROWID AND ac.guid = :chat)
  AND EXISTS (SELECT 1 FROM chat_message_join pj JOIN chat pc ON pc.ROWID = pj.chat_id WHERE pj.message_id = p.ROWID AND pc.guid = :chat)
- AND (p.guid = :root OR (p.thread_originator_guid = :root AND COALESCE(p.thread_originator_part, '') = :part))
+ AND (p.guid = :root OR (p.thread_originator_guid = :root AND (COALESCE(p.thread_originator_part, '') = '' OR :part = '' OR COALESCE(p.thread_originator_part, '') = :part)))
  AND p.date > 0 AND (p.date < a.date OR (p.date = a.date AND p.ROWID < a.ROWID))
  AND COALESCE(p.associated_message_type, 0) = 0
  AND p.is_system_message = 0 AND p.is_service_message = 0 AND COALESCE(p.item_type, 0) = 0
- AND NOT EXISTS (
-  SELECT 1 FROM message u JOIN chat_message_join uj ON uj.message_id = u.ROWID JOIN chat uc ON uc.ROWID = uj.chat_id
-   WHERE uc.guid = :chat AND (u.guid = :root OR (u.thread_originator_guid = :root AND COALESCE(u.thread_originator_part, '') = :part))
-  AND COALESCE(u.associated_message_type, 0) = 0 AND u.is_system_message = 0 AND u.is_service_message = 0 AND COALESCE(u.item_type, 0) = 0
-  AND (u.date IS NULL OR u.date <= 0)
- )
  ORDER BY p.date DESC, p.ROWID DESC LIMIT 1
 )`
 
@@ -70,9 +67,13 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 			config.F("not_found_count", notFoundCount), config.F("rejected_count", rejectedCount), config.F("error_count", errorCount))
 	}()
 	chatGUID := msg.primaryChat().GUID
-	// An explicit selected target must not be replaced by a different thread root.
+	// Group thread order, not a selected-bubble association, owns admission and
+	// enrichment. Direct references remain available outside threaded groups.
+	threaded := allowPredecessor && msg.ThreadOriginatorGUID != ""
 	target := msg.replyTargetGUID()
-	if msg.ReplyToGUID != "" {
+	if threaded {
+		target = msg.ThreadOriginatorGUID
+	} else if msg.ReplyToGUID != "" {
 		target = msg.ReplyToGUID
 	}
 	if ctx.Err() != nil {
@@ -86,7 +87,7 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	cached, cachedOK := g.lookupMessage(target)
 	if cachedOK && cached.ChatGUID == chatGUID {
 		cacheCount++
-		if cached.IsFromBot || !allowPredecessor || msg.ThreadOriginatorGUID == "" || target != msg.ThreadOriginatorGUID {
+		if !threaded {
 			directCount = 1
 			if !cached.IsFromBot {
 				reasonCode = "not_eligible_bot"
@@ -129,19 +130,16 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	if !ok {
 		return
 	}
-	result, found = g.replyContextFromMessage(data, chatGUID), true
-	if result.IsFromBot || !allowPredecessor || msg.ThreadOriginatorGUID == "" || target != msg.ThreadOriginatorGUID {
+	if !threaded {
+		result, found = g.replyContextFromMessage(data, chatGUID), true
 		directCount = 1
 		if !result.IsFromBot {
 			reasonCode = "not_eligible_bot"
 		}
 		return
 	}
-	// Only a real human root can enable the fallback. Failed bot sends cannot.
+	// Validate the root without treating its author as the thread's latest author.
 	switch {
-	case data.IsFromMe:
-		reject("root_not_human")
-		return
 	case data.OriginalROWID <= 0:
 		reject("root_row_missing")
 		return
@@ -173,23 +171,8 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	case anchor.ThreadOriginatorGUID != msg.ThreadOriginatorGUID:
 		reject("anchor_thread_mismatch")
 		return
-	case msg.ThreadOriginatorPart != "" && anchor.ThreadOriginatorPart != msg.ThreadOriginatorPart:
+	case msg.ThreadOriginatorPart != "" && anchor.ThreadOriginatorPart != "" && anchor.ThreadOriginatorPart != msg.ThreadOriginatorPart:
 		reject("anchor_part_mismatch")
-		return
-	}
-	if anchor.ReplyToGUID != "" && anchor.ReplyToGUID != target {
-		// REST may expose the selected bubble omitted from the webhook. Resolve
-		// it directly; never override an explicit human target with a predecessor.
-		phase = "direct_target"
-		explicit, ok := lookup(anchor.ReplyToGUID)
-		if !ok {
-			return
-		}
-		result, found = g.replyContextFromMessage(explicit, chatGUID), true
-		directCount = 1
-		if !result.IsFromBot {
-			reasonCode = "not_eligible_bot"
-		}
 		return
 	}
 	phase = "predecessor"
@@ -232,16 +215,18 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 	case p.GUID == anchor.GUID || p.OriginalROWID == anchor.OriginalROWID || *p.DateCreated > *anchor.DateCreated:
 		reject("predecessor_order_mismatch")
 		return
-	case p.GUID != target && (p.ThreadOriginatorGUID != target || p.ThreadOriginatorPart != anchor.ThreadOriginatorPart):
+	case p.GUID != target && (p.ThreadOriginatorGUID != target || (p.ThreadOriginatorPart != "" && anchor.ThreadOriginatorPart != "" && p.ThreadOriginatorPart != anchor.ThreadOriginatorPart)):
 		reject("predecessor_thread_mismatch")
 		return
 	}
 	// Millisecond equality cannot verify raw ordering locally; SQL owns that check.
-	result = g.replyContextFromMessage(p, chatGUID)
+	result, found = g.replyContextFromMessage(p, chatGUID), true
 	result.IsPredecessor = true
 	predecessorCount = 1
 	if !result.IsFromBot {
 		reasonCode = "not_eligible_bot"
+	} else {
+		reasonCode = "resolved"
 	}
 	return
 }

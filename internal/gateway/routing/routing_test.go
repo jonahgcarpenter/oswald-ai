@@ -28,7 +28,7 @@ func TestCommandRoutingRequiresMentionOnlyInGroups(t *testing.T) {
 		{name: "direct", wantAction: ActionCommand},
 		{name: "mentioned group", isGroup: true, isMention: true, wantAction: ActionCommand},
 		{name: "unmentioned group", isGroup: true, wantAction: ActionIgnore},
-		{name: "unmentioned group reply", isGroup: true, isReplyToBot: true, wantAction: ActionIgnore},
+		{name: "unmentioned group reply", isGroup: true, isReplyToBot: true, wantAction: ActionCommand},
 		{name: "mentioned group reply", isGroup: true, isMention: true, isReplyToBot: true, wantAction: ActionCommand},
 	}
 	for _, test := range tests {

@@ -126,7 +126,7 @@ CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);`)
 }
 
 func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
-	for _, name := range []string{"cold without delivery receipts", "warm human root", "intervening human", "future human", "tie human", "tie bot", "raw nanoseconds", "missing raw date", "root only", "other chat", "other thread", "other part", "reaction", "service", "system", "attachment bot", "attachment human", "failed bot"} {
+	for _, name := range []string{"cold without delivery receipts", "warm human root", "bot root intervening human", "warm bot root intervening human", "bot root only", "intervening human", "future human", "tie human", "tie bot", "raw nanoseconds", "missing raw date", "root only", "other chat", "other thread", "other part", "reaction", "service", "system", "attachment bot", "attachment human", "failed bot"} {
 		t.Run(name, func(t *testing.T) {
 			root, bot, incoming := replyFixture("root", 1, false), replyFixture("bot", 2, true), replyFixture("incoming", 10, false)
 			bot.ThreadOriginatorGUID, incoming.ThreadOriginatorGUID = "root", "root"
@@ -141,6 +141,13 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 			case "intervening human":
 				messages = append(messages, extra)
 				want = false
+			case "bot root intervening human", "warm bot root intervening human":
+				messages[0].IsFromMe = true
+				messages = append(messages, extra)
+				want = false
+			case "bot root only":
+				root.IsFromMe = true
+				messages = []messageLookupData{root, incoming}
 			case "future human":
 				dates["extra"] = raw + 40
 				messages = append(messages, extra)
@@ -159,7 +166,6 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 			case "missing raw date":
 				dates["extra"] = 0
 				messages = append(messages, extra)
-				want = false
 			case "root only":
 				messages = []messageLookupData{root, incoming}
 				want = false
@@ -206,6 +212,9 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 			if name == "warm human root" {
 				g.rememberInboundMessage(webhookMessage{GUID: "root", Text: "cached root", Chats: root.Chats}, "unused", "human", "Human")
 			}
+			if name == "warm bot root intervening human" {
+				g.rememberBotMessage("root", "unused", root.Chats[0].GUID, "imessage:self", "cached bot root")
+			}
 			g.processIncomingMessage(threadIncoming())
 			requests := model.primaryRequests()
 			if (len(requests) == 1) != want {
@@ -223,7 +232,7 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 				return
 			}
 			prompt := requests[0].Messages[len(requests[0].Messages)-1].Content
-			if !strings.Contains(prompt, "preceding thread message, not necessarily the selected bubble") || !strings.Contains(prompt, "follow up") {
+			if !strings.Contains(prompt, "[Replying to Oswald") || strings.Contains(prompt, "preceding thread message") || !strings.Contains(prompt, "follow up") {
 				t.Fatalf("prompt=%s", prompt)
 			}
 			if model.lastPrincipal().ExternalID != "+15551234567" {
@@ -240,9 +249,76 @@ func TestThreadPredecessorAdmissionAndOutboundThreading(t *testing.T) {
 	}
 }
 
-func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
+func TestVerifiedGroupThreadOutcomes(t *testing.T) {
+	// Synthetic content reproduces the five observed thread/ROWID shapes without
+	// retaining private transcripts or requiring an operator's API credentials.
+	for _, tc := range []struct {
+		incoming, prior int64
+		text            string
+		bot, rootOnly   bool
+	}{
+		{7549, 7479, "Test", false, false},
+		{7550, 7464, "Test", true, false},
+		{7551, 7423, "Test", true, false},
+		{7553, 7412, "T", true, false},
+		{7555, 7547, "T", false, true},
+	} {
+		t.Run(fmt.Sprint(tc.incoming), func(t *testing.T) {
+			root := replyFixture("root", 1, false)
+			prior := replyFixture("prior", tc.prior, tc.bot)
+			anchor := replyFixture("incoming", tc.incoming, false)
+			prior.Text = fmt.Sprintf("Complete prior answer %d.\n\nSecond paragraph.", tc.prior)
+			prior.ThreadOriginatorGUID, prior.ThreadOriginatorPart = root.GUID, "0:0"
+			anchor.ThreadOriginatorGUID, anchor.ThreadOriginatorPart = root.GUID, "0:0"
+			// The association points to a bot in another thread. It cannot
+			// authorize this thread or become the quoted context.
+			other := replyFixture("unrelated-bot", tc.prior+1, true)
+			anchor.ReplyToGUID = other.GUID
+			messages := []messageLookupData{root, prior, anchor, other}
+			if tc.rootOnly {
+				root.OriginalROWID, root.Text = tc.prior, prior.Text
+				messages = []messageLookupData{root, anchor, other}
+			}
+			// A later bot response must never become the predecessor when
+			// replaying the webhook after delivery or from a cold cache.
+			later := replyFixture("later-bot", tc.incoming+1, true)
+			later.ThreadOriginatorGUID, later.ThreadOriginatorPart = root.GUID, "0:0"
+			messages = append(messages, later)
+			dates := map[string]int64{root.GUID: 100, prior.GUID: 200, anchor.GUID: 300, other.GUID: 250, later.GUID: 400}
+			bb := newFakeBlueBubbles(t)
+			defer bb.server.Close()
+			bb.mu.Lock()
+			bb.messageLookup = sqliteReplyLookup(t, messages, dates)
+			bb.mu.Unlock()
+			g, b, model := newIMessageTestGateway(t, bb.server.URL)
+			defer b.Shutdown()
+			msg := threadIncoming()
+			msg.Text = tc.text
+			g.processIncomingMessage(msg)
+			requests := model.primaryRequests()
+			if !tc.bot {
+				if len(requests) != 0 || len(bb.sentMessages()) != 0 {
+					t.Fatal("human predecessor invoked the bot")
+				}
+				return
+			}
+			if len(requests) != 1 {
+				t.Fatalf("model requests=%d", len(requests))
+			}
+			prompt := requests[0].Messages[len(requests[0].Messages)-1].Content
+			if want := fmt.Sprintf("[Replying to Oswald: %q]\n\n%s", prior.Text, tc.text); prompt != want {
+				t.Fatalf("prompt=%q want=%q", prompt, want)
+			}
+			if !bb.waitForPath("/api/v1/chat/private-chat%3B+%3Bgroup/typing") {
+				t.Fatal("indicator did not finish")
+			}
+		})
+	}
+}
+
+func TestThreadIgnoresSelectedBubbleAssociation(t *testing.T) {
 	for _, level := range []config.Level{config.LevelDebug} {
-		for _, mode := range []string{"bot", "human", "failed bot", "missing error", "corrupt", "retracted", "empty", "wrong chat", "wrong guid", "missing flags", "system", "missing", "lookup failure"} {
+		for _, mode := range []string{"bot association", "human association", "webhook association", "cached bot root", "latest human", "lookup failure"} {
 			t.Run(level.String()+"/"+mode, func(t *testing.T) {
 				log, events := captureInfoSummaries(t, level)
 				root := replyFixture("private-attachment-root", 1, false)
@@ -251,41 +327,19 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 				prior := replyFixture("private-attachment-prior", 9, true)
 				anchor.ThreadOriginatorGUID, anchor.ThreadOriginatorPart, anchor.ReplyToGUID = root.GUID, "0:0", target.GUID
 				prior.ThreadOriginatorGUID, prior.ThreadOriginatorPart = root.GUID, "0:0"
-				status, reason, direct, rejected, missing, failed := "ok", "not_eligible_bot", float64(1), float64(0), float64(0), float64(0)
+				admitted, phase, reason, status := true, "predecessor", "resolved", "ok"
+				direct, predecessor, rejected, missing, failed := float64(0), float64(1), float64(0), float64(0), float64(0)
+				wantGets, wantPredecessors := int32(0), int32(1)
 				switch mode {
-				case "bot":
-					reason = "resolved"
-				case "human":
+				case "human association":
 					target.IsFromMe = false
-				case "failed bot":
-					code := 1
-					target.SendError = &code
-				case "missing error":
-					target.SendError = nil
-				case "corrupt":
-					target.IsCorrupt = true
-				case "retracted":
-					date := int64(1)
-					target.DateRetracted = &date
-				case "empty":
-					target.Text = ""
-				case "wrong chat":
-					target.Chats[0].GUID = "private-chat-wrong"
-					status, reason, direct, rejected = "rejected", "message_chat_mismatch", 0, 1
-				case "wrong guid":
-					target.GUID = "private-attachment-wrong"
-					status, reason, direct, rejected = "rejected", "message_guid_mismatch", 0, 1
-				case "missing flags":
-					target.IsServiceMessage = nil
-					status, reason, direct, rejected = "rejected", "message_flags_missing", 0, 1
-				case "system":
-					yes := true
-					target.IsSystemMessage = &yes
-					status, reason, direct, rejected = "rejected", "non_conversational_message", 0, 1
-				case "missing":
-					reason, direct, missing = "message_not_found", 0, 1
+				case "cached bot root":
+					root.IsFromMe = true
+				case "latest human":
+					prior.IsFromMe = false
+					admitted, reason = false, "not_eligible_bot"
 				case "lookup failure":
-					status, reason, direct, failed = "error", "lookup_failed", 0, 1
+					admitted, reason, status, predecessor, failed = false, "lookup_failed", "error", 0, 1
 				}
 				bb := newFakeBlueBubbles(t)
 				defer bb.server.Close()
@@ -294,14 +348,8 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 				bb.messageLookup = func(w http.ResponseWriter, r *http.Request) {
 					if r.Method == http.MethodGet {
 						gets.Add(1)
-						if r.URL.Path != "/api/v1/message/"+anchor.ReplyToGUID {
-							t.Error("GET fallback did not look up explicit target")
-						}
-						if mode == "lookup failure" {
-							w.WriteHeader(http.StatusServiceUnavailable)
-						} else {
-							_ = json.NewEncoder(w).Encode(messageLookupResponse{})
-						}
+						t.Error("thread lookup unexpectedly used GET fallback")
+						_ = json.NewEncoder(w).Encode(messageLookupResponse{})
 						return
 					}
 					var q messageQueryRequest
@@ -315,7 +363,10 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 					}
 					if q.Where[0].Statement != "message.guid = :reply_guid" {
 						predecessors.Add(1)
-						// A prior bot is available, but must never replace the explicit target.
+						if mode == "lookup failure" {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
 						_ = json.NewEncoder(w).Encode(messageQueryResponse{Data: []messageLookupData{prior}})
 						return
 					}
@@ -324,23 +375,13 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 					row := root
 					if step == 2 {
 						wantGUID, row = anchor.GUID, anchor
-					} else if step == 3 {
-						wantGUID, row = anchor.ReplyToGUID, target
 					} else if step != 1 {
 						t.Error("repeated direct lookup")
 					}
 					if q.Where[0].Args["reply_guid"] != wantGUID {
 						t.Error("unexpected direct lookup order or target")
 					}
-					if step == 3 && mode == "lookup failure" {
-						w.WriteHeader(http.StatusServiceUnavailable)
-						return
-					}
-					rows := []messageLookupData{row}
-					if step == 3 && mode == "missing" {
-						rows = nil
-					}
-					_ = json.NewEncoder(w).Encode(messageQueryResponse{Data: rows})
+					_ = json.NewEncoder(w).Encode(messageQueryResponse{Data: []messageLookupData{row}})
 				}
 				bb.mu.Unlock()
 				g, b, model := newIMessageTestGateway(t, bb.server.URL)
@@ -348,27 +389,29 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 				g.Log = log
 				msg := threadIncoming()
 				msg.GUID, msg.ThreadOriginatorGUID = anchor.GUID, root.GUID
-				if mode != "bot" {
-					// Profile admission precedes reply lookup; failed reply invocation
+				if mode == "webhook association" {
+					msg.ReplyToGUID = target.GUID
+				}
+				if mode == "cached bot root" {
+					g.rememberBotMessage(root.GUID, "unused", msg.primaryChat().GUID, "imessage:self", root.Text)
+				}
+				if !admitted {
+					// Profile admission precedes reply lookup; a rejected reply
 					// must still prevent attachment downloads and model execution.
 					msg.Attachments = []attachment{{GUID: "private-attachment-input", MimeType: "image/png"}}
 				}
 				g.processIncomingMessage(msg)
-				wantGets := int32(0)
-				if mode == "missing" || mode == "lookup failure" {
-					wantGets = 1
-				}
-				if queries.Load() != 3 || gets.Load() != wantGets || predecessors.Load() != 0 {
+				if queries.Load() != 2 || gets.Load() != wantGets || predecessors.Load() != wantPredecessors {
 					t.Fatalf("queries=%d gets=%d predecessors=%d", queries.Load(), gets.Load(), predecessors.Load())
 				}
 				requests := model.primaryRequests()
-				if mode == "bot" {
+				if admitted {
 					if len(requests) != 1 {
 						t.Fatalf("model invocations=%d", len(requests))
 					}
 					prompt := requests[0].Messages[len(requests[0].Messages)-1].Content
-					if !strings.Contains(prompt, target.Text) || !strings.Contains(prompt, msg.Text) || strings.Contains(prompt, "preceding thread message") || strings.Contains(prompt, root.Text) || strings.Contains(prompt, prior.Text) {
-						t.Fatal("explicit target was not enriched as a direct reply")
+					if prompt != fmt.Sprintf("[Replying to Oswald: %q]\n\n%s", prior.Text, msg.Text) {
+						t.Fatalf("prompt=%s", prompt)
 					}
 					if model.lastPrincipal().ExternalID != msg.Handle.Address {
 						t.Fatal("explicit reply changed ownership")
@@ -391,12 +434,13 @@ func TestRESTExplicitReplyTargetAdmissionAndThreading(t *testing.T) {
 					}
 				}
 				count := 0
+				wantRemote := float64(3)
 				for _, event := range events() {
 					if event["event"] != "gateway.reply_lookup.complete" {
 						continue
 					}
 					count++
-					if event["level"] != "debug" || event["record_kind"] != "measurement" || event["phase"] != "direct_target" || event["reason_code"] != reason || event["status"] != status || event["outcome"] != "complete" || event["remote_count"] != float64(3) || event["direct_count"] != direct || event["predecessor_count"] != float64(0) || event["rejected_count"] != rejected || event["not_found_count"] != missing || event["error_count"] != failed {
+					if event["level"] != "debug" || event["record_kind"] != "measurement" || event["phase"] != phase || event["reason_code"] != reason || event["status"] != status || event["outcome"] != "complete" || event["remote_count"] != wantRemote || event["direct_count"] != direct || event["predecessor_count"] != predecessor || event["rejected_count"] != rejected || event["not_found_count"] != missing || event["error_count"] != failed {
 						t.Fatalf("measurement=%+v", event)
 					}
 				}
@@ -432,7 +476,6 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 			{"wrong thread", "anchor_thread_mismatch", func(m *messageLookupData) { m.ThreadOriginatorGUID = "private-attachment-other-root" }},
 			{"missing thread", "anchor_thread_mismatch", func(m *messageLookupData) { m.ThreadOriginatorGUID = "" }},
 			{"wrong part", "anchor_part_mismatch", func(m *messageLookupData) { m.ThreadOriginatorPart = "1:0" }},
-			{"missing part", "anchor_part_mismatch", func(m *messageLookupData) { m.ThreadOriginatorPart = "" }},
 		} {
 			t.Run(level.String()+"/"+tc.name, func(t *testing.T) {
 				log, events := captureInfoSummaries(t, level)
@@ -463,8 +506,8 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 				defer server.Close()
 				g := &Gateway{BlueBubblesURL: server.URL, Log: log}
 				result, found := g.resolveReply(context.Background(), msg, true, "req-anchor-rejection")
-				if !found || result.IsFromBot || result.IsPredecessor || result.Text != root.Text || calls.Load() != 2 {
-					t.Fatal("invalid anchor did not stop after the validated human root")
+				if found || result.IsFromBot || result.IsPredecessor || result.Text != "" || calls.Load() != 2 {
+					t.Fatal("invalid anchor exposed root context or continued lookup")
 				}
 				got := events()
 				if len(got) != 1 {
@@ -483,7 +526,7 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 }
 
 func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
-	for _, name := range []string{"wrong root guid", "wrong root chat", "missing root chat", "wrong anchor guid", "wrong anchor chat", "missing anchor chat", "anchor absent", "anchor row zero", "anchor row negative", "anchor date absent", "anchor thread", "anchor part", "anchor target", "candidate chat", "candidate missing chat", "candidate thread", "candidate part", "candidate part with empty anchor", "candidate date absent", "candidate row zero", "candidate future", "candidate ambiguous", "candidate anchor", "candidate reaction", "candidate corrupt", "candidate retracted", "explicit human", "no thread"} {
+	for _, name := range []string{"wrong root guid", "wrong root chat", "missing root chat", "wrong anchor guid", "wrong anchor chat", "missing anchor chat", "anchor absent", "anchor row zero", "anchor row negative", "anchor date absent", "anchor thread", "anchor part", "candidate chat", "candidate missing chat", "candidate thread", "candidate part", "candidate date absent", "candidate row zero", "candidate future", "candidate ambiguous", "candidate anchor", "candidate reaction", "candidate corrupt", "candidate retracted", "no thread"} {
 		t.Run(name, func(t *testing.T) {
 			root, anchor, bot := replyFixture("root", 1, false), replyFixture("incoming", 10, false), replyFixture("bot", 2, true)
 			anchor.ThreadOriginatorGUID, bot.ThreadOriginatorGUID = "root", "root"
@@ -514,8 +557,6 @@ func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
 				anchor.ThreadOriginatorGUID = "wrong"
 			case "anchor part":
 				anchor.ThreadOriginatorPart = "wrong"
-			case "anchor target":
-				anchor.ReplyToGUID = "human"
 			case "candidate chat":
 				bot.Chats[0].GUID = "wrong"
 			case "candidate missing chat":
@@ -524,8 +565,6 @@ func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
 				bot.ThreadOriginatorGUID = "wrong"
 			case "candidate part":
 				bot.ThreadOriginatorPart = "wrong"
-			case "candidate part with empty anchor":
-				msg.ThreadOriginatorPart, anchor.ThreadOriginatorPart = "", ""
 			case "candidate date absent":
 				bot.DateCreated = nil
 			case "candidate row zero":
@@ -542,8 +581,6 @@ func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
 			case "candidate retracted":
 				date := int64(1)
 				bot.DateRetracted = &date
-			case "explicit human":
-				msg.ReplyToGUID = "human"
 			case "no thread":
 				msg.ThreadOriginatorGUID = ""
 				msg.ReplyToGUID = "root"
@@ -578,7 +615,7 @@ func TestReplyResolverRejectsUnvalidatedMetadata(t *testing.T) {
 			// No broker or media services: invalid reply metadata must not
 			// proceed past invocation preflight after profile admission.
 			log := config.NewLogger(config.LevelError)
-			g := &Gateway{BlueBubblesURL: server.URL, Log: log, Links: imessageProfileDirectory(t, t.TempDir(), log)}
+			g := &Gateway{BlueBubblesURL: server.URL, Log: log, Links: imessageProfileDirectory(t, t.TempDir(), log), messageIndex: make(map[string]messageContext)}
 			g.processIncomingMessage(msg)
 			if calls.Load() > 3 {
 				t.Fatalf("duplicate or unbounded lookup: %d", calls.Load())
@@ -661,8 +698,10 @@ func TestReplyLookupFailureDoesNotBlockMentionOrDM(t *testing.T) {
 			}
 			g.processIncomingMessage(msg)
 			if mode == "group command" {
-				if calls.Load() != 0 || len(bb.paths()) != 0 || len(model.primaryRequests()) != 0 {
-					t.Fatal("group command rejection did work")
+				// An unmentioned command now attempts reply resolution first; a
+				// failed lookup still must not reach the model.
+				if calls.Load() != 2 || len(model.primaryRequests()) != 0 {
+					t.Fatalf("group command failure did work: calls=%d requests=%d", calls.Load(), len(model.primaryRequests()))
 				}
 			} else {
 				if calls.Load() != 2 || len(model.primaryRequests()) != 1 {
@@ -725,6 +764,7 @@ func TestReplyResolverDebugMeasurement(t *testing.T) {
 	g.rememberBotMessage("private-attachment", "private-chat", "private-chat;+;group", "private-address", "private-body")
 	msg := threadIncoming()
 	msg.ReplyToGUID = "private-attachment"
+	msg.ThreadOriginatorGUID = ""
 	result, found := g.resolveReply(context.Background(), msg, true, "req-reply")
 	if !found || !result.IsFromBot {
 		t.Fatal("cached reference missing")
@@ -777,9 +817,10 @@ func TestThreadPredecessorExactPartSQL(t *testing.T) {
 			switch name {
 			case "missing anchor part":
 				msg.ThreadOriginatorPart, anchor.ThreadOriginatorPart = "", ""
-				want = root
+				want = other
 			case "matching missing parts":
 				msg.ThreadOriginatorPart, anchor.ThreadOriginatorPart, bot.ThreadOriginatorPart = "", "", ""
+				want = other
 			case "remote anchor part":
 				msg.ThreadOriginatorPart = ""
 			case "tied rows":
@@ -848,7 +889,11 @@ func TestReplyResolverTerminalMeasurements(t *testing.T) {
 				if mode == "canceled" {
 					cancel()
 				}
-				g.resolveReply(ctx, threadIncoming(), true, "req-terminal")
+				msg := threadIncoming()
+				if mode == "direct" {
+					msg.ThreadOriginatorGUID, msg.ReplyToGUID = "", "root"
+				}
+				g.resolveReply(ctx, msg, true, "req-terminal")
 				got := events()
 				if len(got) != 1 || got[0]["event"] != "gateway.reply_lookup.complete" || got[0]["level"] != "debug" || got[0]["request_id"] != "req-terminal" {
 					t.Fatalf("events=%+v", got)
@@ -956,5 +1001,76 @@ func TestThreadReplyImageEnrichmentOnlyAfterAdmission(t *testing.T) {
 				t.Fatal("indicator did not finish")
 			}
 		})
+	}
+}
+
+// An omitted thread part on the incoming reply (or on the REST anchor) must not
+// hide a bot-authored message that carries part metadata for the same thread.
+func TestThreadContinuationToleratesOmittedPart(t *testing.T) {
+	root, bot, anchor := replyFixture("root", 1, false), replyFixture("bot", 2, true), replyFixture("incoming", 10, false)
+	bot.ThreadOriginatorGUID, anchor.ThreadOriginatorGUID = "root", "root"
+	bot.ThreadOriginatorPart, anchor.ThreadOriginatorPart = "0:0:166", ""
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	bb.mu.Lock()
+	bb.messageLookup = sqliteReplyLookup(t, []messageLookupData{root, bot, anchor}, map[string]int64{"root": 100, "bot": 200, "incoming": 300})
+	bb.mu.Unlock()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	msg := threadIncoming()
+	msg.ThreadOriginatorPart = ""
+	g.processIncomingMessage(msg)
+	requests := model.primaryRequests()
+	if len(requests) != 1 {
+		t.Fatalf("model invocations=%d", len(requests))
+	}
+	prompt := requests[0].Messages[len(requests[0].Messages)-1].Content
+	if !strings.Contains(prompt, bot.Text) || !strings.Contains(prompt, msg.Text) {
+		t.Fatalf("continuation prompt=%s", prompt)
+	}
+}
+
+// An unmentioned group command resolves like a prompt: it runs only when the
+// reply resolves to a bot-authored message.
+func TestUnmentionedGroupCommandReplyingToBotExecutes(t *testing.T) {
+	root, bot, anchor := replyFixture("root", 1, false), replyFixture("bot", 2, true), replyFixture("incoming", 10, false)
+	bot.ThreadOriginatorGUID, anchor.ThreadOriginatorGUID = "root", "root"
+	bot.ThreadOriginatorPart, anchor.ThreadOriginatorPart = "0:0", "0:0"
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	bb.mu.Lock()
+	bb.messageLookup = sqliteReplyLookup(t, []messageLookupData{root, bot, anchor}, map[string]int64{"root": 100, "bot": 200, "incoming": 300})
+	bb.mu.Unlock()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	msg := threadIncoming()
+	msg.Text = "/help"
+	g.processIncomingMessage(msg)
+	if len(model.primaryRequests()) != 0 {
+		t.Fatal("unmentioned command reached the model")
+	}
+	if len(bb.sentMessages()) == 0 {
+		t.Fatal("resolved command was not delivered")
+	}
+}
+
+// An unmentioned group command whose reply resolves to a human message stays
+// ignored, exactly like a prompt.
+func TestUnmentionedGroupCommandReplyingToHumanIgnored(t *testing.T) {
+	root, human, anchor := replyFixture("root", 1, false), replyFixture("human", 2, false), replyFixture("incoming", 10, false)
+	human.ThreadOriginatorGUID, anchor.ThreadOriginatorGUID = "root", "root"
+	human.ThreadOriginatorPart, anchor.ThreadOriginatorPart = "0:0", "0:0"
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	bb.mu.Lock()
+	bb.messageLookup = sqliteReplyLookup(t, []messageLookupData{root, human, anchor}, map[string]int64{"root": 100, "human": 200, "incoming": 300})
+	bb.mu.Unlock()
+	g, b, model := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	msg := threadIncoming()
+	msg.Text = "/help"
+	g.processIncomingMessage(msg)
+	if len(model.primaryRequests()) != 0 || len(bb.sentMessages()) != 0 {
+		t.Fatal("human-resolved command was invoked")
 	}
 }
