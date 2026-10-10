@@ -22,7 +22,7 @@ import (
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
-func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger) error {
+func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) error {
 	bootstrapLog := log.Server("tool.bootstrap")
 	visionPolicy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
 	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandler(cache))); err != nil {
@@ -114,7 +114,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 			NormalizeArgs:   normalizeSessionSearchArgs,
 			History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		}
-		if err := reg.RegisterHandler(sessionsearch.Name, sessionPolicy, registry.Handler(sessionsearch.NewHandler(profileStore))); err != nil {
+		if err := reg.RegisterHandler(sessionsearch.Name, sessionPolicy, registry.Handler(sessionsearch.NewHandler(profileStore, peerMaps...))); err != nil {
 			return fmt.Errorf("register session_search tool: %w", err)
 		}
 	}
@@ -155,7 +155,7 @@ func normalizeImageGenerateArgs(args map[string]interface{}) interface{} {
 // identical reads collapse, while distinct queries remain distinct.
 func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
 	normalized := map[string]interface{}{}
-	for _, key := range []string{"query", "session_id", "sort", "detail", "after", "before", "role_filter"} {
+	for _, key := range []string{"query", "session_id", "profile", "sort", "detail", "after", "before", "role_filter"} {
 		if value, ok := args[key].(string); ok {
 			normalized[key] = strings.Join(strings.Fields(value), " ")
 		}

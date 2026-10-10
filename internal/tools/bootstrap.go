@@ -24,13 +24,13 @@ func BuiltinDefinitions() []llm.ToolDefinition {
 
 // NewRegistryFromConfig creates a Registry with Go definitions and configured
 // builtin handlers, using a nil profile store for stateless test registries.
-func NewRegistryFromConfig(cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, log *config.Logger) (*registry.Registry, error) {
-	return NewRegistryWithImageCache(cfg, fileStore, profileStore, imagecache.NewProfileCache(cfg.ProfileRoot, cfg.ProfileName), log)
+func NewRegistryFromConfig(cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) (*registry.Registry, error) {
+	return NewRegistryWithImageCache(cfg, fileStore, profileStore, imagecache.NewProfileCache(cfg.ProfileRoot, cfg.ProfileName), log, peerMaps...)
 }
 
 // NewRegistryWithImageCache wires tools to the cache and profile store used by
 // the agent for this process.
-func NewRegistryWithImageCache(cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger) (*registry.Registry, error) {
+func NewRegistryWithImageCache(cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) (*registry.Registry, error) {
 	bootstrapLog := log.Server("tool.bootstrap")
 	reg := registry.New(log.Server("tool.registry"))
 	for _, def := range BuiltinDefinitions() {
@@ -39,7 +39,7 @@ func NewRegistryWithImageCache(cfg *config.Config, fileStore *files.Store, profi
 		}
 	}
 
-	if err := registerHandlers(reg, cfg, fileStore, profileStore, cache, log); err != nil {
+	if err := registerHandlers(reg, cfg, fileStore, profileStore, cache, log, peerMaps...); err != nil {
 		return nil, err
 	}
 	if profileStore == nil {

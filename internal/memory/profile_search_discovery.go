@@ -103,6 +103,10 @@ FROM messages m JOIN sessions s ON s.id=m.session_id
 LEFT JOIN state_meta v ON m.role='assistant' AND v.key=('oswald:v1:turn:'||m.session_id||':'||m.id)
 WHERE ` + searchEligible + ` AND s.source IN ('discord','imessage')`
 	args := []any{owner}
+	if filter.GroupSource != "" && filter.GroupID != "" {
+		query += ` AND s.session_key LIKE ? ESCAPE '\'`
+		args = append(args, escapeLikePrefix(filter.GroupSource)+":"+escapeLikePrefix(filter.GroupID)+":%")
+	}
 	if filter.After != nil {
 		query += " AND s.started_at>=?"
 		args = append(args, float64(filter.After.Unix())+float64(filter.After.Nanosecond())/1e9)
@@ -216,6 +220,13 @@ func (s *ProfileStore) searchLineageRoots(ctx context.Context, owner string) (ma
 		roots[id] = current
 	}
 	return roots, nil
+}
+
+// escapeLikePrefix escapes LIKE metacharacters so a group scope prefix matches
+// literally before the trailing wildcard.
+func escapeLikePrefix(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
 }
 
 func searchExchangeHistory(encoded string) (ToolHistory, error) {
