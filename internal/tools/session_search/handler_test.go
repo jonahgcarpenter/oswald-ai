@@ -229,9 +229,11 @@ func TestDiscoveryReturnsBothSidesAndReadIncludesNativeTraces(t *testing.T) {
 		t.Fatal("assistant-only filter matched user content")
 	}
 	// These counts represent messages outside the returned window, not the
-	// number already included on each side of the anchor.
+	// number already included on each side of the anchor. The traced middle
+	// exchange persists its assistant tool-request and tool rows, so four
+	// delivered messages precede the window.
 	scroll := run(t, store, ctx, map[string]interface{}{"session_id": id, "around_message_id": turn.ID, "window": 1})
-	if scroll["messages_before"].(float64) != 2 || scroll["messages_after"].(float64) != 1 {
+	if scroll["messages_before"].(float64) != 4 || scroll["messages_after"].(float64) != 1 {
 		t.Fatalf("incorrect remainder counts: %+v", scroll)
 	}
 	messages := scroll["messages"].([]interface{})

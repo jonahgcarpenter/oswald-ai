@@ -263,6 +263,106 @@ func TestProfileExchangeRollbackAndNewSessionPreservesFTS(t *testing.T) {
 	}
 }
 
+func TestAppendPersistsToolTranscriptRows(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{
+		AssistantContent: "checking",
+		Calls: []ToolHistoryCall{
+			{Name: "web_search", ProviderCallID: "call_provided_1", Arguments: map[string]interface{}{"query": "x"}, Result: "result one", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+			{Name: "memory", Arguments: map[string]interface{}{"op": "y"}, Result: "result two", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		},
+	}}}
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: 1, UserText: "hello", AssistantText: "done", History: history, AssistantFinishReason: "stop", AssistantReasoning: "thinking trace", AssistantReasoningContent: "thinking trace", AssistantTokenCount: 42, UserPlatformMessageID: "msg-123", Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("exchange row count=%d err=%v", count, err)
+	}
+	type row struct {
+		id      int64
+		role    string
+		content sql.NullString
+		callID  sql.NullString
+		calls   sql.NullString
+		name    sql.NullString
+		finish  sql.NullString
+		reason  sql.NullString
+		tokens  sql.NullInt64
+		plat    sql.NullString
+		ident   []byte
+		order   sql.NullInt64
+		active  int
+	}
+	var rows []row
+	res, err := s.db.SQL().QueryContext(ctx, `SELECT id,role,content,tool_call_id,tool_calls,tool_name,finish_reason,reasoning,token_count,platform_message_id,display_identity,display_order,active FROM messages ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for res.Next() {
+		var r row
+		if err := res.Scan(&r.id, &r.role, &r.content, &r.callID, &r.calls, &r.name, &r.finish, &r.reason, &r.tokens, &r.plat, &r.ident, &r.order, &r.active); err != nil {
+			res.Close()
+			t.Fatal(err)
+		}
+		rows = append(rows, r)
+	}
+	res.Close()
+	if err := res.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].role != "user" || rows[0].plat.String != "msg-123" || rows[1].role != "assistant" || !rows[1].calls.Valid || rows[1].finish.String != "tool_calls" {
+		t.Fatalf("assistant tool-request row malformed: %+v", rows[1])
+	}
+	if rows[2].role != "tool" || rows[2].callID.String != "call_provided_1" || rows[2].name.String != "web_search" || rows[2].content.String != "result one" {
+		t.Fatalf("first tool row malformed: %+v", rows[2])
+	}
+	if rows[3].role != "tool" || rows[3].callID.String == "" || rows[3].callID.String == "call_provided_1" || rows[3].name.String != "memory" {
+		t.Fatalf("fallback tool call id missing: %+v", rows[3])
+	}
+	if rows[4].id != turn.ID || rows[4].role != "assistant" || rows[4].finish.String != "stop" || rows[4].reason.String != "thinking trace" || !rows[4].tokens.Valid || rows[4].tokens.Int64 != 42 {
+		t.Fatalf("final assistant row malformed: %+v", rows[4])
+	}
+	for _, r := range rows {
+		if r.active != 0 {
+			t.Fatal("pending exchange surfaced before delivery")
+		}
+		if len(r.ident) != 32 {
+			t.Fatalf("display_identity is not a 32-byte hash: id=%d len=%d", r.id, len(r.ident))
+		}
+		if !r.order.Valid {
+			t.Fatalf("display_order was not assigned: id=%d", r.id)
+		}
+	}
+	seen := make(map[string]bool)
+	for _, r := range rows {
+		key := string(r.ident)
+		if seen[key] {
+			t.Fatalf("distinct transcript rows share display_identity: id=%d", r.id)
+		}
+		seen[key] = true
+	}
+	var msgCount, toolCount int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT message_count,tool_call_count FROM sessions`).Scan(&msgCount, &toolCount); err != nil || msgCount != 5 || toolCount != 2 {
+		t.Fatalf("session counters msg=%d tool=%d err=%v", msgCount, toolCount, err)
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE active=1`).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("delivery did not publish exchange rows: count=%d err=%v", count, err)
+	}
+	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'result'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("tool FTS text missing: count=%d err=%v", count, err)
+	}
+}
+
 func TestProfileStoreOperationsEmitSafeDebugMeasurements(t *testing.T) {
 	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
@@ -350,5 +450,31 @@ func TestDeliveryIntoEndedSessionFailsClosed(t *testing.T) {
 	var active int
 	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE active=1`).Scan(&active); err != nil || active != 0 {
 		t.Fatalf("unconfirmed exchange surfaced: active=%d err=%v", active, err)
+	}
+}
+
+func TestDisplayIdentityDedupeKey(t *testing.T) {
+	content, callID, calls, name := "hello", "call_1", `[{"id":"call_1"}]`, "web_search"
+	base := displayIdentity("assistant", &content, 1790430142.404224, &callID, &calls, &name)
+	if len(base) != 32 {
+		t.Fatalf("display_identity length=%d", len(base))
+	}
+	// Same tuple reproduces the digest; any key field changes it.
+	if got := displayIdentity("assistant", &content, 1790430142.404224, &callID, &calls, &name); string(got) != string(base) {
+		t.Fatal("dedupe key is not deterministic")
+	}
+	other := content + "!"
+	if got := displayIdentity("assistant", &other, 1790430142.404224, &callID, &calls, &name); string(got) == string(base) {
+		t.Fatal("content change preserved identity")
+	}
+	if got := displayIdentity("assistant", &content, 1790430142.404225, &callID, &calls, &name); string(got) == string(base) {
+		t.Fatal("timestamp change preserved identity")
+	}
+	// NULL never collides with an empty string.
+	empty := ""
+	if got := displayIdentity("tool", &empty, 1, nil, nil, nil); len(got) != 32 {
+		t.Fatal("empty identity malformed")
+	} else if same := displayIdentity("tool", nil, 1, nil, nil, nil); string(same) == string(got) {
+		t.Fatal("NULL content collided with empty content")
 	}
 }

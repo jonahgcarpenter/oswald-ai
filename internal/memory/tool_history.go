@@ -29,6 +29,7 @@ type ToolHistoryBatch struct {
 // ToolHistoryCall preserves one call and its exactly correlated result.
 type ToolHistoryCall struct {
 	Name               string                 `json:"name"`
+	ProviderCallID     string                 `json:"provider_call_id,omitempty"`
 	HistoryMode        string                 `json:"history_mode,omitempty"`
 	Arguments          map[string]interface{} `json:"arguments,omitempty"`
 	Status             string                 `json:"status"`

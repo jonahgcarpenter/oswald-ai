@@ -18,15 +18,16 @@ func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result go
 		args = imageCheckpointArguments(args)
 	}
 	call := memory.ToolHistoryCall{
-		Name:        strings.TrimSpace(tc.Function.Name),
-		HistoryMode: string(governance.HistoryFull),
-		Arguments:   args,
-		Status:      "succeeded",
-		Outcome:     string(result.Outcome),
-		ReasonCode:  result.ReasonCode,
-		IsDegraded:  result.IsDegraded,
-		Result:      toolContent,
-		ExecutedAt:  executedAt.Format(time.RFC3339Nano),
+		Name:           strings.TrimSpace(tc.Function.Name),
+		ProviderCallID: strings.TrimSpace(tc.ID),
+		HistoryMode:    string(governance.HistoryFull),
+		Arguments:      args,
+		Status:         "succeeded",
+		Outcome:        string(result.Outcome),
+		ReasonCode:     result.ReasonCode,
+		IsDegraded:     result.IsDegraded,
+		Result:         toolContent,
+		ExecutedAt:     executedAt.Format(time.RFC3339Nano),
 	}
 	if !decision.Allowed {
 		call.Status = "blocked"

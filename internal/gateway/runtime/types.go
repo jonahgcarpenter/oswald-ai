@@ -53,6 +53,9 @@ type Request struct {
 	// mention, emoji, URL, reply, or attachment transformations. Empty stays empty.
 	PublicUserText string
 	Text           string
+	// PlatformMessageID is the untrusted inbound transport message identifier
+	// (Discord message id, BlueBubbles message GUID). Empty when unavailable.
+	PlatformMessageID string
 	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage

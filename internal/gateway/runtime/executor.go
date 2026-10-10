@@ -411,21 +411,22 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	)
 
 	brokerReq := &broker.Request{
-		Usage:         usage,
-		Metadata:      meta,
-		RequestID:     req.RequestID,
-		ChatID:        req.ChatID,
-		Principal:     req.Principal,
-		DisplayName:   req.DisplayName,
-		SessionKey:    req.SessionKey,
-		ChatLabel:     req.ChatLabel,
-		IsDirect:      req.IsDirect,
-		Prompt:        decision.Prompt,
-		Stateless:     req.Stateless,
-		ClientHistory: req.ClientHistory,
-		Images:        decision.Images,
-		StreamFunc:    req.StreamFunc,
-		ResponseChan:  make(chan broker.Result, 1),
+		Usage:             usage,
+		Metadata:          meta,
+		RequestID:         req.RequestID,
+		ChatID:            req.ChatID,
+		Principal:         req.Principal,
+		DisplayName:       req.DisplayName,
+		SessionKey:        req.SessionKey,
+		ChatLabel:         req.ChatLabel,
+		IsDirect:          req.IsDirect,
+		PlatformMessageID: req.PlatformMessageID,
+		Prompt:            decision.Prompt,
+		Stateless:         req.Stateless,
+		ClientHistory:     req.ClientHistory,
+		Images:            decision.Images,
+		StreamFunc:        req.StreamFunc,
+		ResponseChan:      make(chan broker.Result, 1),
 	}
 	submitErr := deps.Broker.Submit(brokerReq)
 	if submitErr != nil {

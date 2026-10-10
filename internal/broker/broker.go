@@ -42,21 +42,23 @@ type LaneKey struct {
 
 // Request carries a single user request from a gateway into the broker.
 type Request struct {
-	Usage         *requestctx.UsageCollector
-	Metadata      requestctx.Metadata
-	RequestID     string
-	ChatID        string
-	Principal     identity.Principal
-	DisplayName   string
-	SessionKey    string
-	IsDirect      bool
-	ChatLabel     string
-	Prompt        string
-	Stateless     bool
-	ClientHistory []llm.ChatMessage
-	Images        []llm.InputImage
-	StreamFunc    func(agent.StreamChunk)
-	ResponseChan  chan Result
+	Usage       *requestctx.UsageCollector
+	Metadata    requestctx.Metadata
+	RequestID   string
+	ChatID      string
+	Principal   identity.Principal
+	DisplayName string
+	SessionKey  string
+	IsDirect    bool
+	ChatLabel   string
+	Prompt      string
+	// PlatformMessageID is the untrusted inbound transport message identifier.
+	PlatformMessageID string
+	Stateless         bool
+	ClientHistory     []llm.ChatMessage
+	Images            []llm.InputImage
+	StreamFunc        func(agent.StreamChunk)
+	ResponseChan      chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -286,7 +288,7 @@ func (b *Broker) Submit(req *Request) error {
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
 			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
-			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel,
+			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)
 		if cause := context.Cause(w.ctx); cause != nil {

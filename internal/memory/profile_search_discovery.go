@@ -153,7 +153,11 @@ WHERE ` + searchEligible + ` AND s.source IN ('discord','imessage')`
 		}
 		if roles[role] {
 			if role == "tool" {
-				content = truncateRunes(content, 8192)
+				// Tool result text stays policy-gated: searchable tool
+				// matches come from the owning exchange's history
+				// projection below, which honors the stored SearchResult
+				// policy. Index the tool name and call arguments only.
+				content = ""
 			}
 			if _, err := insert.ExecContext(ctx, content, tool, calls, id, messageID, role, started); err != nil {
 				return err

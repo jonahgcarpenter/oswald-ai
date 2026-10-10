@@ -45,6 +45,9 @@ type Request struct {
 	SessionKey string
 	IsDirect   bool
 	Prompt     string
+	// PlatformMessageID is the untrusted inbound transport message identifier,
+	// persisted on the user message row when present.
+	PlatformMessageID string
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
