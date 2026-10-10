@@ -23,6 +23,10 @@ import (
 )
 
 func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
+	return telemetryLoggerAtLevel(t, config.LevelDebug)
+}
+
+func telemetryLoggerAtLevel(t *testing.T, level config.Level) (*config.Logger, func() []map[string]any) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "telemetry.log")
 	f, err := os.Create(path)
@@ -32,7 +36,7 @@ func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
 	t.Cleanup(func() { f.Close() })
 	old := os.Stderr
 	os.Stderr = f
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(level)
 	os.Stderr = old
 	return log, func() []map[string]any {
 		data, err := os.ReadFile(path)
@@ -56,6 +60,38 @@ func telemetryLogger(t *testing.T) (*config.Logger, func() []map[string]any) {
 			records = append(records, record)
 		}
 		return records
+	}
+}
+
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
+// checkStatus asserts a details status: success is implicit (absent), every
+// other status is emitted verbatim.
+func checkStatus(t *testing.T, details map[string]any, want string) {
+	t.Helper()
+	checkImplicitDetail(t, details, "status", want, "ok")
+}
+
+// checkImplicitDetail asserts a details value that is omitted when it equals
+// the implicit success value.
+func checkImplicitDetail(t *testing.T, details map[string]any, key, want, implicit string) {
+	t.Helper()
+	got, exists := details[key]
+	if want == implicit {
+		if exists {
+			t.Fatalf("%s emitted for implicit %q: %#v", key, want, details)
+		}
+		return
+	}
+	if got != want {
+		t.Fatalf("%s=%v, want %q", key, got, want)
 	}
 }
 
@@ -111,7 +147,7 @@ func TestRequestTelemetryClassificationAndUsage(t *testing.T) {
 				switch record["event"] {
 				case "gateway.request.received":
 					received++
-					if record["record_kind"] != "event" || record["is_admitted"] != true {
+					if logDetails(t, record)["is_admitted"] != true {
 						t.Fatalf("receipt = %v", record)
 					}
 				case "gateway.request.complete":
@@ -119,13 +155,14 @@ func TestRequestTelemetryClassificationAndUsage(t *testing.T) {
 					complete = record
 				}
 			}
-			if completed != 1 || complete["prompt_type"] != tc.promptType || complete["duration_ms"].(float64) < 1000 {
+			cd := logDetails(t, complete)
+			if completed != 1 || cd["prompt_type"] != tc.promptType || cd["duration_ms"].(float64) < 1000 {
 				t.Fatalf("bad terminal telemetry: %v", complete)
 			}
-			if complete["image_count"] != float64(len(tc.images)) {
+			if cd["image_count"] != float64(len(tc.images)) {
 				t.Fatalf("enrichment changed input image count: %v", complete)
 			}
-			if tc.name == "reply-image" && complete["model_image_count"] != float64(1) {
+			if tc.name == "reply-image" && cd["model_image_count"] != float64(1) {
 				t.Fatalf("missing enriched image count: %v", complete)
 			}
 			wantReceived := 1
@@ -135,15 +172,15 @@ func TestRequestTelemetryClassificationAndUsage(t *testing.T) {
 			if received != wantReceived {
 				t.Fatalf("received count = %d", received)
 			}
-			if complete["record_kind"] != "summary" || complete["is_admitted"] != (wantReceived == 1) {
+			if cd["is_admitted"] != (wantReceived == 1) {
 				t.Fatalf("summary = %v", complete)
 			}
 			if out.Action == routing.ActionLLM {
-				if complete["model"] != "configured-model" || complete["request_tool_execution_count"] != float64(2) || complete["request_tool_blocked_count"] != float64(1) || complete["is_request_usage_reported"] != true || complete["request_usage_unknown_call_count"] != float64(0) {
+				if cd["model"] != "configured-model" || cd["request_tool_execution_count"] != float64(2) || cd["request_tool_blocked_count"] != float64(1) || cd["is_request_usage_reported"] != true || cd["request_usage_unknown_call_count"] != float64(0) {
 					t.Fatalf("summary counters = %v", complete)
 				}
 			}
-			if out.Action == routing.ActionLLM && (complete["request_model_call_count"] != float64(1) || complete["request_total_tokens"] != float64(10)) {
+			if out.Action == routing.ActionLLM && (cd["request_model_call_count"] != float64(1) || cd["request_total_tokens"] != float64(10)) {
 				t.Fatalf("usage not propagated exactly once: %v", complete)
 			}
 		})
@@ -176,7 +213,7 @@ func TestRequestTelemetryQueueFullAndShutdown(t *testing.T) {
 			if shutdown {
 				want = "canceled"
 			}
-			if record["execution_status"] != want {
+			if logDetails(t, record)["execution_status"] != want {
 				t.Fatalf("shutdown=%v terminal=%v", shutdown, record)
 			}
 		}
@@ -209,18 +246,17 @@ func TestRequestTerminalCancellationAndErrors(t *testing.T) {
 			Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "hello"}, Dependencies{Broker: b, Log: log}, r)
 			completed, errorCount := 0, 0
 			for _, record := range records() {
-				if record["level"] == "error" {
+				if record["event"] == "gateway.request.failed" && record["level"] == "warn" {
 					errorCount++
 				}
 				if record["event"] == "gateway.request.complete" {
 					completed++
-					if record["status"] != tc.status {
-						t.Fatalf("terminal = %v", record)
-					}
-					if tc.name == "stop" && record["reason_code"] != "stop" {
+					d := logDetails(t, record)
+					checkStatus(t, d, tc.status)
+					if tc.name == "stop" && d["reason_code"] != "stop" {
 						t.Fatalf("stop reason = %v", record)
 					}
-					if tc.name == "cancel" && record["reason_code"] != "shutdown" {
+					if tc.name == "cancel" && d["reason_code"] != "shutdown" {
 						t.Fatalf("shutdown reason = %v", record)
 					}
 				}
@@ -254,9 +290,11 @@ func TestCommandMutationTelemetryAndContext(t *testing.T) {
 	for _, record := range records() {
 		if record["event"] == "gateway.command.mutation.complete" {
 			count++
-			if record["status"] != "ok" || record["affected_count"] != float64(1) {
+			d := logDetails(t, record)
+			if d["affected_count"] != float64(1) {
 				t.Fatalf("mutation=%v", record)
 			}
+			checkStatus(t, d, "ok")
 		}
 	}
 	if count != 1 {
@@ -283,10 +321,11 @@ func TestRejectedAdmissionHasOnlyTerminalSummary(t *testing.T) {
 				}
 				if record["event"] == "gateway.request.complete" {
 					completed++
-					if _, ok := record["user_id"]; ok {
+					d := logDetails(t, record)
+					if _, ok := d["user_id"]; ok {
 						t.Fatalf("untrusted user field: %v", record)
 					}
-					if record["is_admitted"] != false || record["record_kind"] != "summary" || record["status"] != "rejected" {
+					if d["is_admitted"] != false || d["status"] != "rejected" {
 						t.Fatalf("rejection = %v", record)
 					}
 				}
@@ -306,14 +345,17 @@ func TestProviderErrorHasSafeRootDiagnostic(t *testing.T) {
 	Execute(Request{Principal: testPrincipal("user"), Text: "hello"}, Dependencies{Log: log, Broker: b}, &fakeResponder{})
 	count := 0
 	for _, record := range records() {
-		if record["level"] == "error" {
+		if record["level"] == "warn" {
 			count++
-			if record["event"] != "gateway.request.failed" || record["error_code"] != "model_failure" {
+			if record["event"] != "gateway.request.failed" || logDetails(t, record)["error_code"] != "model_failure" {
 				t.Fatalf("diagnostic = %v", record)
 			}
 		}
-		if record["event"] == "gateway.request.complete" && (record["is_request_usage_reported"] != false || record["model"] != "configured-model") {
-			t.Fatalf("summary = %v", record)
+		if record["event"] == "gateway.request.complete" {
+			d := logDetails(t, record)
+			if d["is_request_usage_reported"] != false || d["model"] != "configured-model" {
+				t.Fatalf("summary = %v", record)
+			}
 		}
 	}
 	if count != 1 {
@@ -333,7 +375,8 @@ func TestRequestUsageReportsObservedRatherThanCompleteTotals(t *testing.T) {
 			continue
 		}
 		count++
-		if record["is_request_usage_reported"] != true || record["request_usage_unknown_call_count"] != float64(2) || record["request_usage_reported_call_count"] != float64(1) || record["request_model_submission_count"] != float64(3) || record["request_total_tokens"] != float64(10) {
+		d := logDetails(t, record)
+		if d["is_request_usage_reported"] != true || d["request_usage_unknown_call_count"] != float64(2) || d["request_usage_reported_call_count"] != float64(1) || d["request_model_submission_count"] != float64(3) || d["request_total_tokens"] != float64(10) {
 			t.Fatalf("usage summary = %v", record)
 		}
 	}
@@ -409,10 +452,12 @@ func TestImmediateStopSummaryAndLateExecutionAccounting(t *testing.T) {
 				}
 				if record["event"] == "gateway.request.complete" {
 					gatewayCount++
-					if record["status"] != "ok" || record["outcome"] != "canceled" {
+					d := logDetails(t, record)
+					if d["outcome"] != "canceled" {
 						t.Fatalf("gateway cancellation = %v", record)
 					}
-					if record["is_execution_complete"] != false || record["is_request_usage_complete"] != false || record["persistence_status"] != "unknown" || record["request_total_tokens"] != float64(10) || record["request_tool_execution_count"] != float64(1) {
+					checkStatus(t, d, "ok")
+					if d["is_execution_complete"] != false || d["is_request_usage_complete"] != false || d["persistence_status"] != "unknown" || d["request_total_tokens"] != float64(10) || d["request_tool_execution_count"] != float64(1) {
 						t.Fatalf("early summary = %v", record)
 					}
 				}
@@ -427,15 +472,18 @@ func TestImmediateStopSummaryAndLateExecutionAccounting(t *testing.T) {
 					continue
 				}
 				brokerCount++
-				if record["is_execution_complete"] != true || record["is_execution_usage_complete"] != true || record["execution_total_tokens"] != float64(30) || record["execution_model_call_count"] != float64(2) || record["execution_tool_count"] != float64(1) {
+				d := logDetails(t, record)
+				if d["is_execution_complete"] != true || d["is_execution_usage_complete"] != true || d["execution_total_tokens"] != float64(30) || d["execution_model_call_count"] != float64(2) || d["execution_tool_count"] != float64(1) {
 					t.Fatalf("final execution = %v", record)
 				}
 				if tc.failure != nil {
-					if record["status"] != "error" || record["outcome"] != "error" || record["persistence_status"] != "failed" || record["error_code"] != config.ErrorCode(tc.failure) {
+					if d["status"] != "error" || d["outcome"] != "error" || d["persistence_status"] != "failed" || d["error_code"] != config.ErrorCode(tc.failure) {
 						t.Fatalf("late failure masked by cancellation: %v", record)
 					}
-				} else if record["status"] != "ok" || record["outcome"] != "canceled" {
+				} else if d["outcome"] != "canceled" {
 					t.Fatalf("cancellation-only execution = %v", record)
+				} else {
+					checkStatus(t, d, "ok")
 				}
 			}
 			if brokerCount != 1 {
@@ -464,7 +512,8 @@ func TestRequestFailureRetainsExecutionStatsWithoutResponse(t *testing.T) {
 			continue
 		}
 		count++
-		if record["request_tool_execution_count"] != float64(1) || record["request_tool_blocked_count"] != float64(2) || record["persistence_status"] != "failed" || record["is_execution_complete"] != true || record["model"] != "configured-model" {
+		d := logDetails(t, record)
+		if d["request_tool_execution_count"] != float64(1) || d["request_tool_blocked_count"] != float64(2) || d["persistence_status"] != "failed" || d["is_execution_complete"] != true || d["model"] != "configured-model" {
 			t.Fatalf("failure summary = %v", record)
 		}
 	}
@@ -489,7 +538,8 @@ func TestCommittedCommandFailureStillAuditsMutation(t *testing.T) {
 	for _, record := range records() {
 		if record["event"] == "gateway.command.mutation.complete" {
 			count++
-			if record["status"] != "error" || record["is_changed"] != true {
+			d := logDetails(t, record)
+			if d["status"] != "error" || d["is_changed"] != true {
 				t.Fatalf("mutation = %v", record)
 			}
 		}

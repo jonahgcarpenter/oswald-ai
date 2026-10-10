@@ -16,7 +16,7 @@ func TestLogFieldsAllowlist(t *testing.T) {
 	for _, f := range LogFields(ctx) {
 		got[f.Key] = f.Value
 	}
-	want := map[string]any{"request_id": "req_1", "user_id": "usr_1", "gateway": "discord", "model": "model", "workload": "foreground", "operation_id": "op_1", "parent_operation_id": "op_0", "job_id": int64(12)}
+	want := map[string]any{"request_id": "req_1", "profile": "usr_1", "gateway": "discord", "model": "model", "workload": "foreground", "operation_id": "op_1", "parent_operation_id": "op_0", "job_id": int64(12)}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fields: %#v", got)
 	}

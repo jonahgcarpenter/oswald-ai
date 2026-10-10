@@ -317,7 +317,7 @@ func TestVerifiedGroupThreadOutcomes(t *testing.T) {
 }
 
 func TestThreadIgnoresSelectedBubbleAssociation(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, mode := range []string{"bot association", "human association", "webhook association", "cached bot root", "latest human", "lookup failure"} {
 			t.Run(level.String()+"/"+mode, func(t *testing.T) {
 				log, events := captureInfoSummaries(t, level)
@@ -440,9 +440,11 @@ func TestThreadIgnoresSelectedBubbleAssociation(t *testing.T) {
 						continue
 					}
 					count++
-					if event["level"] != "info" || event["record_kind"] != "measurement" || event["phase"] != phase || event["reason_code"] != reason || event["status"] != status || event["outcome"] != "complete" || event["remote_count"] != wantRemote || event["direct_count"] != direct || event["predecessor_count"] != predecessor || event["rejected_count"] != rejected || event["not_found_count"] != missing || event["error_count"] != failed {
+					d := logDetails(t, event)
+					if event["level"] != "debug" || d["phase"] != phase || d["reason_code"] != reason || d["outcome"] != "complete" || d["remote_count"] != wantRemote || d["direct_count"] != direct || d["predecessor_count"] != predecessor || d["rejected_count"] != rejected || d["not_found_count"] != missing || d["error_count"] != failed {
 						t.Fatalf("measurement=%+v", event)
 					}
+					checkStatus(t, d, status)
 				}
 				if count != 1 {
 					t.Fatalf("measurement count=%d", count)
@@ -453,7 +455,7 @@ func TestThreadIgnoresSelectedBubbleAssociation(t *testing.T) {
 }
 
 func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, tc := range []struct {
 			name, reason string
 			change       func(*messageLookupData)
@@ -514,10 +516,11 @@ func TestReplyResolverAnchorRejectionMeasurements(t *testing.T) {
 					t.Fatalf("measurement count=%d", len(got))
 				}
 				event := got[0]
-				if event["event"] != "gateway.reply_lookup.complete" || event["level"] != "info" || event["record_kind"] != "measurement" || event["request_id"] != "req-anchor-rejection" || event["phase"] != "anchor" || event["reason_code"] != tc.reason || event["status"] != "rejected" || event["outcome"] != "complete" || event["remote_count"] != float64(2) || event["rejected_count"] != float64(1) || event["cache_count"] != float64(0) || event["direct_count"] != float64(0) || event["predecessor_count"] != float64(0) || event["not_found_count"] != float64(0) || event["error_count"] != float64(0) {
+				d := logDetails(t, event)
+				if event["event"] != "gateway.reply_lookup.complete" || event["level"] != "debug" || d["request_id"] != "req-anchor-rejection" || d["phase"] != "anchor" || d["reason_code"] != tc.reason || d["status"] != "rejected" || d["outcome"] != "complete" || d["remote_count"] != float64(2) || d["rejected_count"] != float64(1) || d["cache_count"] != float64(0) || d["direct_count"] != float64(0) || d["predecessor_count"] != float64(0) || d["not_found_count"] != float64(0) || d["error_count"] != float64(0) {
 					t.Fatalf("measurement=%+v", event)
 				}
-				if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {
+				if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
 					t.Fatal("missing nonnegative numeric duration")
 				}
 			})
@@ -758,7 +761,7 @@ func TestReplyLookupBoundsAndCancellation(t *testing.T) {
 	}
 }
 
-func TestReplyResolverInfoMeasurement(t *testing.T) {
+func TestReplyResolverDebugMeasurement(t *testing.T) {
 	log, events := captureInfoSummaries(t)
 	g := &Gateway{Log: log, messageIndex: make(map[string]messageContext)}
 	g.rememberBotMessage("private-attachment", "private-chat", "private-chat;+;group", "private-address", "private-body")
@@ -775,10 +778,11 @@ func TestReplyResolverInfoMeasurement(t *testing.T) {
 			continue
 		}
 		count++
-		if event["level"] != "info" || event["request_id"] != "req-reply" || event["record_kind"] != "measurement" || event["cache_count"] != float64(1) || event["direct_count"] != float64(1) || event["remote_count"] != float64(0) {
+		d := logDetails(t, event)
+		if event["level"] != "debug" || d["request_id"] != "req-reply" || d["cache_count"] != float64(1) || d["direct_count"] != float64(1) || d["remote_count"] != float64(0) {
 			t.Fatalf("measurement=%+v", event)
 		}
-		if _, ok := event["duration_ms"].(float64); !ok {
+		if _, ok := d["duration_ms"].(float64); !ok {
 			t.Fatal("missing numeric duration")
 		}
 	}
@@ -844,7 +848,7 @@ func TestThreadPredecessorExactPartSQL(t *testing.T) {
 }
 
 func TestReplyResolverTerminalMeasurements(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, mode := range []string{"direct", "predecessor", "not found", "rejected", "error", "canceled"} {
 			t.Run(level.String()+"/"+mode, func(t *testing.T) {
 				log, events := captureInfoSummaries(t, level)
@@ -895,7 +899,7 @@ func TestReplyResolverTerminalMeasurements(t *testing.T) {
 				}
 				g.resolveReply(ctx, msg, true, "req-terminal")
 				got := events()
-				if len(got) != 1 || got[0]["event"] != "gateway.reply_lookup.complete" || got[0]["level"] != "info" || got[0]["request_id"] != "req-terminal" {
+				if len(got) != 1 || got[0]["event"] != "gateway.reply_lookup.complete" || got[0]["level"] != "debug" || logDetails(t, got[0])["request_id"] != "req-terminal" {
 					t.Fatalf("events=%+v", got)
 				}
 				key, status := "direct_count", "ok"
@@ -912,15 +916,17 @@ func TestReplyResolverTerminalMeasurements(t *testing.T) {
 					key = "error_count"
 				}
 				wantCount := float64(1)
+				d := logDetails(t, got[0])
 				if mode == "canceled" {
 					wantCount = 0
-					if got[0]["outcome"] != "canceled" {
+					if d["outcome"] != "canceled" {
 						t.Fatal("missing cancellation outcome")
 					}
 				}
-				if got[0][key] != wantCount || got[0]["status"] != status {
+				if d[key] != wantCount {
 					t.Fatalf("measurement=%+v", got[0])
 				}
+				checkStatus(t, d, status)
 			})
 		}
 	}

@@ -153,7 +153,7 @@ func TestProfileStartupCleansUpBeforeReturningValidationFailure(t *testing.T) {
 	if err := Run(context.Background(), &config.Config{}, log, io.Discard); err == nil {
 		t.Fatal("missing YAML configuration accepted")
 	}
-	if strings.Count(output.String(), `"event":"app.shutdown.complete"`) != 1 {
+	if strings.Count(output.String(), `"event":"app.stopped"`) != 1 {
 		t.Fatal("cleanup boundary missing")
 	}
 }
@@ -177,7 +177,7 @@ func TestProfileStartupPartialFailureClosesAcquiredStores(t *testing.T) {
 	if !errors.As(err, &failure) || failure.Event != "app.session_compactor.init_failed" || gatewayCalled {
 		t.Fatal("partial initialization failure was not fenced", err)
 	}
-	if strings.Count(output.String(), `"event":"app.shutdown.complete"`) != 1 {
+	if strings.Count(output.String(), `"event":"app.stopped"`) != 1 {
 		t.Fatal("partial cleanup boundary missing")
 	}
 	for _, name := range []string{"alice", "api"} {

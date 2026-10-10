@@ -30,7 +30,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if g.chatNames == nil {
 		g.chatNames = make(map[string]chatNameCacheEntry)
 	}
-	g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
+	privateAPIAvailable := g.refreshBlueBubblesCapabilitiesWithRetry(capabilityAttempts, capabilityRetryDelay)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(g.listenPath(), g.handleWebhook)
@@ -39,7 +39,21 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if err != nil {
 		return err
 	}
-	log.Info("gateway.listen", "imessage gateway listening", config.F("port", g.Port), config.F("path", g.listenPath()))
+	log.Debug("gateway.listen", "imessage gateway listener starting", config.F("port", g.Port))
+	listenAddr := listener.Addr().String()
+	if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
+		listenAddr = host
+	}
+	privateAPI := "disabled"
+	if privateAPIAvailable {
+		privateAPI = "enabled"
+	}
+	log.Info("gateway.connected", "bluebubbles gateway ready",
+		config.F("gateway", "imessage"),
+		config.F("private_api", privateAPI),
+		config.F("webhook_path", g.listenPath()),
+		config.F("listen_addr", listenAddr),
+		config.F("port", g.Port))
 	return http.Serve(listener, mux)
 }
 

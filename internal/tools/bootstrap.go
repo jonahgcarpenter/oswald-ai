@@ -49,6 +49,6 @@ func NewRegistryWithImageCache(cfg *config.Config, fileStore *files.Store, profi
 	}
 
 	enabled := reg.EnabledBuiltinNames()
-	bootstrapLog.Info("tool.bootstrap.enabled", "enabled tools", config.F("tool_count", len(enabled)), config.F("tools", strings.Join(enabled, ",")))
+	bootstrapLog.Debug("tool.bootstrap.enabled", "enabled tools", config.F("tool_count", len(enabled)), config.F("tools", strings.Join(enabled, ",")))
 	return reg, nil
 }

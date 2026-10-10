@@ -38,7 +38,7 @@ func (dg *Gateway) Start(b *broker.Broker) error {
 		if err != nil {
 			switch {
 			case errors.Is(err, errDiscordReconnectRequested):
-				log.Info("gateway.session.resume_requested", "discord requested session resume")
+				log.Debug("gateway.session.resume_requested", "discord requested session resume")
 			case errors.Is(err, errDiscordInvalidSession):
 				log.Warn("gateway.session.invalid", "discord session invalid, reidentifying")
 			case errors.Is(err, errDiscordMissedHeartbeatAck):

@@ -54,8 +54,8 @@ func (w *Worker) run(ctx context.Context, interval time.Duration) {
 				w.log.Warn("imagecache.sweep.failed", "image cache sweep failed", config.ErrorField(err), config.F("status", "error"))
 			}
 		}
-		w.log.Info("imagecache.sweep.complete", "image cache sweep completed",
-			config.F("record_kind", "measurement"), config.F("status", status), config.F("outcome", outcome),
+		w.log.Debug("imagecache.sweep.complete", "image cache sweep completed",
+			config.F("status", status), config.F("outcome", outcome),
 			config.F("removed_file_count", counts.RemovedFiles), config.F("removed_bytes", counts.RemovedBytes),
 			config.F("duration_ms", time.Since(started).Milliseconds()))
 		select {

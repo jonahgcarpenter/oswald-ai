@@ -23,7 +23,7 @@ func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger,
 	t.Cleanup(func() { _ = file.Close() })
 	old := os.Stderr
 	os.Stderr = file
-	level := config.LevelInfo
+	level := config.LevelDebug
 	if len(levels) > 0 {
 		level = levels[0]
 	}
@@ -54,7 +54,7 @@ func captureInfoSummaries(t *testing.T, levels ...config.Level) (*config.Logger,
 	}
 }
 
-func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
+func TestUnsupportedAttachmentSummaryAtDebugAfterProfileAdmission(t *testing.T) {
 	log, events := captureInfoSummaries(t)
 	g, b, _ := newIMessageTestGateway(t, "")
 	defer b.Shutdown()
@@ -70,11 +70,12 @@ func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
 			continue
 		}
 		count++
-		if event["level"] != "info" || event["status"] != "degraded" || event["request_id"] != "req-input-summary" || event["gateway"] != "imessage" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(1) || event["declared_format_count"] != float64(1) {
+		d := logDetails(t, event)
+		if event["level"] != "debug" || d["status"] != "degraded" || d["request_id"] != "req-input-summary" || d["gateway"] != "imessage" || d["user_id"] != nil || d["accepted_count"] != float64(0) || d["downgraded_count"] != float64(1) || d["declared_format_count"] != float64(1) {
 			t.Fatalf("summary=%+v", event)
 		}
-		if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {
-			t.Fatalf("duration=%v", event["duration_ms"])
+		if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
+			t.Fatalf("duration=%v", d["duration_ms"])
 		}
 	}
 	if count != 1 {
@@ -82,7 +83,7 @@ func TestUnsupportedAttachmentSummaryAtInfoAfterProfileAdmission(t *testing.T) {
 	}
 }
 
-func TestCapabilityResolutionSummariesAtInfo(t *testing.T) {
+func TestCapabilityResolutionTerminalSummaries(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, event, reason, status string
 		httpStatus                        int
@@ -112,19 +113,26 @@ func TestCapabilityResolutionSummariesAtInfo(t *testing.T) {
 			if got := attempts.Load(); got != int32(wantAttempts) {
 				t.Fatalf("attempt count=%d", got)
 			}
-			got := events()
+			var got []map[string]any
+			for _, event := range events() {
+				if event["event"] == tc.event {
+					got = append(got, event)
+				}
+			}
 			if len(got) != 1 {
 				t.Fatalf("expected one terminal summary, got %+v", got)
 			}
 			event := got[0]
-			if event["event"] != tc.event || event["status"] != tc.status || event["attempt_count"] != float64(wantAttempts) || event["gateway"] != "imessage" || event["request_id"] != "req-probe-summary" || event["user_id"] != "usr_synthetic" {
+			d := logDetails(t, event)
+			if event["event"] != tc.event || d["attempt_count"] != float64(wantAttempts) || d["gateway"] != "imessage" || d["request_id"] != "req-probe-summary" || d["user_id"] != "usr_synthetic" {
 				t.Fatalf("summary=%+v", event)
 			}
-			if tc.reason != "" && event["reason_code"] != tc.reason {
-				t.Fatalf("reason=%v", event["reason_code"])
+			checkStatus(t, d, tc.status)
+			if tc.reason != "" && d["reason_code"] != tc.reason {
+				t.Fatalf("reason=%v", d["reason_code"])
 			}
-			if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {
-				t.Fatalf("duration=%v", event["duration_ms"])
+			if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
+				t.Fatalf("duration=%v", d["duration_ms"])
 			}
 		})
 	}

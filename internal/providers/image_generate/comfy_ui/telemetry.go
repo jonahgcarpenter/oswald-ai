@@ -32,13 +32,13 @@ func generationStageLogger(ctx context.Context, log *config.Logger, strength *fl
 				err = context.Canceled
 			}
 		}
-		fields := []config.Field{config.F("record_kind", "measurement"), config.F("operation", "generate"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
+		fields := []config.Field{config.F("operation", "generate"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
 		if err != nil {
 			fields = append(fields, config.ErrorField(err))
 		}
 		if code := config.HTTPStatus(err); code != 0 {
 			fields = append(fields, config.F("http_status", code))
 		}
-		log.Info("provider.comfyui.stage.complete", "ComfyUI stage completed", fields...)
+		log.Debug("provider.comfyui.stage.complete", "ComfyUI stage completed", fields...)
 	}
 }

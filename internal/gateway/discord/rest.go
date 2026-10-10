@@ -50,7 +50,7 @@ func (dg *Gateway) fetchMessage(channelID, messageID, requestID string) (message
 		log.Debug("gateway.reply_lookup.failed", "failed to decode discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("status", "degraded"), config.ErrorField(err))
 		return messageResponse{}, false
 	}
-	log.Debug("gateway.reply_lookup.fetched", "fetched discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("attachment_count", len(result.Attachments)), config.F("status", "ok"))
+	log.Debug("gateway.reply_lookup.fetched", "fetched discord reply target", config.F("request_id", requestID), config.F("chat_id", channelID), config.F("message_id", messageID), config.F("attachment_count", len(result.Attachments)))
 	return result, true
 }
 

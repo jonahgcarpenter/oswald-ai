@@ -40,7 +40,7 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 		t.Fatal("vision-only configuration did not cache and annotate the attachment")
 	}
 	var logs bytes.Buffer
-	a.log = config.NewLogger(config.LevelInfo)
+	a.log = config.NewLogger(config.LevelDebug)
 	a.log.SetOutput(&logs)
 	a.toolPolicy = governance.GlobalPolicy{MaxExecutions: 6, MaxToolIterations: 10}
 	var calls []llm.ToolCall
@@ -111,9 +111,10 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 		if err := json.Unmarshal(line, &record); err != nil {
 			t.Fatal(err)
 		}
-		if record["event"] == "agent.tool.complete" {
+		if record["event"] == "tool.completed" {
 			completeCount++
-			if record["level"] != "info" || record["request_id"] != "follow-up" || record["user_id"] != "user-1" || record["operation_id"] == "" {
+			d := logDetails(t, record)
+			if record["level"] != "info" || d["request_id"] != "follow-up" || d["profile"] != "user-1" || d["operation_id"] == "" {
 				t.Fatalf("tool completion lacks safe correlation: %+v", record)
 			}
 		}

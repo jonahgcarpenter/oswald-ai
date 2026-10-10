@@ -30,10 +30,16 @@ func captureLog(t *testing.T, logger *Logger, emit func()) map[string]any {
 
 func assertEnvelope(t *testing.T, record map[string]any) {
 	t.Helper()
-	for _, key := range []string{"ts", "level", "service", "log_type", "component", "event", "msg"} {
+	for _, key := range []string{"ts", "level", "event", "component", "details"} {
 		value, ok := record[key]
 		if !ok {
 			t.Fatalf("missing envelope field %q: %#v", key, record)
+		}
+		if key == "details" {
+			if _, ok := value.(map[string]any); !ok {
+				t.Fatalf("envelope field %q has type %T, want object", key, value)
+			}
+			continue
 		}
 		if _, ok := value.(string); !ok {
 			t.Fatalf("envelope field %q has type %T, want string", key, value)
@@ -42,37 +48,52 @@ func assertEnvelope(t *testing.T, record map[string]any) {
 	if _, err := time.Parse(time.RFC3339Nano, record["ts"].(string)); err != nil {
 		t.Fatalf("invalid timestamp: %v", err)
 	}
-	if record["log_schema_version"] != float64(1) {
-		t.Fatalf("bad schema version: %v", record)
-	}
-	if id, ok := record["instance_id"].(string); !ok || id == "" {
-		t.Fatalf("bad instance ID: %v", record)
+	for _, key := range []string{"service", "instance_id", "record_kind", "log_schema_version"} {
+		if _, exists := record[key]; exists {
+			t.Fatalf("unexpected envelope field %q: %v", key, record)
+		}
 	}
 	if _, ok := record["session_id"]; ok {
 		t.Fatal("private session ID emitted")
 	}
 }
 
+func detailsOf(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
 func TestLoggerEnvelopeAndReservedFieldsCannotBeOverwritten(t *testing.T) {
 	logger := NewLogger(LevelDebug).Server("contract",
-		F("service", "attacker"), F("component", "attacker"), F("event", "attacker"),
+		F("component", "attacker"), F("event", "attacker"),
 	)
 	record := captureLog(t, logger, func() {
 		logger.Info("contract.complete", "contract message",
-			F("ts", "attacker"), F("level", "attacker"), F("service", "attacker"),
+			F("ts", "attacker"), F("level", "attacker"),
 			F("log_type", "attacker"), F("component", "attacker"), F("event", "attacker"), F("msg", "attacker"),
 			F("status", "ok"),
 		)
 	})
 	assertEnvelope(t, record)
 	want := map[string]string{
-		"level": "info", "service": serviceName, "log_type": "server", "component": "contract",
-		"event": "contract.complete", "msg": "contract message", "status": "ok",
+		"level": "info", "log_type": "server", "component": "contract",
+		"event": "contract.complete",
 	}
 	for key, value := range want {
 		if record[key] != value {
 			t.Fatalf("%s=%v, want %q", key, record[key], value)
 		}
+	}
+	details := detailsOf(t, record)
+	if details["msg"] != "contract message" {
+		t.Fatalf("details=%#v", details)
+	}
+	if _, exists := details["status"]; exists {
+		t.Fatalf("success status emitted: %#v", details)
 	}
 }
 
@@ -91,45 +112,54 @@ func TestLoggerRootAndAgentEnvelopesAreComplete(t *testing.T) {
 func TestLoggerAgentFoundationCannotBeOverwritten(t *testing.T) {
 	logger := NewLogger(LevelDebug).With(
 		F("request_id", "inherited-request"), F("session_id", "inherited-session"),
-		F("user_id", "inherited-user"), F("gateway", "inherited-gateway"), F("model", "inherited-model"),
+		F("profile", "inherited-profile"), F("gateway", "inherited-gateway"), F("model", "inherited-model"),
 	).Agent("agent-component", "request", "user", "gateway", "model",
 		F("request_id", "scoped-request"), F("session_id", "scoped-session"),
-		F("user_id", "scoped-user"), F("gateway", "scoped-gateway"), F("model", "scoped-model"),
+		F("profile", "scoped-profile"), F("gateway", "scoped-gateway"), F("model", "scoped-model"),
 	).With(
 		F("request_id", "later-request"), F("session_id", "later-session"),
-		F("user_id", "later-user"), F("gateway", "later-gateway"), F("model", "later-model"),
+		F("profile", "later-profile"), F("gateway", "later-gateway"), F("model", "later-model"),
 	)
 	record := captureLog(t, logger, func() {
 		logger.Info("agent.complete", "message",
 			F("request_id", "event-request"), F("session_id", "event-session"),
-			F("user_id", "event-user"), F("gateway", "event-gateway"), F("model", "event-model"),
+			F("profile", "event-profile"), F("gateway", "event-gateway"), F("model", "event-model"),
 			F("log_type", "server"), F("component", "event-component"),
 		)
 	})
+	details := detailsOf(t, record)
 	want := map[string]string{
-		"request_id": "request", "user_id": "user",
-		"gateway": "gateway", "model": "model", "log_type": "agent", "component": "agent-component",
+		"request_id": "request", "profile": "user",
+		"gateway": "gateway", "model": "model",
 	}
 	for key, value := range want {
-		if record[key] != value {
-			t.Fatalf("%s=%v, want %q; record=%#v", key, record[key], value, record)
+		if details[key] != value {
+			t.Fatalf("%s=%v, want %q; details=%#v", key, details[key], value, details)
 		}
+	}
+	if record["log_type"] != "agent" || record["component"] != "agent-component" {
+		t.Fatalf("unexpected envelope: %#v", record)
 	}
 }
 
 func TestLoggerNormalizesStatusVocabulary(t *testing.T) {
-	valid := []string{"ok", "error", "rejected", "retry", "degraded"}
+	valid := []string{"error", "rejected", "retry", "degraded"}
 	for _, status := range valid {
 		logger := NewLogger(LevelDebug)
 		record := captureLog(t, logger, func() { logger.Info("status.test", "message", F("status", status)) })
-		if record["status"] != status {
-			t.Fatalf("status=%v, want %q", record["status"], status)
+		if detailsOf(t, record)["status"] != status {
+			t.Fatalf("status=%v, want %q", detailsOf(t, record)["status"], status)
 		}
 	}
 	logger := NewLogger(LevelDebug)
-	record := captureLog(t, logger, func() { logger.Info("status.test", "message", F("status", "completed")) })
-	if record["status"] != "degraded" {
-		t.Fatalf("invalid status normalized to %v", record["status"])
+	record := captureLog(t, logger, func() { logger.Info("status.test", "message", F("status", "ok")) })
+	if _, exists := detailsOf(t, record)["status"]; exists {
+		t.Fatalf("success status emitted: %#v", detailsOf(t, record))
+	}
+	logger = NewLogger(LevelDebug)
+	record = captureLog(t, logger, func() { logger.Info("status.test", "message", F("status", "completed")) })
+	if detailsOf(t, record)["status"] != "degraded" {
+		t.Fatalf("invalid status normalized to %v", detailsOf(t, record)["status"])
 	}
 }
 
@@ -139,14 +169,18 @@ func TestLoggerMarshalFailureHasCompleteEnvelope(t *testing.T) {
 		logger.Info("original.event", "original message", F("unmarshalable", make(chan int)))
 	})
 	assertEnvelope(t, record)
-	if record["event"] != "logger.marshal_failed" || record["status"] != "error" || record["log_type"] != "agent" || record["component"] != "contract" {
+	if record["event"] != "logger.marshal_failed" || record["log_type"] != "agent" || record["component"] != "contract" {
 		t.Fatalf("unexpected fallback envelope: %#v", record)
 	}
+	details := detailsOf(t, record)
+	if details["status"] != "error" || details["error_code"] != "invalid_log_payload" {
+		t.Fatalf("missing fallback details: %#v", details)
+	}
 	for key, value := range map[string]string{
-		"request_id": "request", "user_id": "user", "gateway": "gateway", "model": "model",
+		"request_id": "request", "profile": "user", "gateway": "gateway", "model": "model",
 	} {
-		if record[key] != value {
-			t.Fatalf("fallback %s=%v, want %q; record=%#v", key, record[key], value, record)
+		if details[key] != value {
+			t.Fatalf("fallback %s=%v, want %q; details=%#v", key, details[key], value, details)
 		}
 	}
 }
@@ -204,32 +238,31 @@ func TestLoggerPrivacyBoundaryAndFallbackCorrelation(t *testing.T) {
 					t.Fatalf("leaked canary: %s", raw)
 				}
 			}
+			details := detailsOf(t, record)
 			for key, value := range map[string]any{"request_id": "req_1", "operation_id": "op_1", "job_id": float64(12), "user_id": "usr_1", "gateway": "discord"} {
-				if record[key] != value {
-					t.Fatalf("lost %s: %v", key, record)
+				if details[key] != value {
+					t.Fatalf("lost %s: %v", key, details)
 				}
 			}
 			if fallback && record["event"] != "logger.marshal_failed" {
 				t.Fatal("missing fallback")
 			}
-			if !fallback && (record["duration_ms"] != float64(42) || record["account_count"] != float64(3)) {
+			if !fallback && (details["duration_ms"] != float64(42) || details["account_count"] != float64(3)) {
 				t.Fatal("lost metrics")
 			}
 		}
 	}
 }
 
-func TestLoggerInstanceAndBounds(t *testing.T) {
+func TestLoggerBounds(t *testing.T) {
 	root := NewLogger(LevelInfo)
-	child := root.Server("child").With(F("instance_id", "spoof"), F("log_schema_version", 99)).Agent("agent", "req", "usr", "discord", "model")
-	if root.instanceID != child.instanceID || root.instanceID == NewLogger(LevelInfo).instanceID {
-		t.Fatal("instance inheritance/uniqueness")
-	}
+	child := root.Server("child").Agent("agent", "req", "usr", "discord", "model")
 	record := captureLog(t, child, func() {
 		child.Info("bounds.test", strings.Repeat("x", 2000), F("model", strings.Repeat("x", 1000)), F("counts", make([]int, 100)))
 	})
 	assertEnvelope(t, record)
-	if len(record["msg"].(string)) != maxLogMessageBytes || len(record["counts"].([]any)) != maxLogArrayItems {
+	details := detailsOf(t, record)
+	if len(details["msg"].(string)) != maxLogMessageBytes || len(details["counts"].([]any)) != maxLogArrayItems {
 		t.Fatal("unbounded fields")
 	}
 	record = captureLog(t, root, func() {
@@ -283,18 +316,18 @@ func TestLoggerRejectsObjectsAndInvalidCorrelationTypes(t *testing.T) {
 	for _, value := range []any{map[string]any{"private": "private"}, []byte("private"), math.NaN(), math.Inf(1), []any{"private"}, make(chan int), func() {}} {
 		logger := NewLogger(LevelInfo)
 		record := captureLog(t, logger, func() { logger.Info("types.test", "fixed", F("object", value), F("request_id", "req_1")) })
-		if record["event"] != "logger.marshal_failed" || record["request_id"] != "req_1" {
+		if record["event"] != "logger.marshal_failed" || detailsOf(t, record)["request_id"] != "req_1" {
 			t.Fatalf("unsafe %T: %v", value, record)
 		}
 	}
 	logger := NewLogger(LevelInfo)
 	record := captureLog(t, logger, func() { logger.Info("types.test", "fixed", F("request_id", []string{"req_1"})) })
-	if _, ok := record["request_id"]; ok {
+	if _, ok := detailsOf(t, record)["request_id"]; ok {
 		t.Fatal("non-scalar correlation escaped fallback")
 	}
 	for _, status := range []any{42, []string{"ok"}, logCanary{new(bool)}} {
 		record = captureLog(t, logger, func() { logger.Info("types.test", "fixed", F("status", status)) })
-		if record["status"] != "degraded" {
+		if detailsOf(t, record)["status"] != "degraded" {
 			t.Fatal("invalid status not normalized")
 		}
 	}

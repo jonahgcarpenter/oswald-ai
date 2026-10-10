@@ -29,7 +29,8 @@ func TestFallbackCompletionReportsFinalDegradation(t *testing.T) {
 		}
 		if r["event"] == "provider.web.search.fallback.complete" {
 			found = true
-			if r["level"] != "info" || r["status"] != "degraded" || r["result_count"] != float64(1) {
+			d := logDetails(t, r)
+			if r["level"] != "debug" || d["status"] != "degraded" || d["result_count"] != float64(1) {
 				t.Errorf("record=%+v", r)
 			}
 		}
@@ -37,4 +38,13 @@ func TestFallbackCompletionReportsFinalDegradation(t *testing.T) {
 	if !found || strings.Contains(output.String(), "private") {
 		t.Fatalf("logs=%s", output.String())
 	}
+}
+
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
 }

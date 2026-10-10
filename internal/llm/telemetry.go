@@ -26,7 +26,7 @@ type gatewayMeasurement struct {
 type gatewayMeasurementKey struct{}
 
 func (m *gatewayMeasurement) observeUsage(usage gatewayUsage) {
-	m.invalidUsage = m.invalidUsage || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0
+	m.invalidUsage = m.invalidUsage || usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 || usage.ReasoningTokens < 0
 	// Invalid observations must not erase previously reported valid counts.
 	if usage.promptReported && usage.PromptTokens >= 0 {
 		m.usage.PromptTokens, m.usage.promptReported = usage.PromptTokens, true
@@ -36,6 +36,9 @@ func (m *gatewayMeasurement) observeUsage(usage gatewayUsage) {
 	}
 	if usage.totalReported && usage.TotalTokens >= 0 {
 		m.usage.TotalTokens, m.usage.totalReported = usage.TotalTokens, true
+	}
+	if usage.reasoningReported && usage.ReasoningTokens >= 0 {
+		m.usage.ReasoningTokens, m.usage.reasoningReported = usage.ReasoningTokens, true
 	}
 	m.usage.reported = m.usage.reported || usage.reported
 }
@@ -61,7 +64,7 @@ func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, 
 	ctx = requestctx.WithMetadata(ctx, meta)
 	ctx = context.WithValue(ctx, gatewayMeasurementKey{}, m)
 	return ctx, func(err error) {
-		invalidUsage := m.invalidUsage || m.usage.PromptTokens < 0 || m.usage.CompletionTokens < 0 || m.usage.TotalTokens < 0
+		invalidUsage := m.invalidUsage || m.usage.PromptTokens < 0 || m.usage.CompletionTokens < 0 || m.usage.TotalTokens < 0 || m.usage.ReasoningTokens < 0
 		completeUsage := err == nil && !invalidUsage && m.usage.promptReported && m.usage.totalReported && (operation == "embedding" || m.usage.completionReported)
 		status, outcome := "ok", "ok"
 		if m.malformed > 0 || invalidUsage {
@@ -74,10 +77,10 @@ func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, 
 			}
 		}
 		duration := time.Since(m.started)
-		u := requestctx.ModelUsage{Operation: operation, Submitted: m.submitted, Status: status, UsageReported: m.usage.reported, PromptTokens: max(0, m.usage.PromptTokens), CompletionTokens: max(0, m.usage.CompletionTokens), TotalTokens: max(0, m.usage.TotalTokens), DurationMS: duration.Milliseconds()}
+		u := requestctx.ModelUsage{Operation: operation, Submitted: m.submitted, Status: status, UsageReported: m.usage.reported, PromptTokens: max(0, m.usage.PromptTokens), CompletionTokens: max(0, m.usage.CompletionTokens), TotalTokens: max(0, m.usage.TotalTokens), ReasoningTokens: max(0, m.usage.ReasoningTokens), DurationMS: duration.Milliseconds()}
 		u.UsageComplete = completeUsage
 		requestctx.UsageCollectorFromContext(ctx).Record(u)
-		fields := []config.Field{config.F("record_kind", "measurement"), config.F("operation", operation), config.F("transport", transport), config.F("status", status), config.F("outcome", outcome), config.F("is_submitted", m.submitted), config.F("is_usage_reported", u.UsageReported), config.F("duration_ms", u.DurationMS), config.F("malformed_chunk_count", m.malformed)}
+		fields := []config.Field{config.F("operation", operation), config.F("transport", transport), config.F("status", status), config.F("outcome", outcome), config.F("is_submitted", m.submitted), config.F("is_usage_reported", u.UsageReported), config.F("duration_ms", u.DurationMS), config.F("malformed_chunk_count", m.malformed)}
 		fields = append(fields, config.F("phase", m.phase), config.F("is_usage_complete", completeUsage), config.F("is_usage_invalid", invalidUsage))
 		if u.UsageReported {
 			if m.usage.promptReported && m.usage.PromptTokens >= 0 {
@@ -88,6 +91,9 @@ func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, 
 			}
 			if m.usage.totalReported && m.usage.TotalTokens >= 0 {
 				fields = append(fields, config.F("total_tokens", u.TotalTokens))
+			}
+			if m.usage.reasoningReported && m.usage.ReasoningTokens >= 0 {
+				fields = append(fields, config.F("reasoning_tokens", u.ReasoningTokens))
 			}
 			if operation == "chat" && m.usage.completionReported && !invalidUsage && duration > 0 {
 				fields = append(fields, config.F("effective_output_tps", float64(u.CompletionTokens)/duration.Seconds()))
@@ -113,6 +119,6 @@ func (c *GatewayClient) beginMeasurement(ctx context.Context, model, operation, 
 		if operation == "embedding" {
 			event = "provider.gateway.embed.complete"
 		}
-		c.requestLog(ctx, model).Info(event, "LLM gateway call completed", fields...)
+		c.requestLog(ctx, model).Debug(event, "LLM gateway call completed", fields...)
 	}
 }

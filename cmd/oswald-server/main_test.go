@@ -70,7 +70,7 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 				if err := json.Unmarshal(line, &event); err != nil {
 					t.Fatalf("stderr contains a non-JSON event: %q: %v", line, err)
 				}
-				if event["event"] == "app.shutdown.complete" {
+				if event["event"] == "app.stopped" {
 					cleanupComplete = true
 				}
 				if event["level"] == "error" {
@@ -80,7 +80,8 @@ func TestNonInteractiveStartupOmitsBanner(t *testing.T) {
 					}
 				}
 			}
-			if failureCount != 1 || event["event"] != tc.event || event["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
+			details, _ := event["details"].(map[string]any)
+			if failureCount != 1 || event["event"] != tc.event || details["msg"] != tc.message || strings.Contains(stderr.String(), "\x1b") {
 				t.Fatalf("unexpected startup log: %q", stderr.String())
 			}
 		})

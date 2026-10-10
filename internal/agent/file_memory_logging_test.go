@@ -33,11 +33,11 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 		}
 	}
 	var output bytes.Buffer
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&output)
 	a.log = log
 	for _, requestID := range []string{"first-request", "second-request"} {
-		if _, err := processAgent(a, requestID, "imessage", "session", "user-1", "private-display@example.test", "private-prompt", nil, nil); err != nil {
+		if _, err := processAgent(a, requestID, "imessage", "session", "user-1", "Synthetic User", "private-prompt", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if requestID == "first-request" {
@@ -53,7 +53,7 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 	if len(chat.requests) != 2 {
 		t.Fatalf("model calls = %d, want 2", len(chat.requests))
 	}
-	for _, canary := range []string{userContent, memoryContent, "private-display@example.test", "private-prompt"} {
+	for _, canary := range []string{userContent, memoryContent, "private-prompt"} {
 		if strings.Contains(output.String(), canary) {
 			t.Fatalf("log leaked private canary %q", canary)
 		}
@@ -67,15 +67,19 @@ func TestProcessFileMemoryLoadTelemetry(t *testing.T) {
 		if record["event"] != "agent.memory.files.loaded" {
 			continue
 		}
-		requestID, ok := record["request_id"].(string)
+		d := logDetails(t, record)
+		requestID, ok := d["request_id"].(string)
 		if !ok {
 			t.Fatalf("missing request correlation: %v", record)
 		}
 		counts[requestID]++
-		if record["level"] != "info" || record["record_kind"] != "measurement" || record["status"] != "ok" || record["is_session_snapshot"] != true || record["user_chars"] != float64(len([]rune(userContent))) || record["memory_chars"] != float64(len([]rune(memoryContent))) {
+		if record["level"] != "debug" || d["is_session_snapshot"] != true || d["user_chars"] != float64(len([]rune(userContent))) || d["memory_chars"] != float64(len([]rune(memoryContent))) {
 			t.Fatalf("invalid file load measurement: %v", record)
 		}
-		if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
+		if _, exists := d["status"]; exists {
+			t.Fatalf("success status emitted: %v", record)
+		}
+		if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
 			t.Fatalf("invalid load duration: %v", record)
 		}
 	}
@@ -125,10 +129,11 @@ func TestProcessFileMemoryReadFailureWarnsWithoutModelSubmission(t *testing.T) {
 			loaded++
 		case "agent.memory.files.load_failed":
 			failed++
-			if record["level"] != "warn" || record["status"] != "error" || record["request_id"] != "failed-read" || record["error_code"] == nil {
+			d := logDetails(t, record)
+			if record["level"] != "warn" || d["status"] != "error" || d["request_id"] != "failed-read" || d["error_code"] == nil {
 				t.Fatalf("invalid file read warning: %v", record)
 			}
-			if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
+			if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
 				t.Fatalf("invalid failure duration: %v", record)
 			}
 		}

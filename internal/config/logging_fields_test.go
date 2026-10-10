@@ -40,7 +40,7 @@ func TestInfoOperationalMetadataCompleteness(t *testing.T) {
 		"normalized_mime": "image/png", "event_type": "READY", "gateways": "discord, imessage, openai",
 		"tools": "memory,web_search", "phase": "connect", "reason_code": "no_results",
 		"request_kind": "prompt", "prompt_type": "text_image", "execution_status": "ok", "delivery_status": "ok",
-		"persistence_status": "pending", "response_kind": "answer", "record_kind": "measurement", "workload": "foreground",
+		"persistence_status": "pending", "response_kind": "answer", "workload": "foreground",
 		"source": "x_oembed", "build_version": "v4.0.9", "build_revision": "abc123", "go_version": "go1.25.7",
 		"retry_at": "2026-09-06T19:00:00.123+01:00", "delay_ms": float64(5000), "retry_attempt": float64(1),
 		"identity_assurance": string(identity.AssuranceSelfAsserted), "port": float64(8000),
@@ -56,10 +56,44 @@ func TestInfoOperationalMetadataCompleteness(t *testing.T) {
 	if record["event"] != "metadata.complete" {
 		t.Fatalf("unexpected fallback: %v", record)
 	}
+	details := detailsOf(t, record)
 	for key, value := range want {
-		if !reflect.DeepEqual(record[key], value) {
-			t.Errorf("%s: got %#v (%T), want %#v (%T)", key, record[key], record[key], value, value)
+		if !reflect.DeepEqual(details[key], value) {
+			t.Errorf("%s: got %#v (%T), want %#v (%T)", key, details[key], details[key], value, value)
 		}
+	}
+}
+
+func TestDisplayLabelsKeepNamesWithoutIdentifierRedaction(t *testing.T) {
+	for key, value := range map[string]any{
+		"user_id":  "Jonah Carpenter",
+		"bot_name": "Oswald",
+	} {
+		logger := NewLogger(LevelInfo)
+		record := captureLog(t, logger, func() { logger.Info("label.test", "fixed", F(key, value)) })
+		if detailsOf(t, record)[key] != value {
+			t.Fatalf("%s=%v, want %q", key, detailsOf(t, record)[key], value)
+		}
+	}
+	logger := NewLogger(LevelInfo)
+	record := captureLog(t, logger, func() {
+		logger.Info("label.test", "fixed",
+			F("user_id", "  Tab\tSeparated\nName雪  "),
+			F("bot_name", "control\x00name"),
+		)
+	})
+	details := detailsOf(t, record)
+	if details["user_id"] != "Tab Separated Name雪" || details["bot_name"] != "controlname" {
+		t.Fatalf("labels not normalized: %#v", details)
+	}
+	long := strings.Repeat("n", maxLogStringBytes+10)
+	record = captureLog(t, logger, func() { logger.Info("label.test", "fixed", F("user_id", long)) })
+	if got := detailsOf(t, record)["user_id"].(string); len(got) != maxLogStringBytes {
+		t.Fatalf("label not bounded: %d chars", len(got))
+	}
+	record = captureLog(t, logger, func() { logger.Info("label.test", "fixed", F("user_id", " \t\n ")) })
+	if _, exists := detailsOf(t, record)["user_id"]; exists {
+		t.Fatalf("empty label emitted: %#v", detailsOf(t, record))
 	}
 }
 
@@ -70,11 +104,15 @@ func TestNamedScalarsNeverInvokeMethods(t *testing.T) {
 			F("attempt_count", telemetryInt(3)), F("is_submitted", telemetryBool(true)), F("effective_output_tps", telemetryFloat(2.5)),
 			F("counts", []telemetryInt{1, 2}), F("tool_name", []telemetryString{"web_search", "memory"}))
 	})
-	want := map[string]any{"request_id": "req_1", "job_id": float64(12), "status": "ok", "tool_outcome": "productive", "attempt_count": float64(3), "is_submitted": true, "effective_output_tps": 2.5, "counts": []any{float64(1), float64(2)}, "tool_name": []any{"web_search", "memory"}}
+	want := map[string]any{"request_id": "req_1", "job_id": float64(12), "tool_outcome": "productive", "attempt_count": float64(3), "is_submitted": true, "effective_output_tps": 2.5, "counts": []any{float64(1), float64(2)}, "tool_name": []any{"web_search", "memory"}}
+	details := detailsOf(t, record)
 	for key, value := range want {
-		if !reflect.DeepEqual(record[key], value) {
-			t.Errorf("%s: got %#v want %#v", key, record[key], value)
+		if !reflect.DeepEqual(details[key], value) {
+			t.Errorf("%s: got %#v want %#v", key, details[key], value)
 		}
+	}
+	if _, exists := details["status"]; exists {
+		t.Fatalf("success status emitted: %#v", details)
 	}
 }
 
@@ -95,13 +133,13 @@ func TestPrivateFieldsOmittedAtEveryLevelAndScope(t *testing.T) {
 				})
 				for _, f := range fields {
 					if f.Key != "counts" {
-						if _, exists := record[f.Key]; exists {
+						if _, exists := detailsOf(t, record)[f.Key]; exists {
 							t.Fatalf("private key %q emitted at %s", f.Key, level)
 						}
 					}
 				}
 				assertEnvelope(t, record)
-				if record["request_id"] != "req_1" {
+				if detailsOf(t, record)["profile"] != "usr_1" {
 					t.Fatal("lost correlation")
 				}
 				encoded, _ := json.Marshal(record)
@@ -117,7 +155,7 @@ func TestMetadataRejectsUnknownEventsAndUnsafeStrings(t *testing.T) {
 	for key, value := range map[string]any{"event_type": "unreviewed_private_event", "gateways": "discord, private_name", "command_name": "help private_argument", "remote_tool_name": "https://private.invalid", "retry_at": "private", "port": "private", "unknown_metadata": "private"} {
 		logger := NewLogger(LevelInfo)
 		record := captureLog(t, logger, func() { logger.Info("metadata.test", "fixed", F(key, value)) })
-		if record[key] == value {
+		if detailsOf(t, record)[key] == value {
 			t.Fatalf("unsafe %s retained", key)
 		}
 	}

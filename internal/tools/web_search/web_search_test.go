@@ -19,6 +19,31 @@ import (
 type SearchResponse = web.SearchResponse
 type SearchResult = web.SearchResult
 
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
+// checkStatus asserts a details status: success is implicit (absent), every
+// other status is emitted verbatim.
+func checkStatus(t *testing.T, details map[string]any, want string) {
+	t.Helper()
+	got, exists := details["status"]
+	if want == "ok" {
+		if exists {
+			t.Fatalf("success status emitted: %#v", details)
+		}
+		return
+	}
+	if got != want {
+		t.Fatalf("status=%v, want %q", got, want)
+	}
+}
+
 type fakeSearcher struct {
 	response SearchResponse
 	err      error
@@ -205,7 +230,7 @@ func TestHandlerRejectsInvalidLimitBeforeSearch(t *testing.T) {
 
 func TestHandlerTerminalResultMeasurement(t *testing.T) {
 	const canary = "private_search_payload"
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		for _, test := range []struct {
 			name, status, outcome         string
 			args                          map[string]interface{}
@@ -249,14 +274,16 @@ func TestHandlerTerminalResultMeasurement(t *testing.T) {
 						continue
 					}
 					completions++
-					if record["level"] != "info" || record["record_kind"] != "measurement" || record["request_id"] != "req_search" || record["operation_id"] != "op_search" || record["parent_operation_id"] != "op_parent" || record["status"] != test.status || record["outcome"] != test.outcome || record["result_count"] != float64(test.count) || record["is_search_invoked"] != test.invoked {
+					d := logDetails(t, record)
+					if record["level"] != "debug" || d["request_id"] != "req_search" || d["operation_id"] != "op_search" || d["parent_operation_id"] != "op_parent" || d["outcome"] != test.outcome || d["result_count"] != float64(test.count) || d["is_search_invoked"] != test.invoked {
 						t.Fatalf("measurement=%+v", record)
 					}
-					limit, exists := record["requested_result_count"]
+					checkStatus(t, d, test.status)
+					limit, exists := d["requested_result_count"]
 					if exists != test.validLimit || exists && limit != float64(DefaultWebResults) {
 						t.Fatalf("requested count=%v", limit)
 					}
-					if _, ok := record["duration_ms"].(float64); !ok {
+					if _, ok := d["duration_ms"].(float64); !ok {
 						t.Fatal("duration is not numeric")
 					}
 				}

@@ -24,7 +24,7 @@ func TestWorkerImmediateSweepAndJoinedStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&logs)
 	w := NewWorker(cache, log)
 	w.Start()
@@ -74,7 +74,7 @@ func TestWorkerFailureAndCancellationMeasurements(t *testing.T) {
 				root = filepath.Join(root, "bad")
 			}
 			var logs bytes.Buffer
-			log := config.NewLogger(config.LevelInfo)
+			log := config.NewLogger(config.LevelDebug)
 			log.SetOutput(&logs)
 			w := NewWorker(New(root), log)
 			w.done = make(chan struct{})
@@ -95,12 +95,21 @@ func TestWorkerFailureAndCancellationMeasurements(t *testing.T) {
 func containsSweepStatus(data []byte, status string) bool {
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		var record struct {
-			Event   string `json:"event"`
-			Status  string `json:"status"`
-			Level   string `json:"level"`
-			Removed int    `json:"removed_file_count"`
+			Event   string         `json:"event"`
+			Level   string         `json:"level"`
+			Details map[string]any `json:"details"`
 		}
-		if json.Unmarshal(line, &record) == nil && record.Event == "imagecache.sweep.complete" && record.Status == status && record.Level == "info" {
+		if json.Unmarshal(line, &record) != nil || record.Event != "imagecache.sweep.complete" || record.Level != "debug" {
+			continue
+		}
+		got, exists := record.Details["status"]
+		if status == "ok" {
+			if !exists {
+				return true
+			}
+			continue
+		}
+		if exists && got == status {
 			return true
 		}
 	}

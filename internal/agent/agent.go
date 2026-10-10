@@ -140,6 +140,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	streamCallback := request.StreamFunc
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, senderID, gateway, a.model)
+	if name := strings.TrimSpace(displayName); name != "" {
+		reqLog = reqLog.With(config.F("user_id", name))
+	}
 	modelIterations, toolExecutionCount, toolBlockedCount := 0, 0, 0
 	persistenceStatus := "not_attempted"
 	usage := requestctx.UsageCollectorFromContext(ctx)
@@ -171,8 +174,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount,
 			PersistenceStatus: persistenceStatus, ResponseKind: kind, Model: a.model, IsComplete: true})
-		reqLog.Info("agent.response.complete", "completed agent generation", config.F("iteration_count", modelIterations),
-			config.F("record_kind", "summary"), config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
+		reqLog.Debug("agent.response.complete", "completed agent generation", config.F("iteration_count", modelIterations),
+			config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
 			config.F("tool_execution_count", toolExecutionCount), config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 			config.F("response_kind", kind), config.F("persistence_status", persistenceStatus), config.F("status", status))
 	}()
@@ -218,7 +221,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.F("status", "error"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.ErrorField(soulErr))
 		return nil, fmt.Errorf("read user soul: %w", soulErr)
 	}
-	reqLog.Info("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
+	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))))
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
 	dynamicSystemPrompt := soulContent
@@ -238,10 +241,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				config.F("session_generation", session.Generation),
 				config.F("is_session_new", session.IsNewSession))
 			if session.IsNewSession {
-				reqLog.Info("agent.session.bound", "bound tenant session context",
-					config.F("session_generation", session.Generation),
-					config.F("status", "ok"),
-				)
+				reqLog.Debug("agent.session.bound", "bound tenant session context",
+					config.F("session_generation", session.Generation))
 			}
 		}
 	}
@@ -273,7 +274,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		contextBlock = renderFileMemory(userContent, memoryContent)
-		reqLog.Info("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()))
 	}
 	appendContext := func(block string) {
 		if block == "" {
@@ -301,7 +302,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Warn("agent.images.load_failed", "failed to load session images", config.F("status", "degraded"), config.ErrorField(err))
 		} else {
 			contextImages = append(contextImages, priorImages...)
-			reqLog.Info("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()), config.F("status", "ok"))
+			reqLog.Debug("agent.images.loaded", "loaded session images", config.F("image_count", len(priorImages)), config.F("duration_ms", time.Since(imagesStarted).Milliseconds()))
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
@@ -514,10 +515,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			return nil, fmt.Errorf("stateless request exceeds model input budget")
 		}
 		if compactionStats.Compacted {
-			reqLog.Info("agent.context.compacted", "compacted active request context",
+			reqLog.Debug("agent.context.compacted", "compacted active request context",
 				config.F("iteration", iteration), config.F("compacted_unit_count", compactionStats.DebtCount),
 				config.F("estimated_before", compactionStats.EstimatedBefore), config.F("estimated_after", compactionStats.EstimatedAfter),
-				config.F("prompt_budget", inputLimit), config.F("status", "ok"))
+				config.F("prompt_budget", inputLimit))
 		}
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
@@ -559,7 +560,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			if err == nil {
 				// Continue with the response recovered after compaction.
-				reqLog.Info("agent.model.context_retry_recovered", "model recovered after context compaction", config.F("status", "ok"))
+				reqLog.Debug("agent.model.context_retry_recovered", "model recovered after context compaction")
 			} else if len(generatedImages) > 0 && !llm.IsTemporaryOllamaToolParserError(err) {
 				useFallback(generatedImagePartialResponse)
 				goto finalize
@@ -586,7 +587,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					return nil, ctxErr
 				}
 				if err == nil {
-					reqLog.Info("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
+					reqLog.Debug("agent.model.temporary_parser_retry_recovered", "model call recovered after upstream tool parser failure",
 						config.F("iteration", iteration),
 						config.F("retry_attempt", 1),
 						config.F("is_recovered", true),
@@ -646,7 +647,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		// No tool calls — the model is done. Exit the loop.
 		if len(resp.Message.ToolCalls) == 0 {
-			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration), config.F("status", "ok"))
+			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
 		iterationDecision := toolGovernor.BeginToolIteration()
@@ -785,7 +786,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 										}
 									}
 									ctx = requestctx.WithInputImages(ctx, contextImages)
-									reqLog.Info("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)), config.F("status", "ok"))
+									reqLog.Debug("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)))
 								}
 							}
 							if execErr == nil {
@@ -809,9 +810,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if a.registry.HasHandler(toolName) {
 					scope = "builtin"
 				}
-				reqLog.Info("agent.tool.complete", "completed tool execution", config.F("tool_name", toolName), config.F("scope", scope),
-					config.F("record_kind", "measurement"), config.F("reason_code", result.ReasonCode), config.ErrorField(execErr),
-					config.F("operation_id", toolMeta.OperationID), config.F("parent_operation_id", toolMeta.ParentOperationID),
+				reqLog.Info("tool.completed", "completed tool execution", config.F("tool_name", toolName), config.F("scope", scope),
+					config.F("reason_code", result.ReasonCode), config.ErrorField(execErr),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()), config.F("outcome", outcome), config.F("status", status))
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr
@@ -824,19 +824,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if !advertised {
 					safeName = "unadvertised"
 				}
-				reqLog.Info("agent.tool.blocked", "blocked tool execution",
-					config.F("iteration", iteration), config.F("tool_name", safeName),
+				reqLog.Info("tool.blocked", "blocked tool execution",
+					config.F("tool_name", safeName),
 					config.F("reason_code", decision.ReasonCode), config.F("status", "rejected"))
 			}
 			if decision.Allowed && execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
-				reqLog.Warn("agent.tool.failure", "tool execution failed",
-					config.F("iteration", iteration),
-					config.F("tool_name", toolName),
-					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()),
-					config.F("status", "error"),
-					config.ErrorField(execErr),
-				)
+				if !errors.Is(execErr, context.Canceled) {
+					reqLog.Warn("tool.failed", "tool execution failed; model may recover", config.F("tool_name", toolName), config.F("status", "degraded"), config.ErrorField(execErr))
+				}
 				toolContent = "Error: " + truncate(config.SafeErrorText(execErr), 1000)
 			} else if decision.Allowed {
 				toolContent = result.Content
@@ -914,7 +910,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		foregroundCompaction.imageToolRounds = retainedImageToolRounds(messages)
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
-			reqLog.Warn("agent.tool_budget.exhausted", "tool governance budget exhausted",
+			reqLog.Debug("agent.tool_budget.exhausted", "tool governance budget exhausted",
 				config.F("reason_code", reason),
 				config.F("tool_execution_count", toolGovernor.TotalExecutions()),
 				config.F("tool_iteration_count", toolGovernor.ToolIterations()),
@@ -942,9 +938,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			return nil, fmt.Errorf("stateless request exceeds model input budget")
 		}
 		if compactionStats.Compacted {
-			reqLog.Info("agent.context.compacted", "compacted active request context before final model call",
+			reqLog.Debug("agent.context.compacted", "compacted active request context before final model call",
 				config.F("compacted_unit_count", compactionStats.DebtCount), config.F("estimated_before", compactionStats.EstimatedBefore),
-				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit), config.F("status", "ok"))
+				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit))
 		}
 
 		modelIterations++
@@ -1104,7 +1100,7 @@ finalize:
 					finalThinking += retryResp.Message.Thinking
 				}
 				if strings.TrimSpace(finalContent) != "" {
-					reqLog.Info("agent.response.empty_retry_recovered", "model recovered after empty response", config.F("status", "ok"))
+					reqLog.Debug("agent.response.empty_retry_recovered", "model recovered after empty response")
 				}
 			}
 		}
@@ -1162,7 +1158,7 @@ finalize:
 		if storedTurn.ID > 0 {
 			persistenceStatus = "pending"
 			if len(generatedImages) > 0 {
-				reqLog.Info("agent.images.stored", "stored pending session images", config.F("image_count", len(generatedImages)), config.F("status", "ok"))
+				reqLog.Debug("agent.images.stored", "stored pending session images", config.F("image_count", len(generatedImages)))
 			}
 		}
 	}

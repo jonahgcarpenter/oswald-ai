@@ -44,12 +44,17 @@ func TestErrorFieldLogRedactsCanariesAndPreservesStructure(t *testing.T) {
 			t.Fatalf("sensitive canary %q leaked in log: %s", forbidden, text)
 		}
 	}
-	for key, want := range map[string]any{"component": "canary", "event": "canary.failed", "http_status": float64(502), "status": "error", "error_code": "unknown_error"} {
+	for key, want := range map[string]any{"component": "canary", "event": "canary.failed"} {
 		if record[key] != want {
 			t.Fatalf("structured field %q missing from log: %s", key, text)
 		}
 	}
-	if _, ok := record["error"]; ok {
+	for key, want := range map[string]any{"http_status": float64(502), "status": "error", "error_code": "unknown_error"} {
+		if detailsOf(t, record)[key] != want {
+			t.Fatalf("structured field %q missing from log: %s", key, text)
+		}
+	}
+	if _, ok := detailsOf(t, record)["error"]; ok {
 		t.Fatal("raw error field emitted")
 	}
 }

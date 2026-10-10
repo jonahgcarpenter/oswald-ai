@@ -34,6 +34,31 @@ func measurementRecords(t *testing.T, output string, event string) []map[string]
 	return records
 }
 
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
+// checkStatus asserts a details status: success is implicit (absent), every
+// other status is emitted verbatim.
+func checkStatus(t *testing.T, details map[string]any, want string) {
+	t.Helper()
+	got, exists := details["status"]
+	if want == "ok" {
+		if exists {
+			t.Fatalf("success status emitted: %#v", details)
+		}
+		return
+	}
+	if got != want {
+		t.Fatalf("status=%v, want %q", got, want)
+	}
+}
+
 func TestChatCompletionMeasurement(t *testing.T) {
 	const canary = "private_unrecognized_provider_label"
 	for _, test := range []struct {
@@ -69,23 +94,28 @@ func TestChatCompletionMeasurement(t *testing.T) {
 				t.Fatalf("completion count=%d logs=%s", len(records), output.String())
 			}
 			r := records[0]
-			if r["is_usage_complete"] != (test.reported && !test.failed) || r["is_usage_invalid"] != false {
+			d := logDetails(t, r)
+			if d["is_usage_complete"] != (test.reported && !test.failed) || d["is_usage_invalid"] != false {
 				t.Errorf("usage metadata=%+v", r)
 			}
-			for key, want := range map[string]any{"level": "info", "record_kind": "measurement", "operation": "chat", "transport": "streaming", "status": test.status, "is_submitted": true, "is_usage_reported": test.reported, "model": "configured-model", "parent_operation_id": "parent_1", "request_id": "req_1", "user_id": "usr_1", "gateway": "discord", "workload": "foreground", "malformed_chunk_count": float64(test.malformed)} {
-				if r[key] != want {
-					t.Errorf("%s=%v want %v", key, r[key], want)
+			if r["level"] != "debug" {
+				t.Errorf("level=%v", r["level"])
+			}
+			for key, want := range map[string]any{"operation": "chat", "transport": "streaming", "is_submitted": true, "is_usage_reported": test.reported, "model": "configured-model", "parent_operation_id": "parent_1", "request_id": "req_1", "profile": "usr_1", "gateway": "discord", "workload": "foreground", "malformed_chunk_count": float64(test.malformed)} {
+				if d[key] != want {
+					t.Errorf("%s=%v want %v", key, d[key], want)
 				}
 			}
-			if r["operation_id"] == "" || r["operation_id"] == "parent_1" {
-				t.Errorf("operation id=%v", r["operation_id"])
+			checkStatus(t, d, test.status)
+			if d["operation_id"] == "" || d["operation_id"] == "parent_1" {
+				t.Errorf("operation id=%v", d["operation_id"])
 			}
-			_, first := r["time_to_first_output_ms"]
-			_, tokens := r["total_tokens"]
+			_, first := d["time_to_first_output_ms"]
+			_, tokens := d["total_tokens"]
 			if first != test.first || tokens != test.reported {
 				t.Errorf("presence: %+v", r)
 			}
-			if test.reported && r["total_tokens"] != float64(test.tokens) {
+			if test.reported && d["total_tokens"] != float64(test.tokens) {
 				t.Errorf("tokens: %+v", r)
 			}
 			warnings := measurementRecords(t, output.String(), "provider.gateway.chat.stream.parse_failed")
@@ -134,18 +164,24 @@ func TestGatewayLocalFailureAndCancellationMeasurements(t *testing.T) {
 				t.Fatalf("logs=%s", output.String())
 			}
 			r := records[0]
-			if r["is_submitted"] != false || r["workload"] != "system" {
+			d := logDetails(t, r)
+			if d["is_submitted"] != false || d["workload"] != "system" {
 				t.Errorf("measurement=%+v", r)
 			}
 			phase := "submit"
 			if kind == "marshal" {
 				phase = "marshal"
 			}
-			if r["phase"] != phase || r["is_usage_complete"] != false {
+			if d["phase"] != phase || d["is_usage_complete"] != false {
 				t.Errorf("measurement=%+v", r)
 			}
-			if kind == "cancel" && (r["status"] != "ok" || r["outcome"] != "canceled" || !errors.Is(err, context.Canceled)) {
+			if kind == "cancel" && (d["outcome"] != "canceled" || !errors.Is(err, context.Canceled)) {
 				t.Errorf("cancel=%+v err=%v", r, err)
+			}
+			if kind == "cancel" {
+				checkStatus(t, d, "ok")
+			} else {
+				checkStatus(t, d, "error")
 			}
 			if strings.Contains(output.String(), "private prose") || strings.Contains(output.String(), `"level":"warn"`) {
 				t.Fatalf("logs=%s", output.String())
@@ -194,10 +230,14 @@ func TestAsyncMeasurementsSeparateEmbeddingAndDoNotCountPolls(t *testing.T) {
 					t.Fatal(err)
 				}
 				records := measurementRecords(t, output.String(), event)
-				if len(records) != 1 || records[0]["operation"] != operation || records[0]["transport"] != "async" || records[0]["is_usage_reported"] != (usage != "") {
+				if len(records) != 1 {
 					t.Fatalf("logs=%s", output.String())
 				}
-				if records[0]["is_usage_complete"] != (embedding && usage != "") || records[0]["phase"] != "decode" {
+				d := logDetails(t, records[0])
+				if d["operation"] != operation || d["transport"] != "async" || d["is_usage_reported"] != (usage != "") {
+					t.Fatalf("logs=%s", output.String())
+				}
+				if d["is_usage_complete"] != (embedding && usage != "") || d["phase"] != "decode" {
 					t.Errorf("measurement=%+v", records[0])
 				}
 				s := collector.Snapshot()
@@ -247,12 +287,13 @@ func TestInvalidUsageIsOmittedWithoutChangingChatResponse(t *testing.T) {
 				t.Fatalf("records=%v", records)
 			}
 			r := records[0]
-			if r["is_usage_complete"] != false || r["is_usage_invalid"] != true || r["is_usage_reported"] != true || r["status"] != "degraded" || r["prompt_tokens"] != float64(5) {
+			d := logDetails(t, r)
+			if d["is_usage_complete"] != false || d["is_usage_invalid"] != true || d["is_usage_reported"] != true || d["status"] != "degraded" || d["prompt_tokens"] != float64(5) {
 				t.Errorf("measurement=%+v", r)
 			}
 			for _, key := range []string{"completion_tokens", "total_tokens", "effective_output_tps"} {
-				if _, exists := r[key]; exists {
-					t.Errorf("invalid metric %s=%v", key, r[key])
+				if _, exists := d[key]; exists {
+					t.Errorf("invalid metric %s=%v", key, d[key])
 				}
 			}
 			s := collector.Snapshot()
@@ -305,12 +346,17 @@ func TestLaterInvalidStreamUsagePreservesKnownCounts(t *testing.T) {
 				t.Fatalf("completion count=%d logs=%s", len(records), output.String())
 			}
 			r := records[0]
-			for key, want := range map[string]any{"level": "info", "status": status, "outcome": outcome, "is_usage_reported": true, "is_usage_complete": false, "is_usage_invalid": true, "prompt_tokens": float64(81), "completion_tokens": float64(20), "total_tokens": float64(100)} {
-				if r[key] != want {
-					t.Errorf("%s=%v want %v", key, r[key], want)
+			d := logDetails(t, r)
+			if r["level"] != "debug" {
+				t.Errorf("level=%v", r["level"])
+			}
+			for key, want := range map[string]any{"outcome": outcome, "is_usage_reported": true, "is_usage_complete": false, "is_usage_invalid": true, "prompt_tokens": float64(81), "completion_tokens": float64(20), "total_tokens": float64(100)} {
+				if d[key] != want {
+					t.Errorf("%s=%v want %v", key, d[key], want)
 				}
 			}
-			if _, exists := r["effective_output_tps"]; exists {
+			checkStatus(t, d, status)
+			if _, exists := d["effective_output_tps"]; exists {
 				t.Errorf("invalid usage produced TPS: %+v", r)
 			}
 			s := collector.Snapshot()
@@ -355,11 +401,20 @@ func TestStreamReadFailureAndCancellationRetainObservedUsage(t *testing.T) {
 				t.Fatalf("response=%+v err=%v chunks=%d", response, err, chunks)
 			}
 			records := measurementRecords(t, output.String(), "provider.gateway.chat.complete")
-			if len(records) != 1 || records[0]["total_tokens"] != float64(6) || records[0]["is_usage_reported"] != true || records[0]["time_to_first_output_ms"] == nil {
+			if len(records) != 1 {
 				t.Fatalf("logs=%s", output.String())
 			}
-			if canceled && (records[0]["status"] != "ok" || records[0]["outcome"] != "canceled") {
+			d := logDetails(t, records[0])
+			if d["total_tokens"] != float64(6) || d["is_usage_reported"] != true || d["time_to_first_output_ms"] == nil {
+				t.Fatalf("logs=%s", output.String())
+			}
+			if canceled && d["outcome"] != "canceled" {
 				t.Errorf("cancel=%+v", records[0])
+			}
+			if canceled {
+				checkStatus(t, d, "ok")
+			} else {
+				checkStatus(t, d, "error")
 			}
 			s := collector.Snapshot()
 			if s.ModelCallCount != 1 || s.ModelSubmissionCount != 1 || s.TotalTokens != 6 {

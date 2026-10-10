@@ -249,7 +249,7 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 						reg := registry.New(config.NewLogger(config.LevelError))
 						a, store := newTestAgent(t, chat, nil, reg)
 						var logs bytes.Buffer
-						a.log = config.NewLogger(config.LevelInfo)
+						a.log = config.NewLogger(config.LevelDebug)
 						a.log.SetOutput(&logs)
 						policy := testToolPolicy()
 						policy.MaxExecutions = 0
@@ -580,7 +580,7 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 			reg := registry.New(config.NewLogger(config.LevelError))
 			a, store := newTestAgent(t, chat, nil, reg)
 			var logs bytes.Buffer
-			level := config.LevelInfo
+			level := config.LevelDebug
 			if streaming {
 				level = config.LevelDebug
 			}
@@ -667,7 +667,7 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 					continue
 				}
 				for _, key := range []string{"image_count", "selected_image_count", "catalog_image_count"} {
-					if _, ok := record[key].(float64); !ok {
+					if _, ok := logDetails(t, record)[key].(float64); !ok {
 						t.Fatalf("missing numeric %s", key)
 					}
 				}

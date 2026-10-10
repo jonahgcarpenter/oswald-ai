@@ -95,19 +95,19 @@ func (s *ProfileStore) measure(event string, started time.Time, err *error) {
 			outcome = "canceled"
 		}
 	}
-	fields := []config.Field{config.F("record_kind", "measurement"), config.F("user_id", s.profile), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome), config.ErrorField(*err)}
+	fields := []config.Field{config.F("profile", s.profile), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome), config.ErrorField(*err)}
 	log := s.log.Server("memory.profile")
 	switch event {
 	case "memory.profile.session.complete":
-		log.Info("memory.profile.session.complete", "resolved profile session", fields...)
+		log.Debug("memory.profile.session.complete", "resolved profile session", fields...)
 	case "memory.profile.reset.complete":
-		log.Info("memory.profile.reset.complete", "reset profile session", fields...)
+		log.Debug("memory.profile.reset.complete", "reset profile session", fields...)
 	case "memory.profile.snapshot.complete":
-		log.Info("memory.profile.snapshot.complete", "bound profile file snapshot", fields...)
+		log.Debug("memory.profile.snapshot.complete", "bound profile file snapshot", fields...)
 	case "memory.profile.turn.complete":
-		log.Info("memory.profile.turn.complete", "stored pending profile exchange", fields...)
+		log.Debug("memory.profile.turn.complete", "stored pending profile exchange", fields...)
 	case "memory.profile.delivery.complete":
-		log.Info("memory.profile.delivery.complete", "recorded profile exchange delivery", fields...)
+		log.Debug("memory.profile.delivery.complete", "recorded profile exchange delivery", fields...)
 	}
 }
 

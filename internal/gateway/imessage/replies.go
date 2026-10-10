@@ -59,8 +59,8 @@ func (g *Gateway) resolveReply(parent context.Context, msg webhookMessage, allow
 			status, outcome, errorCount, rejectedCount = "ok", "canceled", 0, 0
 			reasonCode = "canceled"
 		}
-		g.log().Info("gateway.reply_lookup.complete", "resolved imessage reply context",
-			config.F("record_kind", "measurement"), config.F("request_id", requestID), config.F("status", status), config.F("outcome", outcome),
+		g.log().Debug("gateway.reply_lookup.complete", "resolved imessage reply context",
+			config.F("request_id", requestID), config.F("status", status), config.F("outcome", outcome),
 			config.F("phase", phase), config.F("reason_code", reasonCode),
 			config.F("duration_ms", time.Since(started).Milliseconds()), config.F("cache_count", cacheCount),
 			config.F("remote_count", remoteCount), config.F("direct_count", directCount), config.F("predecessor_count", predecessorCount),

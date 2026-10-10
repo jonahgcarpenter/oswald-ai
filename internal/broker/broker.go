@@ -236,22 +236,7 @@ func (b *Broker) Start() {
 		for _, head := range heads {
 			b.makeReady(head)
 		}
-		b.log.Info("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
-		b.logHealth()
-		b.workerWG.Add(1)
-		go func() {
-			defer b.workerWG.Done()
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					b.logHealth()
-				case <-b.lifecycleCtx.Done():
-					return
-				}
-			}
-		}()
+		b.log.Debug("broker.started", "started broker worker pool", config.F("worker_count", b.workerCount))
 	})
 }
 
@@ -332,6 +317,7 @@ func (b *Broker) Submit(req *Request) error {
 		}
 		b.log.Warn("broker.request.rejected", "rejected broker request",
 			config.F("request_id", req.RequestID), config.F("gateway", req.Principal.Gateway),
+			config.F("profile", req.Principal.CanonicalUserID),
 			config.F("chat_id", req.ChatID), config.F("status", "rejected"), config.F("reason", reason))
 		deliverResult(req.ResponseChan, Result{Response: &agent.Response{Response: config.SafeText(text)}, ExecutionComplete: true})
 		return err
@@ -500,7 +486,7 @@ func (b *Broker) Shutdown() {
 		queued := b.outstanding
 		started := b.started
 		b.mu.Unlock()
-		b.log.Info("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
+		b.log.Debug("broker.shutdown.start", "shutting down broker", config.F("queued_request_count", queued))
 		if started && b.workerCount > 0 {
 			b.workWG.Wait()
 		} else {
@@ -508,8 +494,7 @@ func (b *Broker) Shutdown() {
 		}
 		close(b.ready)
 		b.workerWG.Wait()
-		b.logHealth()
-		b.log.Info("broker.shutdown.complete", "broker shutdown complete")
+		b.log.Debug("broker.shutdown.complete", "broker shutdown complete")
 	})
 }
 

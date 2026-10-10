@@ -374,7 +374,7 @@ func TestGatewayClientProviderErrorsDoNotExposeResponseText(t *testing.T) {
 			if strings.Contains(logs, reflectedSoulCanary) {
 				t.Fatalf("provider logs exposed reflected content: %s", logs)
 			}
-			if !strings.Contains(logs, `"record_kind":"measurement"`) || !strings.Contains(logs, `.complete"`) {
+			if !strings.Contains(logs, `.complete"`) || !strings.Contains(logs, `"details":{`) {
 				t.Fatalf("missing provider completion: %s", logs)
 			}
 		})
@@ -558,7 +558,7 @@ func TestGatewayClientChatStreamSupportsNilCallback(t *testing.T) {
 }
 
 func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
-	for _, level := range []config.Level{config.LevelInfo, config.LevelDebug} {
+	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(fmt.Sprint(level), func(t *testing.T) {
 			var output bytes.Buffer
 			log := config.NewLogger(level)
@@ -603,11 +603,16 @@ func TestGatewayClientNilCallbackStreamCancellation(t *testing.T) {
 			if len(records) != 1 {
 				t.Fatalf("completion count=%d logs=%s", len(records), output.String())
 			}
-			for key, want := range map[string]any{"level": "info", "status": "ok", "outcome": "canceled", "is_submitted": true, "is_usage_reported": true, "is_usage_complete": false, "prompt_tokens": float64(7)} {
-				if records[0][key] != want {
-					t.Errorf("%s=%v want %v", key, records[0][key], want)
+			d := logDetails(t, records[0])
+			if records[0]["level"] != "debug" {
+				t.Errorf("level=%v", records[0]["level"])
+			}
+			for key, want := range map[string]any{"outcome": "canceled", "is_submitted": true, "is_usage_reported": true, "is_usage_complete": false, "prompt_tokens": float64(7)} {
+				if d[key] != want {
+					t.Errorf("%s=%v want %v", key, d[key], want)
 				}
 			}
+			checkStatus(t, d, "ok")
 			if strings.Contains(output.String(), reflectedSoulCanary) {
 				t.Fatal("stream reasoning leaked into logs")
 			}

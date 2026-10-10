@@ -3,7 +3,6 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -13,11 +12,10 @@ import (
 	"time"
 )
 
-const serviceName = "oswald-ai"
-
+// reservedLogFields name the universal envelope. Caller-supplied fields with
+// these keys are ignored so event details can never overwrite the envelope.
 var reservedLogFields = map[string]struct{}{
-	"ts": {}, "level": {}, "service": {}, "log_type": {}, "component": {}, "event": {}, "msg": {},
-	"log_schema_version": {}, "instance_id": {},
+	"ts": {}, "level": {}, "log_type": {}, "component": {}, "event": {}, "msg": {}, "details": {},
 }
 
 var validLogStatuses = map[string]struct{}{
@@ -86,27 +84,28 @@ func ErrorField(err error) Field {
 	return F("error_code", ErrorCode(err))
 }
 
-// Logger emits structured JSON logs to stderr. Events, components, and messages
-// must be fixed developer-owned text, never interpolated inputs or errors.
-// Field filtering cannot prove the provenance of canonical IDs or model labels.
+// Logger emits structured JSON logs to stderr. Every record is a universal
+// envelope (ts, level, event, component, log_type) plus a nested details object
+// carrying the message and event-specific fields. Events, components, and
+// messages must be fixed developer-owned text, never interpolated inputs or
+// errors. Field filtering cannot prove the provenance of canonical IDs or model
+// labels.
 type Logger struct {
-	level      Level
-	logger     *log.Logger
-	logType    string
-	component  string
-	fields     []Field
-	agent      []Field
-	instanceID string
+	level     Level
+	logger    *log.Logger
+	logType   string
+	component string
+	fields    []Field
+	agent     []Field
 }
 
 // NewLogger creates a Logger that writes JSON to stderr at the given minimum level.
 func NewLogger(level Level) *Logger {
 	return &Logger{
-		level:      level,
-		logger:     log.New(os.Stderr, "", 0),
-		logType:    "server",
-		component:  "app",
-		instanceID: NewRequestID(),
+		level:     level,
+		logger:    log.New(os.Stderr, "", 0),
+		logType:   "server",
+		component: "app",
 	}
 }
 
@@ -120,7 +119,7 @@ func (l *Logger) With(fields ...Field) *Logger {
 		}
 		merged = append(merged, field)
 	}
-	return &Logger{level: l.level, logger: l.logger, logType: l.logType, component: l.component, fields: merged, agent: l.agent, instanceID: l.instanceID}
+	return &Logger{level: l.level, logger: l.logger, logType: l.logType, component: l.component, fields: merged, agent: l.agent}
 }
 
 // SetOutput changes the destination used by this logger and its scoped children.
@@ -137,13 +136,15 @@ func (l *Logger) Server(component string, fields ...Field) *Logger {
 }
 
 // Agent attaches canonical correlation, never session or external identifiers.
-func (l *Logger) Agent(component, requestID, userID, gateway, model string, fields ...Field) *Logger {
+// profile is the trusted internal profile name (CanonicalUserID); the gateway
+// display label, when known, is supplied separately as the user_id detail.
+func (l *Logger) Agent(component, requestID, profile, gateway, model string, fields ...Field) *Logger {
 	scoped := l.With(fields...)
 	scoped.logType = "agent"
 	scoped.component = component
 	scoped.agent = []Field{
+		F("profile", profile),
 		F("request_id", requestID),
-		F("user_id", userID),
 		F("gateway", gateway),
 		F("model", model),
 	}
@@ -155,17 +156,8 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 		return
 	}
 
-	payload := map[string]any{
-		"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
-		"level":              level.String(),
-		"service":            serviceName,
-		"log_type":           l.logType,
-		"component":          safeLogLabel(l.component),
-		"event":              safeLogLabel(event),
-		"msg":                boundedLogString(msg, maxLogMessageBytes),
-		"log_schema_version": 1,
-		"instance_id":        l.instanceID,
-		"record_kind":        "event",
+	details := map[string]any{
+		"msg": boundedLogString(msg, maxLogMessageBytes),
 	}
 
 	valid := true
@@ -173,40 +165,54 @@ func (l *Logger) log(level Level, event, msg string, fields ...Field) {
 		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
-		valid = addLogField(payload, field) && valid
+		valid = addLogField(details, field) && valid
 	}
 	for _, field := range fields {
 		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
 			continue
 		}
-		valid = addLogField(payload, field) && valid
+		valid = addLogField(details, field) && valid
 	}
 	for _, field := range l.agent {
-		valid = addLogField(payload, field) && valid
+		if field.Key == "" || field.Value == nil || isReservedLogField(field.Key) {
+			continue
+		}
+		valid = addLogField(details, field) && valid
+	}
+	if level == LevelInfo {
+		compactActivityLog(details, event)
 	}
 
-	line, err := json.Marshal(payload)
+	payload := map[string]any{
+		"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+		"level":     level.String(),
+		"event":     safeLogLabel(event),
+		"component": safeLogLabel(l.component),
+		"log_type":  l.logType,
+		"details":   details,
+	}
+
+	line, err := marshalOrderedLog(payload)
 	if err != nil || !valid || len(line) > maxLogRecordBytes {
-		fallback := map[string]any{
-			"ts":                 time.Now().UTC().Format(time.RFC3339Nano),
-			"level":              "error",
-			"service":            serviceName,
-			"log_type":           l.logType,
-			"component":          safeLogLabel(l.component),
-			"event":              "logger.marshal_failed",
-			"msg":                "failed to marshal log payload",
-			"status":             "error",
-			"error_code":         "invalid_log_payload",
-			"log_schema_version": 1,
-			"instance_id":        l.instanceID,
-			"record_kind":        "event",
+		fallbackDetails := map[string]any{
+			"msg":        "failed to marshal log payload",
+			"status":     "error",
+			"error_code": "invalid_log_payload",
 		}
 		for _, key := range correlationLogKeys {
-			if value, ok := payload[key]; ok {
-				fallback[key] = value
+			if value, ok := details[key]; ok {
+				fallbackDetails[key] = value
 			}
 		}
-		line, _ = json.Marshal(fallback)
+		fallback := map[string]any{
+			"ts":        time.Now().UTC().Format(time.RFC3339Nano),
+			"level":     "error",
+			"event":     "logger.marshal_failed",
+			"component": safeLogLabel(l.component),
+			"log_type":  l.logType,
+			"details":   fallbackDetails,
+		}
+		line, _ = marshalOrderedLog(fallback)
 	}
 
 	l.logger.Print(string(line))

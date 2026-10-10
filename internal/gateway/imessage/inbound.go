@@ -102,7 +102,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		if len(unsupported) > 0 {
 			status = "degraded"
 		}
-		log.Info("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
+		log.Debug("gateway.attachment.processed", "normalized imessage input attachments", config.F("accepted_count", len(images)), config.F("downgraded_count", len(unsupported)), config.F("declared_format_count", len(msg.Attachments)), config.F("duration_ms", time.Since(normalizationStarted).Milliseconds()), config.F("status", status))
 	}
 	if strings.TrimSpace(msg.Text) == "" && len(images) == 0 {
 		if len(unsupported) == 0 {
@@ -127,7 +127,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	canonicalUserID := principal.CanonicalUserID
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
-	log = log.With(config.F("user_id", canonicalUserID))
+	log = log.With(config.F("profile", canonicalUserID))
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyFound {

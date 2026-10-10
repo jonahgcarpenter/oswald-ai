@@ -28,7 +28,7 @@ func TestOutboundFIFOAndAmbiguousCreate(t *testing.T) {
 		var calls []string
 		var mu sync.Mutex
 		var nonce string
-		dg := &Gateway{Log: config.NewLogger(config.LevelInfo)}
+		dg := &Gateway{Log: config.NewLogger(config.LevelDebug)}
 		var logs bytes.Buffer
 		dg.Log.SetOutput(&logs)
 		dg.HTTPClient = &http.Client{Transport: outboundTransport(func(r *http.Request) (*http.Response, error) {

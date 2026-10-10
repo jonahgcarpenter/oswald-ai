@@ -26,6 +26,31 @@ func ignoredEvent(t *testing.T, events []map[string]any) map[string]any {
 	return found
 }
 
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
+// checkStatus asserts a details status: success is implicit (absent), every
+// other status is emitted verbatim.
+func checkStatus(t *testing.T, details map[string]any, want string) {
+	t.Helper()
+	got, exists := details["status"]
+	if want == "ok" {
+		if exists {
+			t.Fatalf("success status emitted: %#v", details)
+		}
+		return
+	}
+	if got != want {
+		t.Fatalf("status=%v, want %q", got, want)
+	}
+}
+
 func TestIMessageIgnoredLogDistinguishesMissingReplyReference(t *testing.T) {
 	log, events := captureInfoSummaries(t, config.LevelDebug)
 	bb := newFakeBlueBubbles(t)
@@ -42,14 +67,15 @@ func TestIMessageIgnoredLogDistinguishesMissingReplyReference(t *testing.T) {
 	})
 
 	ignored := ignoredEvent(t, events())
-	if ignored["level"] != "debug" || ignored["reason_code"] != "group_message_without_invocation" ||
-		ignored["is_group"] != true || ignored["is_mention"] != false || ignored["is_reply"] != false ||
-		ignored["has_thread_root"] != false || ignored["has_explicit_target"] != false ||
-		ignored["reply_lookup_attempted"] != false || ignored["reply_found"] != false ||
-		ignored["reply_is_bot"] != false || ignored["allow_predecessor"] != true {
+	d := logDetails(t, ignored)
+	if ignored["level"] != "debug" || d["reason_code"] != "group_message_without_invocation" ||
+		d["is_group"] != true || d["is_mention"] != false || d["is_reply"] != false ||
+		d["has_thread_root"] != false || d["has_explicit_target"] != false ||
+		d["reply_lookup_attempted"] != false || d["reply_found"] != false ||
+		d["reply_is_bot"] != false || d["allow_predecessor"] != true {
 		t.Fatalf("ignored=%+v", ignored)
 	}
-	if requestID, ok := ignored["request_id"].(string); !ok || requestID == "" {
+	if requestID, ok := d["request_id"].(string); !ok || requestID == "" {
 		t.Fatalf("missing request correlation: %+v", ignored)
 	}
 }
@@ -77,10 +103,11 @@ func TestIMessageIgnoredLogReportsIneligibleReplyReference(t *testing.T) {
 	})
 
 	ignored := ignoredEvent(t, events())
-	if ignored["reason_code"] != "group_message_without_invocation" ||
-		ignored["is_reply"] != true || ignored["has_thread_root"] != false || ignored["has_explicit_target"] != true ||
-		ignored["reply_lookup_attempted"] != true || ignored["reply_found"] != true ||
-		ignored["reply_is_bot"] != false || ignored["allow_predecessor"] != true || ignored["is_mention"] != false {
+	d := logDetails(t, ignored)
+	if d["reason_code"] != "group_message_without_invocation" ||
+		d["is_reply"] != true || d["has_thread_root"] != false || d["has_explicit_target"] != true ||
+		d["reply_lookup_attempted"] != true || d["reply_found"] != true ||
+		d["reply_is_bot"] != false || d["allow_predecessor"] != true || d["is_mention"] != false {
 		t.Fatalf("ignored=%+v", ignored)
 	}
 }

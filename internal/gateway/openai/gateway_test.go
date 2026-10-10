@@ -22,7 +22,7 @@ import (
 
 func testGateway(t *testing.T) *Gateway {
 	t.Helper()
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenPort: "12345", Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestStreamRejectsAttachmentsAfterProgress(t *testing.T) {
 
 func TestFixedAPIProfileAndPreRuntimeLogging(t *testing.T) {
 	var logs bytes.Buffer
-	log := config.NewLogger(config.LevelInfo)
+	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&logs)
 	svc, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenPort: "12345", Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
 	if err != nil {

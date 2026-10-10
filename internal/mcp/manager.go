@@ -220,13 +220,13 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 				status, outcome = "ok", "canceled"
 			}
 		}
-		fields := []config.Field{config.F("record_kind", "measurement"), config.F("operation", "connect"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
+		fields := []config.Field{config.F("operation", "connect"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
 		if err != nil {
 			fields = append(fields, config.ErrorField(err))
 		} else if srv != nil {
 			fields = append(fields, config.F("tool_count", len(srv.tools)))
 		}
-		connectionLog.Info("mcp.server.connect.complete", "MCP connection completed", fields...)
+		connectionLog.Debug("mcp.server.connect.complete", "MCP connection completed", fields...)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			connectionLog.Warn("mcp.server.connect_failed", "MCP server unavailable", config.F("status", "degraded"), config.ErrorField(err))
 		}
@@ -289,7 +289,7 @@ func (m *Manager) closeSession(closeFn func() error) error {
 	if err != nil {
 		m.log.Warn("mcp.server.close_failed", "failed to close MCP session", append(fields, config.F("status", "degraded"), config.ErrorField(err))...)
 	} else {
-		m.log.Info("mcp.server.close.complete", "closed MCP session", append(fields, config.F("status", "ok"))...)
+		m.log.Debug("mcp.server.close.complete", "closed MCP session", fields...)
 	}
 	return err
 }

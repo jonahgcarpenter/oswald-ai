@@ -17,13 +17,13 @@ const (
 )
 
 var correlationLogKeys = []string{
-	"request_id", "user_id", "gateway", "model", "workload", "operation_id", "parent_operation_id", "job_id",
+	"profile", "request_id", "user_id", "gateway", "model", "workload", "operation_id", "parent_operation_id", "job_id",
 }
 
 // String fields are opt-in. Numeric/bool metrics remain extensible, but private
 // keys are rejected regardless of type. Labels are not a place for user prose.
 var stringLogFields = map[string]bool{
-	"request_id": true, "user_id": true, "actor_user_id": true, "target_user_id": true,
+	"profile": true, "request_id": true, "user_id": true, "actor_user_id": true, "target_user_id": true,
 	"gateway": true, "model": true, "workload": true, "operation_id": true, "parent_operation_id": true,
 	"status": true, "outcome": true, "error_code": true, "operation": true,
 	"tool_name": true, "provider": true, "primary_provider": true, "fallback_provider": true,
@@ -31,7 +31,7 @@ var stringLogFields = map[string]bool{
 	"job_state": true, "formation_purpose": true, "generator_version": true, "extractor_version": true,
 	"input_type": true, "prompt_type": true, "finish_reason": true, "transport": true,
 	"phase": true, "reason_code": true, "response_kind": true, "request_kind": true,
-	"execution_status": true, "delivery_status": true, "persistence_status": true, "record_kind": true,
+	"execution_status": true, "delivery_status": true, "execution_outcome": true, "delivery_outcome": true, "persistence_status": true,
 	"done_reason": true, "job_kind": true, "entity_kind": true, "index_kind": true,
 	"revision_state": true, "source": true, "server_name": true, "identity_assurance": true,
 	"build_version": true, "build_revision": true, "go_version": true, "cleanup_reason": true,
@@ -42,6 +42,9 @@ var stringLogFields = map[string]bool{
 	"mode": true, "server": true, "remote_tool_name": true, "tool_outcome": true,
 	"embedding_model": true, "log_level": true, "default_method": true, "normalized_mime": true,
 	"event_type": true, "gateways": true, "tools": true, "port": true,
+	// Gateway connection identity: the bot's own advertised ID/username and the
+	// BlueBubbles capability/endpoint labels (never transport user identities).
+	"bot_id": true, "bot_name": true, "private_api": true, "webhook_path": true, "listen_addr": true,
 	// Server-generated persisted IDs: random challenge ID (not its code/hash)
 	// and MCP config ID (not its URL or remote client/account identity).
 	"challenge_id": true,
@@ -115,6 +118,26 @@ func safeLogLabel(s string) string {
 	return s
 }
 
+// safeDisplayLabel bounds an untrusted, human-facing gateway label (a chat
+// display name or the bot's own username) without the identifier redaction
+// applied to canonical labels. Real names contain spaces, punctuation, and
+// non-ASCII text, so only control characters are normalized to keep values
+// single-line; the result is truncated on a rune boundary.
+func safeDisplayLabel(s string) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || r == 0x7f:
+			// Drop other control characters.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return boundedLogString(strings.TrimSpace(b.String()), maxLogStringBytes)
+}
+
 // addLogField never passes caller objects to encoding/json. Unsupported objects
 // cause the fixed marshal_failed fallback without calling their methods.
 func addLogField(payload map[string]any, field Field) bool {
@@ -128,6 +151,11 @@ func addLogField(payload map[string]any, field Field) bool {
 		}
 		if _, valid := validLogStatuses[status]; !valid {
 			status = "degraded"
+		}
+		// Success is the implicit default: only attention-worthy statuses
+		// are emitted, so a present status always means something.
+		if status == "ok" {
+			return true
 		}
 		payload[field.Key] = status
 		return true
@@ -162,6 +190,19 @@ func logScalar(key string, value any) (any, bool, bool) {
 	switch v := value.(type) {
 	case string:
 		if !stringLogFields[key] {
+			return nil, false, true
+		}
+		// An absent reason is omitted rather than emitted as an empty string.
+		if key == "reason_code" && strings.TrimSpace(v) == "" {
+			return nil, false, true
+		}
+		// Human-facing gateway labels keep spaces, punctuation, and non-ASCII
+		// text; they are bounded and single-lined, never identifier-redacted.
+		switch key {
+		case "user_id", "bot_name":
+			if label := safeDisplayLabel(v); label != "" {
+				return label, true, true
+			}
 			return nil, false, true
 		}
 		// These fields have wire-specific syntax that generic labels must not

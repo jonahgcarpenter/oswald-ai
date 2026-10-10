@@ -138,22 +138,6 @@ func (s *ProfileStore) CompressionScopesAfter(ctx context.Context, after string)
 	return scopes, rows.Err()
 }
 
-// CompressionHealth reports current durable receipt and lease gauges without
-// exposing source text, session keys, artifacts, or model-authored values.
-func (s *ProfileStore) CompressionHealth(ctx context.Context) (retry, ready, dead, done, expired int64, resultErr error) {
-	err := s.db.SQL().QueryRowContext(ctx, `SELECT
- COALESCE(SUM(json_extract(value,'$.state')='retry' AND json_extract(value,'$.submissions')<4),0),
- COALESCE(SUM(json_extract(value,'$.state')='ready'),0),
- COALESCE(SUM(json_extract(value,'$.state')='dead' OR (json_extract(value,'$.state')='retry' AND json_extract(value,'$.submissions')>=4)),0),
- COALESCE(SUM(json_extract(value,'$.state')='done'),0)
- FROM state_meta WHERE substr(key,1,22)='oswald:v1:compression:'`).Scan(&retry, &ready, &dead, &done)
-	if err != nil {
-		return 0, 0, 0, 0, 0, err
-	}
-	err = s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM compression_locks WHERE expires_at<=?`, float64(s.now().UnixNano())/1e9).Scan(&expired)
-	return retry, ready, dead, done, expired, err
-}
-
 // CompressionCandidates stops before pending delivery, but may pass failed
 // sends. Eligibility is rechecked transactionally at publication.
 func (s *ProfileStore) CompressionCandidates(ctx context.Context, scope ActiveSessionScope, after int64) ([]SessionTurn, SessionPromptPressure, error) {

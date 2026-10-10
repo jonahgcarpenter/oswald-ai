@@ -337,5 +337,5 @@ func (c *Client) logCompletion(ctx context.Context, query string, responseBytes 
 		config.F("provider", "brave"), config.F("query_chars", utf8.RuneCountInString(query)),
 		config.F("response_bytes", responseBytes), config.F("candidate_count", response.Stats.CandidateCount),
 		config.F("filtered_count", response.Stats.FilteredCount), config.F("duplicate_count", response.Stats.DuplicateCount),
-		config.F("result_count", len(response.Results)), config.F("duration_ms", duration.Milliseconds()), config.F("status", "ok"))...)
+		config.F("result_count", len(response.Results)), config.F("duration_ms", duration.Milliseconds()))...)
 }
