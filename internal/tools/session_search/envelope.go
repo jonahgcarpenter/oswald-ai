@@ -35,6 +35,7 @@ type messageJSON struct {
 
 type discoverResultJSON struct {
 	SessionID      string        `json:"session_id"`
+	Profile        string        `json:"profile"`
 	When           string        `json:"when"`
 	Source         string        `json:"source"`
 	Model          string        `json:"model,omitempty"`
@@ -87,6 +88,7 @@ type readEnvelope struct {
 	Success      bool            `json:"success"`
 	Mode         string          `json:"mode"`
 	SessionID    string          `json:"session_id"`
+	Profile      string          `json:"profile"`
 	Link         string          `json:"link"`
 	SessionMeta  sessionMetaJSON `json:"session_meta"`
 	MessageCount int             `json:"message_count"`
@@ -106,6 +108,7 @@ type scrollEnvelope struct {
 	Success         bool          `json:"success"`
 	Mode            string        `json:"mode"`
 	SessionID       string        `json:"session_id"`
+	Profile         string        `json:"profile"`
 	AroundMessageID int64         `json:"around_message_id"`
 	Window          int           `json:"window"`
 	MessagesBefore  int           `json:"messages_before"`
@@ -136,16 +139,24 @@ func toEpoch(t time.Time) float64 {
 	return float64(t.UnixNano()) / 1e9
 }
 
-func buildDiscover(ctx context.Context, store *memory.ProfileStore, owner string, parsed discoveryArgs, sessions []memory.SearchSession) (string, error) {
-	envelope := discoverEnvelope{Success: true, Mode: "discover", Query: parsed.Query, Detail: parsed.Detail, Count: len(sessions), SessionsSearched: len(sessions), LinkHint: linkHint, Results: []discoverResultJSON{}}
-	for index, session := range sessions {
-		result, err := hydrateDiscover(ctx, store, owner, parsed, session, index == 0)
+// discoverHit pairs one discovery match with the profile store that owns it so
+// hydration reads from the correct database.
+type discoverHit struct {
+	Profile string
+	Store   *memory.ProfileStore
+	Session memory.SearchSession
+}
+
+func buildDiscover(ctx context.Context, parsed discoveryArgs, hits []discoverHit) (string, error) {
+	envelope := discoverEnvelope{Success: true, Mode: "discover", Query: parsed.Query, Detail: parsed.Detail, Count: len(hits), SessionsSearched: len(hits), LinkHint: linkHint, Results: []discoverResultJSON{}}
+	for index, hit := range hits {
+		result, err := hydrateDiscover(ctx, hit.Store, hit.Profile, parsed, hit.Session, index == 0)
 		if err != nil {
 			return "", err
 		}
 		envelope.Results = append(envelope.Results, result)
 	}
-	if len(sessions) == 0 {
+	if len(hits) == 0 {
 		envelope.Message = "No delivered messages matched. Broaden with FTS5 syntax: OR between synonyms, \"quoted phrases\", NOT to exclude, and prefix* wildcards."
 	}
 	return marshalBounded(envelope)
@@ -154,7 +165,7 @@ func buildDiscover(ctx context.Context, store *memory.ProfileStore, owner string
 func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner string, parsed discoveryArgs, session memory.SearchSession, top bool) (discoverResultJSON, error) {
 	hydrate := top || parsed.Detail == "full"
 	result := discoverResultJSON{
-		SessionID: session.SessionID, When: formatWhen(session.StartedAt), Source: session.Source,
+		SessionID: session.SessionID, Profile: owner, When: formatWhen(session.StartedAt), Source: session.Source,
 		Model: session.Model, Title: session.Title, MatchedRole: session.MatchedRole,
 		MatchMessageID: session.MatchMessageID, Snippet: session.Snippet,
 		Detail: "compact", Link: discoverLink(owner, session.SessionID),
@@ -213,8 +224,8 @@ func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID 
 	return start, end, nil
 }
 
-func buildScroll(ctx context.Context, store *memory.ProfileStore, owner, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
-	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, AroundMessageID: anchor, Window: window, Messages: []messageJSON{}}
+func buildScroll(ctx context.Context, store *memory.ProfileStore, owner, profile, sessionID string, anchor int64, window int, before []memory.SearchMessage, anchorMessage *memory.SearchMessage, after []memory.SearchMessage) (string, error) {
+	envelope := scrollEnvelope{Success: true, Mode: "scroll", SessionID: sessionID, Profile: profile, AroundMessageID: anchor, Window: window, Messages: []messageJSON{}}
 	for _, message := range before {
 		envelope.Messages = append(envelope.Messages, toJSON(message, false, windowContentRunes))
 	}
@@ -239,12 +250,12 @@ func windowRemainder(ctx context.Context, store *memory.ProfileStore, owner, ses
 	return store.SessionWindowRemainder(ctx, owner, sessionID, messages[0].ID, messages[len(messages)-1].ID)
 }
 
-func buildRead(owner string, summary *memory.SearchSession, sessionID string, count int, first, last []memory.SearchMessage) (string, error) {
+func buildRead(profile string, summary *memory.SearchSession, sessionID string, count int, first, last []memory.SearchMessage) (string, error) {
 	meta := sessionMetaJSON{When: "", Source: "unknown"}
 	if summary != nil {
 		meta = sessionMetaJSON{When: formatWhen(summary.StartedAt), Source: summary.Source, Model: summary.Model, Title: summary.Title}
 	}
-	envelope := readEnvelope{Success: true, Mode: "read", SessionID: sessionID, Link: sessionLink(owner, sessionID), SessionMeta: meta, MessageCount: count, Messages: []messageJSON{}}
+	envelope := readEnvelope{Success: true, Mode: "read", SessionID: sessionID, Profile: profile, Link: sessionLink(profile, sessionID), SessionMeta: meta, MessageCount: count, Messages: []messageJSON{}}
 	if count == 0 {
 		envelope.Message = "Session has no delivered messages in this profile."
 		return marshalBounded(envelope)

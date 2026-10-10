@@ -68,6 +68,60 @@ type SearchFilter struct {
 	// LiveSessionID is the active conversation's session id; it and its lineage
 	// are omitted because that content is already in the model's live context.
 	LiveSessionID string
+	// GroupSource and GroupID constrain discovery to one group conversation
+	// (for example one Discord channel or iMessage chat). Both must be set
+	// together; when empty, no group constraint applies.
+	GroupSource string
+	GroupID     string
+}
+
+// ParseGroupSessionKey splits a group conversation session key of the form
+// source:group:sender (for example discord:<channel>:<author> or
+// imessage:<chatGUID>:<sender>) and reports the source and group segments.
+// DM keys (source:dm:sender) and malformed keys report ok=false.
+func ParseGroupSessionKey(key string) (source, groupID string, ok bool) {
+	first := strings.Index(key, ":")
+	last := strings.LastIndex(key, ":")
+	if first < 0 || last <= first {
+		return "", "", false
+	}
+	source, groupID, sender := key[:first], key[first+1:last], key[last+1:]
+	if source != "discord" && source != "imessage" {
+		return "", "", false
+	}
+	if groupID == "" || groupID == "dm" || sender == "" {
+		return "", "", false
+	}
+	if strings.Contains(groupID, ":") || strings.Contains(sender, ":") {
+		// Group and sender segments must not contain further separators;
+		// first/last split above already isolates them, so any inner colon
+		// means a malformed key rather than a nested namespace.
+		if strings.Contains(groupID, ":") {
+			return "", "", false
+		}
+	}
+	return source, groupID, true
+}
+
+// SessionKeyFor returns the conversation key and source for one session id
+// (or conversation key, resolved to its newest session). It reports
+// sql.ErrNoRows when the session does not exist in this profile.
+func (s *ProfileStore) SessionKeyFor(ctx context.Context, owner, id string) (sessionKey, source string, err error) {
+	if owner != s.profile {
+		return "", "", errors.New("invalid profile search scope")
+	}
+	resolved, err := s.resolveSearchSession(ctx, owner, id)
+	if err != nil {
+		return "", "", err
+	}
+	if resolved == "" {
+		return "", "", sql.ErrNoRows
+	}
+	err = s.db.SQL().QueryRowContext(ctx, `SELECT session_key,source FROM sessions WHERE id=? AND profile_name=?`, resolved, owner).Scan(&sessionKey, &source)
+	if err != nil {
+		return "", "", err
+	}
+	return sessionKey, source, nil
 }
 
 // DiscoverySessions runs an FTS5 search over delivered messages and returns one

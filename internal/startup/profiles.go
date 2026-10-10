@@ -124,7 +124,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		maintenanceStops = append(maintenanceStops, store.StartMaintenance())
 		fileStore := files.NewProfileStore(profile.ProfileRoot, name)
 		cache := imagecache.NewProfileCache(profile.ProfileRoot, name)
-		registry, err := tools.NewRegistryWithImageCache(profile, fileStore, store, cache, rootLog)
+		registry, err := tools.NewRegistryWithImageCache(profile, fileStore, store, cache, rootLog, stores)
 		if err != nil {
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
 		}
