@@ -220,7 +220,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 				status, outcome = "ok", "canceled"
 			}
 		}
-		fields := []config.Field{config.F("record_kind", "measurement"), config.F("operation", "connect"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
+		fields := []config.Field{config.F("operation", "connect"), config.F("phase", phase), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome)}
 		if err != nil {
 			fields = append(fields, config.ErrorField(err))
 		} else if srv != nil {

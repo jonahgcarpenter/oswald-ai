@@ -80,15 +80,17 @@ func TestCatalogTelemetryAggregatesUnsupportedEntriesAndUsesCurrentCaller(t *tes
 		switch record["event"] {
 		case "mcp.tool.skipped":
 			warnings++
-			if record["skipped_count"] != float64(2) || record["level"] != "warn" || record["request_id"] != "req_catalog" {
+			d := logDetails(t, record)
+			if d["skipped_count"] != float64(2) || record["level"] != "warn" || d["request_id"] != "req_catalog" {
 				t.Errorf("warning=%+v", record)
 			}
 		case "agent.tool.mcp.start":
 			starts++
-			if record["request_id"] != "req_first" && record["request_id"] != "req_second" {
+			d := logDetails(t, record)
+			if d["request_id"] != "req_first" && d["request_id"] != "req_second" {
 				t.Errorf("cached caller=%+v", record)
 			}
-			if record["operation_id"] != record["request_id"].(string)+"_op" {
+			if d["operation_id"] != d["request_id"].(string)+"_op" {
 				t.Errorf("operation=%+v", record)
 			}
 		}
@@ -96,6 +98,15 @@ func TestCatalogTelemetryAggregatesUnsupportedEntriesAndUsesCurrentCaller(t *tes
 	if warnings != 1 || starts != 2 {
 		t.Fatalf("warnings=%d starts=%d logs=%s", warnings, starts, output.String())
 	}
+}
+
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
 }
 
 func TestManagerReportsConnectListAndCloseFailuresWithoutPrivateDetails(t *testing.T) {

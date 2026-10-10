@@ -15,6 +15,15 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
 func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 	const canary = "private_generation_prose"
 	imageData := testPNG(t)
@@ -57,11 +66,12 @@ func TestGenerationStagesAndCleanupWarningExcludeProviderProse(t *testing.T) {
 			t.Fatal(err)
 		}
 		if r["event"] == "provider.comfyui.stage.complete" {
-			stages[r["phase"].(string)]++
-			if r["level"] != "debug" || r["duration_ms"] == nil || r["parent_operation_id"] != "op_parent" {
+			d := logDetails(t, r)
+			stages[d["phase"].(string)]++
+			if r["level"] != "debug" || d["duration_ms"] == nil || d["parent_operation_id"] != "op_parent" {
 				t.Errorf("stage=%+v", r)
 			}
-			if r["phase"] == "cleanup" && (r["http_status"] != float64(503) || r["error_code"] != "http_server_error") {
+			if d["phase"] == "cleanup" && (d["http_status"] != float64(503) || d["error_code"] != "http_server_error") {
 				t.Errorf("cleanup=%+v", r)
 			}
 		}
@@ -126,9 +136,10 @@ func TestImageStrengthStageTelemetry(t *testing.T) {
 				if err := json.Unmarshal([]byte(line), &record); err != nil {
 					t.Fatal(err)
 				}
-				if record["event"] == "provider.comfyui.stage.complete" && record["phase"] == "submit" {
+				if record["event"] == "provider.comfyui.stage.complete" && logDetails(t, record)["phase"] == "submit" {
 					submits++
-					if record["strength"] != want || record["level"] != "debug" || record["status"] != "error" || record["request_id"] != "req_strength" || record["parent_operation_id"] != "op_strength" {
+					d := logDetails(t, record)
+					if d["strength"] != want || record["level"] != "debug" || d["status"] != "error" || d["request_id"] != "req_strength" || d["parent_operation_id"] != "op_strength" {
 						t.Fatalf("unexpected strength measurement: %+v", record)
 					}
 				}

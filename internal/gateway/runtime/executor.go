@@ -94,12 +94,19 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("command_name", commandName),
 		}...)
 		if userID != "" {
-			f = append(f, config.F("user_id", userID))
+			f = append(f, config.F("profile", userID))
 		}
 		return f
 	}
 	activityFields := func() []config.Field {
-		fields := []config.Field{config.F("request_id", req.RequestID), config.F("user_id", userID)}
+		fields := []config.Field{
+			config.F("profile", userID),
+			config.F("gateway", gateway),
+			config.F("request_id", req.RequestID),
+		}
+		if display := strings.TrimSpace(req.DisplayName); display != "" {
+			fields = append(fields, config.F("user_id", display))
+		}
 		if kind != "prompt" {
 			return fields
 		}
@@ -149,7 +156,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		}
 		s := usage.Snapshot()
 		f := append(fields(), config.F("duration_ms", max(int64(0), time.Since(req.ReceivedAt).Milliseconds())),
-			config.F("record_kind", "summary"), config.F("is_admitted", isAdmitted), config.F("is_execution_complete", isExecutionComplete),
+			config.F("is_admitted", isAdmitted), config.F("is_execution_complete", isExecutionComplete),
 			config.F("request_tool_execution_count", toolExecutionCount), config.F("request_tool_blocked_count", toolBlockedCount),
 			config.F("is_request_usage_reported", s.UsageReportedCallCount > 0),
 			config.F("is_request_usage_complete", isExecutionComplete && s.ModelSubmissionCount > 0 && s.UsageCompleteCallCount == s.ModelSubmissionCount),
@@ -176,10 +183,24 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		}
 		log.Debug("gateway.request.complete", "completed addressed gateway request", f...)
 		if isAdmitted {
-			completion := append(activityFields(), config.F("execution_outcome", executionStatus), config.F("delivery_outcome", measured.status),
-				config.F("is_execution_complete", isExecutionComplete), config.F("duration_ms", max(int64(0), time.Since(req.ReceivedAt).Milliseconds())))
+			// Success is implicit: ok outcomes and completed execution are
+			// omitted so a present field always means something.
+			completion := append(activityFields(),
+				config.F("duration_ms", max(int64(0), time.Since(req.ReceivedAt).Milliseconds())))
+			if executionStatus != "ok" {
+				completion = append(completion, config.F("execution_outcome", executionStatus))
+			}
+			if measured.status != "ok" {
+				completion = append(completion, config.F("delivery_outcome", measured.status))
+			}
+			if !isExecutionComplete {
+				completion = append(completion, config.F("is_execution_complete", isExecutionComplete))
+			}
 			if kind == "prompt" {
-				completion = append(completion, config.F("tool_execution_count", toolExecutionCount))
+				completion = append(completion,
+					config.F("tool_count", toolExecutionCount),
+					config.F("input_tokens", s.PromptTokens),
+					config.F("output_tokens", s.CompletionTokens))
 				log.Info("chat.completed", "completed chat turn", completion...)
 			} else if kind == "command" {
 				completion = append(completion, config.F("command_name", commandName))
@@ -236,7 +257,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	}
 
 	isAdmitted = true
-	log.Debug("gateway.request.received", "admitted gateway request", append(fields(), config.F("record_kind", "event"), config.F("is_admitted", true))...)
+	log.Debug("gateway.request.received", "admitted gateway request", append(fields(), config.F("is_admitted", true))...)
 	if kind == "prompt" {
 		log.Info("chat.requested", "admitted chat turn", activityFields()...)
 	}
@@ -291,11 +312,11 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 					if validateErr := response.ValidateAttachments(); validateErr != nil {
 						commandErr = validateErr
 						attachmentValidationFailed = true
-						log.Debug("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("status", "error"))
+						log.Debug("gateway.command.attachment_invalid", "command returned invalid attachments", config.F("request_id", req.RequestID), config.F("profile", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes), config.F("status", "error"))
 						response.Text = config.SafeErrorText(validateErr)
 						response.Attachments = nil
 					} else {
-						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes))
+						log.Debug("gateway.command.attachment_ready", "prepared command attachments", config.F("request_id", req.RequestID), config.F("profile", userID), config.F("attachment_count", len(attachments)), config.F("attachment_bytes", totalBytes))
 					}
 				}
 				sendErr = responder.SendCommandResponse(response)
@@ -314,7 +335,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			}
 		}
 		if commandErr != nil {
-			fields := []config.Field{config.F("request_id", req.RequestID), config.F("user_id", userID)}
+			fields := []config.Field{config.F("request_id", req.RequestID), config.F("profile", userID)}
 			if attachmentValidationFailed {
 				fields = append(fields, config.F("failure_kind", "attachment_validation"))
 			} else {
@@ -353,7 +374,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("request_id", req.RequestID),
 			config.F("chat_id", req.ChatID),
 			config.F("session_id", req.SessionKey),
-			config.F("user_id", userID),
+			config.F("profile", userID),
 			config.F("command", commandName),
 			config.F("response_chars", len(response.Text)),
 			config.F("duration_ms", time.Since(startedAt).Milliseconds()),
@@ -374,7 +395,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		config.F("request_id", req.RequestID),
 		config.F("chat_id", req.ChatID),
 		config.F("session_id", req.SessionKey),
-		config.F("user_id", userID),
+		config.F("profile", userID),
 		config.F("identity_assurance", req.Principal.Assurance),
 		config.F("image_count", len(decision.Images)),
 		config.F("is_group", req.IsGroup),
@@ -461,7 +482,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		log.Debug("gateway.send.failed", "failed to send agent response", config.F("request_id", req.RequestID), config.ErrorField(err))
 		if deps.Compaction != nil && result.Response != nil && result.Response.SourceTurnID > 0 {
 			if markErr := deps.Compaction.MarkDeliveryFailed(context.Background(), userID, result.Response.SourceTurnID); markErr != nil {
-				log.Warn("session.delivery.failure_mark_failed", "failed to mark terminal response delivery failure", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(markErr))
+				log.Warn("session.delivery.failure_mark_failed", "failed to mark terminal response delivery failure", config.F("request_id", req.RequestID), config.F("profile", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(markErr))
 			}
 		}
 	} else if result.Response != nil {
@@ -469,7 +490,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			config.F("request_id", req.RequestID),
 			config.F("chat_id", req.ChatID),
 			config.F("session_id", req.SessionKey),
-			config.F("user_id", userID),
+			config.F("profile", userID),
 			config.F("response_chars", len(result.Response.Response)),
 			config.F("status", "ok"),
 		)
@@ -480,7 +501,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 				TurnID:            result.Response.SourceTurnID, Model: result.Response.Model,
 			}
 			if enqueueErr := deps.Compaction.Enqueue(context.Background(), userID, source); enqueueErr != nil {
-				log.Warn("session.compaction.job.enqueue_failed", "failed to enqueue session compaction planning", config.F("request_id", req.RequestID), config.F("user_id", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
+				log.Warn("session.compaction.job.enqueue_failed", "failed to enqueue session compaction planning", config.F("request_id", req.RequestID), config.F("profile", userID), config.F("turn_id", result.Response.SourceTurnID), config.F("status", "degraded"), config.ErrorField(enqueueErr))
 			}
 		}
 	}

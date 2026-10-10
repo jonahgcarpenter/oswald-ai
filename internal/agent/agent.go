@@ -140,6 +140,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	streamCallback := request.StreamFunc
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, senderID, gateway, a.model)
+	if name := strings.TrimSpace(displayName); name != "" {
+		reqLog = reqLog.With(config.F("user_id", name))
+	}
 	modelIterations, toolExecutionCount, toolBlockedCount := 0, 0, 0
 	persistenceStatus := "not_attempted"
 	usage := requestctx.UsageCollectorFromContext(ctx)
@@ -172,7 +175,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount,
 			PersistenceStatus: persistenceStatus, ResponseKind: kind, Model: a.model, IsComplete: true})
 		reqLog.Debug("agent.response.complete", "completed agent generation", config.F("iteration_count", modelIterations),
-			config.F("record_kind", "summary"), config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
+			config.F("is_execution_complete", true), config.F("tool_blocked_count", toolBlockedCount),
 			config.F("tool_execution_count", toolExecutionCount), config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 			config.F("response_kind", kind), config.F("persistence_status", persistenceStatus), config.F("status", status))
 	}()
@@ -218,7 +221,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		reqLog.Warn("agent.soul.read_failed", "failed to read soul file", config.F("status", "error"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.ErrorField(soulErr))
 		return nil, fmt.Errorf("read user soul: %w", soulErr)
 	}
-	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("record_kind", "measurement"), config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
+	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))), config.F("status", "ok"))
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
 	dynamicSystemPrompt := soulContent
@@ -273,7 +276,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		contextBlock = renderFileMemory(userContent, memoryContent)
-		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("record_kind", "measurement"), config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
+		reqLog.Debug("agent.memory.files.loaded", "loaded private memory files", config.F("user_chars", len([]rune(userContent))), config.F("memory_chars", len([]rune(memoryContent))), config.F("is_session_snapshot", a.userMemory != nil && !request.Stateless && sessionGeneration > 0), config.F("duration_ms", time.Since(filesStarted).Milliseconds()), config.F("status", "ok"))
 	}
 	appendContext := func(block string) {
 		if block == "" {
@@ -810,8 +813,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					scope = "builtin"
 				}
 				reqLog.Info("tool.completed", "completed tool execution", config.F("tool_name", toolName), config.F("scope", scope),
-					config.F("record_kind", "measurement"), config.F("reason_code", result.ReasonCode), config.ErrorField(execErr),
-					config.F("operation_id", toolMeta.OperationID), config.F("parent_operation_id", toolMeta.ParentOperationID),
+					config.F("reason_code", result.ReasonCode), config.ErrorField(execErr),
 					config.F("duration_ms", time.Since(toolStartedAt).Milliseconds()), config.F("outcome", outcome), config.F("status", status))
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr

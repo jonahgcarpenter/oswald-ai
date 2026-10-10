@@ -95,7 +95,7 @@ func (s *ProfileStore) measure(event string, started time.Time, err *error) {
 			outcome = "canceled"
 		}
 	}
-	fields := []config.Field{config.F("record_kind", "measurement"), config.F("user_id", s.profile), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome), config.ErrorField(*err)}
+	fields := []config.Field{config.F("profile", s.profile), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("status", status), config.F("outcome", outcome), config.ErrorField(*err)}
 	log := s.log.Server("memory.profile")
 	switch event {
 	case "memory.profile.session.complete":

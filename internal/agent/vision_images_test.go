@@ -113,7 +113,8 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 		}
 		if record["event"] == "tool.completed" {
 			completeCount++
-			if record["level"] != "info" || record["request_id"] != "follow-up" || record["user_id"] != "user-1" || record["operation_id"] == "" {
+			d := logDetails(t, record)
+			if record["level"] != "info" || d["request_id"] != "follow-up" || d["profile"] != "user-1" || d["operation_id"] == "" {
 				t.Fatalf("tool completion lacks safe correlation: %+v", record)
 			}
 		}

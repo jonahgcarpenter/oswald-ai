@@ -41,7 +41,11 @@ func TestRegisteredDefinitionDebugLogContainsOnlySafeFields(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record["event"] != "tool.registry.definition_registered" || record["tool_name"] != "test.safe" {
+	if record["event"] != "tool.registry.definition_registered" {
+		t.Fatalf("unexpected registration log: %+v", record)
+	}
+	details, _ := record["details"].(map[string]any)
+	if details["tool_name"] != "test.safe" {
 		t.Fatalf("unexpected registration log: %+v", record)
 	}
 }

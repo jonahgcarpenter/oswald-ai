@@ -58,14 +58,24 @@ func TestAttachmentAndEmbedShareOneDebugSummary(t *testing.T) {
 			continue
 		}
 		count++
-		if event["level"] != "debug" || event["status"] != "degraded" || event["gateway"] != "discord" || event["request_id"] != "req-input-summary" || event["user_id"] != nil || event["accepted_count"] != float64(0) || event["downgraded_count"] != float64(2) || event["declared_format_count"] != float64(1) || event["declared_embed_count"] != float64(1) {
+		d := logDetails(t, event)
+		if event["level"] != "debug" || d["status"] != "degraded" || d["gateway"] != "discord" || d["request_id"] != "req-input-summary" || d["user_id"] != nil || d["accepted_count"] != float64(0) || d["downgraded_count"] != float64(2) || d["declared_format_count"] != float64(1) || d["declared_embed_count"] != float64(1) {
 			t.Fatalf("summary=%+v", event)
 		}
-		if duration, ok := event["duration_ms"].(float64); !ok || duration < 0 {
-			t.Fatalf("duration=%v", event["duration_ms"])
+		if duration, ok := d["duration_ms"].(float64); !ok || duration < 0 {
+			t.Fatalf("duration=%v", d["duration_ms"])
 		}
 	}
 	if count != 1 {
 		t.Fatalf("summary count=%d", count)
 	}
+}
+
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
 }

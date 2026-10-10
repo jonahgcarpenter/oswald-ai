@@ -176,7 +176,7 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 				s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to retire uncompactable exchange", config.ErrorField(err))
 				return
 			}
-			s.log.Server("compaction").Debug("compaction.profile.uncompactable", "complete exchange exceeds compression capacity", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("turn_count", 1), config.F("status", "rejected"))
+			s.log.Server("compaction").Debug("compaction.profile.uncompactable", "complete exchange exceeds compression capacity", config.F("profile", scope.UserID), config.F("turn_count", 1), config.F("status", "rejected"))
 		}
 		return
 	}
@@ -194,12 +194,14 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 	artifactSaved := work.Artifact != nil
 	artifactReused := artifactSaved
 	savedArtifact, correctiveCode := work.Artifact, work.CorrectiveCode
-	outcome, status := "completed", "ok"
+	outcome := "completed"
 	dead, refund := false, false
 	meta := requestctx.Metadata{OperationID: config.NewRequestID(), Workload: "compaction"}
 	workCtx = requestctx.WithMetadata(workCtx, meta)
 	// Background work has canonical ownership but no invented transport identity.
 	workCtx = requestctx.WithPrincipal(workCtx, identity.Principal{CanonicalUserID: scope.UserID})
+	s.log.Server("compaction").Info("compaction.profile.started", "started profile compression attempt",
+		config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID), config.F("turn_count", len(turns)))
 	var mutex sync.Mutex
 	err = lease.Run(workCtx, 5*time.Minute, func(ctx context.Context) error {
 		mutex.Lock()
@@ -243,13 +245,13 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 		return s.store.PublishProfileSummary(ctx, work, turns, artifact)
 	})
 	if err != nil {
-		status, outcome = "error", "failed"
+		outcome = "failed"
 		if workCtx.Err() != nil {
-			status, outcome = "rejected", "canceled"
+			outcome = "canceled"
 			refund = submitted && !artifactSaved
 		} else if errors.Is(err, errPermanentProvider) || errors.Is(err, memory.ErrModelSubmissionBudgetExhausted) {
 			dead = true
-			status, outcome = "rejected", "skipped"
+			outcome = "skipped"
 		}
 	}
 	// Cleanup must outlive foreground preemption, but is strictly bounded and
@@ -260,9 +262,21 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 	if cleanupErr != nil && !errors.Is(cleanupErr, memory.ErrStaleSessionCompactionJobLease) && !errors.Is(cleanupErr, sql.ErrNoRows) {
 		s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to release profile compression", config.ErrorField(cleanupErr))
 	}
-	s.log.Server("compaction").Debug("compaction.profile.complete", "completed profile compression attempt", config.F("record_kind", "measurement"), config.F("user_id", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", status), config.F("outcome", outcome), config.F("turn_count", len(turns)), config.F("is_submitted", submitted), config.F("is_artifact_reused", artifactReused), config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(err))
+	// Success is implicit: only a non-completed outcome is emitted.
+	complete := []config.Field{
+		config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID),
+		config.F("turn_count", len(turns)), config.F("is_submitted", submitted),
+		config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(err),
+	}
+	if artifactReused {
+		complete = append(complete, config.F("is_artifact_reused", artifactReused))
+	}
+	if outcome != "completed" {
+		complete = append(complete, config.F("outcome", outcome))
+	}
+	s.log.Server("compaction").Info("compaction.profile.complete", "completed profile compression attempt", complete...)
 	if err != nil && workCtx.Err() == nil && !errors.Is(err, context.Canceled) {
-		s.log.Server("compaction").Warn("compaction.failed", "profile compression did not complete", config.F("user_id", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", "degraded"), config.ErrorField(err))
+		s.log.Server("compaction").Warn("compaction.failed", "profile compression did not complete", config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", "degraded"), config.ErrorField(err))
 	}
 	if err == nil {
 		select {

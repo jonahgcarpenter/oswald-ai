@@ -56,7 +56,7 @@ func (b *Broker) logExecutionComplete(ctx context.Context, usage *requestctx.Usa
 	}
 	s := usage.Snapshot()
 	b.log.Debug("broker.request.execution.complete", "completed broker processor execution", append(requestctx.LogFields(ctx),
-		config.F("record_kind", "summary"), config.F("is_execution_complete", true), config.F("status", status), config.F("outcome", outcome),
+		config.F("is_execution_complete", true), config.F("status", status), config.F("outcome", outcome),
 		config.ErrorField(err),
 		config.F("model", e.Model), config.F("response_kind", e.ResponseKind), config.F("persistence_status", e.PersistenceStatus),
 		config.F("execution_tool_count", e.ToolExecutionCount), config.F("execution_blocked_count", e.BlockedCount),

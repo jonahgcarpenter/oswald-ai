@@ -58,7 +58,7 @@ func TestSQLiteErrorCodesAndPrivacy(t *testing.T) {
 			for _, level := range []Level{LevelDebug, LevelInfo, LevelWarn, LevelError} {
 				logger := NewLogger(LevelDebug)
 				record := captureLog(t, logger, func() { logger.log(level, "storage.failed", "storage operation failed", ErrorField(wrapped)) })
-				if record["error_code"] != tc.want {
+				if detailsOf(t, record)["error_code"] != tc.want {
 					t.Fatalf("missing typed storage code: %v", record)
 				}
 				encoded, _ := json.Marshal(record)

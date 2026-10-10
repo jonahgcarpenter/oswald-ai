@@ -152,7 +152,7 @@ func NewHandler(searcher web.Searcher, log *config.Logger) func(ctx context.Cont
 			}
 			// The Searcher interface cannot establish remote submission; provider
 			// measurements continue to own submission and candidate statistics.
-			fields := []config.Field{config.F("record_kind", "measurement"), config.F("tool_name", Name), config.F("status", status), config.F("outcome", outcome), config.F("is_search_invoked", invoked), config.F("result_count", resultCount), config.F("duration_ms", time.Since(started).Milliseconds())}
+			fields := []config.Field{config.F("tool_name", Name), config.F("status", status), config.F("outcome", outcome), config.F("is_search_invoked", invoked), config.F("result_count", resultCount), config.F("duration_ms", time.Since(started).Milliseconds())}
 			if limitErr == nil {
 				fields = append(fields, config.F("requested_result_count", limit))
 			}

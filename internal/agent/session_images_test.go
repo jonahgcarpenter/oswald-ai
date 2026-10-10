@@ -667,7 +667,7 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 					continue
 				}
 				for _, key := range []string{"image_count", "selected_image_count", "catalog_image_count"} {
-					if _, ok := record[key].(float64); !ok {
+					if _, ok := logDetails(t, record)[key].(float64); !ok {
 						t.Fatalf("missing numeric %s", key)
 					}
 				}

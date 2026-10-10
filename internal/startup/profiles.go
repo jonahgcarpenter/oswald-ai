@@ -147,7 +147,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		worker := imagecache.NewWorker(cache, rootLog)
 		worker.Start()
 		imageWorkers = append(imageWorkers, worker)
-		log.Debug("app.profile.initialized", "initialized profile runtime", config.F("user_id", name), config.F("status", "ok"))
+		log.Debug("app.profile.initialized", "initialized profile runtime", config.F("profile", name), config.F("status", "ok"))
 	}
 	requestBroker = broker.NewBroker(processor, brokerWorkerCount, rootLog.Server("broker"))
 	requestBroker.Start()

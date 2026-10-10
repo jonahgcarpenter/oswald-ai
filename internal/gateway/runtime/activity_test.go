@@ -58,11 +58,12 @@ func TestInfoChatActivityClassificationAndExclusions(t *testing.T) {
 				t.Fatalf("chat activity=%v", info)
 			}
 			for _, record := range info {
-				if record["input_type"] != tc.inputType || record["request_id"] != "req" || record["user_id"] != "alice" || record["gateway"] != "imessage" {
+				d := logDetails(t, record)
+				if d["input_type"] != tc.inputType || d["request_id"] != "req" || d["profile"] != "alice" || d["gateway"] != "imessage" {
 					t.Fatalf("correlation/classification=%v", record)
 				}
 				for _, key := range []string{"image_count", "model_image_count", "request_total_tokens", "model", "request_kind"} {
-					if _, exists := record[key]; exists {
+					if _, exists := d[key]; exists {
 						t.Fatalf("noisy activity field %s", key)
 					}
 				}
@@ -94,9 +95,9 @@ func TestInfoChatCompletionSeparatesExecutionAndDelivery(t *testing.T) {
 					continue
 				}
 				count++
-				if record["execution_outcome"] != tc.execution || record["delivery_outcome"] != tc.delivery {
-					t.Fatalf("outcomes=%v", record)
-				}
+				d := logDetails(t, record)
+				checkImplicitDetail(t, d, "execution_outcome", tc.execution, "ok")
+				checkImplicitDetail(t, d, "delivery_outcome", tc.delivery, "ok")
 			}
 			if count != 1 {
 				t.Fatalf("completion count=%d", count)

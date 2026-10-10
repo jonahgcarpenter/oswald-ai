@@ -68,9 +68,11 @@ type gatewayChoice struct {
 type gatewayUsage struct {
 	reported                                          bool
 	promptReported, completionReported, totalReported bool
+	reasoningReported                                 bool
 	PromptTokens                                      int `json:"prompt_tokens,omitempty"`
 	CompletionTokens                                  int `json:"completion_tokens,omitempty"`
 	TotalTokens                                       int `json:"total_tokens,omitempty"`
+	ReasoningTokens                                   int `json:"reasoning_tokens,omitempty"`
 }
 
 func (u *gatewayUsage) UnmarshalJSON(data []byte) error {
@@ -84,10 +86,22 @@ func (u *gatewayUsage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*u = gatewayUsage(value)
-	for key, reported := range map[string]*bool{"prompt_tokens": &u.promptReported, "completion_tokens": &u.completionReported, "total_tokens": &u.totalReported} {
+	for key, reported := range map[string]*bool{"prompt_tokens": &u.promptReported, "completion_tokens": &u.completionReported, "total_tokens": &u.totalReported, "reasoning_tokens": &u.reasoningReported} {
 		if raw, ok := fields[key]; ok && string(raw) != "null" {
 			*reported = true
 			u.reported = true
+		}
+	}
+	// OpenAI-compatible providers may nest reasoning tokens under
+	// completion_tokens_details instead of a top-level field.
+	var details map[string]json.RawMessage
+	if raw, ok := fields["completion_tokens_details"]; ok && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &details); err == nil {
+			if raw, ok := details["reasoning_tokens"]; ok && string(raw) != "null" {
+				_ = json.Unmarshal(raw, &u.ReasoningTokens)
+				u.reasoningReported = true
+				u.reported = true
+			}
 		}
 	}
 	return nil

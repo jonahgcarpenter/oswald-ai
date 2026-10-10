@@ -17,7 +17,7 @@ func LogFields(ctx context.Context) []config.Field {
 	p, _ := PrincipalFromContext(ctx)
 	fields := make([]config.Field, 0, 9)
 	for _, f := range []config.Field{
-		config.F("request_id", m.RequestID), config.F("user_id", p.CanonicalUserID),
+		config.F("request_id", m.RequestID), config.F("profile", p.CanonicalUserID),
 		config.F("gateway", p.Gateway), config.F("model", m.Model), config.F("workload", m.Workload),
 		config.F("operation_id", m.OperationID), config.F("parent_operation_id", m.ParentOperationID),
 	} {
@@ -37,13 +37,13 @@ func LogFields(ctx context.Context) []config.Field {
 // actual zero usage from missing telemetry. DurationMS should use time.Since.
 // Valid statuses are ok, error, rejected, retry, degraded. Canceled calls use ok.
 type ModelUsage struct {
-	Operation                                   string
-	Submitted                                   bool
-	Status                                      string
-	UsageReported                               bool
-	UsageComplete                               bool
-	PromptTokens, CompletionTokens, TotalTokens int
-	DurationMS                                  int64
+	Operation                                                    string
+	Submitted                                                    bool
+	Status                                                       string
+	UsageReported                                                bool
+	UsageComplete                                                bool
+	PromptTokens, CompletionTokens, TotalTokens, ReasoningTokens int
+	DurationMS                                                   int64
 }
 
 // UsageSnapshot is a value copy of request-local counters. Tokens are summed only
@@ -52,7 +52,7 @@ type ModelUsage struct {
 // count as failures. Complete usage counts distinguish partial provider reports.
 type UsageSnapshot struct {
 	ModelCallCount, ModelSubmissionCount, ModelFailureCount, UsageReportedCallCount                      int
-	PromptTokens, CompletionTokens, TotalTokens                                                          int
+	PromptTokens, CompletionTokens, TotalTokens, ReasoningTokens                                         int
 	ModelDurationMS                                                                                      int64
 	UsageCompleteCallCount                                                                               int
 	EmbeddingCallCount, EmbeddingSubmissionCount, EmbeddingFailureCount, EmbeddingUsageReportedCallCount int
@@ -130,7 +130,7 @@ func (c *UsageCollector) Record(u ModelUsage) {
 	s := &c.snapshot
 	calls, submissions, failures, reported := &s.ModelCallCount, &s.ModelSubmissionCount, &s.ModelFailureCount, &s.UsageReportedCallCount
 	complete := &s.UsageCompleteCallCount
-	prompt, completion, total, duration := &s.PromptTokens, &s.CompletionTokens, &s.TotalTokens, &s.ModelDurationMS
+	prompt, completion, total, reasoning, duration := &s.PromptTokens, &s.CompletionTokens, &s.TotalTokens, &s.ReasoningTokens, &s.ModelDurationMS
 	if u.Operation == "embedding" {
 		calls, submissions, failures, reported = &s.EmbeddingCallCount, &s.EmbeddingSubmissionCount, &s.EmbeddingFailureCount, &s.EmbeddingUsageReportedCallCount
 		complete = &s.EmbeddingUsageCompleteCallCount
@@ -152,6 +152,7 @@ func (c *UsageCollector) Record(u ModelUsage) {
 		*prompt += max(u.PromptTokens, 0)
 		*completion += max(u.CompletionTokens, 0)
 		*total += max(u.TotalTokens, 0)
+		*reasoning += max(u.ReasoningTokens, 0)
 	}
 }
 

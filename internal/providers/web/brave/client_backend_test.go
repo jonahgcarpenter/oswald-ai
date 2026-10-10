@@ -18,6 +18,15 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
+func logDetails(t *testing.T, record map[string]any) map[string]any {
+	t.Helper()
+	details, ok := record["details"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing details object: %#v", record)
+	}
+	return details
+}
+
 func testBraveClient(t *testing.T, server *httptest.Server, key string) *Client {
 	t.Helper()
 	client, err := newBraveClient(server.URL, key, server.Client(), noopLimiter{}, config.NewLogger(config.LevelError))
@@ -58,7 +67,8 @@ func TestBraveTelemetryKeepsPrivateDataOutOfMeasurements(t *testing.T) {
 		}
 		if record["event"] == "provider.web.search.complete" {
 			completions++
-			if record["level"] != "debug" || record["request_id"] != "req_search" || record["operation_id"] == "op_parent" || record["parent_operation_id"] != "op_parent" {
+			d := logDetails(t, record)
+			if record["level"] != "debug" || d["request_id"] != "req_search" || d["operation_id"] == "op_parent" || d["parent_operation_id"] != "op_parent" {
 				t.Errorf("completion=%+v", record)
 			}
 		}

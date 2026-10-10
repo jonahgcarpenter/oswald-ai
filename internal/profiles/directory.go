@@ -89,7 +89,7 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 			if resultErr != nil {
 				status = "rejected"
 			}
-			d.log.Server("profile.routing").Debug("profile.resolve.complete", "resolved gateway profile", config.F("record_kind", "measurement"), config.F("status", status), config.F("duration_ms", time.Since(started).Milliseconds()))
+			d.log.Server("profile.routing").Debug("profile.resolve.complete", "resolved gateway profile", config.F("status", status), config.F("duration_ms", time.Since(started).Milliseconds()))
 		}
 	}()
 	if d == nil {

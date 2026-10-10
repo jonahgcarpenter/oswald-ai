@@ -121,7 +121,8 @@ func TestExecuteRejectsMalformedGroupContext(t *testing.T) {
 					}
 					if record["event"] == "gateway.request.complete" {
 						complete++
-						if record["status"] != "rejected" || record["reason_code"] != want || record["is_admitted"] != false {
+						d := logDetails(t, record)
+						if d["status"] != "rejected" || d["reason_code"] != want || d["is_admitted"] != false {
 							t.Fatalf("incorrect rejection telemetry: %+v", record)
 						}
 					}

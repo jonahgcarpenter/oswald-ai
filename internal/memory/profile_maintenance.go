@@ -25,7 +25,7 @@ func (s *ProfileStore) SweepProfile(ctx context.Context) (resultErr error) {
 					emit = log.Warn
 				}
 			}
-			emit("maintenance.profile.complete", "completed profile maintenance", config.F("record_kind", "measurement"), config.F("user_id", s.profile), config.F("status", status), config.F("message_deleted_count", messageCount), config.F("session_expired_count", sessionCount), config.F("delivery_failed_count", failedCount), config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(resultErr))
+			emit("maintenance.profile.complete", "completed profile maintenance", config.F("profile", s.profile), config.F("status", status), config.F("message_deleted_count", messageCount), config.F("session_expired_count", sessionCount), config.F("delivery_failed_count", failedCount), config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(resultErr))
 		}
 	}()
 	tx, err := s.db.SQL().BeginTx(ctx, nil)

@@ -104,7 +104,7 @@ func OpenState(ctx context.Context, path string, log *config.Logger) (_ *DB, res
 			if resultErr != nil {
 				status = "error"
 			}
-			log.Server("database").Debug("database.schema.complete", "profile database schema checked", config.F("record_kind", "measurement"), config.F("is_created", created), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("schema_version", ProfileSchemaVersion), config.F("status", status), config.ErrorField(resultErr))
+			log.Server("database").Debug("database.schema.complete", "profile database schema checked", config.F("is_created", created), config.F("duration_ms", time.Since(started).Milliseconds()), config.F("schema_version", ProfileSchemaVersion), config.F("status", status), config.ErrorField(resultErr))
 		}
 	}()
 	if err := ctx.Err(); err != nil {
