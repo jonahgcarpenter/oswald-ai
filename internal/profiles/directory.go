@@ -3,6 +3,8 @@ package profiles
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"time"
 
@@ -17,6 +19,47 @@ func (d *Directory) LocalOpenAIPrincipal(ctx context.Context) (identity.Principa
 		return identity.Principal{}, err
 	}
 	return d.Resolve("openai", identity.LocalOpenAIIdentifier, true)
+}
+
+// ResolveAPIKey maps a presented bearer key to its owning profile. Keys are
+// configured per profile via the `api.key` field and never logged. Empty keys
+// never authenticate, and duplicate key material across profiles fails closed
+// at directory construction.
+func (d *Directory) ResolveAPIKey(rawKey string) (_ identity.Principal, resultErr error) {
+	started := time.Now()
+	defer func() {
+		if d != nil && d.log != nil {
+			status := "ok"
+			if resultErr != nil {
+				status = "rejected"
+			}
+			d.log.Server("profile.routing").Debug("profile.resolve.complete", "resolved gateway profile", config.F("status", status), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
+	}()
+	if d == nil || rawKey == "" {
+		return identity.Principal{}, ErrUnmappedIdentity
+	}
+	presented := sha256.Sum256([]byte(rawKey))
+	candidates := []struct {
+		name string
+		key  string
+	}{{"default", d.global.OpenAIAPIKey}}
+	for name, profile := range d.global.Profiles {
+		candidates = append(candidates, struct {
+			name string
+			key  string
+		}{name, profile.OpenAIAPIKey})
+	}
+	for _, candidate := range candidates {
+		if candidate.key == "" {
+			continue
+		}
+		stored := sha256.Sum256([]byte(candidate.key))
+		if subtle.ConstantTimeCompare(presented[:], stored[:]) == 1 {
+			return identity.Principal{CanonicalUserID: candidate.name, Gateway: "openai", ExternalID: "api:" + candidate.name, Assurance: identity.AssuranceAPIKey}, nil
+		}
+	}
+	return identity.Principal{}, ErrUnmappedIdentity
 }
 
 // RequiresMention returns shared operator-owned group admission policy.
@@ -60,7 +103,38 @@ func NewDirectory(cfg *config.Config, log *config.Logger) (*Directory, error) {
 		}
 		directory.routes[key] = route.Profile
 	}
+	seen := map[[32]byte]string{}
+	for _, candidate := range append([]struct {
+		name string
+		key  string
+	}{{"default", cfg.OpenAIAPIKey}}, profileKeys(cfg)...) {
+		if candidate.key == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(candidate.key))
+		if owner, exists := seen[sum]; exists && owner != candidate.name {
+			return nil, errors.New("duplicate openai api key")
+		}
+		seen[sum] = candidate.name
+	}
 	return directory, nil
+}
+
+func profileKeys(cfg *config.Config) []struct {
+	name string
+	key  string
+} {
+	out := make([]struct {
+		name string
+		key  string
+	}, 0, len(cfg.Profiles))
+	for name, profile := range cfg.Profiles {
+		out = append(out, struct {
+			name string
+			key  string
+		}{name, profile.OpenAIAPIKey})
+	}
+	return out
 }
 
 // Config returns the validated configuration for a known profile, never a path

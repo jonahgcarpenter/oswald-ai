@@ -60,6 +60,8 @@ type Request struct {
 	TransportProfile string
 	Stateless        bool
 	ClientHistory    []llm.ChatMessage
+	ClientTools      []llm.Tool
+	ClientToolChoice string
 	Images           []llm.InputImage
 	StreamFunc       func(agent.StreamChunk)
 	ResponseChan     chan Result
@@ -291,7 +293,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.mu.Unlock()
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
-			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
+			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)

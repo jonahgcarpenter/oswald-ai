@@ -250,7 +250,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		toolExposure.HideBuiltins(imagegenerate.Name, visionanalyze.Name)
+		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -423,6 +423,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+	if request.Stateless {
+		initialCatalog = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
+	}
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
@@ -540,6 +543,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		respSynthetic := false
 
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+		if request.Stateless {
+			catalog = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
+		}
 		req.Tools = catalog.Tools
 		req.ToolChoice = ""
 		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent
@@ -699,6 +705,30 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
+		// Stateless API: caller-owned tools are never executed server-side.
+		// Return them verbatim so the external app can run the standard loop.
+		if request.Stateless && len(request.ClientTools) > 0 {
+			var clientCalls []llm.ToolCall
+			for _, tc := range resp.Message.ToolCalls {
+				if a.isClientToolCall(request.ClientTools, tc.Function.Name) {
+					clientCalls = append(clientCalls, tc)
+				}
+			}
+			if len(clientCalls) > 0 {
+				finalThinking := accumulatedThinking.String()
+				if finalThinking == "" {
+					finalThinking = resp.Message.Thinking
+				}
+				finalContent := accumulatedContent.String()
+				if finalContent == "" {
+					finalContent = resp.Message.Content
+				}
+				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
+					config.F("iteration", iteration),
+					config.F("tool_call_count", len(clientCalls)))
+				return &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls}, nil
+			}
+		}
 		iterationDecision := toolGovernor.BeginToolIteration()
 
 		// Append the assistant turn (including its tool calls) to the conversation.
@@ -756,7 +786,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
 				if execErr == nil && len(result.Images) > 0 {
-					if toolName != visionanalyze.Name || gateway == "openai" || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
+					if toolName != visionanalyze.Name || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
 						execErr = fmt.Errorf("tool returned unsupported model images")
 					}
 				}

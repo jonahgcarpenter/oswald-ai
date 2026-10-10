@@ -19,7 +19,11 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 	gatewayLog := log.Server("gateway.bootstrap")
 	services := make([]Service, 0, 4)
 	if strings.TrimSpace(cfg.OpenAIListenPort) != "" {
-		api, err := openai.New(cfg.OpenAIListenPort, links, runtimeDeps, cfg.LLMGatewayModel, log)
+		host := strings.TrimSpace(cfg.OpenAIListenHost)
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		api, err := openai.New(host, cfg.OpenAIListenPort, links, runtimeDeps, cfg.LLMGatewayModel, log)
 		if err != nil {
 			gatewayLog.Warn("gateway.openai.config_invalid", "openai gateway configuration is invalid; gateway disabled", config.F("status", "degraded"), config.ErrorField(err))
 		} else {

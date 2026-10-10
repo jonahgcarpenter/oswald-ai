@@ -66,9 +66,15 @@ type Request struct {
 	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
-	Images        []llm.InputImage
-	Unsupported   []string
-	Reply         *routing.ReplyContext
+	// ClientTools are caller-supplied function definitions combined with Oswald
+	// tools for this request only. They are never executed server-side.
+	ClientTools []llm.Tool
+	// ClientToolChoice is the normalized caller preference: "", "none",
+	// "auto", "required", or "named:<tool>".
+	ClientToolChoice string
+	Images           []llm.InputImage
+	Unsupported      []string
+	Reply            *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
 	// OnAllowed runs after profile authentication, before fallback, command, or model work.

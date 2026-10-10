@@ -1,14 +1,16 @@
-// Package openai exposes a bounded, text-only OpenAI-compatible chat gateway.
+// Package openai exposes a stateless OpenAI-compatible chat gateway.
 package openai
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -20,25 +22,36 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
 const maxBody = 256 << 10
 
-// Gateway serves the local OpenAI-compatible API.
+var clientToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+// Gateway serves the stateless OpenAI-compatible API.
 type Gateway struct {
+	host     string
 	port     string
 	accounts identity.Resolver
 	deps     gatewayruntime.Dependencies
 	model    string
 	log      *config.Logger
 	broker   *broker.Broker
-	// Tests replace these seams without constructing a broker or account database.
-	localPrincipal func(context.Context) (identity.Principal, error)
-	execute        func(gatewayruntime.Request, gatewayruntime.Dependencies, gatewayruntime.Responder) gatewayruntime.Outcome
+	// Tests replace these seams without constructing a broker or keyring.
+	resolveKey func(string) (identity.Principal, error)
+	execute    func(gatewayruntime.Request, gatewayruntime.Dependencies, gatewayruntime.Responder) gatewayruntime.Outcome
 }
 
 // New validates and constructs an OpenAI-compatible gateway.
-func New(port string, accounts identity.Resolver, deps gatewayruntime.Dependencies, model string, log *config.Logger) (*Gateway, error) {
+func New(host, port string, accounts identity.Resolver, deps gatewayruntime.Dependencies, model string, log *config.Logger) (*Gateway, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if host != "127.0.0.1" && host != "0.0.0.0" {
+		return nil, fmt.Errorf("openai host must be 127.0.0.1 or 0.0.0.0")
+	}
 	n, err := strconv.Atoi(strings.TrimSpace(port))
 	if err != nil || n < 1 || n > 65535 {
 		return nil, fmt.Errorf("openai port must be an integer from 1 through 65535")
@@ -46,16 +59,16 @@ func New(port string, accounts identity.Resolver, deps gatewayruntime.Dependenci
 	if accounts == nil || log == nil || model == "" {
 		return nil, fmt.Errorf("openai gateway dependencies are incomplete")
 	}
-	return &Gateway{port: strconv.Itoa(n), accounts: accounts, deps: deps, model: model, log: log, execute: gatewayruntime.Execute}, nil
+	return &Gateway{host: host, port: strconv.Itoa(n), accounts: accounts, deps: deps, model: model, log: log, execute: gatewayruntime.Execute}, nil
 }
 
 // Name identifies this gateway.
 func (g *Gateway) Name() string { return "openai" }
 
-// Start serves the loopback HTTP API until the listener terminates.
+// Start serves the OpenAI HTTP API until the listener terminates.
 func (g *Gateway) Start(b *broker.Broker) error {
 	g.broker = b
-	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", g.port))
+	listener, err := net.Listen("tcp", net.JoinHostPort(g.host, g.port))
 	if err != nil {
 		return err
 	}
@@ -71,28 +84,54 @@ func (g *Gateway) Handler() http.Handler {
 	return mux
 }
 
-func (g *Gateway) resolveLocal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
+func bearerKey(r *http.Request) string {
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if header == "" {
+		return ""
+	}
+	scheme, token, found := strings.Cut(header, " ")
+	if !found {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(scheme), "bearer") {
+		return ""
+	}
+	return strings.TrimSpace(token)
+}
+
+func (g *Gateway) resolveKeyPrincipal(w http.ResponseWriter, r *http.Request) (identity.Principal, bool) {
 	start := time.Now()
-	status, reason := "error", "local_user_unavailable"
+	status, reason := "error", "invalid_api_key"
+	var profile string
 	defer func() {
 		fields := []config.Field{config.F("gateway", "openai"), config.F("duration_ms", time.Since(start).Milliseconds()), config.F("status", status), config.F("reason_code", reason)}
+		if profile != "" {
+			fields = append(fields, config.F("profile", profile))
+		}
 		log := g.log.Server("gateway.openai")
 		if status == "error" {
-			log.Warn("gateway.openai.identity.complete", "resolved local openai identity", fields...)
+			log.Warn("gateway.openai.identity.complete", "resolved openai identity", fields...)
 		} else {
-			log.Debug("gateway.openai.identity.complete", "resolved local openai identity", fields...)
+			log.Debug("gateway.openai.identity.complete", "resolved openai identity", fields...)
 		}
 	}()
-	resolve := g.localPrincipal
-	if resolve == nil {
-		resolve = g.accounts.LocalOpenAIPrincipal
-	}
-	principal, err := resolve(r.Context())
-	if err != nil || !principal.Authenticated() || principal.Gateway != "openai" {
-		writeError(w, http.StatusServiceUnavailable, "server_error", "Local account is unavailable.")
+	raw := bearerKey(r)
+	if raw == "" || len(raw) > 4096 {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "invalid_request_error", "Invalid API key.")
 		return identity.Principal{}, false
 	}
-	status, reason = "ok", "local_user"
+	resolve := g.resolveKey
+	if resolve == nil {
+		resolve = g.accounts.ResolveAPIKey
+	}
+	principal, err := resolve(raw)
+	if err != nil || !principal.Authenticated() || principal.Gateway != "openai" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeError(w, http.StatusUnauthorized, "invalid_request_error", "Invalid API key.")
+		return identity.Principal{}, false
+	}
+	status, reason, profile = "ok", "api_key", principal.CanonicalUserID
 	return principal, true
 }
 
@@ -107,58 +146,293 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	if _, ok := g.resolveLocal(w, r); !ok {
+	if _, ok := g.resolveKeyPrincipal(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}}})
 }
 
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type chatMessage struct {
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content"`
+	ReasoningContent *string         `json:"reasoning_content"`
+	ToolCalls        []wireToolCall  `json:"tool_calls"`
+	ToolCallID       *string         `json:"tool_call_id"`
+}
+
 type chatRequest struct {
-	Model    string `json:"model"`
-	Messages []struct {
-		Role             string          `json:"role"`
-		Content          json.RawMessage `json:"content"`
-		ReasoningContent *string         `json:"reasoning_content"`
-	} `json:"messages"`
-	Stream        bool `json:"stream"`
+	Model         string        `json:"model"`
+	Messages      []chatMessage `json:"messages"`
+	Stream        bool          `json:"stream"`
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
-	MaxTokens  *int              `json:"max_tokens"`
-	Tools      []json.RawMessage `json:"tools"`
-	ToolChoice string            `json:"tool_choice"`
+	MaxTokens         *int              `json:"max_tokens"`
+	Tools             []json.RawMessage `json:"tools"`
+	ToolChoice        json.RawMessage   `json:"tool_choice"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls"`
 }
 
-func textContent(raw json.RawMessage) (string, bool) {
+type contentPart struct {
+	Type     string  `json:"type"`
+	Text     *string `json:"text"`
+	ImageURL *struct {
+		URL    string `json:"url"`
+		Detail string `json:"detail"`
+	} `json:"image_url"`
+}
+
+// parseTextParts extracts plain text and image URLs from a content payload.
+// allowImages controls whether image_url parts are accepted (current user turn
+// only); history turns are text-only. Unknown part fields are ignored for
+// compatibility; structural mismatches still fail.
+func parseTextParts(raw json.RawMessage, allowImages bool) (string, []string, bool) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return "", false
+		return "", nil, false
 	}
-	if raw[0] == '"' {
+	if string(raw) == "null" {
+		return "", nil, true
+	}
+	if len(raw) > 0 && raw[0] == '"' {
 		var text string
-		return text, json.Unmarshal(raw, &text) == nil
+		if json.Unmarshal(raw, &text) != nil {
+			return "", nil, false
+		}
+		return text, nil, true
 	}
-	if raw[0] != '[' {
-		return "", false
+	if len(raw) == 0 || raw[0] != '[' {
+		return "", nil, false
 	}
-	var parts []struct {
-		Type string  `json:"type"`
-		Text *string `json:"text"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&parts) != nil || len(parts) == 0 || len(parts) > 32 {
-		return "", false
+	var parts []contentPart
+	if json.Unmarshal(raw, &parts) != nil || len(parts) == 0 || len(parts) > 32 {
+		return "", nil, false
 	}
 	var text strings.Builder
+	var images []string
 	for _, part := range parts {
-		if part.Type != "text" || part.Text == nil || len(*part.Text) > (32<<10)-text.Len() {
+		switch part.Type {
+		case "text":
+			if part.Text == nil || part.ImageURL != nil {
+				return "", nil, false
+			}
+			if len(*part.Text) > (32<<10)-text.Len() {
+				return "", nil, false
+			}
+			text.WriteString(*part.Text)
+		case "image_url":
+			if !allowImages || part.ImageURL == nil || part.Text != nil {
+				return "", nil, false
+			}
+			url := strings.TrimSpace(part.ImageURL.URL)
+			if url == "" || len(url) > (8<<20) {
+				return "", nil, false
+			}
+			images = append(images, url)
+		default:
+			return "", nil, false
+		}
+	}
+	return text.String(), images, true
+}
+
+func parseClientTools(raw []json.RawMessage) ([]llm.Tool, bool) {
+	if len(raw) > 64 {
+		return nil, false
+	}
+	tools := make([]llm.Tool, 0, len(raw))
+	seen := map[string]bool{}
+	for _, item := range raw {
+		if len(item) == 0 || len(bytes.TrimSpace(item)) == 0 || len(item) > 64<<10 {
+			return nil, false
+		}
+		// Permissive envelope: unknown fields such as "strict" are ignored
+		// for compatibility with evolving client SDKs.
+		var wire struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(item, &wire) != nil {
+			return nil, false
+		}
+		if wire.Type != "function" {
+			return nil, false
+		}
+		name := strings.TrimSpace(wire.Function.Name)
+		if !clientToolNameRE.MatchString(name) || seen[name] {
+			return nil, false
+		}
+		seen[name] = true
+		description := strings.TrimSpace(wire.Function.Description)
+		if len([]rune(description)) > 16000 || strings.ContainsRune(description, '\x00') {
+			return nil, false
+		}
+		params := bytes.TrimSpace(wire.Function.Parameters)
+		var parsed llm.ToolParameters
+		if len(params) == 0 || string(params) == "null" {
+			parsed = llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{}}
+		} else {
+			// Permissive schema: unknown JSON-Schema keywords are dropped
+			// rather than rejecting the whole tool.
+			if json.Unmarshal(params, &parsed) != nil || parsed.Type != "object" {
+				return nil, false
+			}
+			if parsed.Properties == nil {
+				parsed.Properties = map[string]llm.ToolParameterProperty{}
+			}
+		}
+		tools = append(tools, llm.Tool{Type: "function", Function: llm.ToolDefinition{Name: name, Description: description, Parameters: parsed}})
+	}
+	return tools, true
+}
+
+func parseToolChoice(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return "", true
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var choice string
+		if json.Unmarshal(trimmed, &choice) != nil {
 			return "", false
 		}
-		text.WriteString(*part.Text)
+		switch choice {
+		case "", "none", "auto", "required":
+			return choice, true
+		}
+		return "", false
 	}
-	return text.String(), true
+	var wire struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if json.Unmarshal(trimmed, &wire) != nil || wire.Type != "function" || !clientToolNameRE.MatchString(strings.TrimSpace(wire.Function.Name)) {
+		return "", false
+	}
+	return "named:" + strings.TrimSpace(wire.Function.Name), true
 }
+
+func parseWireToolCalls(calls []wireToolCall) ([]llm.ToolCall, bool) {
+	if len(calls) == 0 {
+		return nil, true
+	}
+	if len(calls) > 16 {
+		return nil, false
+	}
+	out := make([]llm.ToolCall, 0, len(calls))
+	seen := map[string]bool{}
+	for _, call := range calls {
+		id := strings.TrimSpace(call.ID)
+		if id == "" || len(id) > 128 || seen[id] {
+			return nil, false
+		}
+		seen[id] = true
+		if call.Type != "" && call.Type != "function" {
+			return nil, false
+		}
+		name := strings.TrimSpace(call.Function.Name)
+		if !clientToolNameRE.MatchString(name) {
+			return nil, false
+		}
+		argsRaw := strings.TrimSpace(call.Function.Arguments)
+		if argsRaw == "" {
+			argsRaw = "{}"
+		}
+		if len(argsRaw) > 32<<10 {
+			return nil, false
+		}
+		var args map[string]interface{}
+		decoder := json.NewDecoder(strings.NewReader(argsRaw))
+		decoder.UseNumber()
+		if decoder.Decode(&args) != nil {
+			return nil, false
+		}
+		if args == nil {
+			args = map[string]interface{}{}
+		}
+		out = append(out, llm.ToolCall{ID: id, Function: llm.ToolFunction{Name: name, Arguments: args, RawArguments: argsRaw}})
+	}
+	return out, true
+}
+
+// fetchImageURL converts one image_url value to a normalized model input.
+// Data URLs decode locally; remote URLs fetch with bounded size and time.
+func fetchImageURL(ctx context.Context, url string) (llm.InputImage, bool) {
+	url = strings.TrimSpace(url)
+	if strings.HasPrefix(url, "data:") {
+		comma := strings.Index(url, ",")
+		if comma < 0 {
+			return llm.InputImage{}, false
+		}
+		header, payload := url[:comma], url[comma+1:]
+		if !strings.Contains(header, ";base64") {
+			return llm.InputImage{}, false
+		}
+		mime := strings.TrimPrefix(header, "data:")
+		if idx := strings.Index(mime, ";"); idx >= 0 {
+			mime = mime[:idx]
+		}
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload))
+		if err != nil {
+			if data, err = base64.URLEncoding.DecodeString(strings.TrimSpace(payload)); err != nil {
+				return llm.InputImage{}, false
+			}
+		}
+		if len(data) == 0 || len(data) > media.MaxImageBytes {
+			return llm.InputImage{}, false
+		}
+		result, err := media.NormalizeInputImageFromBytes(nil, mime, data, "api")
+		if err != nil {
+			return llm.InputImage{}, false
+		}
+		return result.Image, true
+	}
+	if !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "http://") {
+		return llm.InputImage{}, false
+	}
+	if err := ctx.Err(); err != nil {
+		return llm.InputImage{}, false
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return llm.InputImage{}, false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return llm.InputImage{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return llm.InputImage{}, false
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxImageBytes+1))
+	if err != nil || len(data) == 0 || len(data) > media.MaxImageBytes {
+		return llm.InputImage{}, false
+	}
+	result, err := media.NormalizeInputImageFromBytes(resp.Header, "", data, "api")
+	if err != nil {
+		return llm.InputImage{}, false
+	}
+	return result.Image, true
+}
+
+const toolContinuationPrompt = "Continue with the completed tool results above to answer the user's last question."
 
 func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -166,16 +440,42 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	principal, ok := g.resolveLocal(w, r)
+	principal, ok := g.resolveKeyPrincipal(w, r)
 	if !ok {
 		return
 	}
-	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+	ct := r.Header.Get("Content-Type")
+	if ct != "application/json" && !strings.HasPrefix(ct, "application/json;") {
 		g.reject(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json.")
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	decoder := json.NewDecoder(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil || len(body) == 0 || len(body) > maxBody {
+		g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
+		return
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
+		return
+	}
+	for key := range top {
+		switch key {
+		case "model", "messages", "stream", "stream_options", "max_tokens", "tools", "tool_choice", "parallel_tool_calls":
+		case "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "stop", "seed", "user", "response_format", "logit_bias", "logprobs", "top_logprobs", "n", "max_completion_tokens", "service_tier", "reasoning_effort", "store":
+			delete(top, key)
+		default:
+			g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
+			return
+		}
+	}
+	filtered, err := json.Marshal(top)
+	if err != nil {
+		g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
+		return
+	}
+	decoder := json.NewDecoder(bytes.NewReader(filtered))
 	decoder.DisallowUnknownFields()
 	var input chatRequest
 	if err := decoder.Decode(&input); err != nil {
@@ -191,17 +491,39 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_model", "Only model oswald is supported.")
 		return
 	}
-	// OpenCode advertises its own tools and generation preferences. Oswald
-	// executes only its independently authorized tools, so required client
-	// tool calls cannot be honored by this text-only gateway.
-	if input.MaxTokens != nil && *input.MaxTokens <= 0 || len(input.Tools) > 64 || input.ToolChoice != "" && input.ToolChoice != "auto" && input.ToolChoice != "none" {
+	if input.MaxTokens != nil && *input.MaxTokens <= 0 {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
 		return
 	}
-	for _, tool := range input.Tools {
-		if len(tool) == 0 || tool[0] != '{' {
-			g.reject(w, http.StatusBadRequest, "unsupported_options", "Invalid client tool definition.")
-			return
+	clientTools, valid := parseClientTools(input.Tools)
+	if !valid {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Invalid client tool definition.")
+		return
+	}
+	toolChoice, valid := parseToolChoice(input.ToolChoice)
+	if !valid {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client tool choice.")
+		return
+	}
+	if toolChoice == "required" || strings.HasPrefix(toolChoice, "named:") {
+		name := strings.TrimPrefix(toolChoice, "named:")
+		if toolChoice == "required" {
+			if len(clientTools) == 0 {
+				g.reject(w, http.StatusBadRequest, "unsupported_options", "Tool choice requires client tools.")
+				return
+			}
+		} else {
+			found := false
+			for _, tool := range clientTools {
+				if tool.Function.Name == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				g.reject(w, http.StatusBadRequest, "unsupported_options", "Named tool is not provided.")
+				return
+			}
 		}
 	}
 	if len(input.Messages) == 0 || len(input.Messages) > 32 {
@@ -210,29 +532,93 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	}
 	history := make([]llm.ChatMessage, 0, len(input.Messages)-1)
 	total := 0
+	var currentImages []llm.InputImage
+	continuation := input.Messages[len(input.Messages)-1].Role == "tool"
 	for i, msg := range input.Messages {
-		if msg.Role != "user" && msg.Role != "assistant" && msg.Role != "system" && msg.Role != "developer" || (i == len(input.Messages)-1 && msg.Role != "user") {
-			g.reject(w, http.StatusBadRequest, "unsupported_role", "Text messages must end in a user message.")
+		last := i == len(input.Messages)-1
+		switch msg.Role {
+		case "user", "assistant", "system", "developer", "tool":
+		default:
+			g.reject(w, http.StatusBadRequest, "unsupported_role", "Unsupported message role.")
+			return
+		}
+		if last && msg.Role != "user" && msg.Role != "tool" {
+			g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
 			return
 		}
 		if msg.ReasoningContent != nil && (msg.Role != "assistant" || len(*msg.ReasoningContent) > 128<<10) {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is only supported on prior assistant messages.")
 			return
 		}
-		text, valid := textContent(msg.Content)
+		if msg.Role == "tool" {
+			if msg.ToolCallID == nil || strings.TrimSpace(*msg.ToolCallID) == "" || len(strings.TrimSpace(*msg.ToolCallID)) > 128 {
+				g.reject(w, http.StatusBadRequest, "unsupported_content", "Tool messages require a tool call id.")
+				return
+			}
+			if len(msg.ToolCalls) != 0 {
+				g.reject(w, http.StatusBadRequest, "unsupported_content", "Tool messages cannot contain tool calls.")
+				return
+			}
+			text, _, valid := parseTextParts(msg.Content, false)
+			if !valid {
+				g.reject(w, http.StatusBadRequest, "unsupported_content", "Only text strings or arrays of text parts are supported.")
+				return
+			}
+			total += len(text)
+			if total > 128<<10 || len(text) > 32<<10 {
+				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
+				return
+			}
+			name := ""
+			history = append(history, llm.ChatMessage{Role: "tool", Content: text, ToolName: name, ToolCallID: strings.TrimSpace(*msg.ToolCallID)})
+			continue
+		}
+		calls, valid := parseWireToolCalls(msg.ToolCalls)
+		if !valid {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Invalid tool calls.")
+			return
+		}
+		if len(calls) > 0 && msg.Role != "assistant" {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Tool calls are only supported on assistant messages.")
+			return
+		}
+		text, imageURLs, valid := parseTextParts(msg.Content, last && msg.Role == "user")
 		if !valid {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Only text strings or arrays of text parts are supported.")
 			return
 		}
-		total += len(text)
-		if total > 128<<10 || len(text) > 32<<10 {
-			g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
+		if msg.Role == "assistant" && strings.TrimSpace(text) == "" && len(calls) == 0 {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Assistant messages require content or tool calls.")
 			return
 		}
-		if i == len(input.Messages)-1 {
+		if !last && msg.Role != "assistant" && msg.Role != "tool" {
+			total += len(text)
+			if total > 128<<10 || len(text) > 32<<10 {
+				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
+				return
+			}
+		}
+		if last {
+			total += len(text)
+			if total > 128<<10 || len(text) > 32<<10 {
+				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
+				return
+			}
 			if strings.TrimSpace(text) == "" || strings.HasPrefix(strings.TrimSpace(text), "/") {
 				g.reject(w, http.StatusBadRequest, "invalid_prompt", "A nonempty, non-command user message is required.")
 				return
+			}
+			if len(imageURLs) > media.MaxImagesPerRequest {
+				g.reject(w, http.StatusBadRequest, "history_limit", "Too many images in the current message.")
+				return
+			}
+			for _, url := range imageURLs {
+				image, ok := fetchImageURL(r.Context(), url)
+				if !ok {
+					g.reject(w, http.StatusBadRequest, "unsupported_content", "Image could not be loaded.")
+					return
+				}
+				currentImages = append(currentImages, image)
 			}
 			deps := g.deps
 			if g.broker != nil {
@@ -242,12 +628,13 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 				deps.Log = g.log
 			}
 			id := config.NewRequestID()
-			responder := &responseWriter{w: w, ctx: r.Context(), id: "chatcmpl-" + id, stream: input.Stream}
+			includeUsage := input.StreamOptions != nil && input.StreamOptions.IncludeUsage
+			responder := &responseWriter{w: w, ctx: r.Context(), id: "chatcmpl-" + id, stream: input.Stream, includeUsage: includeUsage}
 			var streamFunc func(agent.StreamChunk)
 			if input.Stream {
 				streamFunc = responder.Stream
 			}
-			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, Stateless: true, StreamFunc: streamFunc}, deps, responder)
+			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Images: currentImages, Stateless: true, StreamFunc: streamFunc}, deps, responder)
 			if !responder.sent && r.Context().Err() == nil {
 				if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 					w.WriteHeader(http.StatusNoContent)
@@ -257,7 +644,42 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text})
+		_ = msg.ReasoningContent
+		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, ToolCalls: calls})
+		total += len(text)
+		if total > 128<<10 {
+			g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
+			return
+		}
+	}
+	if !continuation {
+		g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
+		return
+	}
+	// Tool continuation: the client posted assistant tool calls with their
+	// results and no new user turn. The full exchange is already in history;
+	// drive the model with a fixed neutral prompt.
+	deps := g.deps
+	if g.broker != nil {
+		deps.Broker = g.broker
+	}
+	if deps.Log == nil {
+		deps.Log = g.log
+	}
+	id := config.NewRequestID()
+	includeUsage := input.StreamOptions != nil && input.StreamOptions.IncludeUsage
+	responder := &responseWriter{w: w, ctx: r.Context(), id: "chatcmpl-" + id, stream: input.Stream, includeUsage: includeUsage}
+	var streamFunc func(agent.StreamChunk)
+	if input.Stream {
+		streamFunc = responder.Stream
+	}
+	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Stateless: true, StreamFunc: streamFunc}, deps, responder)
+	if !responder.sent && r.Context().Err() == nil {
+		if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "server_error", "Request could not be completed.")
+		}
 	}
 }
 

@@ -205,7 +205,7 @@ func TestVisionHiddenAndBlockedForAPI(t *testing.T) {
 	executed := false
 	if err := reg.RegisterHandler(visionanalyze.Name, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		executed = true
-		return governance.Result{}, nil
+		return productiveResult("saw it"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -213,8 +213,8 @@ func TestVisionHiddenAndBlockedForAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executed || requestHasTool(chat.requests[0], visionanalyze.Name) || toolResultByID(chat.requests[1].Messages, "blocked") == nil {
-		t.Fatal("API exposed or executed vision, or omitted the blocked result")
+	if !executed || !requestHasTool(chat.requests[0], visionanalyze.Name) {
+		t.Fatal("API must expose vision to the model")
 	}
 }
 

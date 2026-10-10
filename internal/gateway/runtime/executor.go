@@ -426,6 +426,8 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Prompt:            decision.Prompt,
 		Stateless:         req.Stateless,
 		ClientHistory:     req.ClientHistory,
+		ClientTools:       req.ClientTools,
+		ClientToolChoice:  req.ClientToolChoice,
 		Images:            decision.Images,
 		StreamFunc:        req.StreamFunc,
 		ResponseChan:      make(chan broker.Result, 1),

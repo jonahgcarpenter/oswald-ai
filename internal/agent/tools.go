@@ -56,6 +56,45 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	return catalog
 }
 
+// toolsForStatelessRequest merges Oswald tools with caller-supplied client tools
+// for stateless API requests. Client tools are never executed server-side; when
+// the model calls one, the agent returns it verbatim for the caller to run.
+// Oswald tool names always win on collision.
+func (a *Agent) toolsForStatelessRequest(base offeredToolCatalog, clientTools []llm.Tool, choice string) offeredToolCatalog {
+	if choice == "none" || len(clientTools) == 0 {
+		return base
+	}
+	for _, tool := range clientTools {
+		name := tool.Function.Name
+		if name == "" {
+			continue
+		}
+		if _, exists := base.Policies[name]; exists {
+			continue
+		}
+		if a.registry != nil && a.registry.HasHandler(name) {
+			continue
+		}
+		base.Tools = append(base.Tools, tool)
+		base.Policies[name] = governance.ToolPolicy{}
+	}
+	return base
+}
+
+// isClientToolCall reports whether a tool name refers to a caller-owned tool
+// with no server-side handler.
+func (a *Agent) isClientToolCall(clientTools []llm.Tool, name string) bool {
+	if a.registry != nil && a.registry.HasHandler(name) {
+		return false
+	}
+	for _, tool := range clientTools {
+		if tool.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposure *exposure.Exposure) (governance.Result, error) {
 	if a.registry.HasHandler(name) {
 		return a.registry.Execute(ctx, name, args)

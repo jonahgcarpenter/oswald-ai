@@ -15,14 +15,15 @@ import (
 )
 
 type responseWriter struct {
-	w         http.ResponseWriter
-	ctx       context.Context
-	id        string
-	stream    bool
-	sent      bool
-	finished  bool
-	created   int64
-	streamErr error
+	w            http.ResponseWriter
+	ctx          context.Context
+	id           string
+	stream       bool
+	includeUsage bool
+	sent         bool
+	finished     bool
+	created      int64
+	streamErr    error
 }
 
 func (r *responseWriter) StartProcessing() (func(), error) { return nil, nil }
@@ -85,6 +86,18 @@ func (r *responseWriter) flush() error {
 	return r.contextErr()
 }
 
+func wireToolCalls(calls []struct {
+	ID        string
+	Name      string
+	Arguments string
+}) []any {
+	out := make([]any, 0, len(calls))
+	for _, call := range calls {
+		out = append(out, map[string]any{"id": call.ID, "type": "function", "function": map[string]any{"name": call.Name, "arguments": call.Arguments}})
+	}
+	return out
+}
+
 func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	if err := r.contextErr(); err != nil {
 		return err
@@ -100,6 +113,9 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	}
 	if r.finished || (!r.stream && r.sent) {
 		return errors.New("response already sent")
+	}
+	if len(response.ToolCalls) > 0 {
+		return r.sendToolCalls(response)
 	}
 	if r.stream {
 		if !r.sent {
@@ -119,9 +135,67 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 		}
 		return r.flush()
 	}
+	message := map[string]any{"role": "assistant", "content": response.Response}
+	if response.Thinking != "" {
+		message["reasoning_content"] = response.Thinking
+	}
 	// Stateless agent requests may make several provider calls; response.Metrics
 	// describes only the last one and cannot represent completion usage.
-	return r.sendJSON(http.StatusOK, map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": response.Response}, "finish_reason": "stop"}}})
+	return r.sendJSON(http.StatusOK, map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}}})
+}
+
+func (r *responseWriter) sendToolCalls(response *agent.Response) error {
+	calls := make([]struct {
+		ID        string
+		Name      string
+		Arguments string
+	}, 0, len(response.ToolCalls))
+	for _, call := range response.ToolCalls {
+		args := call.Function.RawArguments
+		if args == "" {
+			encoded, _ := json.Marshal(call.Function.Arguments)
+			if len(encoded) > 0 {
+				args = string(encoded)
+			} else {
+				args = "{}"
+			}
+		}
+		calls = append(calls, struct {
+			ID        string
+			Name      string
+			Arguments string
+		}{ID: call.ID, Name: call.Function.Name, Arguments: args})
+	}
+	if r.stream {
+		if !r.sent {
+			if err := r.startStream(); err != nil {
+				return err
+			}
+		}
+		for i, call := range calls {
+			delta := map[string]any{"tool_calls": []any{map[string]any{"index": i, "id": call.ID, "type": "function", "function": map[string]any{"name": call.Name, "arguments": call.Arguments}}}}
+			if err := r.sendChoice(delta, nil); err != nil {
+				return err
+			}
+		}
+		if err := r.sendChoice(map[string]any{}, "tool_calls"); err != nil {
+			return err
+		}
+		r.finished = true
+		if err := r.writeFrame("data: [DONE]\n\n"); err != nil {
+			return err
+		}
+		return r.flush()
+	}
+	var content any
+	if response.Response != "" {
+		content = response.Response
+	}
+	message := map[string]any{"role": "assistant", "content": content, "tool_calls": wireToolCalls(calls)}
+	if response.Thinking != "" {
+		message["reasoning_content"] = response.Thinking
+	}
+	return r.sendJSON(http.StatusOK, map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}})
 }
 
 func (r *responseWriter) writeFrame(frame string) error {

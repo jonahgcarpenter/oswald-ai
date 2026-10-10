@@ -15,6 +15,8 @@ const (
 	AssuranceBlueBubblesWebhook Assurance = "bluebubbles_webhook"
 	// AssuranceLocalLoopback identifies the process-local OpenAI HTTP listener.
 	AssuranceLocalLoopback Assurance = "local_loopback"
+	// AssuranceAPIKey identifies an OpenAI API caller presenting a per-profile bearer key.
+	AssuranceAPIKey Assurance = "api_key"
 )
 
 // LocalOpenAIIdentifier is the fixed account identity for the loopback listener.
@@ -41,7 +43,10 @@ func (p Principal) Valid() bool {
 	case "imessage":
 		return p.Assurance == AssuranceBlueBubblesWebhook
 	case "openai":
-		return p.Assurance == AssuranceLocalLoopback && p.ExternalID == LocalOpenAIIdentifier
+		if p.Assurance == AssuranceLocalLoopback {
+			return p.ExternalID == LocalOpenAIIdentifier
+		}
+		return p.Assurance == AssuranceAPIKey
 	}
 	return false
 }
@@ -53,7 +58,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback:
+	case AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback, AssuranceAPIKey:
 		return true
 	default:
 		return false

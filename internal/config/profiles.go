@@ -107,9 +107,13 @@ type platformYAML struct {
 	Enabled bool              `yaml:"enabled"`
 	Extra   platformExtraYAML `yaml:"extra"`
 }
+type apiYAML struct {
+	Key *string `yaml:"key"`
+}
 type documentYAML struct {
 	Providers map[string]providerYAML `yaml:"providers"`
 	Model     modelYAML               `yaml:"model"`
+	API       apiYAML                 `yaml:"api"`
 	Gateway   *struct {
 		MultiplexProfiles bool           `yaml:"multiplex_profiles"`
 		Routes            []ProfileRoute `yaml:"profile_routes"`
@@ -387,6 +391,19 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		cfg.MCPServers = append(cfg.MCPServers, MCPServer{Name: name, URL: server.URL, Description: description, Transport: transport, Headers: server.Headers, Enabled: enabled})
 	}
 	sort.Slice(cfg.MCPServers, func(i, j int) bool { return cfg.MCPServers[i].Name < cfg.MCPServers[j].Name })
+	if doc.API.Key != nil {
+		key, err := credential(doc.API.Key, false)
+		if err != nil {
+			return withConfigPath(err, "api.key")
+		}
+		if strings.ContainsAny(key, "\r\n\x00") || len(key) > 4096 {
+			return configErr("config_value_invalid", "api.key")
+		}
+		if trimmed := strings.TrimSpace(key); trimmed != "" && (len([]rune(trimmed)) < 16 || trimmed != key) {
+			return configErr("config_value_invalid", "api.key")
+		}
+		cfg.OpenAIAPIKey = key
+	}
 	return nil
 }
 
@@ -522,8 +539,12 @@ func LoadProfiles(root string) (*Config, error) {
 				return nil, err
 			}
 		case "api":
-			if x.APIHost != "" && x.APIHost != "127.0.0.1" {
+			if x.APIHost != "" && x.APIHost != "127.0.0.1" && x.APIHost != "0.0.0.0" {
 				return nil, configErr("config_platform_host_unsupported", base+"api_host")
+			}
+			cfg.OpenAIListenHost = x.APIHost
+			if cfg.OpenAIListenHost == "" {
+				cfg.OpenAIListenHost = "127.0.0.1"
 			}
 			cfg.OpenAIListenPort, err = port(x.APIPort)
 			if err != nil {

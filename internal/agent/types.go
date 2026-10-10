@@ -18,16 +18,19 @@ type ModelMetrics struct {
 
 // Response is the final payload returned to the gateway after processing.
 type Response struct {
-	Kind               string                   `json:"-"`
-	PersistenceStatus  string                   `json:"-"`
-	ToolExecutionCount int                      `json:"-"`
-	ToolBlockedCount   int                      `json:"-"`
-	Model              string                   `json:"model"`
-	Response           string                   `json:"response,omitempty"`
-	Thinking           string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
-	Error              string                   `json:"error,omitempty"`
-	Metrics            *ModelMetrics            `json:"metrics,omitempty"`
-	Attachments        []media.OutputAttachment `json:"-"`
+	Kind               string `json:"-"`
+	PersistenceStatus  string `json:"-"`
+	ToolExecutionCount int    `json:"-"`
+	ToolBlockedCount   int    `json:"-"`
+	Model              string `json:"model"`
+	Response           string `json:"response,omitempty"`
+	Thinking           string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
+	// the gateway reports finish_reason tool_calls and omits server execution.
+	ToolCalls   []llm.ToolCall           `json:"-"`
+	Error       string                   `json:"error,omitempty"`
+	Metrics     *ModelMetrics            `json:"metrics,omitempty"`
+	Attachments []media.OutputAttachment `json:"-"`
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`
@@ -58,8 +61,12 @@ type Request struct {
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
-	Images        []llm.InputImage
-	StreamFunc    func(StreamChunk)
+	// ClientTools are caller-supplied function definitions for this request only.
+	ClientTools []llm.Tool
+	// ClientToolChoice is the normalized caller preference.
+	ClientToolChoice string
+	Images           []llm.InputImage
+	StreamFunc       func(StreamChunk)
 }
 
 // mapMetrics converts an LLM response into a model metrics summary.

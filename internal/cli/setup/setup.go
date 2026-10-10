@@ -160,7 +160,8 @@ func writeNewPrivateFile(path string, data []byte) (bool, error) {
 }
 
 // defaultConfig is the complete supported configuration surface, seeded by
-// `oswald setup`. The loopback API runs on the default profile; disabled
+// `oswald setup`. The API listener address is shared; each profile sets its
+// own bearer key via `api.key` referencing its private .env. Disabled
 // platforms are pruned before interpolation, so this loads with no credentials.
 // Replace the model provider before starting.
 const defaultConfig = `# Oswald configuration. The oswald setup command writes this file; ${VAR} reads this
@@ -175,6 +176,11 @@ model:
   provider: custom:gateway_name
   default: your/provider-model
   context_length: 32768
+api:
+  # Per-profile bearer key for the OpenAI gateway. Set a long random value in
+  # this root's .env as OPENAI_API_KEY; each named profile sets its own in
+  # profiles/<name>/.env. Empty disables API access for that profile.
+  key: ${OPENAI_API_KEY:-}
 runtime:
   log_level: info
 gateway:
@@ -237,6 +243,7 @@ const defaultEnv = `# Private operator credentials. The process environment take
 # Keep this file private (chmod 600).
 #
 # PROVIDER_API_KEY=
+# OPENAI_API_KEY=
 # DISCORD_TOKEN=
 # BLUEBUBBLES_PASSWORD=
 # BRAVE_API_KEY=
