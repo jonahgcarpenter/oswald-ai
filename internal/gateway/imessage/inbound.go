@@ -59,14 +59,14 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		textWithoutMention = strings.TrimSpace(text[mentionEnd:])
 	}
 	currentIsCommandAttempt := routing.IsCommandAttempt(textWithoutMention)
-	// allowPredecessor permits the thread-root fallback; it is also the exact
-	// condition under which an unmentioned group reply is looked up at all.
-	allowPredecessor := isGroup && !mentionsBot && !currentIsCommandAttempt
+	// Group-thread admission and enrichment share the newest prior message,
+	// including when a mention independently permits invocation.
+	allowPredecessor := isGroup
 	replyLookupAttempted := false
 	currentIsReplyToBot := false
 	var resolvedReply messageContext
 	var replyFound bool
-	if replyGUID != "" && !(isGroup && !mentionsBot && currentIsCommandAttempt) {
+	if replyGUID != "" {
 		replyLookupAttempted = true
 		resolvedReply, replyFound = g.resolveReply(ctx, msg, allowPredecessor, requestID)
 		currentIsReplyToBot = replyFound && resolvedReply.IsFromBot
@@ -147,9 +147,6 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 				SenderName: replyName,
 				Text:       strings.TrimSpace(replyCtx.Text),
 				IsFromBot:  replyCtx.IsFromBot,
-			}
-			if replyCtx.IsPredecessor {
-				reply.SenderName += " (preceding thread message, not necessarily the selected bubble)"
 			}
 			if len(replyCtx.Attachments) > 0 {
 				remainingImageSlots := media.MaxImagesPerRequest - len(images)
