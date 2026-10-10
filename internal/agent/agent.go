@@ -1115,6 +1115,20 @@ finalize:
 			)
 		}
 	}
+	// MEDIA:/absolute/path tokens in final model text are delivery directives:
+	// resolve them against the sender's managed image cache, attach what
+	// resolves, and persist the stripped text so tokens never re-fire.
+	if strings.Contains(finalContent, "MEDIA:") {
+		stripped, mediaAttachments := a.resolveResponseMedia(ctx, reqLog, gateway, senderID, finalContent, outputAttachments)
+		finalContent = stripped
+		outputAttachments = append(outputAttachments, mediaAttachments...)
+		if strings.TrimSpace(finalContent) == "" && len(mediaAttachments) == 0 {
+			finalContent = emptyResponseFallback
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
+			}
+		}
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
@@ -1140,7 +1154,9 @@ finalize:
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
-	if finalContent != "" && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
+	// Attachments-only turns (MEDIA tokens stripped all visible text) still
+	// persist so delivery gating and history stay consistent.
+	if (finalContent != "" || len(outputAttachments) > 0) && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
 		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
