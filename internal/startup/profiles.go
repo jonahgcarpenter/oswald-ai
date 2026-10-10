@@ -133,6 +133,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		if err != nil {
 			return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize profile compactor", Cause: err}
 		}
+		compactor.SetBillingBaseURL(profile.LLMGatewayURL)
 		compactors[name] = compactor
 		manager, err := mcp.NewProfileManager(name, profile.MCPServers, rootLog)
 		if err != nil {
@@ -140,6 +141,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		mcpManagers = append(mcpManagers, manager)
 		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, profile.LLMGatewayProvider, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager))
+		engine.SetBillingBaseURL(profile.LLMGatewayURL)
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
 		engine.SetForegroundCompactor(compactor)

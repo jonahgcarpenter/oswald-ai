@@ -1134,6 +1134,29 @@ func TestProcessInjectsSessionContextBlock(t *testing.T) {
 	}
 }
 
+func TestProcessRecordsSessionModelUsage(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", PromptTokens: 10, CompletionTokens: 3, Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, fixture := newTestAgent(t, chat, nil, nil)
+	agent.SetBillingBaseURL("https://models.example/v1")
+	if _, err := processAgent(agent, "req-1", "discord", "discord:dm:usage", "user-1", "Display", "question", nil, nil); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	usage, err := fixture.stores["user-1"].SessionModelUsage(context.Background(), "user-1", "discord:dm:usage", 1)
+	if err != nil || len(usage) != 1 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+	row := usage[0]
+	if row.Model != "test-model" || row.Task != "" || row.ApiCalls != 1 || row.PromptTokens != 10 || row.CompletionTokens != 3 {
+		t.Fatalf("usage row mismatch: %+v", row)
+	}
+	if row.BillingProvider != "test-provider" || row.BillingBaseURL != "https://models.example/v1" {
+		t.Fatalf("billing scope mismatch: %+v", row)
+	}
+	if row.FirstSeen <= 0 || row.LastSeen < row.FirstSeen {
+		t.Fatalf("usage window malformed: %+v", row)
+	}
+}
+
 func TestProcessAddsDiscordPlatformNotesWithoutIMessageContent(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)

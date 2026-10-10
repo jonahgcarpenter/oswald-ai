@@ -65,6 +65,10 @@ func (s *agentMemoryFixture) AppendPendingSessionTurn(ctx context.Context, write
 	}
 	return s.stores[write.UserID].AppendPendingSessionTurn(ctx, write)
 }
+func (s *agentMemoryFixture) RecordModelUsage(ctx context.Context, record memory.ModelUsageRecord) error {
+	record.SessionID = fixtureSession(record.SessionID)
+	return s.stores[record.UserID].RecordModelUsage(ctx, record)
+}
 func (s *agentMemoryFixture) MarkSessionTurnDelivered(ctx context.Context, owner string, id int64) error {
 	return s.stores[owner].MarkSessionTurnDelivered(ctx, owner, id)
 }

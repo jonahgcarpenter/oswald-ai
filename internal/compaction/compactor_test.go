@@ -82,7 +82,7 @@ func TestLLMCompactorParsesStructuredSummaryWithEmptyCandidates(t *testing.T) {
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
 	compactor := newSummaryTestCompactor(t, client)
 	history := memory.ToolHistory{Version: memory.ToolHistoryVersion, Batches: []memory.ToolHistoryBatch{{Calls: []memory.ToolHistoryCall{{Name: "project.lookup", Status: "succeeded", Result: "Atlas is active", ExecutedAt: "2026-08-28T12:00:00Z"}}}}}
-	artifact, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}}, "")
+	artifact, _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 4, UserText: "I work on Atlas.", AssistantText: "Noted.", ToolHistory: history}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestLLMCompactorClassifiesInvalidToolOutput(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newSummaryTestCompactor(t, test.client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+			_, _, err := newSummaryTestCompactor(t, test.client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 			var invalid *invalidCompactionOutputError
 			if !errors.As(err, &invalid) || invalid.code != test.wantCode {
 				t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -169,7 +169,7 @@ func TestLLMCompactorClassifiesProviderErrors(t *testing.T) {
 		permanent bool
 	}{{http.StatusBadRequest, true}, {http.StatusUnauthorized, true}, {http.StatusRequestTimeout, false}, {http.StatusTooManyRequests, false}, {http.StatusServiceUnavailable, false}} {
 		client := &summaryFakeChatter{err: &llm.ChatHTTPError{StatusCode: test.status, Body: "secret reflected content"}}
-		_, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+		_, _, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 		if errors.Is(err, errPermanentProvider) != test.permanent {
 			t.Fatalf("status=%d permanent=%v error=%v", test.status, test.permanent, err)
 		}
@@ -179,7 +179,7 @@ func TestLLMCompactorClassifiesProviderErrors(t *testing.T) {
 func TestLLMCompactorRejectsNonemptyCandidates(t *testing.T) {
 	raw := `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[{"source_turn_id":9007199254740993,"statement":"The user works.","evidence":"I work.","scope":"long_term","category":"projects","context":"direct_assertion","provenance":"user_statement","sensitivity":"low","confidence":0.9,"importance":4,"ttl_days":0,"supersedes":"","claim_slot":"project.fact","claim_value":"works"}]}`
 	client := &summaryFakeChatter{response: summaryRawToolResponse(sessionSummarySaveToolName, raw)}
-	_, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
+	_, _, err := newSummaryTestCompactor(t, client).Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, "")
 	var invalid *invalidCompactionOutputError
 	if !errors.As(err, &invalid) || invalid.code != "invalid_argument_shape" {
 		t.Fatalf("error=%v code=%q", err, compactionErrorCode(err))
@@ -189,7 +189,7 @@ func TestLLMCompactorRejectsNonemptyCandidates(t *testing.T) {
 func TestLLMCompactorRejectsTrailingJSON(t *testing.T) {
 	client := &summaryFakeChatter{arguments: map[string]interface{}{"_raw": `{"narrative":"x","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]} {}`}}
 	compactor := newSummaryTestCompactor(t, client)
-	if _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, ""); err == nil {
+	if _, _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "I work.", AssistantText: "ok"}}, ""); err == nil {
 		t.Fatal("expected trailing JSON rejection")
 	}
 }
@@ -198,7 +198,7 @@ func TestLLMCompactorAddsReasonAwareStructuredRetryInstructions(t *testing.T) {
 	content := `{"narrative":"Atlas is active.","open_tasks":[],"commitments":[],"entities":["Atlas"],"decisions":[],"topic_tags":["project"],"candidates":[]}`
 	client := &summaryFakeChatter{arguments: summaryArguments(t, content)}
 	compactor := newSummaryTestCompactor(t, client)
-	if _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "Atlas", AssistantText: "Noted"}}, "missing_tool_call"); err != nil {
+	if _, _, err := compactor.Compact(context.Background(), nil, []memory.SessionTurn{{ID: 1, UserText: "Atlas", AssistantText: "Noted"}}, "missing_tool_call"); err != nil {
 		t.Fatal(err)
 	}
 	prompt := client.request.Messages[0].Content

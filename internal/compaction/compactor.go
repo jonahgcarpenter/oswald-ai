@@ -27,15 +27,18 @@ const (
 
 // Compactor generates one structured summary artifact for a fixed range.
 type Compactor interface {
-	Compact(context.Context, *memory.SessionSummary, []memory.SessionTurn, string) (memory.SummaryArtifact, error)
+	Compact(context.Context, *memory.SessionSummary, []memory.SessionTurn, string) (memory.SummaryArtifact, *llm.ChatResponse, error)
 }
 
 // LLMCompactor uses the configured model with the required session_summary_save tool.
 type LLMCompactor struct {
 	client llm.Chatter
 	model  string
-	tool   llm.Tool
-	log    *config.Logger
+	// billingBaseURL is the configured provider endpoint attributed on usage
+	// ledger rows. Empty omits it; set via SetBillingBaseURL before serving.
+	billingBaseURL string
+	tool           llm.Tool
+	log            *config.Logger
 }
 
 // NewLLMCompactor constructs a structured session compactor.
@@ -50,18 +53,29 @@ func NewLLMCompactor(client llm.Chatter, model string, log *config.Logger) (*LLM
 	return &LLMCompactor{client: client, model: model, tool: sessionSummarySaveTool(), log: log}, nil
 }
 
+// SetBillingBaseURL installs the configured provider endpoint attributed on
+// usage ledger rows before the worker starts serving work.
+func (e *LLMCompactor) SetBillingBaseURL(url string) {
+	if e != nil {
+		e.billingBaseURL = url
+	}
+}
+
 // Compact summarizes prior reference data plus newly covered role-correct turns.
-func (e *LLMCompactor) Compact(ctx context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, previousErrorCode string) (memory.SummaryArtifact, error) {
+// It returns the provider response alongside the artifact so callers can ledger
+// the model call even when the output is invalid; resp is nil only when no
+// provider submission completed.
+func (e *LLMCompactor) Compact(ctx context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, previousErrorCode string) (memory.SummaryArtifact, *llm.ChatResponse, error) {
 	return e.compact(ctx, previous, turns, previousErrorCode, false)
 }
 
-func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, previousErrorCode string, allowContextReduction bool) (memory.SummaryArtifact, error) {
+func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSummary, turns []memory.SessionTurn, previousErrorCode string, allowContextReduction bool) (memory.SummaryArtifact, *llm.ChatResponse, error) {
 	if e == nil || e.client == nil || e.model == "" || len(turns) == 0 {
-		return memory.SummaryArtifact{}, fmt.Errorf("session compaction compactor is unavailable")
+		return memory.SummaryArtifact{}, nil, fmt.Errorf("session compaction compactor is unavailable")
 	}
 	messages, err := compactionMessages(previous, turns, previousErrorCode)
 	if err != nil {
-		return memory.SummaryArtifact{}, err
+		return memory.SummaryArtifact{}, nil, err
 	}
 	parallelToolCalls := false
 	temperature := 0.0
@@ -71,51 +85,51 @@ func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSumm
 	}, nil)
 	if err != nil {
 		if allowContextReduction && llm.IsContextLengthExceededError(err) {
-			return memory.SummaryArtifact{}, fmt.Errorf("session compaction model call exceeded context: %w", err)
+			return memory.SummaryArtifact{}, nil, fmt.Errorf("session compaction model call exceeded context: %w", err)
 		}
 		if llm.IsPermanentChatProviderError(err) {
 			var httpErr *llm.ChatHTTPError
 			if errors.As(err, &httpErr) {
-				return memory.SummaryArtifact{}, &permanentProviderError{statusCode: httpErr.StatusCode}
+				return memory.SummaryArtifact{}, nil, &permanentProviderError{statusCode: httpErr.StatusCode}
 			}
 		}
-		return memory.SummaryArtifact{}, fmt.Errorf("session compaction model call: %w", err)
+		return memory.SummaryArtifact{}, nil, fmt.Errorf("session compaction model call: %w", err)
 	}
 	if resp == nil || len(resp.Message.ToolCalls) == 0 {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("missing_tool_call")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("missing_tool_call")
 	}
 	if len(resp.Message.ToolCalls) != 1 {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("multiple_tool_calls")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("multiple_tool_calls")
 	}
 	call := resp.Message.ToolCalls[0]
 	if call.Function.Name != sessionSummarySaveToolName {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("unexpected_tool_call")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("unexpected_tool_call")
 	}
 	if _, malformed := call.Function.Arguments["_raw"]; malformed {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("malformed_tool_arguments")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("malformed_tool_arguments")
 	}
 	encoded := []byte(strings.TrimSpace(call.Function.RawArguments))
 	if len(encoded) == 0 {
 		var err error
 		encoded, err = json.Marshal(call.Function.Arguments)
 		if err != nil {
-			return memory.SummaryArtifact{}, invalidCompactionOutput("invalid_argument_shape")
+			return memory.SummaryArtifact{}, resp, invalidCompactionOutput("invalid_argument_shape")
 		}
 	}
 	if err := validateUniqueJSONFields(encoded); err != nil {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("duplicate_argument_field")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("duplicate_argument_field")
 	}
 	if err := validateCompactionRequiredFields(encoded); err != nil {
-		return memory.SummaryArtifact{}, err
+		return memory.SummaryArtifact{}, resp, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	var output sessionSummaryToolOutput
 	if err := decoder.Decode(&output); err != nil {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("invalid_argument_shape")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("invalid_argument_shape")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("invalid_argument_shape")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("invalid_argument_shape")
 	}
 	artifact := memory.SummaryArtifact{
 		Narrative: output.Narrative, OpenTasks: output.OpenTasks, Commitments: output.Commitments,
@@ -124,9 +138,9 @@ func (e *LLMCompactor) compact(ctx context.Context, previous *memory.SessionSumm
 	}
 	artifact, err = memory.ValidateSummaryArtifact(artifact)
 	if err != nil {
-		return memory.SummaryArtifact{}, invalidCompactionOutput("artifact_limit_exceeded")
+		return memory.SummaryArtifact{}, resp, invalidCompactionOutput("artifact_limit_exceeded")
 	}
-	return artifact, nil
+	return artifact, resp, nil
 }
 
 // CompactForeground folds complete request-local units into the same summary
@@ -169,7 +183,9 @@ func (e *LLMCompactor) CompactForeground(ctx context.Context, previous *memory.S
 		correctiveCode := ""
 		for submissions < foregroundAttemptLimit {
 			submissions++
-			final, err = e.compact(ctx, current, remaining[:count], correctiveCode, true)
+			// Foreground usage stays request-local telemetry: without a durable
+			// session scope here it cannot join the per-session usage ledger.
+			final, _, err = e.compact(ctx, current, remaining[:count], correctiveCode, true)
 			if err == nil {
 				break
 			}

@@ -47,13 +47,16 @@ type Agent struct {
 	budget      tokenbudget.ContextBudget
 	model       string
 	provider    string
-	soul        *soul.Store
-	userMemory  SessionStore
-	fileMemory  *files.Store
-	imageCache  *imagecache.Cache
-	toolPolicy  governance.GlobalPolicy
-	compactor   ForegroundCompactor
-	log         *config.Logger
+	// billingBaseURL is the configured provider endpoint attributed on usage
+	// ledger rows. Empty omits it; set via SetBillingBaseURL before serving.
+	billingBaseURL string
+	soul           *soul.Store
+	userMemory     SessionStore
+	fileMemory     *files.Store
+	imageCache     *imagecache.Cache
+	toolPolicy     governance.GlobalPolicy
+	compactor      ForegroundCompactor
+	log            *config.Logger
 }
 
 // SetImageCache installs the private per-user image cache before requests start.
@@ -74,6 +77,14 @@ func (a *Agent) SetFileMemory(store *files.Store) {
 func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 	if a != nil {
 		a.compactor = compactor
+	}
+}
+
+// SetBillingBaseURL installs the configured provider endpoint attributed on
+// usage ledger rows before the agent starts serving work.
+func (a *Agent) SetBillingBaseURL(url string) {
+	if a != nil {
+		a.billingBaseURL = url
 	}
 }
 
@@ -119,6 +130,34 @@ func NewAgent(
 // response so the model can decide how to proceed. Provider errors are captured
 // into Response.Error rather than returned as Go errors, except that completed
 // generated images are finalized with a partial response. Cancellation still aborts.
+// recordChatUsage persists one completed provider call into the session's
+// model usage ledger. Stateless requests and synthetic fallback responses are
+// skipped; recording failures are debug-logged and never fail the turn.
+func (a *Agent) recordChatUsage(ctx context.Context, reqLog *config.Logger, owner, sessionKey string, generation int, resp *llm.ChatResponse) {
+	if a == nil || a.userMemory == nil || resp == nil || generation <= 0 {
+		return
+	}
+	model := strings.TrimSpace(resp.Model)
+	if model == "" {
+		model = strings.TrimSpace(a.model)
+	}
+	if model == "" {
+		return
+	}
+	record := memory.ModelUsageRecord{
+		SessionID: sessionKey, UserID: owner, Generation: generation,
+		Model: model, BillingProvider: strings.TrimSpace(a.provider),
+		BillingBaseURL:   strings.TrimSpace(a.billingBaseURL),
+		ApiCalls:         1,
+		PromptTokens:     max(0, resp.PromptTokens),
+		CompletionTokens: max(0, resp.CompletionTokens),
+	}
+	if err := a.userMemory.RecordModelUsage(ctx, record); err != nil {
+		reqLog.Debug("agent.session_memory.usage_failed", "failed to record session model usage",
+			config.F("status", "degraded"), config.ErrorField(err))
+	}
+}
+
 func (a *Agent) Process(ctx context.Context, request Request) (response *Response, processErr error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
@@ -494,6 +533,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
+		// Synthetic fallback responses are built locally, never submitted to a
+		// provider, and must not count as model calls in the usage ledger.
+		respSynthetic := false
 
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		req.Tools = catalog.Tools
@@ -566,6 +608,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
+				respSynthetic = true
 				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 				if streamCallback != nil {
 					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
@@ -611,6 +654,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					}
 					if llm.IsTemporaryOllamaToolParserError(err) {
 						temporaryParserFallback = true
+						respSynthetic = true
 						resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
 						if streamCallback != nil {
 							streamCallback(StreamChunk{Type: ChunkContent, Text: emptyResponseFallback})
@@ -631,6 +675,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		normalizeToolCallIDs(&resp.Message, iteration)
 		lastResp = resp
+		if !respSynthetic {
+			a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, resp)
+		}
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
 				config.F("estimated_after", promptContext.EstimatedAfter),
@@ -1092,6 +1139,7 @@ finalize:
 				}
 			} else {
 				lastResp = retryResp
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, retryResp)
 				finalContent = accumulatedContent.String()
 				if strings.TrimSpace(finalContent) == "" {
 					finalContent = retryResp.Message.Content
