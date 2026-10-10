@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,13 +49,16 @@ type Agent struct {
 	budget      tokenbudget.ContextBudget
 	model       string
 	provider    string
-	soul        *soul.Store
-	userMemory  SessionStore
-	fileMemory  *files.Store
-	imageCache  *imagecache.Cache
-	toolPolicy  governance.GlobalPolicy
-	compactor   ForegroundCompactor
-	log         *config.Logger
+	// billingBaseURL is the configured provider endpoint attributed on usage
+	// ledger rows. Empty omits it; set via SetBillingBaseURL before serving.
+	billingBaseURL string
+	soul           *soul.Store
+	userMemory     SessionStore
+	fileMemory     *files.Store
+	imageCache     *imagecache.Cache
+	toolPolicy     governance.GlobalPolicy
+	compactor      ForegroundCompactor
+	log            *config.Logger
 }
 
 // SetImageCache installs the private per-user image cache before requests start.
@@ -74,6 +79,14 @@ func (a *Agent) SetFileMemory(store *files.Store) {
 func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 	if a != nil {
 		a.compactor = compactor
+	}
+}
+
+// SetBillingBaseURL installs the configured provider endpoint attributed on
+// usage ledger rows before the agent starts serving work.
+func (a *Agent) SetBillingBaseURL(url string) {
+	if a != nil {
+		a.billingBaseURL = url
 	}
 }
 
@@ -119,6 +132,34 @@ func NewAgent(
 // response so the model can decide how to proceed. Provider errors are captured
 // into Response.Error rather than returned as Go errors, except that completed
 // generated images are finalized with a partial response. Cancellation still aborts.
+// recordChatUsage persists one completed provider call into the session's
+// model usage ledger. Stateless requests and synthetic fallback responses are
+// skipped; recording failures are debug-logged and never fail the turn.
+func (a *Agent) recordChatUsage(ctx context.Context, reqLog *config.Logger, owner, sessionKey string, generation int, resp *llm.ChatResponse) {
+	if a == nil || a.userMemory == nil || resp == nil || generation <= 0 {
+		return
+	}
+	model := strings.TrimSpace(resp.Model)
+	if model == "" {
+		model = strings.TrimSpace(a.model)
+	}
+	if model == "" {
+		return
+	}
+	record := memory.ModelUsageRecord{
+		SessionID: sessionKey, UserID: owner, Generation: generation,
+		Model: model, BillingProvider: strings.TrimSpace(a.provider),
+		BillingBaseURL:   strings.TrimSpace(a.billingBaseURL),
+		ApiCalls:         1,
+		PromptTokens:     max(0, resp.PromptTokens),
+		CompletionTokens: max(0, resp.CompletionTokens),
+	}
+	if err := a.userMemory.RecordModelUsage(ctx, record); err != nil {
+		reqLog.Debug("agent.session_memory.usage_failed", "failed to record session model usage",
+			config.F("status", "degraded"), config.ErrorField(err))
+	}
+}
+
 func (a *Agent) Process(ctx context.Context, request Request) (response *Response, processErr error) {
 	if !request.Principal.Authenticated() {
 		return nil, fmt.Errorf("agent request has no authenticated principal")
@@ -494,6 +535,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// Reset the content accumulator each iteration — we only keep the final
 		// response turn's content. Thinking is accumulated across all iterations.
 		accumulatedContent.Reset()
+		// Synthetic fallback responses are built locally, never submitted to a
+		// provider, and must not count as model calls in the usage ledger.
+		respSynthetic := false
 
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		req.Tools = catalog.Tools
@@ -566,6 +610,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				goto finalize
 			} else if imageRetriesExhausted {
 				imageSizeFallbackUsed = true
+				respSynthetic = true
 				resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: imageSizeFallback}}
 				if streamCallback != nil {
 					streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
@@ -611,6 +656,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					}
 					if llm.IsTemporaryOllamaToolParserError(err) {
 						temporaryParserFallback = true
+						respSynthetic = true
 						resp = &llm.ChatResponse{Model: a.model, Message: llm.ChatMessage{Role: "assistant", Content: emptyResponseFallback}}
 						if streamCallback != nil {
 							streamCallback(StreamChunk{Type: ChunkContent, Text: emptyResponseFallback})
@@ -631,6 +677,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		normalizeToolCallIDs(&resp.Message, iteration)
 		lastResp = resp
+		if !respSynthetic {
+			a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, resp)
+		}
 		if iteration == 1 && resp.PromptTokens > 0 {
 			reqLog.Debug("agent.context.estimated_vs_actual", "compared estimated and actual prompt tokens",
 				config.F("estimated_after", promptContext.EstimatedAfter),
@@ -1092,6 +1141,7 @@ finalize:
 				}
 			} else {
 				lastResp = retryResp
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, retryResp)
 				finalContent = accumulatedContent.String()
 				if strings.TrimSpace(finalContent) == "" {
 					finalContent = retryResp.Message.Content
@@ -1154,14 +1204,64 @@ finalize:
 		return nil, fmt.Errorf("persist generated images: session storage is unavailable")
 	}
 	var storedTurn memory.StoredSessionTurn
+	// Session-row attributes are resolved before persistence. The system
+	// prompt ledger stores the exact rendered system message alongside its
+	// hex SHA-256, matching operator data.
+	sessionModel := strings.TrimSpace(a.model)
+	if lastResp != nil && strings.TrimSpace(lastResp.Model) != "" {
+		sessionModel = strings.TrimSpace(lastResp.Model)
+	}
+	modelConfig, _ := json.Marshal(map[string]any{"gateway_runtime": map[string]any{"provider": strings.TrimSpace(a.provider), "base_url": strings.TrimSpace(a.billingBaseURL), "api_mode": "chat_completions"}})
+	systemPromptText := ""
+	if len(promptContext.Messages) > 0 && promptContext.Messages[0].Role == "system" {
+		systemPromptText = promptContext.Messages[0].Content
+	}
+	systemPromptHash := ""
+	if systemPromptText != "" {
+		sum := sha256.Sum256([]byte(systemPromptText))
+		systemPromptHash = hex.EncodeToString(sum[:])
+	}
+	chatType := "group"
+	if request.IsDirect {
+		chatType = "dm"
+	}
+	// The response kind doubles as the session activity description. It is
+	// computed before persistence because it only reads settled loop outputs.
+	responseKind := "answer"
+	if toolGovernanceStopReason != "" {
+		responseKind = "tool_limit"
+	}
+	if temporaryParserFallback {
+		responseKind = "parser_fallback"
+	}
+	if imageSizeFallbackUsed {
+		responseKind = "image_fallback"
+	}
+	if finalContent == contextCompactionFallback {
+		responseKind = "context_fallback"
+	}
+	if finalContent == emptyResponseFallback && !temporaryParserFallback {
+		responseKind = "empty_fallback"
+	}
+	if finalContent == generatedImagePartialResponse {
+		responseKind = "image_partial"
+	}
 	// Attachments-only turns (MEDIA tokens stripped all visible text) still
 	// persist so delivery gating and history stay consistent.
 	if (finalContent != "" || len(outputAttachments) > 0) && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
 		persistenceStatus = "failed"
 		storedReplay := memory.SessionTurn{UserText: userMemoryContent, AssistantText: finalContent, ToolNames: uniqueToolNames(toolAnnotations), ToolHistory: toolHistory}
 		completedPressure := tokenbudget.EstimateCompletedRequest(promptContext.EstimatedBefore, storedReplay.UserText, memory.SessionTurnMessages(storedReplay))
+		finishReason := "stop"
+		completionTokens := 0
+		if lastResp != nil {
+			if strings.TrimSpace(lastResp.DoneReason) != "" {
+				finishReason = strings.TrimSpace(lastResp.DoneReason)
+			}
+			completionTokens = lastResp.CompletionTokens
+		}
 		var err error
-		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
+		storedTurn, err = a.userMemory.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{SessionID: sessionKey, UserID: senderID, Generation: sessionGeneration, UserText: userMemoryContent, AssistantText: finalContent, GroupGateway: meta.GroupGateway, GroupChatID: meta.GroupChatID, PublicUserText: meta.PublicUserText, ToolNames: toolAnnotations, History: toolHistory, Images: imagesForStorage, TTL: sessionTurnTTL, AssistantFinishReason: finishReason, AssistantReasoning: finalThinking, AssistantReasoningContent: finalThinking, AssistantTokenCount: completionTokens, UserPlatformMessageID: request.PlatformMessageID, Model: sessionModel, BillingProvider: strings.TrimSpace(a.provider), BillingBaseURL: strings.TrimSpace(a.billingBaseURL), ModelConfig: string(modelConfig), ChatID: strings.TrimSpace(request.ChatID), ChatType: chatType, ChatDisplayName: strings.TrimSpace(request.ChatDisplayName), Platform: strings.TrimSpace(gateway), TransportProfile: strings.TrimSpace(request.TransportProfile), PlatformUserID: strings.TrimSpace(request.Principal.ExternalID), PlatformDisplayName: strings.TrimSpace(displayName), SystemPromptHash: systemPromptHash, SystemPromptText: systemPromptText, ActivityDescription: responseKind, Pressure: memory.SessionPromptPressure{Tokens: completedPressure, Limit: promptContext.InputLimit, Version: promptPressureVersion(a.model, promptContext.InputLimit)}})
 		if err != nil {
 			reqLog.Warn("agent.session_memory.write_failed", "failed to append session memory after turn", config.F("status", "degraded"), config.ErrorField(err))
 			if len(generatedImages) > 0 {
@@ -1191,26 +1291,6 @@ finalize:
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("status", responseStatus),
 	)
-
-	responseKind := "answer"
-	if toolGovernanceStopReason != "" {
-		responseKind = "tool_limit"
-	}
-	if temporaryParserFallback {
-		responseKind = "parser_fallback"
-	}
-	if imageSizeFallbackUsed {
-		responseKind = "image_fallback"
-	}
-	if finalContent == contextCompactionFallback {
-		responseKind = "context_fallback"
-	}
-	if finalContent == emptyResponseFallback && !temporaryParserFallback {
-		responseKind = "empty_fallback"
-	}
-	if finalContent == generatedImagePartialResponse {
-		responseKind = "image_partial"
-	}
 	return &Response{
 		Kind:              responseKind,
 		Model:             a.model,

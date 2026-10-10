@@ -45,6 +45,16 @@ type Request struct {
 	SessionKey string
 	IsDirect   bool
 	Prompt     string
+	// PlatformMessageID is the untrusted inbound transport message identifier,
+	// persisted on the user message row when present.
+	PlatformMessageID string
+	// ChatID is the untrusted transport conversation identifier stored on the
+	// session row; ChatDisplayName is its plain conversation name for the
+	// session origin record.
+	ChatID, ChatDisplayName string
+	// TransportProfile names the profile owning the receiving adapter,
+	// credential, and allowlist. It never affects session ownership.
+	TransportProfile string
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage

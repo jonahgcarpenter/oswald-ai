@@ -15,7 +15,11 @@ func (s *ProfileStore) discoverIndexed(ctx context.Context, owner string, filter
 	if err != nil {
 		return nil, err
 	}
-	if err := s.addLiveLineage(ctx, owner, filter.LiveSessionID, excluded); err != nil {
+	// The live session and the sessions forked from it are omitted; older
+	// generations predate the live conversation and remain recallable.
+	// Result rows still dedupe to one entry per lineage root below.
+	subtree, err := s.lineageSubtree(ctx, owner, filter.LiveSessionID)
+	if err != nil {
 		return nil, err
 	}
 	index, err := sql.Open("sqlite3", ":memory:")
@@ -30,7 +34,7 @@ func (s *ProfileStore) discoverIndexed(ctx context.Context, owner string, filter
 	if _, err := index.ExecContext(ctx, `CREATE VIRTUAL TABLE recall USING fts5(content, tool_name, tool_calls, session_id UNINDEXED, message_id UNINDEXED, role UNINDEXED, started_at UNINDEXED)`); err != nil {
 		return nil, fmt.Errorf("initialize recall projection: %w", err)
 	}
-	if err := s.populateRecall(ctx, index, owner, filter, excluded); err != nil {
+	if err := s.populateRecall(ctx, index, owner, filter, excluded, subtree); err != nil {
 		return nil, err
 	}
 	// Temporal preference gently biases relevance instead of replacing it with
@@ -66,7 +70,7 @@ func (s *ProfileStore) discoverIndexed(ctx context.Context, owner string, filter
 		if err != nil {
 			return nil, err
 		}
-		if root == "" || seen[root] || excluded[root] {
+		if root == "" || seen[root] || excluded[root] || subtree[id] {
 			continue
 		}
 		seen[root] = true
@@ -89,7 +93,7 @@ func (s *ProfileStore) discoverIndexed(ctx context.Context, owner string, filter
 	return results, nil
 }
 
-func (s *ProfileStore) populateRecall(ctx context.Context, index *sql.DB, owner string, filter SearchFilter, excluded map[string]bool) error {
+func (s *ProfileStore) populateRecall(ctx context.Context, index *sql.DB, owner string, filter SearchFilter, excluded, subtree map[string]bool) error {
 	roots, err := s.searchLineageRoots(ctx, owner)
 	if err != nil {
 		return err
@@ -141,7 +145,7 @@ WHERE ` + searchEligible + ` AND s.source IN ('discord','imessage')`
 		}
 		if id != previous {
 			root := roots[id]
-			previous, skip = id, root == "" || excluded[root]
+			previous, skip = id, root == "" || excluded[root] || subtree[id]
 			if !skip && title != "" && (roles["user"] || roles["assistant"]) {
 				if _, err := insert.ExecContext(ctx, title, "", "", id, messageID, "title", started); err != nil {
 					return err
@@ -153,7 +157,11 @@ WHERE ` + searchEligible + ` AND s.source IN ('discord','imessage')`
 		}
 		if roles[role] {
 			if role == "tool" {
-				content = truncateRunes(content, 8192)
+				// Tool result text stays policy-gated: searchable tool
+				// matches come from the owning exchange's history
+				// projection below, which honors the stored SearchResult
+				// policy. Index the tool name and call arguments only.
+				content = ""
 			}
 			if _, err := insert.ExecContext(ctx, content, tool, calls, id, messageID, role, started); err != nil {
 				return err

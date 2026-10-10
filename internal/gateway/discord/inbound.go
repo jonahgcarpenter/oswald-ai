@@ -140,23 +140,37 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 	})
 
 	responder := newRuntimeResponder(dg, requestID, msg.ChannelID, replyToID, sessionKey, msg.Author.ID)
+	// The plain conversation name rides alongside the formatted chat label
+	// for the session origin record: peer name in DMs, channel name in groups.
+	chatDisplayName := msg.Author.Username
+	if msg.GuildID != "" {
+		chatDisplayName = dg.channelName(msg.ChannelID, log)
+		if chatDisplayName == "" {
+			chatDisplayName = dg.guildName(msg.GuildID, log)
+		}
+	}
 	gatewayruntime.Execute(gatewayruntime.Request{
-		ReceivedAt:     receivedAt,
-		RequestID:      requestID,
-		ChatID:         msg.ChannelID,
-		Principal:      principal,
-		DisplayName:    msg.Author.Username,
-		SessionKey:     sessionKey,
-		ChatLabel:      dg.chatLabel(msg, log),
-		IsDirect:       msg.GuildID == "",
-		IsGroup:        msg.GuildID != "",
-		IsMention:      mentionsBot,
-		IsReplyToBot:   isReplyToBot,
-		Text:           text,
-		PublicUserText: publicUserText,
-		Images:         images,
-		Unsupported:    unsupported,
-		Reply:          reply,
-		StreamFunc:     responder.Stream,
+		ReceivedAt:        receivedAt,
+		RequestID:         requestID,
+		ChatID:            msg.ChannelID,
+		Principal:         principal,
+		DisplayName:       msg.Author.Username,
+		SessionKey:        sessionKey,
+		ChatLabel:         dg.chatLabel(msg, log),
+		IsDirect:          msg.GuildID == "",
+		IsGroup:           msg.GuildID != "",
+		IsMention:         mentionsBot,
+		IsReplyToBot:      isReplyToBot,
+		Text:              text,
+		PublicUserText:    publicUserText,
+		PlatformMessageID: msg.ID,
+		ChatDisplayName:   chatDisplayName,
+		// Adapters are process-global: the receiving credential always
+		// belongs to the reserved default profile.
+		TransportProfile: "default",
+		Images:           images,
+		Unsupported:      unsupported,
+		Reply:            reply,
+		StreamFunc:       responder.Stream,
 	}, dg.runtimeDependencies(), responder)
 }

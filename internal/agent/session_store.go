@@ -19,5 +19,6 @@ type SessionStore interface {
 	RecentCompletedExchangesAfter(context.Context, string, string, int, int64, int) ([]memory.SessionTurn, error)
 	PageDeliveredSessionTurnsAfter(context.Context, string, string, int, int64, int) ([]memory.SessionTurn, error)
 	AppendPendingSessionTurn(context.Context, memory.SessionTurnWrite) (memory.StoredSessionTurn, error)
+	RecordModelUsage(context.Context, memory.ModelUsageRecord) error
 	MarkSessionTurnDelivered(context.Context, string, int64) error
 }

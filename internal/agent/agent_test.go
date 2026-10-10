@@ -1134,6 +1134,80 @@ func TestProcessInjectsSessionContextBlock(t *testing.T) {
 	}
 }
 
+func TestProcessRecordsSessionModelUsage(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", PromptTokens: 10, CompletionTokens: 3, Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, fixture := newTestAgent(t, chat, nil, nil)
+	agent.SetBillingBaseURL("https://models.example/v1")
+	if _, err := processAgent(agent, "req-1", "discord", "discord:dm:usage", "user-1", "Display", "question", nil, nil); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	usage, err := fixture.stores["user-1"].SessionModelUsage(context.Background(), "user-1", "discord:dm:usage", 1)
+	if err != nil || len(usage) != 1 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+	row := usage[0]
+	if row.Model != "test-model" || row.Task != "" || row.ApiCalls != 1 || row.PromptTokens != 10 || row.CompletionTokens != 3 {
+		t.Fatalf("usage row mismatch: %+v", row)
+	}
+	if row.BillingProvider != "test-provider" || row.BillingBaseURL != "https://models.example/v1" {
+		t.Fatalf("billing scope mismatch: %+v", row)
+	}
+	if row.FirstSeen <= 0 || row.LastSeen < row.FirstSeen {
+		t.Fatalf("usage window malformed: %+v", row)
+	}
+}
+
+func TestProcessWritesSessionRowAttributes(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
+	agent, fixture := newTestAgent(t, chat, nil, nil)
+	agent.SetBillingBaseURL("https://models.example/v1")
+	_, err := agent.Process(context.Background(), Request{
+		RequestID:        "req-1",
+		Principal:        identity.Principal{CanonicalUserID: "user-1", ExternalID: "user-1", Gateway: "discord", Assurance: identity.AssuranceDiscordGateway},
+		DisplayName:      "fragsap",
+		SessionKey:       "discord:dm:123",
+		IsDirect:         true,
+		ChatID:           "channel-1",
+		ChatDisplayName:  "general",
+		TransportProfile: "default",
+		Prompt:           "question",
+	})
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	id, err := fixture.stores["user-1"].ActiveSessionID(context.Background(), "user-1", "discord:dm:123", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model, billing, chatID, chatType, platformUserID, platformDisplayName, transportProfile, promptHash, activity, provenance sql.NullString
+	var promptRows int
+	var origin string
+	if err := fixture.sql.QueryRow(`SELECT model,billing_base_url,chat_id,chat_type,user_id,display_name,transport_profile,system_prompt_hash,last_activity_description,last_activity_provenance,origin_json FROM sessions WHERE id=?`, id).Scan(
+		&model, &billing, &chatID, &chatType, &platformUserID, &platformDisplayName, &transportProfile, &promptHash, &activity, &provenance, &origin); err != nil {
+		t.Fatal(err)
+	}
+	if model.String != "test-model" || billing.String != "https://models.example/v1" {
+		t.Fatalf("model/billing mismatch: %q %q", model.String, billing.String)
+	}
+	if chatID.String != "channel-1" || chatType.String != "dm" || platformUserID.String != "user-1" || platformDisplayName.String != "fragsap" {
+		t.Fatalf("chat identity mismatch: %q %q %q %q", chatID.String, chatType.String, platformUserID.String, platformDisplayName.String)
+	}
+	if transportProfile.String != "default" {
+		t.Fatalf("transport profile mismatch: %q", transportProfile.String)
+	}
+	if len(promptHash.String) != 64 || activity.String != "answer" || provenance.String != "unknown" {
+		t.Fatalf("prompt/activity mismatch: %q %q %q", promptHash.String, activity.String, provenance.String)
+	}
+	if err := fixture.sql.QueryRow(`SELECT COUNT(*) FROM system_prompts WHERE hash=?`, promptHash.String).Scan(&promptRows); err != nil || promptRows != 1 {
+		t.Fatalf("prompt rows=%d err=%v", promptRows, err)
+	}
+	for key, want := range map[string]string{"platform": "discord", "chat_id": "channel-1", "chat_name": "general", "chat_type": "dm", "user_id": "user-1", "user_name": "fragsap", "profile": "user-1"} {
+		if !strings.Contains(origin, `"`+key+`":"`+want+`"`) {
+			t.Fatalf("origin missing %s=%q: %s", key, want, origin)
+		}
+	}
+}
+
 func TestProcessAddsDiscordPlatformNotesWithoutIMessageContent(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "ok"}}}}
 	agent, _ := newTestAgent(t, chat, nil, nil)

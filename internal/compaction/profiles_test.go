@@ -92,6 +92,51 @@ func TestProfileWorkerCorrectiveRetryUsesFrozenRange(t *testing.T) {
 	}
 }
 
+func TestProfileWorkerRecordsCompressionUsage(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memory.NewProfileStore(ctx, root, "alice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	key := "discord:dm:123"
+	if _, err := store.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.AppendPendingSessionTurn(ctx, memory.SessionTurnWrite{UserID: "alice", SessionID: key, Generation: 1, UserText: "synthetic source", AssistantText: "synthetic answer", Pressure: memory.SessionPromptPressure{Tokens: 80, Limit: 100, Version: "test-v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	client := &summarySequenceChatter{outcomes: []summarySequenceOutcome{
+		{response: &llm.ChatResponse{Model: "synthetic/model", PromptTokens: 50, CompletionTokens: 7, Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{Function: llm.ToolFunction{Name: sessionSummarySaveToolName, Arguments: summaryArguments(t, `{"narrative":"synthetic summary","open_tasks":[],"commitments":[],"entities":[],"decisions":[],"topic_tags":[],"candidates":[]}`)}}}}}},
+	}}
+	compactor := newSummaryTestCompactor(t, client)
+	compactor.SetBillingBaseURL("https://models.example/v1")
+	gate := &profileTestGate{allowed: true}
+	log := config.NewLogger(config.LevelInfo)
+	log.SetOutput(io.Discard)
+	worker := NewProfileService(store, compactor, gate, budget.NewContextBudget(32768), log)
+	worker.runScope(ctx, memory.ActiveSessionScope{UserID: "alice", SessionID: key, Generation: 1})
+	usage, err := store.SessionModelUsage(ctx, "alice", key, 1)
+	if err != nil || len(usage) != 1 {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+	row := usage[0]
+	if row.Task != "compression" || row.Model != "synthetic/model" || row.ApiCalls != 1 || row.PromptTokens != 50 || row.CompletionTokens != 7 {
+		t.Fatalf("compression usage mismatch: %+v", row)
+	}
+	if row.BillingBaseURL != "https://models.example/v1" {
+		t.Fatalf("compression billing URL mismatch: %+v", row)
+	}
+}
+
 type preemptedProfileChatter struct{ cancel context.CancelFunc }
 
 func (c preemptedProfileChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(llm.ChatMessage)) (*llm.ChatResponse, error) {

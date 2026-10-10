@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,35 @@ func (s *ProfileService) cycle(ctx context.Context) {
 			return
 		}
 		s.runScope(ctx, scope)
+	}
+}
+
+// recordCompactionUsage ledgers one completed summary model call under the
+// compression task. Recording failures are logged and never fail compaction.
+func (s *ProfileService) recordCompactionUsage(ctx context.Context, scope memory.ActiveSessionScope, resp *llm.ChatResponse) {
+	if s == nil || s.store == nil || resp == nil {
+		return
+	}
+	model := strings.TrimSpace(resp.Model)
+	baseURL := ""
+	if s.compactor != nil {
+		if model == "" {
+			model = strings.TrimSpace(s.compactor.model)
+		}
+		baseURL = strings.TrimSpace(s.compactor.billingBaseURL)
+	}
+	if model == "" {
+		return
+	}
+	record := memory.ModelUsageRecord{
+		SessionID: scope.SessionID, UserID: scope.UserID, Generation: scope.Generation,
+		Model: model, BillingBaseURL: baseURL, Task: "compression",
+		ApiCalls:         1,
+		PromptTokens:     max(0, resp.PromptTokens),
+		CompletionTokens: max(0, resp.CompletionTokens),
+	}
+	if err := s.store.RecordModelUsage(ctx, record); err != nil {
+		s.log.Server("compaction").Debug("compaction.profile.usage_failed", "failed to record compression model usage", config.ErrorField(err))
 	}
 }
 
@@ -224,7 +254,10 @@ func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessio
 			return err
 		}
 		submitted = true
-		artifact, err := s.compactor.Compact(ctx, prior, turns, correctiveCode)
+		artifact, usage, err := s.compactor.Compact(ctx, prior, turns, correctiveCode)
+		if usage != nil {
+			s.recordCompactionUsage(ctx, scope, usage)
+		}
 		if err != nil {
 			if errors.Is(err, errInvalidCompactionOutput) && ctx.Err() == nil {
 				mutex.Lock()

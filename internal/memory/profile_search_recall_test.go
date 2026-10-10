@@ -76,8 +76,11 @@ func TestDiscoveryRolesTitlesAndNativeToolSearchPolicy(t *testing.T) {
 		})
 	}
 	first, _, _, err := s.SessionTranscript(ctx, s.profile, id, 20, 10)
-	if err != nil || len(first) != 2 || len(first[1].History.Batches) != 1 || first[1].History.Batches[0].Calls[0].Result != "connection refused toolword" {
+	if err != nil || len(first) != 4 || len(first[3].History.Batches) != 1 || first[3].History.Batches[0].Calls[0].Result != "connection refused toolword" {
 		t.Fatalf("native tool trace was not hydrated: %+v err=%v", first, err)
+	}
+	if first[0].Role != "user" || first[1].Role != "assistant" || first[1].ToolCalls == "" || first[2].Role != "tool" || first[2].ToolCallID == "" || first[3].Role != "assistant" {
+		t.Fatalf("tool transcript rows missing linkage: %+v", first)
 	}
 }
 

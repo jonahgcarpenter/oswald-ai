@@ -2,11 +2,15 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -210,7 +214,16 @@ func (s *ProfileStore) ResolveSessionContext(ctx context.Context, owner, key str
 		if err != nil {
 			return result, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,source,user_id,session_key,profile_name,transport_profile,started_at,last_activity_at,origin_json) VALUES(?,?,?,?,?,?,?,?,?)`, config.NewRequestID(), source, owner, key, owner, owner, now, now, string(origin)); err != nil {
+		// Link the new session to its most recent ended predecessor, preserving
+		// the conversation lineage across resets and expiry.
+		var parent any
+		var parentID string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM sessions WHERE profile_name=? AND source=? AND session_key=? AND ended_at IS NOT NULL ORDER BY ended_at DESC, started_at DESC LIMIT 1`, owner, source, key).Scan(&parentID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return result, err
+		} else if err == nil {
+			parent = parentID
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id,source,user_id,session_key,profile_name,parent_session_id,started_at,last_activity_at,origin_json) VALUES(?,?,?,?,?,?,?,?,?)`, config.NewRequestID(), source, owner, key, owner, parent, now, now, string(origin)); err != nil {
 			return result, err
 		}
 		result.IsNewSession = true
@@ -323,8 +336,114 @@ func (s *ProfileStore) BindSessionFileMemory(ctx context.Context, owner, key str
 	return snapshot.User, snapshot.Memory, tx.Commit()
 }
 
-// AppendPendingSessionTurn writes two inactive message rows and one bounded,
-// versioned delivery/history record, including private cache image references.
+// messageToolCallFunction is the persisted function reference inside one
+// messages.tool_calls JSON entry: provider call id, function name, and
+// JSON-encoded arguments, matching the transcript shapes in operator data.
+type messageToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// messageToolCall is one entry of a messages.tool_calls JSON list.
+type messageToolCall struct {
+	ID       string                  `json:"id"`
+	CallID   string                  `json:"call_id"`
+	Type     string                  `json:"type"`
+	Function messageToolCallFunction `json:"function"`
+}
+
+// isHexDigest reports whether value is lowercase hexadecimal, the canonical
+// encoding for stored SHA-256 digests.
+func isHexDigest(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < '0' || (c > '9' && c < 'a') || c > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
+// nullString stores empty strings as NULL so sparse detail columns keep the
+// operator null distribution instead of empty-string sentinels.
+func nullString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+// displayIdentity hashes the dedupe key tuple (role, content, timestamp,
+// tool_call_id, tool_calls, tool_name) with SHA-256. Each text field is framed
+// as a big-endian uint32 length followed by its UTF-8 bytes; NULL is the
+// reserved length 0xFFFFFFFF so it never collides with an empty string. The
+// timestamp hashes as its exact float64 bits, avoiding text-formatting drift.
+// A nil text pointer means NULL; role is never NULL.
+func displayIdentity(role string, content *string, timestamp float64, toolCallID, toolCalls, toolName *string) []byte {
+	sum := sha256.New()
+	var length [4]byte
+	writeField := func(text *string) {
+		if text == nil {
+			binary.BigEndian.PutUint32(length[:], 0xFFFFFFFF)
+			sum.Write(length[:])
+			return
+		}
+		binary.BigEndian.PutUint32(length[:], uint32(len(*text)))
+		sum.Write(length[:])
+		sum.Write([]byte(*text))
+	}
+	writeField(&role)
+	writeField(content)
+	var timestampBits [8]byte
+	binary.BigEndian.PutUint64(timestampBits[:], math.Float64bits(timestamp))
+	sum.Write(timestampBits[:])
+	writeField(toolCallID)
+	writeField(toolCalls)
+	writeField(toolName)
+	return sum.Sum(nil)
+}
+
+// encodeMessageToolCalls renders one assistant tool-request row payload from a
+// history batch. Arguments are JSON-encoded exactly once; failures fall back
+// to an empty object so one bad argument map cannot fail the whole exchange.
+func encodeMessageToolCalls(batch ToolHistoryBatch, batchIndex int) (string, []string, error) {
+	entries := make([]messageToolCall, 0, len(batch.Calls))
+	providerIDs := make([]string, 0, len(batch.Calls))
+	for callIndex, call := range batch.Calls {
+		providerID := strings.TrimSpace(call.ProviderCallID)
+		if providerID == "" {
+			providerID = fmt.Sprintf("call_%d_%d", batchIndex+1, callIndex+1)
+		}
+		args := call.Arguments
+		if args == nil {
+			args = map[string]interface{}{}
+		}
+		encodedArgs, err := json.Marshal(args)
+		if err != nil {
+			encodedArgs = []byte("{}")
+		}
+		entries = append(entries, messageToolCall{
+			ID:     providerID,
+			CallID: providerID,
+			Type:   "function",
+			Function: messageToolCallFunction{
+				Name:      strings.TrimSpace(call.Name),
+				Arguments: string(encodedArgs),
+			},
+		})
+		providerIDs = append(providerIDs, providerID)
+	}
+	encoded, err := json.Marshal(entries)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode message tool calls: %w", err)
+	}
+	return string(encoded), providerIDs, nil
+}
+
+// AppendPendingSessionTurn writes one inactive user row, one inactive
+// assistant tool-request row per history batch, one inactive tool result row
+// per call, one inactive final assistant row, and one bounded, versioned
+// delivery/history record, including private cache image references.
 func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input SessionTurnWrite) (result StoredSessionTurn, resultErr error) {
 	defer s.measure("memory.profile.turn.complete", time.Now(), &resultErr)
 	if len(input.Images) > 4 {
@@ -335,6 +454,93 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	}
 	if input.Pressure.Tokens < 0 || input.Pressure.Limit <= 0 || input.Pressure.Version == "" || len(input.Pressure.Version) > 1024 {
 		return result, errors.New("invalid profile exchange pressure")
+	}
+	if !utf8.ValidString(input.AssistantFinishReason) || len(input.AssistantFinishReason) > 64 {
+		return result, errors.New("invalid profile exchange finish reason")
+	}
+	if !utf8.ValidString(input.AssistantReasoning) || !utf8.ValidString(input.AssistantReasoningContent) {
+		return result, errors.New("invalid profile exchange reasoning")
+	}
+	reasoning := input.AssistantReasoning
+	if runeCount := utf8.RuneCountInString(reasoning); runeCount > 32768 {
+		reasoning = string([]rune(reasoning)[:32768])
+	}
+	reasoningContent := input.AssistantReasoningContent
+	if runeCount := utf8.RuneCountInString(reasoningContent); runeCount > 32768 {
+		reasoningContent = string([]rune(reasoningContent)[:32768])
+	}
+	if input.AssistantTokenCount < 0 {
+		return result, errors.New("invalid profile exchange token count")
+	}
+	platformMessageID := strings.TrimSpace(input.UserPlatformMessageID)
+	if !utf8.ValidString(platformMessageID) || len(platformMessageID) > 512 {
+		return result, errors.New("invalid profile exchange platform message id")
+	}
+	model := strings.TrimSpace(input.Model)
+	if !utf8.ValidString(model) || len(model) > 256 {
+		return result, errors.New("invalid profile exchange model")
+	}
+	for _, field := range []string{input.BillingProvider, input.BillingBaseURL} {
+		if !utf8.ValidString(field) || len(field) > 512 {
+			return result, errors.New("invalid profile exchange billing scope")
+		}
+	}
+	if input.ModelConfig != "" && (!utf8.ValidString(input.ModelConfig) || len(input.ModelConfig) > 8192 || !json.Valid([]byte(input.ModelConfig))) {
+		return result, errors.New("invalid profile exchange model config")
+	}
+	chatID := strings.TrimSpace(input.ChatID)
+	chatType := strings.TrimSpace(input.ChatType)
+	chatDisplayName := strings.TrimSpace(input.ChatDisplayName)
+	platform := strings.TrimSpace(input.Platform)
+	if !utf8.ValidString(chatID) || len(chatID) > 512 || !utf8.ValidString(chatType) || len(chatType) > 32 {
+		return result, errors.New("invalid profile exchange chat identity")
+	}
+	if chatType != "" && chatType != "dm" && chatType != "group" {
+		return result, errors.New("invalid profile exchange chat type")
+	}
+	if !utf8.ValidString(chatDisplayName) || utf8.RuneCountInString(chatDisplayName) > 256 {
+		return result, errors.New("invalid profile exchange chat display name")
+	}
+	if !utf8.ValidString(platform) || len(platform) > 64 {
+		return result, errors.New("invalid profile exchange platform")
+	}
+	transportProfile := strings.TrimSpace(input.TransportProfile)
+	if transportProfile != "" && transportProfile != "default" && !config.ValidProfileName(transportProfile) {
+		return result, errors.New("invalid profile exchange transport profile")
+	}
+	platformUserID := strings.TrimSpace(input.PlatformUserID)
+	if !utf8.ValidString(platformUserID) || len(platformUserID) > 512 {
+		return result, errors.New("invalid profile exchange platform user id")
+	}
+	platformDisplayName := strings.TrimSpace(input.PlatformDisplayName)
+	if !utf8.ValidString(platformDisplayName) || utf8.RuneCountInString(platformDisplayName) > 256 {
+		return result, errors.New("invalid profile exchange platform display name")
+	}
+	systemPromptHash := strings.TrimSpace(input.SystemPromptHash)
+	if systemPromptHash != "" && (len(systemPromptHash) != 64 || !isHexDigest(systemPromptHash)) {
+		return result, errors.New("invalid profile exchange system prompt hash")
+	}
+	if systemPromptHash != "" && !utf8.ValidString(input.SystemPromptText) {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if systemPromptHash == "" && input.SystemPromptText != "" {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if len(input.SystemPromptText) > 1024*1024 {
+		return result, errors.New("invalid profile exchange system prompt text")
+	}
+	if !utf8.ValidString(input.ActivityDescription) || utf8.RuneCountInString(input.ActivityDescription) > 256 {
+		return result, errors.New("invalid profile exchange activity description")
+	}
+	for _, batch := range input.History.Batches {
+		if !utf8.ValidString(batch.AssistantContent) || len(batch.AssistantContent) > 128*1024 {
+			return result, errors.New("invalid profile exchange tool content")
+		}
+		for _, call := range batch.Calls {
+			if !utf8.ValidString(call.Result) {
+				return result, errors.New("invalid profile exchange tool result")
+			}
+		}
 	}
 	trace, _, err := EncodeToolHistory(input.History)
 	if err != nil {
@@ -363,7 +569,8 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	}
 	now := s.now().UTC()
 	seconds := float64(now.UnixNano()) / 1e9
-	userRow, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,timestamp,active) VALUES(?,'user',?,?,0)`, id, input.UserText, seconds)
+	userIdentity := displayIdentity("user", &input.UserText, seconds, nil, nil, nil)
+	userRow, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,platform_message_id,display_identity,timestamp,active) VALUES(?,'user',?,?,?,?,0)`, id, input.UserText, nullString(platformMessageID), userIdentity, seconds)
 	if err != nil {
 		return result, err
 	}
@@ -371,7 +578,37 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	if err != nil {
 		return result, err
 	}
-	assistantRow, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,timestamp,active) VALUES(?,'assistant',?,?,0)`, id, input.AssistantText, seconds)
+	// Persist every model iteration as transcript rows, matching operator
+	// data: one assistant tool-request row per history batch and one tool
+	// result row per call, all inactive until delivery.
+	toolResultRows := 0
+	for batchIndex, batch := range input.History.Batches {
+		encodedCalls, providerIDs, err := encodeMessageToolCalls(batch, batchIndex)
+		if err != nil {
+			return result, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,tool_calls,finish_reason,display_identity,timestamp,active) VALUES(?,'assistant',?,?,'tool_calls',?,?,0)`, id, batch.AssistantContent, encodedCalls, displayIdentity("assistant", &batch.AssistantContent, seconds, nil, &encodedCalls, nil), seconds); err != nil {
+			return result, err
+		}
+		for callIndex, call := range batch.Calls {
+			toolName := strings.TrimSpace(call.Name)
+			providerID := providerIDs[callIndex]
+			callResult := call.Result
+			if _, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,tool_call_id,tool_name,display_identity,timestamp,active) VALUES(?,'tool',?,?,?,?,?,0)`, id, call.Result, providerIDs[callIndex], toolName, displayIdentity("tool", &callResult, seconds, &providerID, nil, &toolName), seconds); err != nil {
+				return result, err
+			}
+			toolResultRows++
+		}
+	}
+	finishReason := strings.TrimSpace(input.AssistantFinishReason)
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	var tokenCount any
+	if input.AssistantTokenCount > 0 {
+		tokenCount = input.AssistantTokenCount
+	}
+	assistantRow, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,finish_reason,reasoning,reasoning_content,token_count,display_identity,timestamp,active) VALUES(?,'assistant',?,?,?,?,?,?,?,0)`, id, input.AssistantText, finishReason, nullString(reasoning), nullString(reasoningContent), tokenCount, displayIdentity("assistant", &input.AssistantText, seconds, nil, nil, nil), seconds)
 	if err != nil {
 		return result, err
 	}
@@ -410,8 +647,28 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 	if _, err := tx.ExecContext(ctx, `INSERT INTO state_meta(key,value) VALUES(?,?)`, exchangeKey(id, turnID), string(encoded)); err != nil {
 		return result, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count=message_count+2,last_activity_at=? WHERE id=?`, seconds, id); err != nil {
+	// Ledger the rendered system prompt before referencing it: the sessions
+	// foreign key is enforced per statement. Rows dedupe on the hash.
+	if systemPromptHash != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO system_prompts(hash,prompt) VALUES(?,?) ON CONFLICT(hash) DO NOTHING`, systemPromptHash, input.SystemPromptText); err != nil {
+			return result, err
+		}
+	}
+	// One exchange owns the contiguous id range from its user row through its
+	// final assistant row: the broker serializes one execution per
+	// conversation, so no same-session rows can interleave this range.
+	totalRows := int64(2 + len(input.History.Batches) + toolResultRows)
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET message_count=message_count+?,tool_call_count=tool_call_count+?,last_activity_at=?,model=?,model_config=?,billing_provider=?,billing_base_url=?,chat_id=?,chat_type=?,user_id=?,display_name=?,transport_profile=?,system_prompt_hash=?,last_activity_description=?,last_activity_provenance='unknown' WHERE id=?`,
+		totalRows, toolResultRows, seconds,
+		nullString(model), nullString(input.ModelConfig), nullString(strings.TrimSpace(input.BillingProvider)), nullString(strings.TrimSpace(input.BillingBaseURL)),
+		nullString(chatID), nullString(chatType), nullString(platformUserID), nullString(platformDisplayName), nullString(transportProfile),
+		nullString(systemPromptHash), nullString(strings.TrimSpace(input.ActivityDescription)), id); err != nil {
 		return result, err
+	}
+	if platform != "" || chatID != "" || platformUserID != "" {
+		if err := s.mergeSessionOrigin(ctx, tx, id, input.UserID, platform, chatID, chatType, chatDisplayName, platformUserID, platformDisplayName); err != nil {
+			return result, err
+		}
 	}
 	if err := s.boundImages(ctx, tx, id); err != nil {
 		return result, err
@@ -484,7 +741,12 @@ func (s *ProfileStore) markDelivery(ctx context.Context, owner string, turnID in
 	if err != nil {
 		return err
 	}
-	updated, err := tx.ExecContext(ctx, `UPDATE messages SET active=? WHERE session_id=? AND ((id=? AND role='user') OR (id=? AND role='assistant'))`, active, id, state.UserMessageID, turnID)
+	// One exchange owns the contiguous id range from its user row through its
+	// final assistant row, including intermediate tool transcript rows. The
+	// broker serializes one execution per conversation, so no same-session
+	// rows can interleave this range; the session_id predicate isolates
+	// globally interleaved rows from other sessions.
+	updated, err := tx.ExecContext(ctx, `UPDATE messages SET active=? WHERE session_id=? AND id>=? AND id<=?`, active, id, state.UserMessageID, turnID)
 	if err != nil {
 		return err
 	}
@@ -492,21 +754,104 @@ func (s *ProfileStore) markDelivery(ctx context.Context, owner string, turnID in
 	if err != nil {
 		return err
 	}
-	if count != 2 {
+	if count < 2 || count != turnID-state.UserMessageID+1 {
 		return errors.New("incomplete profile exchange")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE state_meta SET value=? WHERE key=?`, string(encodedState), exchangeKey(id, turnID)); err != nil {
 		return err
 	}
+	if delivered {
+		if err := s.refreshSessionLedger(ctx, tx, id); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
-// MarkSessionTurnDelivered publishes both messages together, including late success.
+// mergeSessionOrigin records gateway conversation identity into the session
+// origin record while preserving the generation fence fields it already
+// carries. Operator data holds the same platform keys; any other keys already
+// present are retained byte-indifferently.
+func (s *ProfileStore) mergeSessionOrigin(ctx context.Context, tx *sql.Tx, id, owner, platform, chatID, chatType, chatName, userID, userName string) error {
+	var encoded sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT origin_json FROM sessions WHERE id=?`, id).Scan(&encoded); err != nil {
+		return err
+	}
+	record := map[string]any{}
+	if encoded.Valid && strings.TrimSpace(encoded.String) != "" {
+		if err := json.Unmarshal([]byte(encoded.String), &record); err != nil {
+			return errors.New("invalid session origin record")
+		}
+	}
+	set := func(key, value string) {
+		if value != "" {
+			record[key] = value
+		}
+	}
+	set("platform", platform)
+	set("chat_id", chatID)
+	set("chat_name", chatName)
+	set("chat_type", chatType)
+	set("user_id", userID)
+	set("user_name", userName)
+	record["profile"] = owner
+	merged, err := json.Marshal(record)
+	if err != nil || len(merged) > 8192 {
+		return errors.New("invalid session origin record")
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET origin_json=? WHERE id=?`, string(merged), id)
+	return err
+}
+
+// refreshSessionLedger recomputes a session's delivered usage counters and
+// tool-set hash from durable rows, so late delivery repairs the aggregates.
+// Only the main chat task feeds the token counters, matching operator data.
+func (s *ProfileStore) refreshSessionLedger(ctx context.Context, tx *sql.Tx, id string) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET
+ input_tokens=COALESCE((SELECT SUM(input_tokens) FROM session_model_usage WHERE session_id=? AND task=''),0),
+ output_tokens=COALESCE((SELECT SUM(output_tokens) FROM session_model_usage WHERE session_id=? AND task=''),0),
+ api_call_count=COALESCE((SELECT SUM(api_call_count) FROM session_model_usage WHERE session_id=? AND task=''),0)
+ WHERE id=?`, id, id, id, id); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT tool_name FROM messages WHERE session_id=? AND role='tool' AND tool_name IS NOT NULL AND tool_name<>'' ORDER BY tool_name`, id)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var toolSet any
+	if len(names) > 0 {
+		encoded, err := json.Marshal(names)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(encoded)
+		digest := hex.EncodeToString(sum[:])
+		toolSet = digest
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET tool_names=? WHERE id=?`, toolSet, id)
+	return err
+}
+
+// MarkSessionTurnDelivered publishes the exchange's rows together, including late success.
 func (s *ProfileStore) MarkSessionTurnDelivered(ctx context.Context, owner string, turnID int64) error {
 	return s.markDelivery(ctx, owner, turnID, true)
 }
 
-// MarkSessionTurnDeliveryFailed keeps both messages ineligible for prompt history.
+// MarkSessionTurnDeliveryFailed keeps the exchange's rows ineligible for prompt history.
 func (s *ProfileStore) MarkSessionTurnDeliveryFailed(ctx context.Context, owner string, turnID int64) error {
 	return s.markDelivery(ctx, owner, turnID, false)
 }

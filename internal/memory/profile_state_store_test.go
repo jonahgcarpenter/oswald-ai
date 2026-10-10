@@ -3,7 +3,10 @@ package memory
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -263,6 +266,106 @@ func TestProfileExchangeRollbackAndNewSessionPreservesFTS(t *testing.T) {
 	}
 }
 
+func TestAppendPersistsToolTranscriptRows(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{
+		AssistantContent: "checking",
+		Calls: []ToolHistoryCall{
+			{Name: "web_search", ProviderCallID: "call_provided_1", Arguments: map[string]interface{}{"query": "x"}, Result: "result one", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+			{Name: "memory", Arguments: map[string]interface{}{"op": "y"}, Result: "result two", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		},
+	}}}
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: 1, UserText: "hello", AssistantText: "done", History: history, AssistantFinishReason: "stop", AssistantReasoning: "thinking trace", AssistantReasoningContent: "thinking trace", AssistantTokenCount: 42, UserPlatformMessageID: "msg-123", Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("exchange row count=%d err=%v", count, err)
+	}
+	type row struct {
+		id      int64
+		role    string
+		content sql.NullString
+		callID  sql.NullString
+		calls   sql.NullString
+		name    sql.NullString
+		finish  sql.NullString
+		reason  sql.NullString
+		tokens  sql.NullInt64
+		plat    sql.NullString
+		ident   []byte
+		order   sql.NullInt64
+		active  int
+	}
+	var rows []row
+	res, err := s.db.SQL().QueryContext(ctx, `SELECT id,role,content,tool_call_id,tool_calls,tool_name,finish_reason,reasoning,token_count,platform_message_id,display_identity,display_order,active FROM messages ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for res.Next() {
+		var r row
+		if err := res.Scan(&r.id, &r.role, &r.content, &r.callID, &r.calls, &r.name, &r.finish, &r.reason, &r.tokens, &r.plat, &r.ident, &r.order, &r.active); err != nil {
+			res.Close()
+			t.Fatal(err)
+		}
+		rows = append(rows, r)
+	}
+	res.Close()
+	if err := res.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if rows[0].role != "user" || rows[0].plat.String != "msg-123" || rows[1].role != "assistant" || !rows[1].calls.Valid || rows[1].finish.String != "tool_calls" {
+		t.Fatalf("assistant tool-request row malformed: %+v", rows[1])
+	}
+	if rows[2].role != "tool" || rows[2].callID.String != "call_provided_1" || rows[2].name.String != "web_search" || rows[2].content.String != "result one" {
+		t.Fatalf("first tool row malformed: %+v", rows[2])
+	}
+	if rows[3].role != "tool" || rows[3].callID.String == "" || rows[3].callID.String == "call_provided_1" || rows[3].name.String != "memory" {
+		t.Fatalf("fallback tool call id missing: %+v", rows[3])
+	}
+	if rows[4].id != turn.ID || rows[4].role != "assistant" || rows[4].finish.String != "stop" || rows[4].reason.String != "thinking trace" || !rows[4].tokens.Valid || rows[4].tokens.Int64 != 42 {
+		t.Fatalf("final assistant row malformed: %+v", rows[4])
+	}
+	for _, r := range rows {
+		if r.active != 0 {
+			t.Fatal("pending exchange surfaced before delivery")
+		}
+		if len(r.ident) != 32 {
+			t.Fatalf("display_identity is not a 32-byte hash: id=%d len=%d", r.id, len(r.ident))
+		}
+		if !r.order.Valid {
+			t.Fatalf("display_order was not assigned: id=%d", r.id)
+		}
+	}
+	seen := make(map[string]bool)
+	for _, r := range rows {
+		key := string(r.ident)
+		if seen[key] {
+			t.Fatalf("distinct transcript rows share display_identity: id=%d", r.id)
+		}
+		seen[key] = true
+	}
+	var msgCount, toolCount int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT message_count,tool_call_count FROM sessions`).Scan(&msgCount, &toolCount); err != nil || msgCount != 5 || toolCount != 2 {
+		t.Fatalf("session counters msg=%d tool=%d err=%v", msgCount, toolCount, err)
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE active=1`).Scan(&count); err != nil || count != 5 {
+		t.Fatalf("delivery did not publish exchange rows: count=%d err=%v", count, err)
+	}
+	if err := s.db.SQL().QueryRow(`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'result'`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("tool FTS text missing: count=%d err=%v", count, err)
+	}
+}
+
 func TestProfileStoreOperationsEmitSafeDebugMeasurements(t *testing.T) {
 	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {
@@ -350,5 +453,217 @@ func TestDeliveryIntoEndedSessionFailsClosed(t *testing.T) {
 	var active int
 	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE active=1`).Scan(&active); err != nil || active != 0 {
 		t.Fatalf("unconfirmed exchange surfaced: active=%d err=%v", active, err)
+	}
+}
+
+func TestDisplayIdentityDedupeKey(t *testing.T) {
+	content, callID, calls, name := "hello", "call_1", `[{"id":"call_1"}]`, "web_search"
+	base := displayIdentity("assistant", &content, 1790430142.404224, &callID, &calls, &name)
+	if len(base) != 32 {
+		t.Fatalf("display_identity length=%d", len(base))
+	}
+	// Same tuple reproduces the digest; any key field changes it.
+	if got := displayIdentity("assistant", &content, 1790430142.404224, &callID, &calls, &name); string(got) != string(base) {
+		t.Fatal("dedupe key is not deterministic")
+	}
+	other := content + "!"
+	if got := displayIdentity("assistant", &other, 1790430142.404224, &callID, &calls, &name); string(got) == string(base) {
+		t.Fatal("content change preserved identity")
+	}
+	if got := displayIdentity("assistant", &content, 1790430142.404225, &callID, &calls, &name); string(got) == string(base) {
+		t.Fatal("timestamp change preserved identity")
+	}
+	// NULL never collides with an empty string.
+	empty := ""
+	if got := displayIdentity("tool", &empty, 1, nil, nil, nil); len(got) != 32 {
+		t.Fatal("empty identity malformed")
+	} else if same := displayIdentity("tool", nil, 1, nil, nil, nil); string(same) == string(got) {
+		t.Fatal("NULL content collided with empty content")
+	}
+}
+
+func TestAppendWritesSessionRowAttributes(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Creation leaves transport ownership unset; the first append records the
+	// receiving adapter instead of the runtime profile.
+	created, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createdTransport sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT transport_profile FROM sessions WHERE id=?`, created).Scan(&createdTransport); err != nil {
+		t.Fatal(err)
+	}
+	if createdTransport.Valid {
+		t.Fatalf("creation set transport profile: %q", createdTransport.String)
+	}
+	prompt := "rendered system prompt"
+	sum := sha256.Sum256([]byte(prompt))
+	hash := hex.EncodeToString(sum[:])
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "hello", AssistantText: "done",
+		Model: "test-model", BillingProvider: "custom", BillingBaseURL: "https://models.example/v1",
+		ModelConfig: `{"gateway_runtime":{"provider":"custom","base_url":"https://models.example/v1","api_mode":"chat_completions"}}`,
+		ChatID:      "channel-1", ChatType: "group", Platform: "discord", ChatDisplayName: "general",
+		TransportProfile: "default", PlatformUserID: "+15550001111", PlatformDisplayName: "Alice",
+		SystemPromptHash: hash, SystemPromptText: prompt, ActivityDescription: "answer",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var model, modelConfig, billingProvider, billingBaseURL, chatID, chatType, platformUserID, platformDisplayName, transportProfile, promptHash, activity, provenance sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT model,model_config,billing_provider,billing_base_url,chat_id,chat_type,user_id,display_name,transport_profile,system_prompt_hash,last_activity_description,last_activity_provenance FROM sessions WHERE id=?`, id).Scan(
+		&model, &modelConfig, &billingProvider, &billingBaseURL, &chatID, &chatType, &platformUserID, &platformDisplayName, &transportProfile, &promptHash, &activity, &provenance); err != nil {
+		t.Fatal(err)
+	}
+	if model.String != "test-model" || billingProvider.String != "custom" || billingBaseURL.String != "https://models.example/v1" {
+		t.Fatalf("model/billing mismatch: %+v", model)
+	}
+	if !json.Valid([]byte(modelConfig.String)) {
+		t.Fatalf("model config is not JSON: %q", modelConfig.String)
+	}
+	if chatID.String != "channel-1" || chatType.String != "group" || platformUserID.String != "+15550001111" || platformDisplayName.String != "Alice" {
+		t.Fatalf("chat identity mismatch: %q %q %q %q", chatID.String, chatType.String, platformUserID.String, platformDisplayName.String)
+	}
+	if transportProfile.String != "default" {
+		t.Fatalf("transport profile mismatch: %q", transportProfile.String)
+	}
+	if promptHash.String != hash || activity.String != "answer" || provenance.String != "unknown" {
+		t.Fatalf("prompt/activity mismatch: %q %q %q", promptHash.String, activity.String, provenance.String)
+	}
+	var stored string
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT prompt FROM system_prompts WHERE hash=?`, hash).Scan(&stored); err != nil || stored != prompt {
+		t.Fatalf("system prompt not ledgered: %v", err)
+	}
+	var origin string
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT origin_json FROM sessions WHERE id=?`, id).Scan(&origin); err != nil {
+		t.Fatal(err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(origin), &record); err != nil {
+		t.Fatalf("origin is not JSON: %v", err)
+	}
+	// Generation fencing survives the merge; platform identity joins it.
+	if record["version"] != float64(1) || record["generation"] != float64(session.Generation) || record["ttl_seconds"] == nil {
+		t.Fatalf("fence fields lost: %s", origin)
+	}
+	want := map[string]string{"platform": "discord", "chat_id": "channel-1", "chat_name": "general", "chat_type": "group", "user_id": "+15550001111", "user_name": "Alice", "profile": "alice"}
+	for key, value := range want {
+		if record[key] != value {
+			t.Fatalf("origin[%s]=%v want %q: %s", key, record[key], value, origin)
+		}
+	}
+	// A second turn reuses the prompt row instead of duplicating it.
+	if _, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "again", AssistantText: "done", Model: "test-model", SystemPromptHash: hash, SystemPromptText: prompt,
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}}); err != nil {
+		t.Fatal(err)
+	}
+	var promptRows int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM system_prompts`).Scan(&promptRows); err != nil || promptRows != 1 {
+		t.Fatalf("prompt rows=%d err=%v", promptRows, err)
+	}
+	bad := SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "bad", AssistantText: "done", Model: "m", TransportProfile: "not a profile!",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}}
+	if _, err := s.AppendPendingSessionTurn(ctx, bad); err == nil {
+		t.Fatal("invalid transport profile accepted")
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeliveryRefreshesSessionLedger(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := ToolHistory{Version: ToolHistoryVersion, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{
+		{Name: "web_search", ProviderCallID: "call-1", Arguments: map[string]interface{}{}, Result: "r1", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+		{Name: "memory", ProviderCallID: "call-2", Arguments: map[string]interface{}{}, Result: "r2", Status: "succeeded", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	}}}}
+	turn, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: session.Generation,
+		UserText: "hello", AssistantText: "done", History: history, Model: "m",
+		Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.ActiveSessionID(ctx, "alice", key, session.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := ModelUsageRecord{SessionID: key, UserID: "alice", Generation: session.Generation, Model: "m", ApiCalls: 2, PromptTokens: 100, CompletionTokens: 10}
+	if err := s.RecordModelUsage(ctx, usage); err != nil {
+		t.Fatal(err)
+	}
+	compression := usage
+	compression.Task = "compression"
+	compression.PromptTokens, compression.CompletionTokens = 50, 5
+	if err := s.RecordModelUsage(ctx, compression); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	var input, output, calls int
+	var toolSet sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT input_tokens,output_tokens,api_call_count,tool_names FROM sessions WHERE id=?`, id).Scan(&input, &output, &calls, &toolSet); err != nil {
+		t.Fatal(err)
+	}
+	if input != 100 || output != 10 || calls != 2 {
+		t.Fatalf("ledger rollup counted non-chat tasks: in=%d out=%d calls=%d", input, output, calls)
+	}
+	encoded, _ := json.Marshal([]string{"memory", "web_search"})
+	sum := sha256.Sum256(encoded)
+	if toolSet.String != hex.EncodeToString(sum[:]) {
+		t.Fatalf("tool set hash mismatch: %q", toolSet.String)
+	}
+}
+
+func TestNewSessionLinksParent(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ActiveSessionID(ctx, "alice", key, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.NewSessionContext(ctx, "alice", key); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Generation != 2 {
+		t.Fatalf("generation=%d", session.Generation)
+	}
+	second, err := s.ActiveSessionID(ctx, "alice", key, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parent sql.NullString
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT parent_session_id FROM sessions WHERE id=?`, second).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent.String != first {
+		t.Fatalf("parent=%q want %q", parent.String, first)
 	}
 }
