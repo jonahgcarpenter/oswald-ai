@@ -1,6 +1,9 @@
 package llm
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ToolFunction holds the name and arguments of a single tool invocation.
 type ToolFunction struct {
@@ -62,12 +65,40 @@ type ToolParameterProperty struct {
 	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
 }
 
+// MarshalJSON always emits an explicit required array so providers never
+// infer requiredness from an absent key: empty means nothing is required.
+func (p ToolParameterProperty) MarshalJSON() ([]byte, error) {
+	type propertyPlain ToolParameterProperty
+	required := p.Required
+	if len(required) == 0 {
+		required = []string{}
+	}
+	return json.Marshal(struct {
+		propertyPlain
+		Required []string `json:"required"`
+	}{propertyPlain: propertyPlain(p), Required: required})
+}
+
 // ToolParameters is the JSON Schema object describing a tool's input parameters.
 type ToolParameters struct {
 	Type                 string                           `json:"type"`
 	Properties           map[string]ToolParameterProperty `json:"properties"`
 	Required             []string                         `json:"required,omitempty"`
 	AdditionalProperties *bool                            `json:"additionalProperties,omitempty"`
+}
+
+// MarshalJSON always emits an explicit required array so providers never
+// infer requiredness from an absent key: empty means nothing is required.
+func (p ToolParameters) MarshalJSON() ([]byte, error) {
+	type parametersPlain ToolParameters
+	required := p.Required
+	if len(required) == 0 {
+		required = []string{}
+	}
+	return json.Marshal(struct {
+		parametersPlain
+		Required []string `json:"required"`
+	}{parametersPlain: parametersPlain(p), Required: required})
 }
 
 // ToolDefinition holds the schema for a single function tool.
