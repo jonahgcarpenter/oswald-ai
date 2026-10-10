@@ -15,7 +15,7 @@ func Decide(input Input) Decision {
 	reply := input.Reply
 
 	if input.IsCommandAttempt {
-		if input.IsGroup && !input.IsMention {
+		if input.IsGroup && !input.IsMention && !input.IsReplyToBot {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{Action: ActionCommand, Prompt: text, Reason: "command"}
@@ -39,7 +39,7 @@ func Decide(input Input) Decision {
 func Preflight(input PreflightInput) Decision {
 	isCommandAttempt := IsCommandAttempt(input.Text)
 	if isCommandAttempt {
-		if input.IsGroup && !input.IsMention {
+		if input.IsGroup && !input.IsMention && !input.IsReplyToBot {
 			return Decision{Action: ActionIgnore, Reason: "group_command_without_mention"}
 		}
 		return Decision{}

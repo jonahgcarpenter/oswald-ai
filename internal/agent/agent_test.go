@@ -255,7 +255,7 @@ func (c *cancelingChatter) Chat(ctx context.Context, _ llm.ChatRequest, _ func(l
 	return nil, ctx.Err()
 }
 
-func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
+func TestProcessFinalAnswerPersistsReplyContextWithoutImageBytes(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 
@@ -282,7 +282,7 @@ func TestProcessFinalAnswerPersistsCleanedSessionMemory(t *testing.T) {
 	if len(turns) != 1 {
 		t.Fatalf("expected one persisted turn, got %d", len(turns))
 	}
-	wantUser := "new prompt\n\n[Attached 1 image(s)]"
+	wantUser := "[Replying to Alice: \"old\"]\n\nnew prompt\n\n[Attached 1 image(s)]"
 	if turns[0].UserText != wantUser || turns[0].AssistantText != "final answer" {
 		t.Fatalf("unexpected stored turn: %+v", turns[0])
 	}
@@ -1173,7 +1173,7 @@ func TestProcessSendsStrippedSpeakerIntroAsProviderUser(t *testing.T) {
 
 func TestSessionMemoryUserContentReplyOnly(t *testing.T) {
 	got := sessionMemoryUserContent("[Replying to Alice: \"old\"]", nil)
-	if got != "[User replied to a prior message]" {
+	if got != "[Replying to Alice: \"old\"]" {
 		t.Fatalf("unexpected content %q", got)
 	}
 }

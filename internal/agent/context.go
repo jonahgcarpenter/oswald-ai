@@ -47,11 +47,9 @@ func stripReplyContext(prompt string) (string, bool) {
 }
 
 func sessionMemoryUserContent(prompt string, images []requestctx.InputImage) string {
-	content, hadReplyContext := stripReplyContext(prompt)
-	if content == "" && hadReplyContext {
-		content = "[User replied to a prior message]"
-	}
-	content = promptWithAttachedImages(content, images)
+	// Keep gateway reply enrichment with its owning user turn so later history
+	// retains what the user was answering, without replaying attachment bytes.
+	content := promptWithAttachedImages(strings.TrimSpace(prompt), images)
 	uncached := 0
 	for _, image := range images {
 		if image.Path == "" {

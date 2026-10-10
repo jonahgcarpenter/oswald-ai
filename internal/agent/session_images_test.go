@@ -46,15 +46,15 @@ func attachedImagePaths(content string) []string {
 	return paths
 }
 
-func TestSessionMemoryUserContentKeepsImagePathsAndStripsReplyContext(t *testing.T) {
+func TestSessionMemoryUserContentKeepsImagePathsAndReplyContext(t *testing.T) {
 	images := []requestctx.InputImage{{Path: "/private/first.jpg"}, {Path: "/private/second.jpg"}}
 	for _, test := range []struct {
 		name   string
 		prompt string
 		text   string
 	}{
-		{name: "reply", prompt: "[Replying to Alice: \"old\"]\n\nnew prompt", text: "new prompt"},
-		{name: "reply only", prompt: "[Replying to Alice: \"old\"]", text: "[User replied to a prior message]"},
+		{name: "reply", prompt: "[Replying to Alice: \"old\"]\n\nnew prompt", text: "[Replying to Alice: \"old\"]\n\nnew prompt"},
+		{name: "reply only", prompt: "[Replying to Alice: \"old\"]", text: "[Replying to Alice: \"old\"]"},
 		{name: "image only"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
