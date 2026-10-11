@@ -23,9 +23,13 @@ type Response struct {
 	PersistenceStatus  string `json:"-"`
 	ToolExecutionCount int    `json:"-"`
 	ToolBlockedCount   int    `json:"-"`
-	Model              string `json:"model"`
-	Response           string `json:"response,omitempty"`
-	Thinking           string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// ToolChoiceError carries the fixed invalid_tool_choice code
+	// ("named_tool_missing" or "no_tools_available"). It is separate from
+	// Error so runtime telemetry keeps provider failures distinct.
+	ToolChoiceError string `json:"-"`
+	Model           string `json:"model"`
+	Response        string `json:"response,omitempty"`
+	Thinking        string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
 	ToolCalls []llm.ToolCall `json:"-"`
@@ -73,11 +77,33 @@ type Request struct {
 	ClientHistory []llm.ChatMessage
 	// ClientTools are caller-supplied function definitions for this request only.
 	ClientTools []llm.Tool
-	// ClientToolChoice is the normalized caller preference.
-	ClientToolChoice string
+	// ClientToolChoice is the normalized caller preference. Mode is one of
+	// "", "none", "auto", "required", "named", or "allowed". Named carries a
+	// single forced tool name; Allowed carries a filtered tool-name set with
+	// AllowedMode "auto" or "required".
+	ClientToolChoice ClientToolChoice
 	Images           []llm.InputImage
 	StreamFunc       func(StreamChunk)
 }
+
+// ClientToolChoice constrains the merged Oswald and caller tool catalog for
+// one stateless API request. It mirrors the OpenAI chat completions
+// tool_choice shape: string modes, a named function force, and the
+// allowed_tools allow-list.
+type ClientToolChoice struct {
+	// Mode is "", "none", "auto", "required", "named", or "allowed".
+	// Empty behaves as "auto".
+	Mode string
+	// Named names the single forced tool when Mode is "named".
+	Named string
+	// Allowed lists tool names to offer when Mode is "allowed".
+	Allowed []string
+	// AllowedMode is "auto" or "required" when Mode is "allowed".
+	AllowedMode string
+}
+
+// IsNone reports whether the caller requested no tool calls at all.
+func (c ClientToolChoice) IsNone() bool { return c.Mode == "none" }
 
 // setObservedUsage records provider-reported request totals on the response.
 // Gateways omit usage unless UsageReported, so unreported turns never invent it.

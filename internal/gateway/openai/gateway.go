@@ -311,32 +311,85 @@ func parseClientTools(raw []json.RawMessage) ([]llm.Tool, bool) {
 	return tools, true
 }
 
-func parseToolChoice(raw json.RawMessage) (string, bool) {
+func parseToolChoice(raw json.RawMessage) (agent.ClientToolChoice, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return "", true
+		return agent.ClientToolChoice{}, true
 	}
 	if len(trimmed) > 0 && trimmed[0] == '"' {
 		var choice string
 		if json.Unmarshal(trimmed, &choice) != nil {
-			return "", false
+			return agent.ClientToolChoice{}, false
 		}
 		switch choice {
-		case "", "none", "auto", "required":
-			return choice, true
+		case "", "auto":
+			return agent.ClientToolChoice{Mode: "auto"}, true
+		case "none", "required":
+			return agent.ClientToolChoice{Mode: choice}, true
 		}
-		return "", false
+		return agent.ClientToolChoice{}, false
 	}
-	var wire struct {
-		Type     string `json:"type"`
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
+	var typeProbe struct {
+		Type string `json:"type"`
 	}
-	if json.Unmarshal(trimmed, &wire) != nil || wire.Type != "function" || !clientToolNameRE.MatchString(strings.TrimSpace(wire.Function.Name)) {
-		return "", false
+	if json.Unmarshal(trimmed, &typeProbe) != nil {
+		return agent.ClientToolChoice{}, false
 	}
-	return "named:" + strings.TrimSpace(wire.Function.Name), true
+	switch typeProbe.Type {
+	case "function":
+		var wire struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(trimmed, &wire) != nil || wire.Type != "function" || !clientToolNameRE.MatchString(strings.TrimSpace(wire.Function.Name)) {
+			return agent.ClientToolChoice{}, false
+		}
+		return agent.ClientToolChoice{Mode: "named", Named: strings.TrimSpace(wire.Function.Name)}, true
+	case "allowed_tools":
+		var wire struct {
+			Type         string `json:"type"`
+			AllowedTools struct {
+				Mode  string            `json:"mode"`
+				Tools []json.RawMessage `json:"tools"`
+			} `json:"allowed_tools"`
+		}
+		if json.Unmarshal(trimmed, &wire) != nil || wire.Type != "allowed_tools" {
+			return agent.ClientToolChoice{}, false
+		}
+		if wire.AllowedTools.Mode != "auto" && wire.AllowedTools.Mode != "required" {
+			return agent.ClientToolChoice{}, false
+		}
+		if len(wire.AllowedTools.Tools) == 0 || len(wire.AllowedTools.Tools) > 64 {
+			return agent.ClientToolChoice{}, false
+		}
+		names := make([]string, 0, len(wire.AllowedTools.Tools))
+		seen := make(map[string]bool, len(wire.AllowedTools.Tools))
+		for _, item := range wire.AllowedTools.Tools {
+			if len(item) == 0 || len(item) > 4<<10 {
+				return agent.ClientToolChoice{}, false
+			}
+			var entry struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			}
+			if json.Unmarshal(item, &entry) != nil || entry.Type != "function" || !clientToolNameRE.MatchString(strings.TrimSpace(entry.Function.Name)) {
+				return agent.ClientToolChoice{}, false
+			}
+			name := strings.TrimSpace(entry.Function.Name)
+			if seen[name] {
+				return agent.ClientToolChoice{}, false
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+		return agent.ClientToolChoice{Mode: "allowed", Allowed: names, AllowedMode: wire.AllowedTools.Mode}, true
+	default:
+		return agent.ClientToolChoice{}, false
+	}
 }
 
 func parseWireToolCalls(calls []wireToolCall) ([]llm.ToolCall, bool) {
@@ -517,27 +570,10 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client tool choice.")
 		return
 	}
-	if toolChoice == "required" || strings.HasPrefix(toolChoice, "named:") {
-		name := strings.TrimPrefix(toolChoice, "named:")
-		if toolChoice == "required" {
-			if len(clientTools) == 0 {
-				g.reject(w, http.StatusBadRequest, "unsupported_options", "Tool choice requires client tools.")
-				return
-			}
-		} else {
-			found := false
-			for _, tool := range clientTools {
-				if tool.Function.Name == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				g.reject(w, http.StatusBadRequest, "unsupported_options", "Named tool is not provided.")
-				return
-			}
-		}
-	}
+	// Named and allowed-tools existence is validated against the merged
+	// Oswald and client catalog inside the agent, which alone knows the
+	// profile's builtin tools. Syntax errors fail here; unknown names fail
+	// there as invalid_tool_choice.
 	if len(input.Messages) == 0 {
 		g.reject(w, http.StatusBadRequest, "invalid_messages", "Messages must contain at least 1 turn.")
 		return

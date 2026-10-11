@@ -74,9 +74,10 @@ type Request struct {
 	// ClientTools are caller-supplied function definitions combined with Oswald
 	// tools for this request only. They are never executed server-side.
 	ClientTools []llm.Tool
-	// ClientToolChoice is the normalized caller preference: "", "none",
-	// "auto", "required", or "named:<tool>".
-	ClientToolChoice string
+	// ClientToolChoice is the normalized caller preference. See
+	// agent.ClientToolChoice for the "none", "required", named, and
+	// "allowed_tools" modes applied to the merged catalog.
+	ClientToolChoice agent.ClientToolChoice
 	Images           []llm.InputImage
 	Unsupported      []string
 	Reply            *routing.ReplyContext

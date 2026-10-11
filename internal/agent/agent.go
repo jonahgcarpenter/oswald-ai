@@ -424,7 +424,18 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 	if request.Stateless {
-		initialCatalog = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
+		var choiceErr error
+		initialCatalog, choiceErr = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
+		if choiceErr != nil {
+			reqLog.Debug("agent.loop.client_tool_choice", "rejected stateless tool choice",
+				config.F("mode", request.ClientToolChoice.Mode),
+				config.ErrorField(choiceErr))
+			errCode := "named_tool_missing"
+			if choiceErr.Error() == "no_tools_available" {
+				errCode = "no_tools_available"
+			}
+			return &Response{Kind: "invalid_tool_choice", Model: a.model, ToolChoiceError: errCode}, nil
+		}
 	}
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
@@ -544,7 +555,18 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
 		if request.Stateless {
-			catalog = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
+			var choiceErr error
+			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
+			if choiceErr != nil {
+				// The initial catalog already validated the choice; a later
+				// failure means governance retired an offered tool mid-request.
+				// Degrade to no tools rather than failing streamed work.
+				reqLog.Debug("agent.loop.client_tool_choice", "degraded stateless tool choice",
+					config.F("iteration", iteration),
+					config.F("mode", request.ClientToolChoice.Mode),
+					config.ErrorField(choiceErr))
+				catalog = offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
+			}
 		}
 		req.Tools = catalog.Tools
 		req.ToolChoice = ""
@@ -707,9 +729,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		// Stateless API: caller-owned tools are never executed server-side.
 		// Return them verbatim so the external app can run the standard loop.
+		// Only currently offered tools qualify; disallowed or hallucinated
+		// names fall through to governance below.
 		if request.Stateless && len(request.ClientTools) > 0 {
 			var clientCalls []llm.ToolCall
 			for _, tc := range resp.Message.ToolCalls {
+				if _, offered := catalog.Policies[tc.Function.Name]; !offered {
+					continue
+				}
 				if a.isClientToolCall(request.ClientTools, tc.Function.Name) {
 					clientCalls = append(clientCalls, tc)
 				}

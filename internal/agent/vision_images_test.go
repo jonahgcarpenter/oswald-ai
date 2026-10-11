@@ -209,7 +209,7 @@ func TestVisionHiddenAndBlockedForAPI(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "Hello", Stateless: true})
+	_, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "Hello", Stateless: true, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{visionanalyze.Name}, AllowedMode: "auto"}})
 	if err != nil {
 		t.Fatal(err)
 	}

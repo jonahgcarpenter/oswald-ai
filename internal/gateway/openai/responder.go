@@ -120,6 +120,12 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	if response.Kind == "over_budget" {
 		return r.failure(http.StatusBadRequest, "invalid_request_error", "Message history exceeds the model context budget.")
 	}
+	if response.Kind == "invalid_tool_choice" {
+		if response.ToolChoiceError == "no_tools_available" {
+			return r.failure(http.StatusBadRequest, "invalid_request_error", "Tool choice requires available tools.")
+		}
+		return r.failure(http.StatusBadRequest, "invalid_request_error", "Named tool is not provided.")
+	}
 	if len(response.Attachments) > 0 {
 		return r.failure(http.StatusUnprocessableEntity, "unsupported_response", "Image attachments are not supported.")
 	}

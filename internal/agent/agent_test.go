@@ -148,7 +148,7 @@ func TestStatelessClientHistorySurvivesToolRoundWithoutPersistence(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, SessionKey: "session", Prompt: "what time?", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: "client-prior-marker"}}})
+	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, SessionKey: "session", Prompt: "what time?", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: "client-prior-marker"}}, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{"test.clock"}, AllowedMode: "auto"}})
 	if err != nil || resp == nil || resp.SourceTurnID != 0 || resp.Response != "answer with clock" || len(chat.requests) != 2 {
 		t.Fatalf("tool response=%+v err=%v model calls=%d", resp, err, len(chat.requests))
 	}
@@ -185,7 +185,7 @@ func TestStatelessFileMemorySnapshotChangesOnlyBetweenRequests(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "question", Stateless: true}
+	request := Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "question", Stateless: true, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{"test.edit_memory"}, AllowedMode: "auto"}}
 	if _, err := agent.Process(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}

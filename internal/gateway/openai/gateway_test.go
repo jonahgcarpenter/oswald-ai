@@ -75,8 +75,14 @@ func TestValidation(t *testing.T) {
 		{"invalid reasoning type", `{"model":"oswald","messages":[{"role":"assistant","content":"prior","reasoning_content":{"text":"private"}},{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"trailing json", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]} {}`, []string{"Bearer " + testAPIKey}, 400},
 		{"wrong model", `{"model":"route","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
-		{"required without tools", `{"model":"oswald","tool_choice":"required","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
-		{"named missing tool", `{"model":"oswald","tool_choice":{"type":"function","function":{"name":"read"}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"invalid tool choice string", `{"model":"oswald","tool_choice":"sometimes","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"invalid tool choice type", `{"model":"oswald","tool_choice":{"type":"computer","function":{"name":"read"}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"invalid named tool name", `{"model":"oswald","tool_choice":{"type":"function","function":{"name":"bad name"}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"allowed bad mode", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"sometimes","tools":[{"type":"function","function":{"name":"read"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"allowed empty tools", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"allowed bad name", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"bad name"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"allowed duplicate", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"read"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"allowed wrong entry type", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"custom","custom":{"name":"read"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid client tool", `{"model":"oswald","tools":["read"],"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid stream options", `{"model":"oswald","stream_options":{"include_usage":"yes"},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid output tokens", `{"model":"oswald","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
@@ -696,5 +702,69 @@ func TestClientToolCallsSerialized(t *testing.T) {
 	}
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Choices) != 1 || result.Choices[0].FinishReason != "tool_calls" || len(result.Choices[0].Message.ToolCalls) != 1 || result.Choices[0].Message.ToolCalls[0].Function.Name != "get_weather" {
 		t.Fatalf("tool call response: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestToolChoiceForwarding(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		check func(t *testing.T, choice agent.ClientToolChoice)
+	}{
+		{"none", `{"model":"oswald","tool_choice":"none","messages":[{"role":"user","content":"hi"}]}`, func(t *testing.T, choice agent.ClientToolChoice) {
+			t.Helper()
+			if choice.Mode != "none" {
+				t.Fatalf("mode %q, want none", choice.Mode)
+			}
+		}},
+		{"required without client tools", `{"model":"oswald","tool_choice":"required","messages":[{"role":"user","content":"hi"}]}`, func(t *testing.T, choice agent.ClientToolChoice) {
+			t.Helper()
+			if choice.Mode != "required" {
+				t.Fatalf("mode %q, want required", choice.Mode)
+			}
+		}},
+		{"named builtin candidate", `{"model":"oswald","tool_choice":{"type":"function","function":{"name":"memory"}},"messages":[{"role":"user","content":"hi"}]}`, func(t *testing.T, choice agent.ClientToolChoice) {
+			t.Helper()
+			if choice.Mode != "named" || choice.Named != "memory" {
+				t.Fatalf("named %+v, want memory", choice)
+			}
+		}},
+		{"allowed client only", `{"model":"oswald","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}],"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"get_weather"}}]}},"messages":[{"role":"user","content":"hi"}]}`, func(t *testing.T, choice agent.ClientToolChoice) {
+			t.Helper()
+			if choice.Mode != "allowed" || choice.AllowedMode != "auto" || len(choice.Allowed) != 1 || choice.Allowed[0] != "get_weather" {
+				t.Fatalf("allowed %+v", choice)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := testGateway(t)
+			var got agent.ClientToolChoice
+			g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+				got = req.ClientToolChoice
+				if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+					t.Error(err)
+				}
+				return gatewayruntime.Outcome{}
+			}
+			w := request(g, "POST", "/v1/chat/completions", tc.body, "Bearer "+testAPIKey)
+			if w.Code != 200 {
+				t.Fatalf("status %d, want 200: %s", w.Code, w.Body.String())
+			}
+			tc.check(t, got)
+		})
+	}
+}
+
+func TestInvalidToolChoiceMapsToBadRequest(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Kind: "invalid_tool_choice", Model: "route", ToolChoiceError: "named_tool_missing"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid tool choice status=%d body=%q", w.Code, w.Body.String())
 	}
 }

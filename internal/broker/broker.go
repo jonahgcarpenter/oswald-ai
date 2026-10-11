@@ -61,7 +61,7 @@ type Request struct {
 	Stateless        bool
 	ClientHistory    []llm.ChatMessage
 	ClientTools      []llm.Tool
-	ClientToolChoice string
+	ClientToolChoice agent.ClientToolChoice
 	// Ctx carries transport cancellation to the worker. Nil keeps the
 	// previous lifecycle-only behavior.
 	Ctx          context.Context

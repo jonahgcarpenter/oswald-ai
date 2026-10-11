@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
@@ -99,7 +100,7 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				}
 			}
 			responses := make(chan broker.Result, 1)
-			err = selected.Broker.Submit(&broker.Request{Principal: principal, SessionKey: "openai:test", Stateless: true, Prompt: "synthetic prompt", ResponseChan: responses})
+			err = selected.Broker.Submit(&broker.Request{Principal: principal, SessionKey: "openai:test", Stateless: true, Prompt: "synthetic prompt", ClientToolChoice: agent.ClientToolChoice{Mode: "allowed", Allowed: []string{"default_tools.tools"}, AllowedMode: "auto"}, ResponseChan: responses})
 			if err == nil {
 				response := <-responses
 				err = response.Err
