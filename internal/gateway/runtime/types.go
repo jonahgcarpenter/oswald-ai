@@ -78,6 +78,12 @@ type Request struct {
 	// agent.ClientToolChoice for the "none", "required", named, and
 	// "allowed_tools" modes applied to the merged catalog.
 	ClientToolChoice agent.ClientToolChoice
+	// ClientParallelToolCalls carries the caller's explicit
+	// parallel_tool_calls preference through to the agent.
+	ClientParallelToolCalls *bool
+	// ClientGeneration carries the caller's sampling and stop parameters
+	// through to the agent for stateless requests.
+	ClientGeneration *agent.ClientGeneration
 	Images           []llm.InputImage
 	Unsupported      []string
 	Reply            *routing.ReplyContext

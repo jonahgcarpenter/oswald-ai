@@ -40,6 +40,7 @@ type InputImage struct {
 type ChatMessage struct {
 	Role       string       `json:"role"`
 	Content    string       `json:"content"`
+	Name       string       `json:"name,omitempty"`
 	Images     []InputImage `json:"images,omitempty"`
 	Thinking   string       `json:"thinking,omitempty"`
 	ToolCalls  []ToolCall   `json:"tool_calls,omitempty"`
@@ -132,6 +133,12 @@ type ChatRequest struct {
 	ToolChoice        ToolChoice    `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool         `json:"parallel_tool_calls,omitempty"`
 	Temperature       *float64      `json:"temperature,omitempty"`
+	TopP              *float64      `json:"top_p,omitempty"`
+	FrequencyPenalty  *float64      `json:"frequency_penalty,omitempty"`
+	PresencePenalty   *float64      `json:"presence_penalty,omitempty"`
+	Seed              *int64        `json:"seed,omitempty"`
+	Stop              []string      `json:"stop,omitempty"`
+	MaxTokens         *int          `json:"max_tokens,omitempty"`
 	Format            string        `json:"format,omitempty"`
 	Stream            bool          `json:"stream"`
 }

@@ -98,6 +98,17 @@ func wireToolCalls(calls []struct {
 	return out
 }
 
+// finishReason maps the agent's terminal stop reason to the OpenAI
+// finish_reason. Only the spec reasons this gateway can produce are
+// reported; anything else falls back to "stop" without leaking provider
+// internals. Tool-call turns report "tool_calls" separately.
+func finishReason(response *agent.Response) string {
+	if response != nil && (response.FinishReason == "length" || response.FinishReason == "content_filter") {
+		return response.FinishReason
+	}
+	return "stop"
+}
+
 // wireUsage returns observed token totals, or nil when no provider call
 // reported usage. Gateways must omit usage rather than invent it.
 func wireUsage(response *agent.Response) map[string]any {
@@ -144,7 +155,7 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 		if err := r.sendChoice(map[string]any{"content": response.Response}, nil); err != nil {
 			return err
 		}
-		if err := r.sendChoice(map[string]any{}, "stop"); err != nil {
+		if err := r.sendChoice(map[string]any{}, finishReason(response)); err != nil {
 			return err
 		}
 		r.finished = true
@@ -168,7 +179,7 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	}
 	// Stateless agent requests may make several provider calls; usage carries
 	// observed request totals and is omitted when nothing reported.
-	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}}}
+	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason(response)}}}
 	if usage := wireUsage(response); usage != nil {
 		completion["usage"] = usage
 	}

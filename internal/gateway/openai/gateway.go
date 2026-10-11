@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"regexp"
@@ -28,6 +29,22 @@ import (
 const maxBody = 2 << 20
 
 var clientToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+
+// clientParticipantNameRE bounds the OpenAI participant name field.
+var clientParticipantNameRE = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// parseParticipantName validates the optional message name field. Tool
+// messages never take a name; other roles accept the spec charset.
+func parseParticipantName(msg chatMessage) (string, bool) {
+	if msg.Name == nil {
+		return "", true
+	}
+	name := strings.TrimSpace(*msg.Name)
+	if msg.Role == "tool" || !clientParticipantNameRE.MatchString(name) {
+		return "", false
+	}
+	return name, true
+}
 
 // Gateway serves the stateless OpenAI-compatible API.
 type Gateway struct {
@@ -179,6 +196,7 @@ type wireToolCall struct {
 type chatMessage struct {
 	Role             string          `json:"role"`
 	Content          json.RawMessage `json:"content"`
+	Name             *string         `json:"name"`
 	ReasoningContent *string         `json:"reasoning_content"`
 	ToolCalls        []wireToolCall  `json:"tool_calls"`
 	ToolCallID       *string         `json:"tool_call_id"`
@@ -191,10 +209,19 @@ type chatRequest struct {
 	StreamOptions *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
-	MaxTokens         *int              `json:"max_tokens"`
-	Tools             []json.RawMessage `json:"tools"`
-	ToolChoice        json.RawMessage   `json:"tool_choice"`
-	ParallelToolCalls *bool             `json:"parallel_tool_calls"`
+	MaxTokens           *int              `json:"max_tokens"`
+	MaxCompletionTokens *int              `json:"max_completion_tokens"`
+	Tools               []json.RawMessage `json:"tools"`
+	ToolChoice          json.RawMessage   `json:"tool_choice"`
+	ParallelToolCalls   *bool             `json:"parallel_tool_calls"`
+	Temperature         *float64          `json:"temperature"`
+	TopP                *float64          `json:"top_p"`
+	FrequencyPenalty    *float64          `json:"frequency_penalty"`
+	PresencePenalty     *float64          `json:"presence_penalty"`
+	Seed                *int64            `json:"seed"`
+	Stop                json.RawMessage   `json:"stop"`
+	N                   *int              `json:"n"`
+	ResponseFormat      json.RawMessage   `json:"response_format"`
 }
 
 type contentPart struct {
@@ -392,6 +419,60 @@ func parseToolChoice(raw json.RawMessage) (agent.ClientToolChoice, bool) {
 	}
 }
 
+// parseStopSequences normalizes the OpenAI stop field (a string or an array
+// of up to four strings) into a sequence list. Null/missing means no stops.
+func parseStopSequences(raw json.RawMessage) ([]string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, true
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var sequence string
+		if json.Unmarshal(trimmed, &sequence) != nil || len(sequence) > 4096 {
+			return nil, false
+		}
+		return []string{sequence}, true
+	}
+	var sequences []string
+	if json.Unmarshal(trimmed, &sequences) != nil || len(sequences) == 0 || len(sequences) > 4 {
+		return nil, false
+	}
+	for _, sequence := range sequences {
+		if len(sequence) > 4096 {
+			return nil, false
+		}
+	}
+	return sequences, true
+}
+
+// parseResponseFormat normalizes the OpenAI response_format field. Only the
+// text and json_object shapes are supported; json_schema needs output-schema
+// enforcement the provider loop does not implement, so it fails here.
+func parseResponseFormat(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return "", true
+	}
+	var wire struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(trimmed, &wire) != nil {
+		return "", false
+	}
+	switch wire.Type {
+	case "text":
+		return "", true
+	case "json_object":
+		return "json_object", true
+	default:
+		return "", false
+	}
+}
+
+func inRange(value *float64, min, max float64) bool {
+	return value == nil || (!math.IsNaN(*value) && !math.IsInf(*value, 0) && *value >= min && *value <= max)
+}
+
 func parseWireToolCalls(calls []wireToolCall) ([]llm.ToolCall, bool) {
 	if len(calls) == 0 {
 		return nil, true
@@ -527,8 +608,9 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	}
 	for key := range top {
 		switch key {
-		case "model", "messages", "stream", "stream_options", "max_tokens", "tools", "tool_choice", "parallel_tool_calls":
-		case "temperature", "top_p", "top_k", "frequency_penalty", "presence_penalty", "repetition_penalty", "stop", "seed", "user", "response_format", "logit_bias", "logprobs", "top_logprobs", "n", "max_completion_tokens", "service_tier", "reasoning_effort", "store":
+		case "model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "tools", "tool_choice", "parallel_tool_calls", "response_format":
+		case "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "n":
+		case "top_k", "repetition_penalty", "user", "logit_bias", "logprobs", "top_logprobs", "service_tier", "reasoning_effort", "store":
 			delete(top, key)
 		default:
 			g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
@@ -560,6 +642,10 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
 		return
 	}
+	if input.MaxCompletionTokens != nil && *input.MaxCompletionTokens <= 0 {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
+		return
+	}
 	clientTools, valid := parseClientTools(input.Tools)
 	if !valid {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Invalid client tool definition.")
@@ -574,6 +660,44 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	// Oswald and client catalog inside the agent, which alone knows the
 	// profile's builtin tools. Syntax errors fail here; unknown names fail
 	// there as invalid_tool_choice.
+	if !inRange(input.Temperature, 0, 2) || !inRange(input.TopP, 0, 1) ||
+		!inRange(input.FrequencyPenalty, -2, 2) || !inRange(input.PresencePenalty, -2, 2) {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
+		return
+	}
+	stop, valid := parseStopSequences(input.Stop)
+	if !valid {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
+		return
+	}
+	if input.N != nil && *input.N != 1 {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Only a single completion choice is supported.")
+		return
+	}
+	format, valid := parseResponseFormat(input.ResponseFormat)
+	if !valid {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported response format.")
+		return
+	}
+	var generation *agent.ClientGeneration
+	if input.Temperature != nil || input.TopP != nil || input.FrequencyPenalty != nil ||
+		input.PresencePenalty != nil || input.Seed != nil || stop != nil ||
+		input.MaxTokens != nil || input.MaxCompletionTokens != nil || format != "" {
+		cap := input.MaxTokens
+		if cap == nil {
+			cap = input.MaxCompletionTokens
+		}
+		generation = &agent.ClientGeneration{
+			Temperature:      input.Temperature,
+			TopP:             input.TopP,
+			FrequencyPenalty: input.FrequencyPenalty,
+			PresencePenalty:  input.PresencePenalty,
+			Seed:             input.Seed,
+			Stop:             stop,
+			MaxTokens:        cap,
+			ResponseFormat:   format,
+		}
+	}
 	if len(input.Messages) == 0 {
 		g.reject(w, http.StatusBadRequest, "invalid_messages", "Messages must contain at least 1 turn.")
 		return
@@ -595,6 +719,11 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		}
 		if msg.ReasoningContent != nil && msg.Role != "assistant" {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is only supported on prior assistant messages.")
+			return
+		}
+		name, valid := parseParticipantName(msg)
+		if !valid {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Invalid participant name.")
 			return
 		}
 		if msg.Role == "tool" {
@@ -664,7 +793,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			if input.Stream {
 				streamFunc = responder.Stream
 			}
-			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Images: currentImages, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
+			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, Images: currentImages, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 			if !responder.sent && r.Context().Err() == nil {
 				if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 					w.WriteHeader(http.StatusNoContent)
@@ -675,7 +804,10 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = msg.ReasoningContent
-		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, ToolCalls: calls})
+		// Participant names are retained as quoted history metadata. The
+		// current-turn name carries no attribution: the sender is always the
+		// API key owner.
+		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, Name: name, ToolCalls: calls})
 	}
 	if !continuation {
 		g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
@@ -698,7 +830,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	if input.Stream {
 		streamFunc = responder.Stream
 	}
-	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
+	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 	if !responder.sent && r.Context().Err() == nil {
 		if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 			w.WriteHeader(http.StatusNoContent)

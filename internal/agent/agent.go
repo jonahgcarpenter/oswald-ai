@@ -569,7 +569,45 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 		req.Tools = catalog.Tools
+		// Caller generation parameters apply to every provider call in the
+		// stateless loop; sampling/stop shape each model invocation equally.
+		req.Temperature, req.TopP = nil, nil
+		req.FrequencyPenalty, req.PresencePenalty = nil, nil
+		req.Seed, req.Stop = nil, nil
+		if request.Stateless && request.ClientGeneration != nil {
+			req.Temperature = request.ClientGeneration.Temperature
+			req.TopP = request.ClientGeneration.TopP
+			req.FrequencyPenalty = request.ClientGeneration.FrequencyPenalty
+			req.PresencePenalty = request.ClientGeneration.PresencePenalty
+			req.Seed = request.ClientGeneration.Seed
+			req.Stop = request.ClientGeneration.Stop
+			req.MaxTokens = request.ClientGeneration.MaxTokens
+			req.Format = request.ClientGeneration.ResponseFormat
+		}
+		// Spec forcing is first-call only: later iterations revert to auto so
+		// executed Oswald tools cannot force an endless tool-call loop.
+		// Single-tool catalogs also disable parallel calls per provider
+		// contract unless the caller overrode the preference explicitly.
 		req.ToolChoice = ""
+		req.ParallelToolCalls = request.ClientParallelToolCalls
+		if request.Stateless && iteration == 1 && len(catalog.Tools) > 0 {
+			switch request.ClientToolChoice.Mode {
+			case "required", "named":
+				req.ToolChoice = llm.ToolChoiceRequired
+			case "allowed":
+				if request.ClientToolChoice.AllowedMode == "required" {
+					req.ToolChoice = llm.ToolChoiceRequired
+				}
+			}
+			if req.ParallelToolCalls == nil {
+				single := request.ClientToolChoice.Mode == "named" ||
+					(request.ClientToolChoice.Mode == "allowed" && len(request.ClientToolChoice.Allowed) == 1)
+				if single {
+					disabled := false
+					req.ParallelToolCalls = &disabled
+				}
+			}
+		}
 		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent
 		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, initialPressure)
 		if compactErr != nil {
@@ -1359,6 +1397,12 @@ finalize:
 		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
+	}
+	if lastResp != nil {
+		switch strings.TrimSpace(lastResp.DoneReason) {
+		case "length", "content_filter":
+			final.FinishReason = strings.TrimSpace(lastResp.DoneReason)
+		}
 	}
 	final.setObservedUsage(usage.Snapshot())
 	return final, nil

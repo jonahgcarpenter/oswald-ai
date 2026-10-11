@@ -27,9 +27,13 @@ type Response struct {
 	// ("named_tool_missing" or "no_tools_available"). It is separate from
 	// Error so runtime telemetry keeps provider failures distinct.
 	ToolChoiceError string `json:"-"`
-	Model           string `json:"model"`
-	Response        string `json:"response,omitempty"`
-	Thinking        string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// FinishReason carries the terminal provider stop reason for text
+	// answers ("stop" or "length"). Empty behaves as "stop"; tool_calls
+	// answers are reported separately via ToolCalls.
+	FinishReason string `json:"-"`
+	Model        string `json:"model"`
+	Response     string `json:"response,omitempty"`
+	Thinking     string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
 	ToolCalls []llm.ToolCall `json:"-"`
@@ -82,6 +86,13 @@ type Request struct {
 	// single forced tool name; Allowed carries a filtered tool-name set with
 	// AllowedMode "auto" or "required".
 	ClientToolChoice ClientToolChoice
+	// ClientParallelToolCalls carries the caller's explicit
+	// parallel_tool_calls preference. Nil leaves the provider default;
+	// single-tool forcing disables parallel calls unless overridden here.
+	ClientParallelToolCalls *bool
+	// ClientGeneration carries the caller's sampling and stop parameters
+	// for stateless requests. Nil leaves provider defaults untouched.
+	ClientGeneration *ClientGeneration
 	Images           []llm.InputImage
 	StreamFunc       func(StreamChunk)
 }
@@ -104,6 +115,25 @@ type ClientToolChoice struct {
 
 // IsNone reports whether the caller requested no tool calls at all.
 func (c ClientToolChoice) IsNone() bool { return c.Mode == "none" }
+
+// ClientGeneration carries caller-supplied generation parameters for one
+// stateless API request. All fields are optional; nil leaves the provider
+// default in place. Ranges mirror the OpenAI chat completions contract:
+// temperature 0–2, top_p 0–1, frequency/presence penalties −2–2, seed any
+// integer, stop up to four sequences, max tokens a positive cap applied to
+// each provider call in the request loop.
+type ClientGeneration struct {
+	Temperature      *float64
+	TopP             *float64
+	FrequencyPenalty *float64
+	PresencePenalty  *float64
+	Seed             *int64
+	Stop             []string
+	MaxTokens        *int
+	// ResponseFormat is "" or "json_object"; richer schemas are rejected
+	// at the gateway because the provider loop cannot enforce them.
+	ResponseFormat string
+}
 
 // setObservedUsage records provider-reported request totals on the response.
 // Gateways omit usage unless UsageReported, so unreported turns never invent it.

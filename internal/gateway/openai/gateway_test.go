@@ -70,7 +70,9 @@ func TestValidation(t *testing.T) {
 		code       int
 	}{
 		{"malformed", `{"model":`, []string{"Bearer " + testAPIKey}, 400},
-		{"nested unknown", `{"model":"oswald","messages":[{"role":"user","content":"hi","name":"injected"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"nested unknown", `{"model":"oswald","messages":[{"role":"user","content":"hi","session":"injected"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"name on tool message", `{"model":"oswald","messages":[{"role":"tool","tool_call_id":"call_1","content":"result","name":"helper"},{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"bad participant name", `{"model":"oswald","messages":[{"role":"user","content":"hi","name":"bad name!"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"reasoning on user", `{"model":"oswald","messages":[{"role":"user","content":"hi","reasoning_content":"override"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid reasoning type", `{"model":"oswald","messages":[{"role":"assistant","content":"prior","reasoning_content":{"text":"private"}},{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"trailing json", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]} {}`, []string{"Bearer " + testAPIKey}, 400},
@@ -83,6 +85,12 @@ func TestValidation(t *testing.T) {
 		{"allowed bad name", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"bad name"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"allowed duplicate", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"read"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"allowed wrong entry type", `{"model":"oswald","tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"custom","custom":{"name":"read"}}]}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"temperature out of range", `{"model":"oswald","temperature":2.5,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"top_p out of range", `{"model":"oswald","top_p":-0.1,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"penalty out of range", `{"model":"oswald","frequency_penalty":2.5,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"too many stops", `{"model":"oswald","stop":["a","b","c","d","e"],"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"multiple choices unsupported", `{"model":"oswald","n":2,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"json schema unsupported", `{"model":"oswald","response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{}}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid client tool", `{"model":"oswald","tools":["read"],"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid stream options", `{"model":"oswald","stream_options":{"include_usage":"yes"},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid output tokens", `{"model":"oswald","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
@@ -735,12 +743,20 @@ func TestToolChoiceForwarding(t *testing.T) {
 				t.Fatalf("allowed %+v", choice)
 			}
 		}},
+		{"parallel false", `{"model":"oswald","parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`, func(t *testing.T, choice agent.ClientToolChoice) {
+			t.Helper()
+			if choice.Mode != "" && choice.Mode != "auto" {
+				t.Fatalf("mode %q, want default", choice.Mode)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := testGateway(t)
 			var got agent.ClientToolChoice
+			var gotParallel *bool
 			g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
 				got = req.ClientToolChoice
+				gotParallel = req.ClientParallelToolCalls
 				if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
 					t.Error(err)
 				}
@@ -751,7 +767,56 @@ func TestToolChoiceForwarding(t *testing.T) {
 				t.Fatalf("status %d, want 200: %s", w.Code, w.Body.String())
 			}
 			tc.check(t, got)
+			if tc.name == "parallel false" && (gotParallel == nil || *gotParallel) {
+				t.Fatalf("parallel %+v, want disabled", gotParallel)
+			}
 		})
+	}
+}
+
+func TestGenerationOptionsForwarded(t *testing.T) {
+	g := testGateway(t)
+	var generation *agent.ClientGeneration
+	var parallel *bool
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		generation = req.ClientGeneration
+		parallel = req.ClientParallelToolCalls
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	body := `{"model":"oswald","temperature":0.7,"top_p":0.9,"frequency_penalty":0.5,"presence_penalty":-0.5,"seed":7,"stop":["END"],"max_tokens":512,"response_format":{"type":"json_object"},"parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`
+	w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if generation == nil || generation.Temperature == nil || *generation.Temperature != 0.7 || generation.TopP == nil || *generation.TopP != 0.9 ||
+		generation.FrequencyPenalty == nil || *generation.FrequencyPenalty != 0.5 || generation.PresencePenalty == nil || *generation.PresencePenalty != -0.5 ||
+		generation.Seed == nil || *generation.Seed != 7 || len(generation.Stop) != 1 || generation.Stop[0] != "END" ||
+		generation.MaxTokens == nil || *generation.MaxTokens != 512 || generation.ResponseFormat != "json_object" {
+		t.Fatalf("generation not forwarded: %+v", generation)
+	}
+	if parallel == nil || *parallel {
+		t.Fatalf("parallel %+v, want disabled", parallel)
+	}
+}
+
+func TestParticipantNamesRetainedAsHistory(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if len(req.ClientHistory) != 1 || req.ClientHistory[0].Name != "alice" || req.ClientHistory[0].Content != "prior" {
+			t.Errorf("participant name lost: %+v", req.ClientHistory)
+		}
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	body := `{"model":"oswald","messages":[{"role":"user","content":"prior","name":"alice"},{"role":"user","content":"hi"}]}`
+	w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
+	if w.Code != 200 {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -766,5 +831,26 @@ func TestInvalidToolChoiceMapsToBadRequest(t *testing.T) {
 	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid tool choice status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestLengthFinishReasonReported(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		w := httptest.NewRecorder()
+		r := &responseWriter{w: w, ctx: context.Background(), id: "chatcmpl-test", stream: stream}
+		if err := r.SendAgentResponse(&agent.Response{Response: "truncated", FinishReason: "length"}); err != nil {
+			t.Fatalf("stream=%t: %v", stream, err)
+		}
+		if !strings.Contains(w.Body.String(), `"finish_reason":"length"`) || strings.Contains(w.Body.String(), `"finish_reason":"stop"`) {
+			t.Fatalf("stream=%t body=%s", stream, w.Body.String())
+		}
+	}
+	w := httptest.NewRecorder()
+	r := &responseWriter{w: w, ctx: context.Background(), id: "chatcmpl-test"}
+	if err := r.SendAgentResponse(&agent.Response{Response: "done", FinishReason: "bogus"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.Body.String(), `"finish_reason":"stop"`) {
+		t.Fatalf("unknown reason must fall back to stop: %s", w.Body.String())
 	}
 }
