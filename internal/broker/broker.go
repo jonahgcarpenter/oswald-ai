@@ -62,9 +62,12 @@ type Request struct {
 	ClientHistory    []llm.ChatMessage
 	ClientTools      []llm.Tool
 	ClientToolChoice string
-	Images           []llm.InputImage
-	StreamFunc       func(agent.StreamChunk)
-	ResponseChan     chan Result
+	// Ctx carries transport cancellation to the worker. Nil keeps the
+	// previous lifecycle-only behavior.
+	Ctx          context.Context
+	Images       []llm.InputImage
+	StreamFunc   func(agent.StreamChunk)
+	ResponseChan chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -266,6 +269,19 @@ func (b *Broker) Submit(req *Request) error {
 	requestCtx = requestctx.WithPrincipal(requestCtx, req.Principal)
 	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
 	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
+	// Transport cancellation (for example an HTTP client disconnect) cancels
+	// this request's work without touching the conversation lane or queued
+	// prompts. The watch is released on first delivery.
+	transport := req.Ctx
+	if transport == nil {
+		transport = b.lifecycleCtx
+	}
+	stopWatch := context.AfterFunc(transport, func() {
+		cancel(context.Cause(transport))
+	})
+	if err := transport.Err(); err != nil {
+		cancel(context.Cause(transport))
+	}
 	deliver := func(result Result) {
 		b.mu.Lock()
 		if !w.queuedAt.IsZero() {
@@ -277,7 +293,7 @@ func (b *Broker) Submit(req *Request) error {
 			}
 		}
 		b.mu.Unlock()
-		w.deliverOnce.Do(func() { deliverResult(req.ResponseChan, result) })
+		w.deliverOnce.Do(func() { stopWatch(); deliverResult(req.ResponseChan, result) })
 	}
 	w.run = func() error {
 		if cause := context.Cause(w.ctx); cause != nil {

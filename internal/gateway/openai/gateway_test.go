@@ -89,7 +89,7 @@ func TestValidation(t *testing.T) {
 		{"unexpected part field", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text","text":"Hi","image_url":"hidden"}]}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"missing part text", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text"}]}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"empty parts", `{"model":"oswald","messages":[{"role":"user","content":[]} ]}`, []string{"Bearer " + testAPIKey}, 400},
-		{"oversized", `{"model":"oswald","messages":[{"role":"user","content":"` + strings.Repeat("a", 256<<10) + `"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"oversized", `{"model":"oswald","messages":[{"role":"user","content":"` + strings.Repeat("a", 3<<20) + `"}]}`, []string{"Bearer " + testAPIKey}, 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := request(g, "POST", "/v1/chat/completions", tc.body, tc.auth...)
@@ -603,6 +603,22 @@ func TestOverBudgetMapsToBadRequest(t *testing.T) {
 	var result map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result["error"] == nil {
 		t.Fatalf("missing JSON error: %v", err)
+	}
+}
+
+func TestCompletionsForwardsTransportContext(t *testing.T) {
+	g := testGateway(t)
+	var captured context.Context
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		captured = req.Context
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || captured == nil || captured.Err() != nil {
+		t.Fatalf("transport context not forwarded: %d %v", w.Code, captured)
 	}
 }
 

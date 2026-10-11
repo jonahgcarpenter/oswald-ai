@@ -82,9 +82,14 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 	isExecutionComplete := true
 	var queueWaitMS, agentDurationMS int64
 	usage := requestctx.NewUsageCollector()
-	// Commands deliberately outlive transport cancellation but retain request correlation.
 	meta := requestctx.Metadata{RequestID: req.RequestID, Workload: "foreground", OperationID: req.RequestID}
-	workCtx := requestctx.WithUsageCollector(requestctx.WithMetadata(context.Background(), meta), usage)
+	// Commands deliberately outlive transport cancellation but retain request correlation.
+	commandCtx := requestctx.WithUsageCollector(requestctx.WithMetadata(context.Background(), meta), usage)
+	base := req.Context
+	if base == nil {
+		base = context.Background()
+	}
+	workCtx := requestctx.WithUsageCollector(requestctx.WithMetadata(base, meta), usage)
 	measured := &measuredResponder{Responder: responder, status: "not_attempted"}
 	responder = measured
 	fields := func() []config.Field {
@@ -284,14 +289,14 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			var fenceTargets []string
 			var resolveErr error
 			if !definition.OutOfBand {
-				fenceTargets, resolveErr = deps.Commands.ResolveFenceTargets(workCtx, commandReq)
+				fenceTargets, resolveErr = deps.Commands.ResolveFenceTargets(commandCtx, commandReq)
 			}
 			executeCommand := func() error {
 				queueWaitMS = time.Since(startedAt).Milliseconds()
 				if resolveErr != nil {
 					commandErr = resolveErr
 				} else {
-					response, commandErr = deps.Commands.Execute(workCtx, commandReq)
+					response, commandErr = deps.Commands.Execute(commandCtx, commandReq)
 				}
 				if response.Outcome.IsChanged && response.Outcome.Operation != "" {
 					// IsChanged certifies an actual commit, even if later command work failed.
@@ -428,6 +433,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		ClientHistory:     req.ClientHistory,
 		ClientTools:       req.ClientTools,
 		ClientToolChoice:  req.ClientToolChoice,
+		Ctx:               req.Context,
 		Images:            decision.Images,
 		StreamFunc:        req.StreamFunc,
 		ResponseChan:      make(chan broker.Result, 1),

@@ -98,6 +98,7 @@ func checkImplicitDetail(t *testing.T, details map[string]any, key, want, implic
 type telemetryProcessor struct {
 	err             error
 	unreportedCalls int
+	block           chan struct{}
 }
 
 func (p telemetryProcessor) Process(ctx context.Context, req agent.Request) (*agent.Response, error) {
@@ -109,6 +110,11 @@ func (p telemetryProcessor) Process(ctx context.Context, req agent.Request) (*ag
 	collector := requestctx.UsageCollectorFromContext(ctx)
 	if collector == nil {
 		return nil, errors.New("missing collector")
+	}
+	if p.block != nil {
+		close(p.block)
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 	collector.Record(requestctx.ModelUsage{Submitted: true, Status: "ok", UsageReported: true, PromptTokens: 7, CompletionTokens: 3, TotalTokens: 10})
 	for i := 0; i < p.unreportedCalls; i++ {
@@ -268,6 +274,33 @@ func TestRequestTerminalCancellationAndErrors(t *testing.T) {
 				t.Fatalf("cancellation sent failure: %+v", r)
 			}
 		})
+	}
+}
+
+func TestTransportContextCancelsPromptWork(t *testing.T) {
+	log, _ := telemetryLogger(t)
+	started := make(chan struct{})
+	b := broker.NewBroker(telemetryProcessor{block: started}, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	transport, cancel := context.WithCancel(context.Background())
+	r := &fakeResponder{}
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- Execute(Request{RequestID: "req", Principal: testPrincipal("canonical-user"), Text: "hello", Context: transport}, Dependencies{Broker: b, Log: log}, r)
+	}()
+	<-started
+	cancel()
+	select {
+	case outcome := <-done:
+		if outcome.Reason != "request_canceled" {
+			t.Fatalf("outcome = %+v", outcome)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("transport-cancelled prompt never completed")
+	}
+	if !r.canceled {
+		t.Fatal("cancellation cleanup was not attempted")
 	}
 }
 

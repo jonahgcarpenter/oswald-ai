@@ -860,3 +860,51 @@ func (p *captureProcessor) Process(_ context.Context, req agent.Request) (*agent
 	p.requests <- req
 	return &agent.Response{Response: "ok"}, nil
 }
+
+func TestTransportCancellationAbortsQueuedWork(t *testing.T) {
+	processor := &captureProcessor{requests: make(chan agent.Request, 1)}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	transport, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := &Request{Principal: identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: "api:user", Assurance: identity.AssuranceAPIKey}, SessionKey: "session", Ctx: transport, ResponseChan: make(chan Result, 1)}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-req.ResponseChan:
+		if !errors.Is(result.Err, context.Canceled) || !result.ExecutionComplete {
+			t.Fatalf("canceled result = %+v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transport-cancelled request never completed")
+	}
+	select {
+	case forwarded := <-processor.requests:
+		t.Fatalf("cancelled request reached processor: %+v", forwarded)
+	default:
+	}
+}
+
+func TestTransportCancellationAbortsActiveWork(t *testing.T) {
+	processor := &cancelProcessor{started: make(chan struct{})}
+	b := NewBroker(processor, 1, config.NewLogger(config.LevelError))
+	b.Start()
+	defer b.Shutdown()
+	transport, cancel := context.WithCancel(context.Background())
+	req := &Request{RequestID: "active", Principal: identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: "api:user", Assurance: identity.AssuranceAPIKey}, SessionKey: "session", Ctx: transport, ResponseChan: make(chan Result, 1)}
+	if err := b.Submit(req); err != nil {
+		t.Fatal(err)
+	}
+	<-processor.started
+	cancel()
+	select {
+	case result := <-req.ResponseChan:
+		if !errors.Is(result.Err, context.Canceled) {
+			t.Fatalf("active result err = %v", result.Err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("transport-cancelled active work never completed")
+	}
+}

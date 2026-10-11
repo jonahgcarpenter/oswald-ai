@@ -66,6 +66,11 @@ type Request struct {
 	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
+	// Context carries transport cancellation (for example an HTTP client
+	// disconnect). Nil means no transport deadline; commands and gateways
+	// without a transport context leave it nil so that work outlives the
+	// transport as before.
+	Context context.Context
 	// ClientTools are caller-supplied function definitions combined with Oswald
 	// tools for this request only. They are never executed server-side.
 	ClientTools []llm.Tool

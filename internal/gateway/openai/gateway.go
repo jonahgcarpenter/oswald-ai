@@ -25,7 +25,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
 )
 
-const maxBody = 256 << 10
+const maxBody = 2 << 20
 
 var clientToolNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 
@@ -628,7 +628,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			if input.Stream {
 				streamFunc = responder.Stream
 			}
-			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Images: currentImages, Stateless: true, StreamFunc: streamFunc}, deps, responder)
+			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Images: currentImages, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 			if !responder.sent && r.Context().Err() == nil {
 				if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 					w.WriteHeader(http.StatusNoContent)
@@ -662,7 +662,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	if input.Stream {
 		streamFunc = responder.Stream
 	}
-	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Stateless: true, StreamFunc: streamFunc}, deps, responder)
+	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 	if !responder.sent && r.Context().Err() == nil {
 		if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 			w.WriteHeader(http.StatusNoContent)
