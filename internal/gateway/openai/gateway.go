@@ -265,14 +265,13 @@ type contentPart struct {
 
 // parseTextParts extracts plain text and image URLs from a content payload.
 // allowImages controls whether image_url parts are accepted (current user turn
-// only); history turns are text-only. Unknown part fields are ignored for
-// compatibility; structural mismatches still fail.
+// only); history turns are text-only. Missing content coerces to empty text,
+// matching explicit null: assistant tool-call turns commonly omit content or
+// send null. Unknown part fields are ignored for compatibility; structural
+// mismatches still fail.
 func parseTextParts(raw json.RawMessage, allowImages bool) (string, []string, bool) {
 	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return "", nil, false
-	}
-	if string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == "null" {
 		return "", nil, true
 	}
 	if len(raw) > 0 && raw[0] == '"' {
@@ -801,6 +800,10 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is only supported on prior assistant messages.")
 			return
 		}
+		if msg.ReasoningContent != nil && len(*msg.ReasoningContent) > 128<<10 {
+			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is too large.")
+			return
+		}
 		name, valid := parseParticipantName(msg)
 		if !valid {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Invalid participant name.")
@@ -883,11 +886,16 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		_ = msg.ReasoningContent
-		// Participant names are retained as quoted history metadata. The
-		// current-turn name carries no attribution: the sender is always the
-		// API key owner.
-		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, Name: name, ToolCalls: calls})
+		thinking := ""
+		if msg.ReasoningContent != nil {
+			thinking = *msg.ReasoningContent
+		}
+		// Prior reasoning is retained as quoted, lower-authority history
+		// reference (Ollama thinking parity), never replayed as model
+		// reasoning. Participant names are retained as quoted history
+		// metadata. The current-turn name carries no attribution: the sender
+		// is always the API key owner.
+		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, Name: name, ToolCalls: calls, Thinking: thinking})
 	}
 	if !continuation {
 		g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
