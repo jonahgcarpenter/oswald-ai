@@ -90,7 +90,25 @@ func (g *Gateway) Start(b *broker.Broker) error {
 		return err
 	}
 	g.log.Server("gateway.openai").Debug("gateway.listen", "openai gateway listener starting", config.F("port", g.port))
+	g.logConnected(listener.Addr())
 	return http.Serve(listener, g.Handler())
+}
+
+// logConnected reports listener readiness on the INFO lifecycle stream. It
+// runs only after the HTTP listener binds and carries no credential or
+// request material.
+func (g *Gateway) logConnected(addr net.Addr) {
+	listenAddr := ""
+	if addr != nil {
+		listenAddr = addr.String()
+		if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
+			listenAddr = host
+		}
+	}
+	g.log.Server("gateway.openai").Info("gateway.connected", "openai gateway ready",
+		config.F("gateway", "openai"),
+		config.F("listen_addr", listenAddr),
+		config.F("port", g.port))
 }
 
 // Handler returns the HTTP API handler for mounting or local testing.

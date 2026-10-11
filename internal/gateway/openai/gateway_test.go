@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -869,5 +871,48 @@ func TestLengthFinishReasonReported(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"finish_reason":"stop"`) {
 		t.Fatalf("unknown reason must fall back to stop: %s", w.Body.String())
+	}
+}
+
+func TestConnectedLogReportsListenerReadiness(t *testing.T) {
+	var logs bytes.Buffer
+	log := config.NewLogger(config.LevelDebug)
+	log.SetOutput(&logs)
+	g := &Gateway{host: "127.0.0.1", port: "8080", log: log}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	g.logConnected(listener.Addr())
+	var record struct {
+		Level   string         `json:"level"`
+		Event   string         `json:"event"`
+		Details map[string]any `json:"details"`
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	found := false
+	for _, line := range lines {
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("invalid log line: %v", err)
+		}
+		if record.Event == "gateway.connected" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing gateway.connected record: %s", logs.String())
+	}
+	if record.Level != "info" || record.Details["gateway"] != "openai" || fmt.Sprint(record.Details["port"]) != "8080" {
+		t.Fatalf("unexpected connected record: %+v", record)
+	}
+	if _, ok := record.Details["listen_addr"]; !ok {
+		t.Fatalf("missing listen address: %+v", record.Details)
+	}
+	for _, secret := range []string{testAPIKey, "apiKey", "key"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("connected log must not carry credential material")
+		}
 	}
 }
