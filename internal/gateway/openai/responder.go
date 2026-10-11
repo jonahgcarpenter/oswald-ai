@@ -98,6 +98,15 @@ func wireToolCalls(calls []struct {
 	return out
 }
 
+// wireUsage returns observed token totals, or nil when no provider call
+// reported usage. Gateways must omit usage rather than invent it.
+func wireUsage(response *agent.Response) map[string]any {
+	if response == nil || !response.UsageReported {
+		return nil
+	}
+	return map[string]any{"prompt_tokens": response.UsagePromptTokens, "completion_tokens": response.UsageCompletionTokens, "total_tokens": response.UsageTotalTokens}
+}
+
 func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	if err := r.contextErr(); err != nil {
 		return err
@@ -107,6 +116,9 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	}
 	if response == nil || response.Error != "" || response.Kind == "provider_error" {
 		return r.SendAgentError("")
+	}
+	if response.Kind == "over_budget" {
+		return r.failure(http.StatusBadRequest, "invalid_request_error", "Message history exceeds the model context budget.")
 	}
 	if len(response.Attachments) > 0 {
 		return r.failure(http.StatusUnprocessableEntity, "unsupported_response", "Image attachments are not supported.")
@@ -130,6 +142,15 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 			return err
 		}
 		r.finished = true
+		if r.includeUsage {
+			if usage := wireUsage(response); usage != nil {
+				payload, _ := json.Marshal(map[string]any{"id": r.id, "object": "chat.completion.chunk", "created": r.created, "model": "oswald", "choices": []any{}, "usage": usage})
+				r.sent = true
+				if err := r.writeFrame(fmt.Sprintf("data: %s\n\n", payload)); err != nil {
+					return err
+				}
+			}
+		}
 		if err := r.writeFrame("data: [DONE]\n\n"); err != nil {
 			return err
 		}
@@ -139,9 +160,13 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	if response.Thinking != "" {
 		message["reasoning_content"] = response.Thinking
 	}
-	// Stateless agent requests may make several provider calls; response.Metrics
-	// describes only the last one and cannot represent completion usage.
-	return r.sendJSON(http.StatusOK, map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}}})
+	// Stateless agent requests may make several provider calls; usage carries
+	// observed request totals and is omitted when nothing reported.
+	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "stop"}}}
+	if usage := wireUsage(response); usage != nil {
+		completion["usage"] = usage
+	}
+	return r.sendJSON(http.StatusOK, completion)
 }
 
 func (r *responseWriter) sendToolCalls(response *agent.Response) error {
@@ -182,6 +207,15 @@ func (r *responseWriter) sendToolCalls(response *agent.Response) error {
 			return err
 		}
 		r.finished = true
+		if r.includeUsage {
+			if usage := wireUsage(response); usage != nil {
+				payload, _ := json.Marshal(map[string]any{"id": r.id, "object": "chat.completion.chunk", "created": r.created, "model": "oswald", "choices": []any{}, "usage": usage})
+				r.sent = true
+				if err := r.writeFrame(fmt.Sprintf("data: %s\n\n", payload)); err != nil {
+					return err
+				}
+			}
+		}
 		if err := r.writeFrame("data: [DONE]\n\n"); err != nil {
 			return err
 		}
@@ -195,7 +229,11 @@ func (r *responseWriter) sendToolCalls(response *agent.Response) error {
 	if response.Thinking != "" {
 		message["reasoning_content"] = response.Thinking
 	}
-	return r.sendJSON(http.StatusOK, map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}})
+	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}}
+	if usage := wireUsage(response); usage != nil {
+		completion["usage"] = usage
+	}
+	return r.sendJSON(http.StatusOK, completion)
 }
 
 func (r *responseWriter) writeFrame(frame string) error {

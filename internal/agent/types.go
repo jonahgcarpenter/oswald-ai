@@ -4,6 +4,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -27,10 +28,19 @@ type Response struct {
 	Thinking           string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
-	ToolCalls   []llm.ToolCall           `json:"-"`
-	Error       string                   `json:"error,omitempty"`
-	Metrics     *ModelMetrics            `json:"metrics,omitempty"`
-	Attachments []media.OutputAttachment `json:"-"`
+	ToolCalls []llm.ToolCall `json:"-"`
+	// Usage totals accumulate observed provider-reported tokens across all
+	// model calls in this request. UsageReported is false when no call
+	// reported usage, in which case gateways must omit usage rather than
+	// invent it. UsageComplete is false when some submissions never reported.
+	UsagePromptTokens     int                      `json:"-"`
+	UsageCompletionTokens int                      `json:"-"`
+	UsageTotalTokens      int                      `json:"-"`
+	UsageReported         bool                     `json:"-"`
+	UsageComplete         bool                     `json:"-"`
+	Error                 string                   `json:"error,omitempty"`
+	Metrics               *ModelMetrics            `json:"metrics,omitempty"`
+	Attachments           []media.OutputAttachment `json:"-"`
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`
@@ -67,6 +77,17 @@ type Request struct {
 	ClientToolChoice string
 	Images           []llm.InputImage
 	StreamFunc       func(StreamChunk)
+}
+
+// setObservedUsage records provider-reported request totals on the response.
+// Gateways omit usage unless UsageReported, so unreported turns never invent it.
+func (r *Response) setObservedUsage(s requestctx.UsageSnapshot) {
+	if r == nil {
+		return
+	}
+	r.UsagePromptTokens, r.UsageCompletionTokens, r.UsageTotalTokens = s.PromptTokens, s.CompletionTokens, s.TotalTokens
+	r.UsageReported = s.UsageReportedCallCount > 0
+	r.UsageComplete = r.UsageReported && s.ModelSubmissionCount > 0 && s.UsageCompleteCallCount == s.ModelSubmissionCount
 }
 
 // mapMetrics converts an LLM response into a model metrics summary.

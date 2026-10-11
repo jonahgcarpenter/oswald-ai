@@ -105,7 +105,7 @@ func TestStatelessClientHistoryValidationAndBudget(t *testing.T) {
 	a, _ := newTestAgent(t, chat, nil, nil)
 	a.budget = budget.ContextBudget{PromptLimit: 512}
 	resp, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "imessage", ExternalID: "user-1", Assurance: identity.AssuranceBlueBubblesWebhook}, SessionKey: "session", Prompt: "question", Stateless: true, ClientHistory: []llm.ChatMessage{{Role: "user", Content: strings.Repeat("x", 10000)}}})
-	if resp != nil || err == nil || !strings.Contains(err.Error(), "budget") || len(chat.requests) != 0 {
+	if err != nil || resp == nil || resp.Kind != "over_budget" || len(chat.requests) != 0 {
 		t.Fatalf("oversized history response=%+v err=%v requests=%d", resp, err, len(chat.requests))
 	}
 }
@@ -126,7 +126,7 @@ func TestStatelessRequiredBudgetIncludesFileMemoryAndClientHistory(t *testing.T)
 	a.budget = budget.ContextBudget{PromptLimit: actual - 1}
 	chat.requests = nil
 	response, err := a.Process(context.Background(), request)
-	if response != nil || err == nil || !strings.Contains(err.Error(), "budget") || len(chat.requests) != 0 {
+	if err != nil || response == nil || response.Kind != "over_budget" || len(chat.requests) != 0 {
 		t.Fatalf("over-budget required context: response=%+v err=%v calls=%d", response, err, len(chat.requests))
 	}
 }

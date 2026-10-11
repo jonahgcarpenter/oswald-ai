@@ -73,7 +73,6 @@ func TestValidation(t *testing.T) {
 		{"nested unknown", `{"model":"oswald","messages":[{"role":"user","content":"hi","name":"injected"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"reasoning on user", `{"model":"oswald","messages":[{"role":"user","content":"hi","reasoning_content":"override"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid reasoning type", `{"model":"oswald","messages":[{"role":"assistant","content":"prior","reasoning_content":{"text":"private"}},{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
-		{"oversized prior reasoning", `{"model":"oswald","messages":[{"role":"assistant","content":"prior","reasoning_content":"` + strings.Repeat("x", (128<<10)+1) + `"},{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"trailing json", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]} {}`, []string{"Bearer " + testAPIKey}, 400},
 		{"wrong model", `{"model":"route","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"required without tools", `{"model":"oswald","tool_choice":"required","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
@@ -90,7 +89,6 @@ func TestValidation(t *testing.T) {
 		{"unexpected part field", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text","text":"Hi","image_url":"hidden"}]}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"missing part text", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text"}]}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"empty parts", `{"model":"oswald","messages":[{"role":"user","content":[]} ]}`, []string{"Bearer " + testAPIKey}, 400},
-		{"oversized text parts", `{"model":"oswald","messages":[{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("a", 20<<10) + `"},{"type":"text","text":"` + strings.Repeat("b", 20<<10) + `"}]}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"oversized", `{"model":"oswald","messages":[{"role":"user","content":"` + strings.Repeat("a", 256<<10) + `"}]}`, []string{"Bearer " + testAPIKey}, 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -407,6 +405,80 @@ func TestResponderDeliveryFailures(t *testing.T) {
 	}
 }
 
+func TestModelsAdvertiseProfileContext(t *testing.T) {
+	log := config.NewLogger(config.LevelDebug)
+	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenHost: "127.0.0.1", OpenAIListenPort: "12345", OpenAIAPIKey: testAPIKey, ModelContextWindow: 262144, Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := New("127.0.0.1", "12345", directory, gatewayruntime.Dependencies{}, "route", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.resolveKey = func(raw string) (identity.Principal, error) {
+		if raw != testAPIKey {
+			return identity.Principal{}, profiles.ErrUnmappedIdentity
+		}
+		return identity.Principal{CanonicalUserID: "default", Gateway: "openai", ExternalID: "api:default", Assurance: identity.AssuranceAPIKey}, nil
+	}
+	w := request(g, "GET", "/v1/models", "")
+	var result struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextLength *int   `json:"context_length"`
+			Capabilities  *struct {
+				Tools  bool     `json:"tools"`
+				Input  []string `json:"input"`
+				Output []string `json:"output"`
+			} `json:"capabilities"`
+		} `json:"data"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Data) != 1 || result.Data[0].ID != "oswald" {
+		t.Fatalf("models: %d %s", w.Code, w.Body.String())
+	}
+	if result.Data[0].ContextLength == nil || *result.Data[0].ContextLength != 262144 {
+		t.Fatalf("missing context length: %s", w.Body.String())
+	}
+	caps := result.Data[0].Capabilities
+	if caps == nil || !caps.Tools || len(caps.Input) != 2 || len(caps.Output) != 1 {
+		t.Fatalf("missing capabilities: %s", w.Body.String())
+	}
+}
+
+func TestUsageReportedWhenObserved(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		g := testGateway(t)
+		g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+			err := responder.SendAgentResponse(&agent.Response{Response: "answer", UsagePromptTokens: 10, UsageCompletionTokens: 5, UsageTotalTokens: 15, UsageReported: true, UsageComplete: true})
+			if err != nil {
+				t.Error(err)
+			}
+			return gatewayruntime.Outcome{}
+		}
+		body := `{"model":"oswald","messages":[{"role":"user","content":"hi"}]`
+		if stream {
+			body += `,"stream":true,"stream_options":{"include_usage":true}}`
+		} else {
+			body += `}`
+		}
+		w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"prompt_tokens":10`) || !strings.Contains(w.Body.String(), `"completion_tokens":5`) || !strings.Contains(w.Body.String(), `"total_tokens":15`) {
+			t.Fatalf("stream=%t usage: %d %s", stream, w.Code, w.Body.String())
+		}
+	}
+	g := testGateway(t)
+	g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Response: "answer"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "prompt_tokens") {
+		t.Fatalf("unreported usage must be omitted: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestModelsAndUnsupportedOutput(t *testing.T) {
 	g := testGateway(t)
 	w := request(g, "GET", "/v1/models", "")
@@ -465,6 +537,72 @@ func TestBannedRequestHasNoResponseBody(t *testing.T) {
 	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
 	if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
 		t.Fatalf("banned request status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestLargeHistoryPassesToTokenBudget(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if len(req.ClientHistory) != 1 || len(req.ClientHistory[0].Content) != 100<<10 {
+			t.Errorf("large history not forwarded: %+v", len(req.ClientHistory))
+		}
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	body := `{"model":"oswald","messages":[{"role":"user","content":"` + strings.Repeat("a", 100<<10) + `"},{"role":"user","content":"hi"}]}`
+	w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("large history: %d", w.Code)
+	}
+}
+
+func TestManyTurnsPassToTokenBudget(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if len(req.ClientHistory) != 64 {
+			t.Errorf("turns not forwarded: %d", len(req.ClientHistory))
+		}
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	var turns strings.Builder
+	turns.WriteString(`{"model":"oswald","messages":[`)
+	for i := 0; i < 64; i++ {
+		if i > 0 {
+			turns.WriteString(",")
+		}
+		if i%2 == 0 {
+			turns.WriteString(`{"role":"user","content":"q"}`)
+		} else {
+			turns.WriteString(`{"role":"assistant","content":"a"}`)
+		}
+	}
+	turns.WriteString(`,{"role":"user","content":"hi"}]}`)
+	w := request(g, "POST", "/v1/chat/completions", turns.String(), "Bearer "+testAPIKey)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "ok") {
+		t.Fatalf("many turns: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOverBudgetMapsToBadRequest(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Kind: "over_budget", Model: "route"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("over budget status=%d body=%q", w.Code, w.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || result["error"] == nil {
+		t.Fatalf("missing JSON error: %v", err)
 	}
 }
 

@@ -453,7 +453,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		promptContext.EstimatedAfter = promptContext.RequiredEstimate
 		promptContext.RequiredOverBudget = promptContext.RequiredEstimate > inputLimit
 		if promptContext.RequiredOverBudget {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 	}
 	if promptContext.RequiredOverBudget {
@@ -562,7 +562,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		messages = preparedMessages
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 		if compactionStats.Compacted {
 			reqLog.Debug("agent.context.compacted", "compacted active request context",
@@ -726,7 +726,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
 					config.F("iteration", iteration),
 					config.F("tool_call_count", len(clientCalls)))
-				return &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls}, nil
+				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls}
+				response.setObservedUsage(usage.Snapshot())
+				return response, nil
 			}
 		}
 		iterationDecision := toolGovernor.BeginToolIteration()
@@ -1014,7 +1016,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		messages = preparedMessages
 		finalReq.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 		if compactionStats.Compacted {
 			reqLog.Debug("agent.context.compacted", "compacted active request context before final model call",
@@ -1115,7 +1117,7 @@ finalize:
 			retryReq.Messages = retryMessages
 			retryReq.Tools = nil
 			if request.Stateless && tokenbudget.EstimateRequest(retryReq.Messages, nil) > inputLimit {
-				return nil, fmt.Errorf("stateless request exceeds model input budget")
+				return &Response{Kind: "over_budget", Model: a.model}, nil
 			}
 
 			reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
@@ -1321,7 +1323,7 @@ finalize:
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("status", responseStatus),
 	)
-	return &Response{
+	final := &Response{
 		Kind:              responseKind,
 		Model:             a.model,
 		Response:          finalContent,
@@ -1330,5 +1332,7 @@ finalize:
 		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
-	}, nil
+	}
+	final.setObservedUsage(usage.Snapshot())
+	return final, nil
 }

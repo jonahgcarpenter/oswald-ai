@@ -146,10 +146,25 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	if _, ok := g.resolveKeyPrincipal(w, r); !ok {
+	principal, ok := g.resolveKeyPrincipal(w, r)
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}}})
+	model := map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}
+	// The key already selected the owning profile; advertise that profile's
+	// context window without exposing any credential material.
+	type profileConfigSource interface {
+		Config(string) (*config.Config, bool)
+	}
+	if source, ok := g.accounts.(profileConfigSource); ok {
+		if profile, ok := source.Config(principal.CanonicalUserID); ok && profile != nil {
+			if profile.ModelContextWindow > 0 {
+				model["context_length"] = profile.ModelContextWindow
+			}
+			model["capabilities"] = map[string]any{"tools": true, "input": []string{"text", "image"}, "output": []string{"text"}}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{model}})
 }
 
 type wireToolCall struct {
@@ -223,9 +238,6 @@ func parseTextParts(raw json.RawMessage, allowImages bool) (string, []string, bo
 		switch part.Type {
 		case "text":
 			if part.Text == nil || part.ImageURL != nil {
-				return "", nil, false
-			}
-			if len(*part.Text) > (32<<10)-text.Len() {
 				return "", nil, false
 			}
 			text.WriteString(*part.Text)
@@ -526,12 +538,11 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if len(input.Messages) == 0 || len(input.Messages) > 32 {
-		g.reject(w, http.StatusBadRequest, "invalid_messages", "Messages must contain 1 to 32 turns.")
+	if len(input.Messages) == 0 {
+		g.reject(w, http.StatusBadRequest, "invalid_messages", "Messages must contain at least 1 turn.")
 		return
 	}
 	history := make([]llm.ChatMessage, 0, len(input.Messages)-1)
-	total := 0
 	var currentImages []llm.InputImage
 	continuation := input.Messages[len(input.Messages)-1].Role == "tool"
 	for i, msg := range input.Messages {
@@ -546,7 +557,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
 			return
 		}
-		if msg.ReasoningContent != nil && (msg.Role != "assistant" || len(*msg.ReasoningContent) > 128<<10) {
+		if msg.ReasoningContent != nil && msg.Role != "assistant" {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Reasoning content is only supported on prior assistant messages.")
 			return
 		}
@@ -562,11 +573,6 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			text, _, valid := parseTextParts(msg.Content, false)
 			if !valid {
 				g.reject(w, http.StatusBadRequest, "unsupported_content", "Only text strings or arrays of text parts are supported.")
-				return
-			}
-			total += len(text)
-			if total > 128<<10 || len(text) > 32<<10 {
-				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
 				return
 			}
 			name := ""
@@ -591,19 +597,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			g.reject(w, http.StatusBadRequest, "unsupported_content", "Assistant messages require content or tool calls.")
 			return
 		}
-		if !last && msg.Role != "assistant" && msg.Role != "tool" {
-			total += len(text)
-			if total > 128<<10 || len(text) > 32<<10 {
-				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
-				return
-			}
-		}
 		if last {
-			total += len(text)
-			if total > 128<<10 || len(text) > 32<<10 {
-				g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
-				return
-			}
 			if strings.TrimSpace(text) == "" || strings.HasPrefix(strings.TrimSpace(text), "/") {
 				g.reject(w, http.StatusBadRequest, "invalid_prompt", "A nonempty, non-command user message is required.")
 				return
@@ -646,11 +640,6 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = msg.ReasoningContent
 		history = append(history, llm.ChatMessage{Role: msg.Role, Content: text, ToolCalls: calls})
-		total += len(text)
-		if total > 128<<10 {
-			g.reject(w, http.StatusBadRequest, "history_limit", "Message history exceeds limits.")
-			return
-		}
 	}
 	if !continuation {
 		g.reject(w, http.StatusBadRequest, "unsupported_role", "Messages must end in a user or tool message.")
