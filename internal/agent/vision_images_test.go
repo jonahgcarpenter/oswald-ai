@@ -205,16 +205,16 @@ func TestVisionHiddenAndBlockedForAPI(t *testing.T) {
 	executed := false
 	if err := reg.RegisterHandler(visionanalyze.Name, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		executed = true
-		return governance.Result{}, nil
+		return productiveResult("saw it"), nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "Hello", Stateless: true})
+	_, err := a.Process(context.Background(), Request{Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}, Prompt: "Hello", Stateless: true, ClientToolChoice: ClientToolChoice{Mode: "allowed", Allowed: []string{visionanalyze.Name}, AllowedMode: "auto"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executed || requestHasTool(chat.requests[0], visionanalyze.Name) || toolResultByID(chat.requests[1].Messages, "blocked") == nil {
-		t.Fatal("API exposed or executed vision, or omitted the blocked result")
+	if !executed || !requestHasTool(chat.requests[0], visionanalyze.Name) {
+		t.Fatal("API must expose vision to the model")
 	}
 }
 

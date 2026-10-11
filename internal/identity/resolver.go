@@ -8,4 +8,5 @@ type Resolver interface {
 	Resolve(string, string, bool) (Principal, error)
 	RequiresMention(string) bool
 	LocalOpenAIPrincipal(context.Context) (Principal, error)
+	ResolveAPIKey(string) (Principal, error)
 }

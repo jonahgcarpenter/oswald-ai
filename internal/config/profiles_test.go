@@ -73,7 +73,7 @@ func TestProfileYAMLInheritanceAndNoDotenvLoading(t *testing.T) {
 func TestProfileYAMLRejectsUnsafeOrUnsupportedConfiguration(t *testing.T) {
 	for _, tc := range []struct{ name, text string }{
 		{"unknown field", syntheticProfileConfig + "unknown: private-yaml-canary\n"},
-		{"non-loopback API", strings.ReplaceAll(syntheticProfileConfig, "127.0.0.1", "0.0.0.0")},
+		{"non-loopback API", strings.ReplaceAll(syntheticProfileConfig, "127.0.0.1", "1.2.3.4")},
 		{"traversal", strings.ReplaceAll(syntheticProfileConfig, "profile: alice", "profile: ../outside")},
 		{"duplicate route", strings.ReplaceAll(syntheticProfileConfig, "platform: bluebubbles\n      user_id: \"+15551234567\"", "platform: discord\n      user_id: \"123\"")},
 		{"duplicate YAML", syntheticProfileConfig + "model: {}\n"},

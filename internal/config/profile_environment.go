@@ -330,13 +330,13 @@ func profileDocument(global, override *yaml.Node) (*yaml.Node, error) {
 	base := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	for i := 0; i < len(global.Content); i += 2 {
 		switch global.Content[i].Value {
-		case "providers", "model", "tools", "mcp":
+		case "providers", "model", "tools", "mcp", "api":
 			base.Content = append(base.Content, cloneYAML(global.Content[i]), cloneYAML(global.Content[i+1]))
 		}
 	}
 	for i := 0; i < len(override.Content); i += 2 {
 		switch override.Content[i].Value {
-		case "providers", "model", "tools", "mcp":
+		case "providers", "model", "tools", "mcp", "api":
 		default:
 			return nil, configErr("config_profile_override_invalid", override.Content[i].Value)
 		}

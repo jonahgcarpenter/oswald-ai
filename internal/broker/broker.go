@@ -60,9 +60,23 @@ type Request struct {
 	TransportProfile string
 	Stateless        bool
 	ClientHistory    []llm.ChatMessage
-	Images           []llm.InputImage
-	StreamFunc       func(agent.StreamChunk)
-	ResponseChan     chan Result
+	ClientTools      []llm.Tool
+	ClientToolChoice agent.ClientToolChoice
+	// ClientParallelToolCalls carries the caller's explicit
+	// parallel_tool_calls preference through to the agent.
+	ClientParallelToolCalls *bool
+	// ClientGeneration carries the caller's sampling and stop parameters
+	// through to the agent for stateless requests.
+	ClientGeneration *agent.ClientGeneration
+	// ServiceTier carries the caller's validated service_tier value through
+	// to the agent for stateless requests.
+	ServiceTier string
+	// Ctx carries transport cancellation to the worker. Nil keeps the
+	// previous lifecycle-only behavior.
+	Ctx          context.Context
+	Images       []llm.InputImage
+	StreamFunc   func(agent.StreamChunk)
+	ResponseChan chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -264,6 +278,19 @@ func (b *Broker) Submit(req *Request) error {
 	requestCtx = requestctx.WithPrincipal(requestCtx, req.Principal)
 	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
 	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
+	// Transport cancellation (for example an HTTP client disconnect) cancels
+	// this request's work without touching the conversation lane or queued
+	// prompts. The watch is released on first delivery.
+	transport := req.Ctx
+	if transport == nil {
+		transport = b.lifecycleCtx
+	}
+	stopWatch := context.AfterFunc(transport, func() {
+		cancel(context.Cause(transport))
+	})
+	if err := transport.Err(); err != nil {
+		cancel(context.Cause(transport))
+	}
 	deliver := func(result Result) {
 		b.mu.Lock()
 		if !w.queuedAt.IsZero() {
@@ -275,7 +302,7 @@ func (b *Broker) Submit(req *Request) error {
 			}
 		}
 		b.mu.Unlock()
-		w.deliverOnce.Do(func() { deliverResult(req.ResponseChan, result) })
+		w.deliverOnce.Do(func() { stopWatch(); deliverResult(req.ResponseChan, result) })
 	}
 	w.run = func() error {
 		if cause := context.Cause(w.ctx); cause != nil {
@@ -291,7 +318,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.mu.Unlock()
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
-			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, Images: req.Images, StreamFunc: req.StreamFunc,
+			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)

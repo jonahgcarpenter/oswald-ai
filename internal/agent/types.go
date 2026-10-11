@@ -4,6 +4,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 )
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -18,19 +19,61 @@ type ModelMetrics struct {
 
 // Response is the final payload returned to the gateway after processing.
 type Response struct {
-	Kind               string                   `json:"-"`
-	PersistenceStatus  string                   `json:"-"`
-	ToolExecutionCount int                      `json:"-"`
-	ToolBlockedCount   int                      `json:"-"`
-	Model              string                   `json:"model"`
-	Response           string                   `json:"response,omitempty"`
-	Thinking           string                   `json:"thinking,omitempty"` // reasoning tokens emitted before the response
-	Error              string                   `json:"error,omitempty"`
-	Metrics            *ModelMetrics            `json:"metrics,omitempty"`
-	Attachments        []media.OutputAttachment `json:"-"`
+	Kind               string `json:"-"`
+	PersistenceStatus  string `json:"-"`
+	ToolExecutionCount int    `json:"-"`
+	ToolBlockedCount   int    `json:"-"`
+	// ToolChoiceError carries the fixed invalid_tool_choice code
+	// ("named_tool_missing" or "no_tools_available"). It is separate from
+	// Error so runtime telemetry keeps provider failures distinct.
+	ToolChoiceError string `json:"-"`
+	// FinishReason carries the terminal provider stop reason for text
+	// answers ("stop" or "length"). Empty behaves as "stop"; tool_calls
+	// answers are reported separately via ToolCalls.
+	FinishReason string `json:"-"`
+	// ServiceTier echoes the caller's validated service_tier request value
+	// in completion responses. Empty omits it.
+	ServiceTier string `json:"-"`
+	Model       string `json:"model"`
+	Response    string `json:"response,omitempty"`
+	Thinking    string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
+	// the gateway reports finish_reason tool_calls and omits server execution.
+	ToolCalls []llm.ToolCall `json:"-"`
+	// OswaldTools carries the server-side tool timeline (builtin/MCP calls
+	// executed inside the agent loop) for UIs that render a details timeline
+	// alongside the answer. It mirrors Ollama-style thinking/tool visibility
+	// while the OpenAI tool_calls field stays reserved for caller-owned tools.
+	OswaldTools []OswaldToolEvent `json:"-"`
+	// Usage totals accumulate observed provider-reported tokens across all
+	// model calls in this request. UsageReported is false when no call
+	// reported usage, in which case gateways must omit usage rather than
+	// invent it. UsageComplete is false when some submissions never reported.
+	UsagePromptTokens     int                      `json:"-"`
+	UsageCompletionTokens int                      `json:"-"`
+	UsageTotalTokens      int                      `json:"-"`
+	UsageReported         bool                     `json:"-"`
+	UsageComplete         bool                     `json:"-"`
+	Error                 string                   `json:"error,omitempty"`
+	Metrics               *ModelMetrics            `json:"metrics,omitempty"`
+	Attachments           []media.OutputAttachment `json:"-"`
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`
+}
+
+// OswaldToolEvent is one server-side tool timeline entry for streaming UIs.
+// Phase is "call" (invocation with arguments) or "result" (outcome with
+// result text). Arguments and ResultText reuse the UI-safe redaction already
+// applied to ToolStreamPayload (no image bytes, no reasoning).
+type OswaldToolEvent struct {
+	Name       string                   `json:"name"`
+	Phase      string                   `json:"phase"`
+	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
+	ResultText string                   `json:"result_text,omitempty"`
+	IsError    bool                     `json:"is_error,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web_search,omitempty"`
 }
 
 // Request contains one fully resolved request submitted to the agent.
@@ -58,8 +101,74 @@ type Request struct {
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
-	Images        []llm.InputImage
-	StreamFunc    func(StreamChunk)
+	// ClientTools are caller-supplied function definitions for this request only.
+	ClientTools []llm.Tool
+	// ClientToolChoice is the normalized caller preference. Mode is one of
+	// "", "none", "auto", "required", "named", or "allowed". Named carries a
+	// single forced tool name; Allowed carries a filtered tool-name set with
+	// AllowedMode "auto" or "required".
+	ClientToolChoice ClientToolChoice
+	// ClientParallelToolCalls carries the caller's explicit
+	// parallel_tool_calls preference. Nil leaves the provider default;
+	// single-tool forcing disables parallel calls unless overridden here.
+	ClientParallelToolCalls *bool
+	// ClientGeneration carries the caller's sampling and stop parameters
+	// for stateless requests. Nil leaves provider defaults untouched.
+	ClientGeneration *ClientGeneration
+	// ServiceTier carries the caller's validated service_tier value for
+	// stateless requests. Empty omits it from responses.
+	ServiceTier string
+	Images      []llm.InputImage
+	StreamFunc  func(StreamChunk)
+}
+
+// ClientToolChoice constrains the merged Oswald and caller tool catalog for
+// one stateless API request. It mirrors the OpenAI chat completions
+// tool_choice shape: string modes, a named function force, and the
+// allowed_tools allow-list.
+type ClientToolChoice struct {
+	// Mode is "", "none", "auto", "required", "named", or "allowed".
+	// Empty behaves as "auto".
+	Mode string
+	// Named names the single forced tool when Mode is "named".
+	Named string
+	// Allowed lists tool names to offer when Mode is "allowed".
+	Allowed []string
+	// AllowedMode is "auto" or "required" when Mode is "allowed".
+	AllowedMode string
+}
+
+// IsNone reports whether the caller requested no tool calls at all.
+func (c ClientToolChoice) IsNone() bool { return c.Mode == "none" }
+
+// ClientGeneration carries caller-supplied generation parameters for one
+// stateless API request. All fields are optional; nil leaves the provider
+// default in place. Ranges mirror the OpenAI chat completions contract:
+// temperature 0–2, top_p 0–1, frequency/presence penalties −2–2, seed any
+// integer, stop up to four sequences, max tokens a positive cap applied to
+// each provider call in the request loop.
+type ClientGeneration struct {
+	Temperature      *float64
+	TopP             *float64
+	FrequencyPenalty *float64
+	PresencePenalty  *float64
+	Seed             *int64
+	Stop             []string
+	MaxTokens        *int
+	// ResponseFormat is "" or "json_object"; richer schemas are rejected
+	// at the gateway because the provider loop cannot enforce them.
+	ResponseFormat string
+}
+
+// setObservedUsage records provider-reported request totals on the response.
+// Gateways omit usage unless UsageReported, so unreported turns never invent it.
+func (r *Response) setObservedUsage(s requestctx.UsageSnapshot) {
+	if r == nil {
+		return
+	}
+	r.UsagePromptTokens, r.UsageCompletionTokens, r.UsageTotalTokens = s.PromptTokens, s.CompletionTokens, s.TotalTokens
+	r.UsageReported = s.UsageReportedCallCount > 0
+	r.UsageComplete = r.UsageReported && s.ModelSubmissionCount > 0 && s.UsageCompleteCallCount == s.ModelSubmissionCount
 }
 
 // mapMetrics converts an LLM response into a model metrics summary.

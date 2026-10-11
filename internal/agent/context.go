@@ -18,12 +18,30 @@ import (
 
 // clientHistoryContext keeps caller-owned conversation text as quoted, lower-authority
 // reference data rather than replaying caller-supplied roles as model messages.
+// Prior thinking is retained in that quoted reference (Ollama thinking parity);
+// it is never replayed as model reasoning, executed, or persisted.
 func clientHistoryContext(history []llm.ChatMessage) (string, error) {
 	if len(history) == 0 {
 		return "", nil
 	}
 	for _, message := range history {
-		if (message.Role != "user" && message.Role != "assistant" && message.Role != "system" && message.Role != "developer") || len(message.Images) != 0 || message.Thinking != "" || len(message.ToolCalls) != 0 || message.ToolName != "" || message.ToolCallID != "" {
+		switch message.Role {
+		case "user", "assistant", "system", "developer", "tool":
+		default:
+			return "", fmt.Errorf("client history must contain only text")
+		}
+		if len(message.Images) != 0 {
+			return "", fmt.Errorf("client history must contain only text")
+		}
+		if message.Role == "tool" && (message.ToolName == "" && message.ToolCallID == "") {
+			return "", fmt.Errorf("client history must contain only text")
+		}
+		for _, call := range message.ToolCalls {
+			if call.ID == "" || call.Function.Name == "" {
+				return "", fmt.Errorf("client history must contain only text")
+			}
+		}
+		if len(message.ToolCalls) != 0 && message.Role != "assistant" {
 			return "", fmt.Errorf("client history must contain only text")
 		}
 	}

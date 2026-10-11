@@ -22,18 +22,22 @@ type Config struct {
 	BlueBubblesWebhookPath         string
 	BlueBubblesMentionPatterns     []*regexp.Regexp
 	DiscordToken                   string
+	OpenAIListenHost               string
 	OpenAIListenPort               string
-	LLMGatewayURL                  string
-	LLMGatewayModel                string
-	LLMGatewayProvider             string
-	LLMGatewayAPIKey               string
-	LLMGatewayVirtualKey           string
-	ModelContextWindow             int
-	BraveAPIKey                    string
-	SearxngURL                     string
-	ComfyUIURL                     string
-	ComfyUIGenerationTimeout       time.Duration
-	LogLevel                       Level
+	// OpenAIAPIKey is the per-profile bearer credential for the OpenAI gateway.
+	// Empty means the profile has no API access. It must never be logged.
+	OpenAIAPIKey             string
+	LLMGatewayURL            string
+	LLMGatewayModel          string
+	LLMGatewayProvider       string
+	LLMGatewayAPIKey         string
+	LLMGatewayVirtualKey     string
+	ModelContextWindow       int
+	BraveAPIKey              string
+	SearxngURL               string
+	ComfyUIURL               string
+	ComfyUIGenerationTimeout time.Duration
+	LogLevel                 Level
 }
 
 // RetentionPolicy supplies code-owned worker bounds.

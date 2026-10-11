@@ -250,7 +250,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	ctx = requestctx.WithInputImages(ctx, contextImages)
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
-		toolExposure.HideBuiltins(imagegenerate.Name, visionanalyze.Name)
+		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	toolGovernor := governance.New(a.toolPolicy)
@@ -423,6 +423,20 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 
 	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+	if request.Stateless {
+		var choiceErr error
+		initialCatalog, choiceErr = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
+		if choiceErr != nil {
+			reqLog.Debug("agent.loop.client_tool_choice", "rejected stateless tool choice",
+				config.F("mode", request.ClientToolChoice.Mode),
+				config.ErrorField(choiceErr))
+			errCode := "named_tool_missing"
+			if choiceErr.Error() == "no_tools_available" {
+				errCode = "no_tools_available"
+			}
+			return &Response{Kind: "invalid_tool_choice", Model: a.model, ToolChoiceError: errCode}, nil
+		}
+	}
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
@@ -450,7 +464,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		promptContext.EstimatedAfter = promptContext.RequiredEstimate
 		promptContext.RequiredOverBudget = promptContext.RequiredEstimate > inputLimit
 		if promptContext.RequiredOverBudget {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 	}
 	if promptContext.RequiredOverBudget {
@@ -487,6 +501,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// show what tools were called without ballooning history size.
 	var toolAnnotations []string
 	toolHistory := memory.EmptyToolHistory()
+	// oswaldTimeline records server-side tool calls/results for API UIs.
+	// It is populated whether or not a stream callback exists so stateless
+	// non-streaming responses carry the same details timeline.
+	var oswaldTimeline []OswaldToolEvent
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -540,8 +558,60 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		respSynthetic := false
 
 		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+		if request.Stateless {
+			var choiceErr error
+			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
+			if choiceErr != nil {
+				// The initial catalog already validated the choice; a later
+				// failure means governance retired an offered tool mid-request.
+				// Degrade to no tools rather than failing streamed work.
+				reqLog.Debug("agent.loop.client_tool_choice", "degraded stateless tool choice",
+					config.F("iteration", iteration),
+					config.F("mode", request.ClientToolChoice.Mode),
+					config.ErrorField(choiceErr))
+				catalog = offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
+			}
+		}
 		req.Tools = catalog.Tools
+		// Caller generation parameters apply to every provider call in the
+		// stateless loop; sampling/stop shape each model invocation equally.
+		req.Temperature, req.TopP = nil, nil
+		req.FrequencyPenalty, req.PresencePenalty = nil, nil
+		req.Seed, req.Stop = nil, nil
+		if request.Stateless && request.ClientGeneration != nil {
+			req.Temperature = request.ClientGeneration.Temperature
+			req.TopP = request.ClientGeneration.TopP
+			req.FrequencyPenalty = request.ClientGeneration.FrequencyPenalty
+			req.PresencePenalty = request.ClientGeneration.PresencePenalty
+			req.Seed = request.ClientGeneration.Seed
+			req.Stop = request.ClientGeneration.Stop
+			req.MaxTokens = request.ClientGeneration.MaxTokens
+			req.Format = request.ClientGeneration.ResponseFormat
+		}
+		// Spec forcing is first-call only: later iterations revert to auto so
+		// executed Oswald tools cannot force an endless tool-call loop.
+		// Single-tool catalogs also disable parallel calls per provider
+		// contract unless the caller overrode the preference explicitly.
 		req.ToolChoice = ""
+		req.ParallelToolCalls = request.ClientParallelToolCalls
+		if request.Stateless && iteration == 1 && len(catalog.Tools) > 0 {
+			switch request.ClientToolChoice.Mode {
+			case "required", "named":
+				req.ToolChoice = llm.ToolChoiceRequired
+			case "allowed":
+				if request.ClientToolChoice.AllowedMode == "required" {
+					req.ToolChoice = llm.ToolChoiceRequired
+				}
+			}
+			if req.ParallelToolCalls == nil {
+				single := request.ClientToolChoice.Mode == "named" ||
+					(request.ClientToolChoice.Mode == "allowed" && len(request.ClientToolChoice.Allowed) == 1)
+				if single {
+					disabled := false
+					req.ParallelToolCalls = &disabled
+				}
+			}
+		}
 		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent
 		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, initialPressure)
 		if compactErr != nil {
@@ -556,7 +626,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		messages = preparedMessages
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 		if compactionStats.Compacted {
 			reqLog.Debug("agent.context.compacted", "compacted active request context",
@@ -699,6 +769,37 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
+		// Stateless API: caller-owned tools are never executed server-side.
+		// Return them verbatim so the external app can run the standard loop.
+		// Only currently offered tools qualify; disallowed or hallucinated
+		// names fall through to governance below.
+		if request.Stateless && len(request.ClientTools) > 0 {
+			var clientCalls []llm.ToolCall
+			for _, tc := range resp.Message.ToolCalls {
+				if _, offered := catalog.Policies[tc.Function.Name]; !offered {
+					continue
+				}
+				if a.isClientToolCall(request.ClientTools, tc.Function.Name) {
+					clientCalls = append(clientCalls, tc)
+				}
+			}
+			if len(clientCalls) > 0 {
+				finalThinking := accumulatedThinking.String()
+				if finalThinking == "" {
+					finalThinking = resp.Message.Thinking
+				}
+				finalContent := accumulatedContent.String()
+				if finalContent == "" {
+					finalContent = resp.Message.Content
+				}
+				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
+					config.F("iteration", iteration),
+					config.F("tool_call_count", len(clientCalls)))
+				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, OswaldTools: oswaldTimeline, ServiceTier: request.ServiceTier}
+				response.setObservedUsage(usage.Snapshot())
+				return response, nil
+			}
+		}
 		iterationDecision := toolGovernor.BeginToolIteration()
 
 		// Append the assistant turn (including its tool calls) to the conversation.
@@ -715,8 +816,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			toolStartedAt := time.Now()
 
 			// Emit a structured tool-call chunk so UIs can render the invocation.
+			callPayload := toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)
+			oswaldTimeline = append(oswaldTimeline, OswaldToolEvent{
+				Name:      callPayload.Name,
+				Phase:     "call",
+				Arguments: callPayload.Arguments,
+			})
 			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)})
+				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: callPayload})
 			}
 
 			var toolContent string
@@ -756,7 +863,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
 				if execErr == nil && len(result.Images) > 0 {
-					if toolName != visionanalyze.Name || gateway == "openai" || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
+					if toolName != visionanalyze.Name || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
 						execErr = fmt.Errorf("tool returned unsupported model images")
 					}
 				}
@@ -901,14 +1008,22 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
+			resultPayload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
+			if toolName == websearch.Name && resultPayload.WebSearch != nil {
+				resultPayload.WebSearch.IsDegraded = result.IsDegraded
+			}
+			oswaldTimeline = append(oswaldTimeline, OswaldToolEvent{
+				Name:       resultPayload.Name,
+				Phase:      "result",
+				ResultText: resultPayload.ResultText,
+				IsError:    resultPayload.IsError,
+				DurationMS: resultPayload.DurationMS,
+				WebSearch:  resultPayload.WebSearch,
+			})
 			if streamCallback != nil {
-				payload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
-				if toolName == websearch.Name && payload.WebSearch != nil {
-					payload.WebSearch.IsDegraded = result.IsDegraded
-				}
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
-					Tool: payload,
+					Tool: resultPayload,
 				})
 			}
 
@@ -984,7 +1099,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		messages = preparedMessages
 		finalReq.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
-			return nil, fmt.Errorf("stateless request exceeds model input budget")
+			return &Response{Kind: "over_budget", Model: a.model}, nil
 		}
 		if compactionStats.Compacted {
 			reqLog.Debug("agent.context.compacted", "compacted active request context before final model call",
@@ -1085,7 +1200,7 @@ finalize:
 			retryReq.Messages = retryMessages
 			retryReq.Tools = nil
 			if request.Stateless && tokenbudget.EstimateRequest(retryReq.Messages, nil) > inputLimit {
-				return nil, fmt.Errorf("stateless request exceeds model input budget")
+				return &Response{Kind: "over_budget", Model: a.model}, nil
 			}
 
 			reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
@@ -1291,14 +1406,24 @@ finalize:
 		config.F("duration_ms", time.Since(startedAt).Milliseconds()),
 		config.F("status", responseStatus),
 	)
-	return &Response{
+	final := &Response{
 		Kind:              responseKind,
 		Model:             a.model,
 		Response:          finalContent,
 		Thinking:          finalThinking,
+		OswaldTools:       oswaldTimeline,
 		Metrics:           mapMetrics(lastResp),
 		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
-	}, nil
+		ServiceTier:       request.ServiceTier,
+	}
+	if lastResp != nil {
+		switch strings.TrimSpace(lastResp.DoneReason) {
+		case "length", "content_filter":
+			final.FinishReason = strings.TrimSpace(lastResp.DoneReason)
+		}
+	}
+	final.setObservedUsage(usage.Snapshot())
+	return final, nil
 }

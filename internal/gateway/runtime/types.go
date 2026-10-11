@@ -66,9 +66,30 @@ type Request struct {
 	// Stateless uses only ClientHistory for prior conversation context and does not persist this turn.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
-	Images        []llm.InputImage
-	Unsupported   []string
-	Reply         *routing.ReplyContext
+	// Context carries transport cancellation (for example an HTTP client
+	// disconnect). Nil means no transport deadline; commands and gateways
+	// without a transport context leave it nil so that work outlives the
+	// transport as before.
+	Context context.Context
+	// ClientTools are caller-supplied function definitions combined with Oswald
+	// tools for this request only. They are never executed server-side.
+	ClientTools []llm.Tool
+	// ClientToolChoice is the normalized caller preference. See
+	// agent.ClientToolChoice for the "none", "required", named, and
+	// "allowed_tools" modes applied to the merged catalog.
+	ClientToolChoice agent.ClientToolChoice
+	// ClientParallelToolCalls carries the caller's explicit
+	// parallel_tool_calls preference through to the agent.
+	ClientParallelToolCalls *bool
+	// ClientGeneration carries the caller's sampling and stop parameters
+	// through to the agent for stateless requests.
+	ClientGeneration *agent.ClientGeneration
+	// ServiceTier carries the caller's validated service_tier value through
+	// to the agent for stateless requests.
+	ServiceTier string
+	Images      []llm.InputImage
+	Unsupported []string
+	Reply       *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
 	// OnAllowed runs after profile authentication, before fallback, command, or model work.
