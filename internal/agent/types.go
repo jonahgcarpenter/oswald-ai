@@ -31,9 +31,12 @@ type Response struct {
 	// answers ("stop" or "length"). Empty behaves as "stop"; tool_calls
 	// answers are reported separately via ToolCalls.
 	FinishReason string `json:"-"`
-	Model        string `json:"model"`
-	Response     string `json:"response,omitempty"`
-	Thinking     string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
+	// ServiceTier echoes the caller's validated service_tier request value
+	// in completion responses. Empty omits it.
+	ServiceTier string `json:"-"`
+	Model       string `json:"model"`
+	Response    string `json:"response,omitempty"`
+	Thinking    string `json:"thinking,omitempty"` // reasoning tokens emitted before the response
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
 	ToolCalls []llm.ToolCall `json:"-"`
@@ -93,8 +96,11 @@ type Request struct {
 	// ClientGeneration carries the caller's sampling and stop parameters
 	// for stateless requests. Nil leaves provider defaults untouched.
 	ClientGeneration *ClientGeneration
-	Images           []llm.InputImage
-	StreamFunc       func(StreamChunk)
+	// ServiceTier carries the caller's validated service_tier value for
+	// stateless requests. Empty omits it from responses.
+	ServiceTier string
+	Images      []llm.InputImage
+	StreamFunc  func(StreamChunk)
 }
 
 // ClientToolChoice constrains the merged Oswald and caller tool catalog for

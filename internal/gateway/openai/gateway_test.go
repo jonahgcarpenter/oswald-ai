@@ -92,6 +92,8 @@ func TestValidation(t *testing.T) {
 		{"penalty out of range", `{"model":"oswald","frequency_penalty":2.5,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"too many stops", `{"model":"oswald","stop":["a","b","c","d","e"],"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"multiple choices unsupported", `{"model":"oswald","n":2,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"float seed unsupported", `{"model":"oswald","seed":7.5,"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
+		{"bad service tier", `{"model":"oswald","service_tier":"ultra","messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"json schema unsupported", `{"model":"oswald","response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{}}},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid client tool", `{"model":"oswald","tools":["read"],"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
 		{"invalid stream options", `{"model":"oswald","stream_options":{"include_usage":"yes"},"messages":[{"role":"user","content":"hi"}]}`, []string{"Bearer " + testAPIKey}, 400},
@@ -914,5 +916,99 @@ func TestConnectedLogReportsListenerReadiness(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("connected log must not carry credential material")
 		}
+	}
+}
+
+func TestServiceTierEchoedWhenSet(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		g := testGateway(t)
+		g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+			if req.ServiceTier != "flex" {
+				t.Errorf("tier %q, want flex", req.ServiceTier)
+			}
+			if err := responder.SendAgentResponse(&agent.Response{Response: "ok", ServiceTier: req.ServiceTier}); err != nil {
+				t.Error(err)
+			}
+			return gatewayruntime.Outcome{}
+		}
+		body := `{"model":"oswald","service_tier":"flex","messages":[{"role":"user","content":"hi"}]}`
+		if stream {
+			body = `{"model":"oswald","stream":true,"service_tier":"flex","messages":[{"role":"user","content":"hi"}]}`
+		}
+		w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"service_tier":"flex"`) {
+			t.Fatalf("stream=%t tier echo: %d %s", stream, w.Code, w.Body.String())
+		}
+	}
+	g := testGateway(t)
+	g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "service_tier") {
+		t.Fatalf("unset tier must be omitted: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEmptyStopMeansNoStops(t *testing.T) {
+	for _, tc := range []struct {
+		stop string
+		want []string
+	}{
+		{`"stop":""`, nil},
+		{`"stop":[]`, nil},
+		{`"stop":["END",""]`, []string{"END"}},
+	} {
+		g := testGateway(t)
+		var generation *agent.ClientGeneration
+		g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+			generation = req.ClientGeneration
+			if err := responder.SendAgentResponse(&agent.Response{Response: "ok"}); err != nil {
+				t.Error(err)
+			}
+			return gatewayruntime.Outcome{}
+		}
+		w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald",`+tc.stop+`,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+		if w.Code != 200 {
+			t.Fatalf("stop %s status=%d body=%s", tc.stop, w.Code, w.Body.String())
+		}
+		var got []string
+		if generation != nil {
+			got = generation.Stop
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("stop %s forwarded stops: %+v", tc.stop, got)
+		}
+		for i := range got {
+			if got[i] != tc.want[i] || got[i] == "" {
+				t.Fatalf("stop %s forwarded stops: %+v", tc.stop, got)
+			}
+		}
+	}
+}
+
+func TestErrorShapeCarriesParam(t *testing.T) {
+	g := testGateway(t)
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[]}`, "Bearer "+testAPIKey)
+	var result struct {
+		Error struct {
+			Message string  `json:"message"`
+			Type    string  `json:"type"`
+			Param   *string `json:"param"`
+			Code    string  `json:"code"`
+		} `json:"error"`
+	}
+	if w.Code != 400 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Error.Type == "" || result.Error.Code == "" {
+		t.Fatalf("error shape: %d %s", w.Code, w.Body.String())
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["error"].(map[string]any)["param"]; !ok {
+		t.Fatalf("error must carry param: %s", w.Body.String())
 	}
 }

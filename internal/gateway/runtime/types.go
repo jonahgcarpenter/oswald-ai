@@ -84,9 +84,12 @@ type Request struct {
 	// ClientGeneration carries the caller's sampling and stop parameters
 	// through to the agent for stateless requests.
 	ClientGeneration *agent.ClientGeneration
-	Images           []llm.InputImage
-	Unsupported      []string
-	Reply            *routing.ReplyContext
+	// ServiceTier carries the caller's validated service_tier value through
+	// to the agent for stateless requests.
+	ServiceTier string
+	Images      []llm.InputImage
+	Unsupported []string
+	Reply       *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
 	// OnAllowed runs after profile authentication, before fallback, command, or model work.

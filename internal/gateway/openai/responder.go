@@ -20,6 +20,7 @@ type responseWriter struct {
 	id           string
 	stream       bool
 	includeUsage bool
+	serviceTier  string
 	sent         bool
 	finished     bool
 	created      int64
@@ -71,7 +72,11 @@ func (r *responseWriter) sendChoice(delta map[string]any, finish any) error {
 	if err := r.contextErr(); err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]any{"id": r.id, "object": "chat.completion.chunk", "created": r.created, "model": "oswald", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+	chunk := map[string]any{"id": r.id, "object": "chat.completion.chunk", "created": r.created, "model": "oswald", "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}}
+	if r.serviceTier != "" {
+		chunk["service_tier"] = r.serviceTier
+	}
+	payload, _ := json.Marshal(chunk)
 	r.sent = true
 	if err := r.writeFrame(fmt.Sprintf("data: %s\n\n", payload)); err != nil {
 		return err
@@ -128,6 +133,9 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	if response == nil || response.Error != "" || response.Kind == "provider_error" {
 		return r.SendAgentError("")
 	}
+	if response.ServiceTier != "" {
+		r.serviceTier = response.ServiceTier
+	}
 	if response.Kind == "over_budget" {
 		return r.failure(http.StatusBadRequest, "invalid_request_error", "Message history exceeds the model context budget.")
 	}
@@ -180,6 +188,9 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	// Stateless agent requests may make several provider calls; usage carries
 	// observed request totals and is omitted when nothing reported.
 	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason(response)}}}
+	if r.serviceTier != "" {
+		completion["service_tier"] = r.serviceTier
+	}
 	if usage := wireUsage(response); usage != nil {
 		completion["usage"] = usage
 	}
@@ -247,6 +258,9 @@ func (r *responseWriter) sendToolCalls(response *agent.Response) error {
 		message["reasoning_content"] = response.Thinking
 	}
 	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}}
+	if r.serviceTier != "" {
+		completion["service_tier"] = r.serviceTier
+	}
 	if usage := wireUsage(response); usage != nil {
 		completion["usage"] = usage
 	}
@@ -273,13 +287,13 @@ func (r *responseWriter) failure(code int, kind, message string) error {
 	}
 	if r.stream && r.sent {
 		r.finished = true
-		payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": kind, "code": kind}})
+		payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": kind}})
 		if err := r.writeFrame(fmt.Sprintf("data: %s\n\n", payload)); err != nil {
 			return err
 		}
 		return r.flush()
 	}
-	return r.sendJSON(code, map[string]any{"error": map[string]any{"message": message, "type": kind, "code": kind}})
+	return r.sendJSON(code, map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": kind}})
 }
 
 func (r *responseWriter) contextErr() error {

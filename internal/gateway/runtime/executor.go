@@ -435,6 +435,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		ClientToolChoice:        req.ClientToolChoice,
 		ClientParallelToolCalls: req.ClientParallelToolCalls,
 		ClientGeneration:        req.ClientGeneration,
+		ServiceTier:             req.ServiceTier,
 		Ctx:                     req.Context,
 		Images:                  decision.Images,
 		StreamFunc:              req.StreamFunc,

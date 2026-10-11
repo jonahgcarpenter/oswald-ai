@@ -791,7 +791,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
 					config.F("iteration", iteration),
 					config.F("tool_call_count", len(clientCalls)))
-				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls}
+				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, ServiceTier: request.ServiceTier}
 				response.setObservedUsage(usage.Snapshot())
 				return response, nil
 			}
@@ -1397,6 +1397,7 @@ finalize:
 		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,
 		SessionGeneration: storedTurn.Generation,
+		ServiceTier:       request.ServiceTier,
 	}
 	if lastResp != nil {
 		switch strings.TrimSpace(lastResp.DoneReason) {

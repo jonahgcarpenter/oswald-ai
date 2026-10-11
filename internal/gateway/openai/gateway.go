@@ -247,10 +247,11 @@ type chatRequest struct {
 	TopP                *float64          `json:"top_p"`
 	FrequencyPenalty    *float64          `json:"frequency_penalty"`
 	PresencePenalty     *float64          `json:"presence_penalty"`
-	Seed                *int64            `json:"seed"`
+	Seed                json.RawMessage   `json:"seed"`
 	Stop                json.RawMessage   `json:"stop"`
 	N                   *int              `json:"n"`
 	ResponseFormat      json.RawMessage   `json:"response_format"`
+	ServiceTier         *string           `json:"service_tier"`
 }
 
 type contentPart struct {
@@ -449,7 +450,8 @@ func parseToolChoice(raw json.RawMessage) (agent.ClientToolChoice, bool) {
 }
 
 // parseStopSequences normalizes the OpenAI stop field (a string or an array
-// of up to four strings) into a sequence list. Null/missing means no stops.
+// of up to four strings) into a sequence list. Null/missing means no stops;
+// empty sequences are dropped, and an all-empty input means no stops.
 func parseStopSequences(raw json.RawMessage) ([]string, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
@@ -460,18 +462,28 @@ func parseStopSequences(raw json.RawMessage) ([]string, bool) {
 		if json.Unmarshal(trimmed, &sequence) != nil || len(sequence) > 4096 {
 			return nil, false
 		}
+		if sequence == "" {
+			return nil, true
+		}
 		return []string{sequence}, true
 	}
 	var sequences []string
-	if json.Unmarshal(trimmed, &sequences) != nil || len(sequences) == 0 || len(sequences) > 4 {
+	if json.Unmarshal(trimmed, &sequences) != nil || len(sequences) > 4 {
 		return nil, false
 	}
+	kept := sequences[:0]
 	for _, sequence := range sequences {
 		if len(sequence) > 4096 {
 			return nil, false
 		}
+		if sequence != "" {
+			kept = append(kept, sequence)
+		}
 	}
-	return sequences, true
+	if len(kept) == 0 {
+		return nil, true
+	}
+	return kept, true
 }
 
 // parseResponseFormat normalizes the OpenAI response_format field. Only the
@@ -496,6 +508,28 @@ func parseResponseFormat(raw json.RawMessage) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// parseSeed normalizes the OpenAI seed field to an integer. Floats and
+// out-of-range values fail as unsupported options rather than malformed
+// JSON: the envelope is valid, only the value is unusable.
+func parseSeed(raw json.RawMessage) (*int64, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil, true
+	}
+	var seed int64
+	if json.Unmarshal(trimmed, &seed) != nil {
+		return nil, false
+	}
+	// Reject floats such as 7.5, which decode into int64 targets only by
+	// truncation on some parsers; encoding/json rejects them outright, but
+	// re-marshaling guards against exponential forms losing precision.
+	var check float64
+	if json.Unmarshal(trimmed, &check) != nil || check != math.Trunc(check) {
+		return nil, false
+	}
+	return &seed, true
 }
 
 func inRange(value *float64, min, max float64) bool {
@@ -637,9 +671,9 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	}
 	for key := range top {
 		switch key {
-		case "model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "tools", "tool_choice", "parallel_tool_calls", "response_format":
+		case "model", "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens", "tools", "tool_choice", "parallel_tool_calls", "response_format", "service_tier":
 		case "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop", "n":
-		case "top_k", "repetition_penalty", "user", "logit_bias", "logprobs", "top_logprobs", "service_tier", "reasoning_effort", "store":
+		case "top_k", "repetition_penalty", "user", "logit_bias", "logprobs", "top_logprobs", "reasoning_effort", "store":
 			delete(top, key)
 		default:
 			g.reject(w, http.StatusBadRequest, "invalid_json", "Invalid or unsupported JSON request.")
@@ -699,6 +733,11 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
 		return
 	}
+	seed, valid := parseSeed(input.Seed)
+	if !valid {
+		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported client generation options.")
+		return
+	}
 	if input.N != nil && *input.N != 1 {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Only a single completion choice is supported.")
 		return
@@ -708,9 +747,21 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported response format.")
 		return
 	}
+	tier := ""
+	if input.ServiceTier != nil {
+		switch *input.ServiceTier {
+		case "auto", "default", "flex", "scale", "priority", "fast":
+			// Single-tier deployment: the requested tier is acknowledged
+			// verbatim in completion responses without changing routing.
+			tier = *input.ServiceTier
+		default:
+			g.reject(w, http.StatusBadRequest, "unsupported_options", "Unsupported service tier.")
+			return
+		}
+	}
 	var generation *agent.ClientGeneration
 	if input.Temperature != nil || input.TopP != nil || input.FrequencyPenalty != nil ||
-		input.PresencePenalty != nil || input.Seed != nil || stop != nil ||
+		input.PresencePenalty != nil || seed != nil || stop != nil ||
 		input.MaxTokens != nil || input.MaxCompletionTokens != nil || format != "" {
 		cap := input.MaxTokens
 		if cap == nil {
@@ -721,7 +772,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			TopP:             input.TopP,
 			FrequencyPenalty: input.FrequencyPenalty,
 			PresencePenalty:  input.PresencePenalty,
-			Seed:             input.Seed,
+			Seed:             seed,
 			Stop:             stop,
 			MaxTokens:        cap,
 			ResponseFormat:   format,
@@ -822,7 +873,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 			if input.Stream {
 				streamFunc = responder.Stream
 			}
-			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, Images: currentImages, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
+			outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: text, PublicUserText: text, ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, ServiceTier: tier, Images: currentImages, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 			if !responder.sent && r.Context().Err() == nil {
 				if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 					w.WriteHeader(http.StatusNoContent)
@@ -859,7 +910,7 @@ func (g *Gateway) completions(w http.ResponseWriter, r *http.Request) {
 	if input.Stream {
 		streamFunc = responder.Stream
 	}
-	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
+	outcome := g.execute(gatewayruntime.Request{ReceivedAt: time.Now(), RequestID: id, ChatID: "openai:" + id, SessionKey: "openai:" + id, Principal: principal, IsDirect: true, IsMention: true, Text: toolContinuationPrompt, PublicUserText: "", ClientHistory: history, ClientTools: clientTools, ClientToolChoice: toolChoice, ClientParallelToolCalls: input.ParallelToolCalls, ClientGeneration: generation, ServiceTier: tier, Stateless: true, Context: r.Context(), StreamFunc: streamFunc}, deps, responder)
 	if !responder.sent && r.Context().Err() == nil {
 		if outcome.Action == routing.ActionIgnore && outcome.Reason == "user_banned" {
 			w.WriteHeader(http.StatusNoContent)
@@ -876,5 +927,5 @@ func writeJSON(w http.ResponseWriter, code int, value any) {
 }
 
 func writeError(w http.ResponseWriter, code int, kind, message string) {
-	writeJSON(w, code, map[string]any{"error": map[string]any{"message": message, "type": kind, "code": kind}})
+	writeJSON(w, code, map[string]any{"error": map[string]any{"message": message, "type": kind, "param": nil, "code": kind}})
 }
