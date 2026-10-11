@@ -419,43 +419,60 @@ func TestResponderDeliveryFailures(t *testing.T) {
 	}
 }
 
-func TestModelsAdvertiseProfileContext(t *testing.T) {
-	log := config.NewLogger(config.LevelDebug)
-	directory, err := profiles.NewDirectory(&config.Config{ProfileRoot: t.TempDir(), ProfileName: "default", OpenAIListenHost: "127.0.0.1", OpenAIListenPort: "12345", OpenAIAPIKey: testAPIKey, ModelContextWindow: 262144, Profiles: map[string]*config.Config{"api": {ProfileName: "api"}}}, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g, err := New("127.0.0.1", "12345", directory, gatewayruntime.Dependencies{}, "route", log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g.resolveKey = func(raw string) (identity.Principal, error) {
-		if raw != testAPIKey {
-			return identity.Principal{}, profiles.ErrUnmappedIdentity
-		}
-		return identity.Principal{CanonicalUserID: "default", Gateway: "openai", ExternalID: "api:default", Assurance: identity.AssuranceAPIKey}, nil
-	}
+func TestModelsListIsSpecPure(t *testing.T) {
+	g := testGateway(t)
 	w := request(g, "GET", "/v1/models", "")
 	var result struct {
-		Data []struct {
-			ID            string `json:"id"`
-			ContextLength *int   `json:"context_length"`
-			Capabilities  *struct {
-				Tools  bool     `json:"tools"`
-				Input  []string `json:"input"`
-				Output []string `json:"output"`
-			} `json:"capabilities"`
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int    `json:"created"`
+			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Data) != 1 || result.Data[0].ID != "oswald" {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Object != "list" || len(result.Data) != 1 {
 		t.Fatalf("models: %d %s", w.Code, w.Body.String())
 	}
-	if result.Data[0].ContextLength == nil || *result.Data[0].ContextLength != 262144 {
-		t.Fatalf("missing context length: %s", w.Body.String())
+	entry := result.Data[0]
+	if entry.ID != "oswald" || entry.Object != "model" || entry.OwnedBy != "oswald" {
+		t.Fatalf("unexpected model entry: %+v", entry)
 	}
-	caps := result.Data[0].Capabilities
-	if caps == nil || !caps.Tools || len(caps.Input) != 2 || len(caps.Output) != 1 {
-		t.Fatalf("missing capabilities: %s", w.Body.String())
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"context_length", "capabilities"} {
+		if _, ok := raw["data"].([]any)[0].(map[string]any)[key]; ok {
+			t.Fatalf("additive field %q must not be advertised: %s", key, w.Body.String())
+		}
+	}
+}
+
+func TestRetrieveModel(t *testing.T) {
+	g := testGateway(t)
+	w := request(g, "GET", "/v1/models/oswald", "")
+	var entry struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int    `json:"created"`
+		OwnedBy string `json:"owned_by"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &entry) != nil || entry.ID != "oswald" || entry.Object != "model" || entry.OwnedBy != "oswald" {
+		t.Fatalf("retrieve: %d %s", w.Code, w.Body.String())
+	}
+	w = request(g, "GET", "/v1/models/other", "")
+	var result map[string]any
+	if w.Code != http.StatusNotFound || json.Unmarshal(w.Body.Bytes(), &result) != nil || result["error"] == nil {
+		t.Fatalf("unknown model status=%d body=%q", w.Code, w.Body.String())
+	}
+	w = request(g, "POST", "/v1/models/oswald", `{"model":"oswald"}`)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("retrieve method status=%d", w.Code)
+	}
+	w = request(g, "GET", "/v1/models/oswald", "", "")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("keyless retrieve status=%d", w.Code)
 	}
 }
 

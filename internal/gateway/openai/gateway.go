@@ -97,6 +97,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", g.models)
+	mux.HandleFunc("/v1/models/", g.retrieveModel)
 	mux.HandleFunc("/v1/chat/completions", g.completions)
 	return mux
 }
@@ -163,25 +164,35 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
 		return
 	}
-	principal, ok := g.resolveKeyPrincipal(w, r)
-	if !ok {
+	if _, ok := g.resolveKeyPrincipal(w, r); !ok {
 		return
 	}
-	model := map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}
-	// The key already selected the owning profile; advertise that profile's
-	// context window without exposing any credential material.
-	type profileConfigSource interface {
-		Config(string) (*config.Config, bool)
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{oswaldModel()}})
+}
+
+// retrieveModel serves the OpenAI retrieve-model endpoint for the single
+// supported model id. Unknown ids fail as JSON errors, never the mux's
+// HTML page.
+func (g *Gateway) retrieveModel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		g.reject(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed.")
+		return
 	}
-	if source, ok := g.accounts.(profileConfigSource); ok {
-		if profile, ok := source.Config(principal.CanonicalUserID); ok && profile != nil {
-			if profile.ModelContextWindow > 0 {
-				model["context_length"] = profile.ModelContextWindow
-			}
-			model["capabilities"] = map[string]any{"tools": true, "input": []string{"text", "image"}, "output": []string{"text"}}
-		}
+	if _, ok := g.resolveKeyPrincipal(w, r); !ok {
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": []any{model}})
+	if strings.TrimPrefix(r.URL.Path, "/v1/models/") != "oswald" {
+		g.reject(w, http.StatusNotFound, "not_found", "No such model.")
+		return
+	}
+	writeJSON(w, http.StatusOK, oswaldModel())
+}
+
+// oswaldModel returns the spec-pure model object: no additive discovery
+// fields. Clients declare their own capabilities and limits locally.
+func oswaldModel() map[string]any {
+	return map[string]any{"id": "oswald", "object": "model", "created": 0, "owned_by": "oswald"}
 }
 
 type wireToolCall struct {
