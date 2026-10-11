@@ -501,6 +501,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// show what tools were called without ballooning history size.
 	var toolAnnotations []string
 	toolHistory := memory.EmptyToolHistory()
+	// oswaldTimeline records server-side tool calls/results for API UIs.
+	// It is populated whether or not a stream callback exists so stateless
+	// non-streaming responses carry the same details timeline.
+	var oswaldTimeline []OswaldToolEvent
 
 	// Build the streaming callback that routes thinking vs content chunks.
 	// Tool-call iterations are streamed too — the model may reason aloud before
@@ -791,7 +795,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				reqLog.Debug("agent.loop.client_tools", "returning caller-owned tool calls",
 					config.F("iteration", iteration),
 					config.F("tool_call_count", len(clientCalls)))
-				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, ServiceTier: request.ServiceTier}
+				response := &Response{Kind: "tool_calls", Model: a.model, Response: finalContent, Thinking: finalThinking, ToolCalls: clientCalls, OswaldTools: oswaldTimeline, ServiceTier: request.ServiceTier}
 				response.setObservedUsage(usage.Snapshot())
 				return response, nil
 			}
@@ -812,8 +816,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			toolStartedAt := time.Now()
 
 			// Emit a structured tool-call chunk so UIs can render the invocation.
+			callPayload := toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)
+			oswaldTimeline = append(oswaldTimeline, OswaldToolEvent{
+				Name:      callPayload.Name,
+				Phase:     "call",
+				Arguments: callPayload.Arguments,
+			})
 			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)})
+				streamCallback(StreamChunk{Type: ChunkToolCall, Tool: callPayload})
 			}
 
 			var toolContent string
@@ -998,14 +1008,22 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
+			resultPayload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
+			if toolName == websearch.Name && resultPayload.WebSearch != nil {
+				resultPayload.WebSearch.IsDegraded = result.IsDegraded
+			}
+			oswaldTimeline = append(oswaldTimeline, OswaldToolEvent{
+				Name:       resultPayload.Name,
+				Phase:      "result",
+				ResultText: resultPayload.ResultText,
+				IsError:    resultPayload.IsError,
+				DurationMS: resultPayload.DurationMS,
+				WebSearch:  resultPayload.WebSearch,
+			})
 			if streamCallback != nil {
-				payload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
-				if toolName == websearch.Name && payload.WebSearch != nil {
-					payload.WebSearch.IsDegraded = result.IsDegraded
-				}
 				streamCallback(StreamChunk{
 					Type: ChunkToolResult,
-					Tool: payload,
+					Tool: resultPayload,
 				})
 			}
 
@@ -1393,6 +1411,7 @@ finalize:
 		Model:             a.model,
 		Response:          finalContent,
 		Thinking:          finalThinking,
+		OswaldTools:       oswaldTimeline,
 		Metrics:           mapMetrics(lastResp),
 		Attachments:       outputAttachments,
 		SourceTurnID:      storedTurn.ID,

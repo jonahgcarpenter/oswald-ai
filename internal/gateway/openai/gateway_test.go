@@ -144,10 +144,10 @@ func TestOpenCodeChatRequest(t *testing.T) {
 	}
 }
 
-func TestOpenCodeFollowUpIgnoresReasoning(t *testing.T) {
+func TestOpenCodeFollowUpRetainsReasoningAsReference(t *testing.T) {
 	g := testGateway(t)
 	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
-		if req.Text != "another question" || len(req.ClientHistory) != 2 || req.ClientHistory[1].Role != "assistant" || req.ClientHistory[1].Content != "previous answer" || req.ClientHistory[1].Thinking != "" {
+		if req.Text != "another question" || len(req.ClientHistory) != 2 || req.ClientHistory[1].Role != "assistant" || req.ClientHistory[1].Content != "previous answer" || req.ClientHistory[1].Thinking != "First thought. Second thought." {
 			t.Errorf("unexpected follow-up history: %+v", req.ClientHistory)
 		}
 		if err := responder.SendAgentResponse(&agent.Response{Response: "new answer"}); err != nil {
@@ -156,7 +156,8 @@ func TestOpenCodeFollowUpIgnoresReasoning(t *testing.T) {
 		return gatewayruntime.Outcome{}
 	}
 	// OpenCode sends reasoning_content back with its prior assistant message
-	// after receiving Oswald's streamed reasoning tokens.
+	// after receiving Oswald's streamed reasoning tokens. Prior thinking is
+	// retained as quoted history reference, never replayed as model reasoning.
 	body := `{"model":"oswald","stream":true,"messages":[{"role":"system","content":"client instructions"},{"role":"assistant","content":"previous answer","reasoning_content":"First thought. Second thought."},{"role":"user","content":"another question"}]}`
 	w := request(g, "POST", "/v1/chat/completions", body, "Bearer "+testAPIKey)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "new answer") {
@@ -246,13 +247,14 @@ func TestStreamProgressPrecedesFinalAnswer(t *testing.T) {
 			t.Fatal("stream callback not passed to runtime")
 		}
 		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkThinking, Text: "First thought. "})
-		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "abandoned draft"})
-		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "private.tool", ResultText: "private result"}})
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "partial draft "})
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkToolCall, Tool: &agent.ToolStreamPayload{Name: "session_search", Arguments: map[string]interface{}{"query": "lights"}}})
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkToolResult, Tool: &agent.ToolStreamPayload{Name: "session_search", ResultText: "no results"}})
 		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkThinking, Text: "Second thought."})
 		if !w.Flushed || !strings.Contains(w.Body.String(), `"reasoning_content":"First thought. "`) || !strings.Contains(w.Body.String(), `"reasoning_content":"Second thought."`) || strings.Contains(w.Body.String(), "Final answer") {
 			t.Fatal("progress must flush before the final response")
 		}
-		if err := responder.SendAgentResponse(&agent.Response{Response: "Final answer", Thinking: "First thought. Second thought."}); err != nil {
+		if err := responder.SendAgentResponse(&agent.Response{Response: "partial draft Final answer", Thinking: "First thought. Second thought."}); err != nil {
 			t.Error(err)
 		}
 		return gatewayruntime.Outcome{}
@@ -262,12 +264,10 @@ func TestStreamProgressPrecedesFinalAnswer(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+testAPIKey)
 	w = httptest.NewRecorder()
 	g.Handler().ServeHTTP(w, r)
-	frames := strings.Split(strings.TrimSuffix(w.Body.String(), "\n\n"), "\n\n")
-	if w.Code != 200 || !w.Flushed || len(frames) != 6 || !strings.Contains(frames[1], `"reasoning_content":"First thought. "`) || !strings.Contains(frames[2], `"reasoning_content":"Second thought."`) || !strings.Contains(frames[3], `"content":"Final answer"`) || frames[5] != "data: [DONE]" {
+	body := w.Body.String()
+	frames := strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n")
+	if w.Code != 200 || !w.Flushed || len(frames) != 9 || !strings.Contains(frames[1], `"reasoning_content":"First thought. "`) || !strings.Contains(frames[2], `"content":"partial draft "`) || !strings.Contains(frames[3], `"oswald_tool_calls"`) || !strings.Contains(frames[3], `"session_search"`) || !strings.Contains(frames[4], `"oswald_tool_calls"`) || !strings.Contains(frames[4], `"no results"`) || !strings.Contains(frames[5], `"reasoning_content":"Second thought."`) || !strings.Contains(frames[6], `"content":"Final answer"`) || frames[8] != "data: [DONE]" {
 		t.Fatalf("unexpected progress stream: code=%d frames=%q", w.Code, frames)
-	}
-	if strings.Contains(w.Body.String(), "private") || strings.Contains(w.Body.String(), "abandoned") {
-		t.Fatal("stream exposed internal content")
 	}
 }
 
@@ -298,14 +298,14 @@ func TestStreamWithoutReasoningDoesNotInventIt(t *testing.T) {
 	g := testGateway(t)
 	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
 		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkStatus, Text: "private status"})
-		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "abandoned draft"})
-		if err := responder.SendAgentResponse(&agent.Response{Response: "Final answer"}); err != nil {
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "partial "})
+		if err := responder.SendAgentResponse(&agent.Response{Response: "partial Final answer"}); err != nil {
 			t.Error(err)
 		}
 		return gatewayruntime.Outcome{}
 	}
 	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
-	if w.Code != 200 || !w.Flushed || strings.Contains(w.Body.String(), "reasoning_content") || strings.Contains(w.Body.String(), "abandoned") || strings.Contains(w.Body.String(), "private") || !strings.Contains(w.Body.String(), "Final answer") {
+	if w.Code != 200 || !w.Flushed || strings.Contains(w.Body.String(), "reasoning_content") || strings.Contains(w.Body.String(), "private") || !strings.Contains(w.Body.String(), `"content":"partial "`) || !strings.Contains(w.Body.String(), "Final answer") {
 		t.Fatalf("unexpected stream without reasoning: code=%d body=%s", w.Code, w.Body.String())
 	}
 }
@@ -320,7 +320,7 @@ func TestStreamRejectsAttachmentsAfterProgress(t *testing.T) {
 		return gatewayruntime.Outcome{}
 	}
 	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"code":"unsupported_response"`) || strings.Contains(w.Body.String(), "discarded") || strings.Contains(w.Body.String(), "private image") || strings.Contains(w.Body.String(), "[DONE]") {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"code":"unsupported_response"`) || strings.Contains(w.Body.String(), "private image") || strings.Contains(w.Body.String(), "[DONE]") {
 		t.Fatalf("attachment failure: code=%d body=%s", w.Code, w.Body.String())
 	}
 }
@@ -1010,5 +1010,48 @@ func TestErrorShapeCarriesParam(t *testing.T) {
 	}
 	if _, ok := raw["error"].(map[string]any)["param"]; !ok {
 		t.Fatalf("error must carry param: %s", w.Body.String())
+	}
+}
+
+func TestOswaldTimelineBufferedAndStreamed(t *testing.T) {
+	timeline := []agent.OswaldToolEvent{
+		{Name: "session_search", Phase: "call", Arguments: map[string]interface{}{"query": "lights"}},
+		{Name: "session_search", Phase: "result", ResultText: "no results"},
+	}
+	// Buffered responses carry the timeline on the message.
+	g := testGateway(t)
+	g.execute = func(_ gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Response: "answer", OswaldTools: timeline}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"oswald_tool_calls"`) || !strings.Contains(w.Body.String(), `"session_search"`) || !strings.Contains(w.Body.String(), `"no results"`) || strings.Contains(w.Body.String(), `"tool_calls"`) {
+		t.Fatalf("buffered timeline: %d %s", w.Code, w.Body.String())
+	}
+	// Streaming responses flush entries not yet sent live exactly once.
+	g = testGateway(t)
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		if err := responder.SendAgentResponse(&agent.Response{Response: "answer", OswaldTools: timeline}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w = request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || strings.Count(w.Body.String(), "session_search") != 2 || !strings.Contains(w.Body.String(), "data: [DONE]") {
+		t.Fatalf("streamed timeline: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestOswaldTimelineBoundsResults(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := &responseWriter{w: w, ctx: context.Background(), id: "chatcmpl-test"}
+	long := strings.Repeat("x", oswaldToolResultRunes+10)
+	if err := r.SendAgentResponse(&agent.Response{Response: "ok", OswaldTools: []agent.OswaldToolEvent{{Name: "web_search", Phase: "result", ResultText: long}}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.Body.String(), `"result_truncated":true`) || strings.Contains(w.Body.String(), long) {
+		t.Fatalf("timeline must bound results: %s", w.Body.String())
 	}
 }

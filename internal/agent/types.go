@@ -40,6 +40,11 @@ type Response struct {
 	// ToolCalls holds caller-owned tool calls to return verbatim. When non-empty,
 	// the gateway reports finish_reason tool_calls and omits server execution.
 	ToolCalls []llm.ToolCall `json:"-"`
+	// OswaldTools carries the server-side tool timeline (builtin/MCP calls
+	// executed inside the agent loop) for UIs that render a details timeline
+	// alongside the answer. It mirrors Ollama-style thinking/tool visibility
+	// while the OpenAI tool_calls field stays reserved for caller-owned tools.
+	OswaldTools []OswaldToolEvent `json:"-"`
 	// Usage totals accumulate observed provider-reported tokens across all
 	// model calls in this request. UsageReported is false when no call
 	// reported usage, in which case gateways must omit usage rather than
@@ -55,6 +60,20 @@ type Response struct {
 
 	SourceTurnID      int64 `json:"-"`
 	SessionGeneration int   `json:"-"`
+}
+
+// OswaldToolEvent is one server-side tool timeline entry for streaming UIs.
+// Phase is "call" (invocation with arguments) or "result" (outcome with
+// result text). Arguments and ResultText reuse the UI-safe redaction already
+// applied to ToolStreamPayload (no image bytes, no reasoning).
+type OswaldToolEvent struct {
+	Name       string                   `json:"name"`
+	Phase      string                   `json:"phase"`
+	Arguments  map[string]interface{}   `json:"arguments,omitempty"`
+	ResultText string                   `json:"result_text,omitempty"`
+	IsError    bool                     `json:"is_error,omitempty"`
+	DurationMS int64                    `json:"duration_ms,omitempty"`
+	WebSearch  *ToolStreamSearchPayload `json:"web_search,omitempty"`
 }
 
 // Request contains one fully resolved request submitted to the agent.

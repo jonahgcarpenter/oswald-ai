@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
@@ -25,7 +27,24 @@ type responseWriter struct {
 	finished     bool
 	created      int64
 	streamErr    error
+	// streamedContent tracks content text already flushed as live deltas so
+	// the terminal response only sends the unstreamed remainder instead of
+	// repeating the full answer. streamedTools counts oswald_tool_calls
+	// entries already flushed live for the same dedup purpose.
+	streamedContent string
+	streamedTools   int
 }
+
+const (
+	// oswaldToolStreamLimit bounds the details timeline per response so one
+	// tool-heavy turn cannot balloon the SSE stream or buffered message.
+	oswaldToolStreamLimit = 32
+	// oswaldToolResultRunes bounds each server-side tool result in the API
+	// timeline; durable history keeps the full text.
+	oswaldToolResultRunes = 4000
+	// oswaldToolArgsRunes bounds the encoded arguments object per entry.
+	oswaldToolArgsRunes = 16000
+)
 
 func (r *responseWriter) StartProcessing() (func(), error) { return nil, nil }
 func (r *responseWriter) SendFallback(string) error {
@@ -41,8 +60,11 @@ func (r *responseWriter) CancelAgentResponse() error {
 	return r.failure(http.StatusServiceUnavailable, "server_error", "Request was canceled.")
 }
 
-// Stream forwards model reasoning without publishing provisional answer text
-// or Oswald's internal tool arguments and results.
+// Stream forwards live progress to SSE clients: reasoning tokens as
+// reasoning_content, answer tokens as content, and server-side tool activity
+// as the oswald_tool_calls extension. Caller-owned tool_calls keep the
+// standard OpenAI field and are only sent with the terminal response.
+// ChunkStatus (compaction notices) stays suppressed.
 func (r *responseWriter) Stream(chunk agent.StreamChunk) {
 	if !r.stream || r.finished || r.streamErr != nil || chunk.Type == "" {
 		return
@@ -53,8 +75,30 @@ func (r *responseWriter) Stream(chunk agent.StreamChunk) {
 			return
 		}
 	}
-	if chunk.Type == agent.ChunkThinking && chunk.Text != "" {
-		r.streamErr = r.sendChoice(map[string]any{"reasoning_content": chunk.Text}, nil)
+	switch chunk.Type {
+	case agent.ChunkThinking:
+		if chunk.Text != "" {
+			r.streamErr = r.sendChoice(map[string]any{"reasoning_content": chunk.Text}, nil)
+		}
+	case agent.ChunkContent:
+		if chunk.Text != "" {
+			r.streamedContent += chunk.Text
+			r.streamErr = r.sendChoice(map[string]any{"content": chunk.Text}, nil)
+		}
+	case agent.ChunkToolCall:
+		if chunk.Tool == nil || chunk.Tool.Name == "" || r.streamedTools >= oswaldToolStreamLimit {
+			return
+		}
+		event := agent.OswaldToolEvent{Name: chunk.Tool.Name, Phase: "call", Arguments: chunk.Tool.Arguments}
+		r.streamedTools++
+		r.streamErr = r.sendChoice(map[string]any{"oswald_tool_calls": []any{wireOswaldToolEvent(event)}}, nil)
+	case agent.ChunkToolResult:
+		if chunk.Tool == nil || chunk.Tool.Name == "" || r.streamedTools >= oswaldToolStreamLimit {
+			return
+		}
+		event := agent.OswaldToolEvent{Name: chunk.Tool.Name, Phase: "result", ResultText: chunk.Tool.ResultText, IsError: chunk.Tool.IsError, DurationMS: chunk.Tool.DurationMS, WebSearch: chunk.Tool.WebSearch}
+		r.streamedTools++
+		r.streamErr = r.sendChoice(map[string]any{"oswald_tool_calls": []any{wireOswaldToolEvent(event)}}, nil)
 	}
 }
 
@@ -89,6 +133,132 @@ func (r *responseWriter) flush() error {
 		return err
 	}
 	return r.contextErr()
+}
+
+// truncateWireRunes caps UI timeline text without breaking UTF-8.
+func truncateWireRunes(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:limit])
+}
+
+// wireOswaldToolEvent renders one server-side tool timeline entry. Arguments
+// are passed through as a JSON-safe object (already redacted upstream: no
+// image bytes or reasoning); result text is rune-bounded for the stream.
+func wireOswaldToolEvent(event agent.OswaldToolEvent) map[string]any {
+	entry := map[string]any{"name": event.Name, "phase": event.Phase}
+	switch event.Phase {
+	case "call":
+		if len(event.Arguments) > 0 {
+			args := map[string]any{}
+			for key, value := range event.Arguments {
+				args[key] = value
+			}
+			if encoded, err := json.Marshal(args); err == nil && utf8.RuneCountInString(string(encoded)) > oswaldToolArgsRunes {
+				entry["arguments_truncated"] = true
+			}
+			entry["arguments"] = args
+		}
+	case "result":
+		if event.ResultText != "" {
+			text := truncateWireRunes(event.ResultText, oswaldToolResultRunes)
+			entry["result_text"] = text
+			if text != event.ResultText {
+				entry["result_truncated"] = true
+			}
+		}
+		if event.IsError {
+			entry["is_error"] = true
+		}
+		if event.DurationMS > 0 {
+			entry["duration_ms"] = event.DurationMS
+		}
+		if event.WebSearch != nil {
+			entry["web_search"] = event.WebSearch
+		}
+	default:
+		entry["phase"] = "result"
+		if event.ResultText != "" {
+			entry["result_text"] = truncateWireRunes(event.ResultText, oswaldToolResultRunes)
+		}
+	}
+	return entry
+}
+
+// wireOswaldTools renders the server-side details timeline, bounded so one
+// turn cannot balloon the response. Caller-owned tool_calls are unaffected.
+func wireOswaldTools(events []agent.OswaldToolEvent) []any {
+	if len(events) == 0 {
+		return nil
+	}
+	bounded := events
+	if len(bounded) > oswaldToolStreamLimit {
+		bounded = bounded[:oswaldToolStreamLimit]
+	}
+	out := make([]any, 0, len(bounded))
+	for _, event := range bounded {
+		if event.Name == "" {
+			continue
+		}
+		phase := event.Phase
+		if phase != "call" && phase != "result" {
+			continue
+		}
+		out = append(out, wireOswaldToolEvent(event))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// unstreamedOswaldTools returns timeline entries not yet flushed live.
+func (r *responseWriter) unstreamedOswaldTools(events []agent.OswaldToolEvent) []agent.OswaldToolEvent {
+	if r.streamedTools < 0 {
+		r.streamedTools = 0
+	}
+	if r.streamedTools >= len(events) {
+		return nil
+	}
+	remaining := events[r.streamedTools:]
+	if len(remaining) > oswaldToolStreamLimit-r.streamedTools {
+		remaining = remaining[:oswaldToolStreamLimit-r.streamedTools]
+	}
+	return remaining
+}
+
+// sendOswaldTimeline flushes unstreamed server-side tool entries as live
+// deltas. In live requests most entries already streamed via Stream().
+func (r *responseWriter) sendOswaldTimeline(events []agent.OswaldToolEvent) error {
+	for _, event := range r.unstreamedOswaldTools(events) {
+		if r.streamedTools >= oswaldToolStreamLimit {
+			break
+		}
+		r.streamedTools++
+		if err := r.sendChoice(map[string]any{"oswald_tool_calls": []any{wireOswaldToolEvent(event)}}, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// unstreamedContent returns the terminal answer suffix not yet flushed live.
+// Intermediate drafts before tool calls may already be streamed; when the
+// final answer no longer starts with them the full text is sent so nothing
+// is lost.
+func (r *responseWriter) unstreamedContent(final string) string {
+	if r.streamedContent == "" || final == "" {
+		return final
+	}
+	if strings.HasPrefix(final, r.streamedContent) {
+		return final[len(r.streamedContent):]
+	}
+	return final
 }
 
 func wireToolCalls(calls []struct {
@@ -160,8 +330,17 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 				return err
 			}
 		}
-		if err := r.sendChoice(map[string]any{"content": response.Response}, nil); err != nil {
+		if err := r.sendOswaldTimeline(response.OswaldTools); err != nil {
 			return err
+		}
+		if remainder := r.unstreamedContent(response.Response); remainder != "" {
+			if err := r.sendChoice(map[string]any{"content": remainder}, nil); err != nil {
+				return err
+			}
+		} else if r.streamedTools == 0 && len(response.OswaldTools) == 0 && r.streamedContent == "" && response.Response == "" {
+			if err := r.sendChoice(map[string]any{"content": ""}, nil); err != nil {
+				return err
+			}
 		}
 		if err := r.sendChoice(map[string]any{}, finishReason(response)); err != nil {
 			return err
@@ -184,6 +363,9 @@ func (r *responseWriter) SendAgentResponse(response *agent.Response) error {
 	message := map[string]any{"role": "assistant", "content": response.Response}
 	if response.Thinking != "" {
 		message["reasoning_content"] = response.Thinking
+	}
+	if timeline := wireOswaldTools(response.OswaldTools); len(timeline) > 0 {
+		message["oswald_tool_calls"] = timeline
 	}
 	// Stateless agent requests may make several provider calls; usage carries
 	// observed request totals and is omitted when nothing reported.
@@ -225,6 +407,9 @@ func (r *responseWriter) sendToolCalls(response *agent.Response) error {
 				return err
 			}
 		}
+		if err := r.sendOswaldTimeline(response.OswaldTools); err != nil {
+			return err
+		}
 		for i, call := range calls {
 			delta := map[string]any{"tool_calls": []any{map[string]any{"index": i, "id": call.ID, "type": "function", "function": map[string]any{"name": call.Name, "arguments": call.Arguments}}}}
 			if err := r.sendChoice(delta, nil); err != nil {
@@ -256,6 +441,9 @@ func (r *responseWriter) sendToolCalls(response *agent.Response) error {
 	message := map[string]any{"role": "assistant", "content": content, "tool_calls": wireToolCalls(calls)}
 	if response.Thinking != "" {
 		message["reasoning_content"] = response.Thinking
+	}
+	if timeline := wireOswaldTools(response.OswaldTools); len(timeline) > 0 {
+		message["oswald_tool_calls"] = timeline
 	}
 	completion := map[string]any{"id": r.id, "object": "chat.completion", "created": time.Now().Unix(), "model": "oswald", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}}
 	if r.serviceTier != "" {
