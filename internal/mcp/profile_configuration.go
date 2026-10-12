@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"net/url"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
@@ -36,28 +37,75 @@ func NewProfileManager(owner string, servers []config.MCPServer, log *config.Log
 		if err := validateServerName(entry.Name); err != nil {
 			return nil, err
 		}
-		if _, err := normalizeServerDescription(entry.Description); err != nil {
+		resolved, err := resolveProfileServer(entry)
+		if err != nil {
 			return nil, err
 		}
-		endpoint, err := url.Parse(entry.URL)
-		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
-			return nil, errors.New("invalid profile MCP endpoint")
-		}
-		if entry.Transport == "" {
-			entry.Transport = TransportStreamableHTTP
-		}
-		if entry.Transport != TransportStreamableHTTP {
-			return nil, errors.New("unsupported profile MCP transport")
-		}
-		headers := make(map[string]string, len(entry.Headers))
-		for key, value := range entry.Headers {
-			headers[key] = value
-		}
-		source.servers = append(source.servers, ServerConfig{ID: rand.Text(), Scope: ScopeUser, OwnerUserID: owner, Name: entry.Name, Description: entry.Description, Transport: entry.Transport, URL: entry.URL, Headers: headers, Enabled: entry.Enabled})
+		resolved.ID = rand.Text()
+		resolved.Scope = ScopeUser
+		resolved.OwnerUserID = owner
+		source.servers = append(source.servers, resolved)
 	}
 	manager := newManager(source, log)
 	manager.log.Debug("mcp.profile.configured", "configured profile MCP servers", config.F("profile", owner), config.F("server_count", len(servers)))
 	return manager, nil
+}
+
+// resolveProfileServer validates one operator-owned server entry and copies
+// its credentials so later caller mutation cannot affect resolved state.
+// Exactly one of URL (HTTP) or Command (stdio) must be set; configuration
+// loading enforces the same contract, and this is defense in depth.
+func resolveProfileServer(entry config.MCPServer) (ServerConfig, error) {
+	hasURL := strings.TrimSpace(entry.URL) != ""
+	hasCommand := strings.TrimSpace(entry.Command) != ""
+	if hasURL == hasCommand {
+		return ServerConfig{}, errors.New("profile MCP server requires exactly one of url or command")
+	}
+	if hasCommand {
+		if strings.TrimSpace(entry.Transport) != "" && entry.Transport != TransportStdio {
+			return ServerConfig{}, errors.New("profile MCP stdio server does not use transport")
+		}
+		if len(entry.Headers) > 0 {
+			return ServerConfig{}, errors.New("profile MCP stdio server does not use headers")
+		}
+		if strings.TrimSpace(entry.Command) == "" {
+			return ServerConfig{}, errors.New("invalid profile MCP command")
+		}
+		env := make(map[string]string, len(entry.Env))
+		for key, value := range entry.Env {
+			env[key] = value
+		}
+		return ServerConfig{
+			Name: entry.Name, Transport: TransportStdio,
+			Command: strings.TrimSpace(entry.Command), Args: append([]string(nil), entry.Args...),
+			Cwd: strings.TrimSpace(entry.Cwd), Env: env,
+			Include: append([]string(nil), entry.Include...), Exclude: append([]string(nil), entry.Exclude...),
+			Enabled: entry.Enabled,
+		}, nil
+	}
+	endpoint, err := url.Parse(entry.URL)
+	if err != nil || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.Host == "" || endpoint.User != nil {
+		return ServerConfig{}, errors.New("invalid profile MCP endpoint")
+	}
+	if len(entry.Args) > 0 || strings.TrimSpace(entry.Cwd) != "" || len(entry.Env) > 0 {
+		return ServerConfig{}, errors.New("profile MCP HTTP server does not use stdio fields")
+	}
+	transport := entry.Transport
+	if transport == "" {
+		transport = TransportStreamableHTTP
+	}
+	if transport != TransportStreamableHTTP && transport != TransportSSE {
+		return ServerConfig{}, errors.New("unsupported profile MCP transport")
+	}
+	headers := make(map[string]string, len(entry.Headers))
+	for key, value := range entry.Headers {
+		headers[key] = value
+	}
+	return ServerConfig{
+		Name: entry.Name, Transport: transport, URL: entry.URL, Headers: headers,
+		Include: append([]string(nil), entry.Include...), Exclude: append([]string(nil), entry.Exclude...),
+		Enabled: entry.Enabled,
+	}, nil
 }
 
 func (s *profileConfiguration) ListForUser(ctx context.Context, owner string) ([]ServerConfig, error) {

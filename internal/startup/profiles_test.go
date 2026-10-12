@@ -63,9 +63,9 @@ func profileStartupFixture(t *testing.T) *config.Config {
 
 func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) {
 	cfg := profileStartupFixture(t)
-	cfg.MCPServers = []config.MCPServer{{Name: "default_tools", URL: "https://example.com/mcp", Description: "Synthetic default tools.", Transport: "streamable_http", Enabled: true}}
-	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Description: "Synthetic API tools.", Transport: "streamable_http", Enabled: true}}
-	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Description: "Synthetic Alice tools.", Transport: "streamable_http", Enabled: true}}
+	cfg.MCPServers = []config.MCPServer{{Name: "default_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
+	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
+	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := &profileFakeModel{}

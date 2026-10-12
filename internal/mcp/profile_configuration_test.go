@@ -11,7 +11,7 @@ import (
 
 func TestProfileMCPIsolationAndImmutableConfiguration(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	entries := []config.MCPServer{{Name: "example", URL: "https://example.com/mcp", Description: "Synthetic tools.", Transport: TransportStreamableHTTP, Enabled: true, Headers: map[string]string{"Authorization": "Bearer alice"}}}
+	entries := []config.MCPServer{{Name: "example", URL: "https://example.com/mcp", Transport: TransportStreamableHTTP, Enabled: true, Headers: map[string]string{"Authorization": "Bearer alice"}}}
 	alice, err := NewProfileManager("alice", entries, log)
 	if err != nil {
 		t.Fatal(err)

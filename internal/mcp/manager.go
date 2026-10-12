@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -44,7 +47,7 @@ func (m *Manager) ServerInfos(ctx context.Context, userID string) []ServerInfo {
 	}
 	infos := make([]ServerInfo, 0, len(configs))
 	for _, cfg := range configs {
-		info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+		info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 		if !cfg.Enabled {
 			info.Status = serverStatusDisabled
 			infos = append(infos, info)
@@ -90,7 +93,7 @@ func (m *Manager) ToolSpecs(ctx context.Context, userID string) []ToolSpec {
 	}
 	var specs []ToolSpec
 	for _, cfg := range configs {
-		if !cfg.Enabled || strings.TrimSpace(cfg.Description) == "" || isReservedServerName(cfg.Name) {
+		if !cfg.Enabled || isReservedServerName(cfg.Name) {
 			continue
 		}
 		srv, err := m.ensureConnected(ctx, cfg)
@@ -116,7 +119,7 @@ func (m *Manager) ServerToolSpecs(ctx context.Context, userID, name string) ([]T
 		m.requestLog(ctx).Debug("mcp.server_config.not_found", "MCP server is not configured", config.F("status", "rejected"))
 		return nil, ServerInfo{}, fmt.Errorf("no configured MCP server named %q", name)
 	}
-	info := ServerInfo{Name: cfg.Name, Description: cfg.Description, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
+	info := ServerInfo{Name: cfg.Name, Scope: cfg.Scope, OwnerUserID: cfg.OwnerUserID, Status: serverStatusNotConnected}
 	if !cfg.Enabled {
 		info.Status = serverStatusDisabled
 		return nil, info, nil
@@ -241,17 +244,25 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 		}
 		cfg = current
 	}
-	if _, err := parseAndValidateURL(ctx, cfg.URL, m.resolver); err != nil {
-		m.rememberError(key, cfg, generation, err)
-		return nil, err
-	}
-	if cfg.Transport != TransportStreamableHTTP {
-		err := fmt.Errorf("MCP transport %q is not implemented", cfg.Transport)
-		m.rememberError(key, cfg, generation, err)
-		return nil, err
-	}
 	phase = "connect"
-	session, closeFn, err := connectStreamableHTTP(ctx, cfg)
+	var session *gomcp.ClientSession
+	var closeFn func() error
+	if strings.TrimSpace(cfg.Command) != "" {
+		session, closeFn, err = connectStdio(ctx, cfg)
+	} else {
+		if _, err := parseAndValidateURL(ctx, cfg.URL, m.resolver); err != nil {
+			m.rememberError(key, cfg, generation, err)
+			return nil, err
+		}
+		switch cfg.Transport {
+		case TransportStreamableHTTP, "":
+			session, closeFn, err = connectStreamableHTTP(ctx, cfg)
+		case TransportSSE:
+			session, closeFn, err = connectSSE(ctx, cfg)
+		default:
+			err = fmt.Errorf("MCP transport %q is not implemented", cfg.Transport)
+		}
+	}
 	if err != nil {
 		m.rememberError(key, cfg, generation, err)
 		return nil, err
@@ -322,6 +333,91 @@ func connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.Client
 	return session, session.Close, nil
 }
 
+func connectSSE(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
+	// The SSE hanging GET stream is bound to the Connect context: canceling
+	// it terminates the session. Scope the stream to the session lifetime and
+	// stop it only on close. Handshake phases are bounded by transport
+	// timeouts; http.Client.Timeout would kill the hanging GET. Detaching
+	// parent cancellation is intentional: sessions are cached across requests
+	// and outlive any single turn. Shutdown closes them via Close.
+	streamCtx, stopStream := context.WithCancel(context.WithoutCancel(ctx))
+	base := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+	httpClient := &http.Client{
+		Transport: &headerTransport{
+			base:    base,
+			headers: cfg.Headers,
+		},
+	}
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "oswald-ai", Version: "1.0.0"}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
+	transport := &gomcp.SSEClientTransport{Endpoint: cfg.URL, HTTPClient: httpClient}
+	session, err := client.Connect(streamCtx, transport, nil)
+	if err != nil {
+		stopStream()
+		return nil, nil, fmt.Errorf("connect MCP session: %w", err)
+	}
+	closeFn := func() error {
+		defer stopStream()
+		defer base.CloseIdleConnections()
+		return session.Close()
+	}
+	return session, closeFn, nil
+}
+
+func connectStdio(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
+	command := strings.TrimSpace(cfg.Command)
+	if command == "" {
+		return nil, nil, fmt.Errorf("MCP stdio server has no command")
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return nil, nil, fmt.Errorf("resolve MCP stdio command: %w", err)
+	}
+	cmd := exec.Command(command, cfg.Args...)
+	if dir := strings.TrimSpace(cfg.Cwd); dir != "" {
+		cmd.Dir = dir
+	}
+	if len(cfg.Env) > 0 {
+		environment := os.Environ()
+		for key, value := range cfg.Env {
+			environment = append(environment, key+"="+value)
+		}
+		cmd.Env = environment
+	}
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "oswald-ai", Version: "1.0.0"}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
+	transport := &gomcp.CommandTransport{Command: cmd, TerminateDuration: 5 * time.Second}
+	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	session, err := client.Connect(connectCtx, transport, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("connect MCP session: %w", err)
+	}
+	return session, session.Close, nil
+}
+
+// toolAllowed reports whether a remote tool passes the operator's
+// include/exclude filter. An empty include list allows every tool;
+// exclude always wins.
+func toolAllowed(include, exclude []string, remote string) bool {
+	for _, blocked := range exclude {
+		if blocked == remote {
+			return false
+		}
+	}
+	if len(include) == 0 {
+		return true
+	}
+	for _, allowed := range include {
+		if allowed == remote {
+			return true
+		}
+	}
+	return false
+}
+
 func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientSession, log *config.Logger) ([]ToolSpec, error) {
 	var specs []ToolSpec
 	skipped := 0
@@ -343,6 +439,9 @@ func loadToolSpecs(ctx context.Context, cfg ServerConfig, session *gomcp.ClientS
 			}
 			if strings.EqualFold(strings.TrimSpace(tool.Name), "tools") {
 				skipped++
+				continue
+			}
+			if !toolAllowed(cfg.Include, cfg.Exclude, strings.TrimSpace(tool.Name)) {
 				continue
 			}
 			spec, err := toolSpec(cfg, tool, session, log)

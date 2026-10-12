@@ -14,8 +14,11 @@ const (
 
 	// TransportStreamableHTTP identifies MCP streamable HTTP transport.
 	TransportStreamableHTTP = "streamable_http"
-	// TransportSSE is reserved for HTTP SSE MCP transport.
+	// TransportSSE identifies the legacy MCP HTTP SSE transport.
 	TransportSSE = "sse"
+	// TransportStdio identifies MCP stdio transport over a child process.
+	// It is derived from a configured command, never from YAML directly.
+	TransportStdio = "stdio"
 
 	serverStatusConnected    = "connected"
 	serverStatusError        = "error"
@@ -63,7 +66,6 @@ type ToolSpec struct {
 // ServerInfo describes a configured MCP server and its current availability.
 type ServerInfo struct {
 	Name        string
-	Description string
 	Scope       string
 	OwnerUserID string
 	Status      string
@@ -77,10 +79,15 @@ type ServerConfig struct {
 	Scope       string
 	OwnerUserID string
 	Name        string
-	Description string
 	Transport   string
 	URL         string
 	Headers     map[string]string
+	Command     string
+	Args        []string
+	Cwd         string
+	Env         map[string]string
+	Include     []string
+	Exclude     []string
 	Enabled     bool
 }
 

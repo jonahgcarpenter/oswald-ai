@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -13,13 +12,12 @@ import (
 )
 
 const (
-	maxProviderIdentifierBytes    = 64
-	maxServerDescriptionRuneCount = 500
-	maxToolDescriptionRuneCount   = 1000
-	maxParamDescriptionRuneCount  = 500
-	maxEnumValueCount             = 100
-	maxEnumValueRuneCount         = 200
-	maxEnumTotalRuneCount         = 4000
+	maxProviderIdentifierBytes   = 64
+	maxToolDescriptionRuneCount  = 1000
+	maxParamDescriptionRuneCount = 500
+	maxEnumValueCount            = 100
+	maxEnumValueRuneCount        = 200
+	maxEnumTotalRuneCount        = 4000
 )
 
 func validateProviderIdentifier(name string) error {
@@ -64,22 +62,6 @@ func validateServerName(name string) error {
 		return fmt.Errorf("server name %q is reserved", name)
 	}
 	return nil
-}
-
-func normalizeServerDescription(description string) (string, error) {
-	description = strings.TrimSpace(description)
-	if description == "" {
-		return "", fmt.Errorf("MCP server description cannot be empty")
-	}
-	if utf8.RuneCountInString(description) > maxServerDescriptionRuneCount {
-		return "", fmt.Errorf("MCP server description must be at most %d characters", maxServerDescriptionRuneCount)
-	}
-	for _, r := range description {
-		if unicode.IsControl(r) {
-			return "", fmt.Errorf("MCP server description cannot contain control characters")
-		}
-	}
-	return description, nil
 }
 
 func normalizeCatalogDescription(description string, maxRunes int) string {
@@ -160,8 +142,8 @@ func parseAndValidateURL(ctx context.Context, rawURL string, resolver hostnameRe
 	if err != nil {
 		return nil, fmt.Errorf("parse MCP server URL: %w", err)
 	}
-	if parsed.Scheme != "https" {
-		return nil, fmt.Errorf("MCP server URL must use https")
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return nil, fmt.Errorf("MCP server URL must use http or https")
 	}
 	if parsed.Hostname() == "" {
 		return nil, fmt.Errorf("MCP server URL must include a host")
@@ -181,21 +163,7 @@ func parseAndValidateURL(ctx context.Context, rawURL string, resolver hostnameRe
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("resolve MCP server host: no addresses")
 	}
-	for _, addr := range addrs {
-		ip, err := netip.ParseAddr(addr)
-		if err != nil {
-			return nil, fmt.Errorf("parse resolved MCP server address: %w", err)
-		}
-		if !isPublicRoutable(ip) {
-			return nil, fmt.Errorf("MCP server host resolves to non-public address")
-		}
-	}
+	// Local HTTP endpoints are operator configuration: any resolved address,
+	// including private and loopback ranges, is accepted once it resolves.
 	return parsed, nil
-}
-
-func isPublicRoutable(ip netip.Addr) bool {
-	if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
-		return false
-	}
-	return true
 }

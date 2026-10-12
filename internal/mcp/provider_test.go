@@ -27,7 +27,7 @@ func bridgeTestManager(t *testing.T, owner string) *Manager {
 	store := testStore(t)
 	addTestUsers(t, store, owner)
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: owner, Name: "home", Description: "Control Home Assistant.", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeUser, OwnerUserID: owner, Name: "home", Transport: TransportStreamableHTTP, URL: "https://example.com/home", Enabled: true})
 	if err != nil {
 		t.Fatalf("save home: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestBridgeDoesNotAdvertiseReservedSoulServer(t *testing.T) {
 	store := testStore(t)
 	addTestUsers(t, store, "user_1")
 	ctx := context.Background()
-	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "soul", Description: "Reserved tools.", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
+	cfg, err := store.Save(ctx, ServerConfig{Scope: ScopeGlobal, Name: "soul", Transport: TransportStreamableHTTP, URL: "https://example.com/mcp", Enabled: true})
 	if err != nil {
 		t.Fatalf("save soul: %v", err)
 	}

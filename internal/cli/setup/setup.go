@@ -226,14 +226,24 @@ tools:
     url: ""
     generation_timeout: 2m
 # MCP connections are isolated by profile and opened lazily; restart to reload.
+# Each server sets exactly one of url (HTTP) or command (stdio).
 mcp:
   servers: {}
   # servers:
-  #   example:
+  #   example_http:
   #     url: https://example.com/mcp
-  #     description: Describe what this server can do.
+  #     # transport: sse  # streamable_http default; sse for legacy servers.
   #     headers:
   #       Authorization: Bearer ${EXAMPLE_MCP_TOKEN}
+  #     tools:
+  #       include: [search, read]  # empty include allows all; exclude wins.
+  #       exclude: [delete]
+  #   example_local:
+  #     command: npx
+  #     args: ["-y", "@example/notes-server"]
+  #     cwd: "."  # relative paths resolve against the profile root.
+  #     env:
+  #       API_KEY: ${EXAMPLE_MCP_API_KEY}
 `
 
 // defaultEnv is a private placeholder credential file. godotenv can parse it as

@@ -128,20 +128,31 @@ type documentYAML struct {
 	} `yaml:"mcp"`
 }
 
+type mcpToolsYAML struct {
+	Include []string `yaml:"include"`
+	Exclude []string `yaml:"exclude"`
+}
+
 type mcpServerYAML struct {
-	URL         string            `yaml:"url"`
-	Description string            `yaml:"description"`
-	Transport   string            `yaml:"transport"`
-	Headers     map[string]string `yaml:"headers"`
-	Enabled     *bool             `yaml:"enabled"`
+	URL       string            `yaml:"url"`
+	Command   string            `yaml:"command"`
+	Args      []string          `yaml:"args"`
+	Cwd       string            `yaml:"cwd"`
+	Env       map[string]string `yaml:"env"`
+	Transport string            `yaml:"transport"`
+	Headers   map[string]string `yaml:"headers"`
+	Tools     mcpToolsYAML      `yaml:"tools"`
+	Enabled   *bool             `yaml:"enabled"`
 }
 
 // MCPServer holds one resolved operator-owned profile connection. It is never
-// persisted in SQLite, and its URL/headers must not be logged.
+// persisted in SQLite, and its URL/command/headers/environment must not be logged.
 type MCPServer struct {
-	Name, URL, Description, Transport string
-	Headers                           map[string]string
-	Enabled                           bool
+	Name, URL, Command, Cwd, Transport string
+	Args                               []string
+	Headers, Env                       map[string]string
+	Include, Exclude                   []string
+	Enabled                            bool
 }
 
 var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -289,6 +300,44 @@ func pruneDisabledPlatforms(raw *yaml.Node, env profileEnvironment) (*yaml.Node,
 	return pruned, nil
 }
 
+var mcpHeaderNameRE = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
+var mcpToolFilterRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+
+// checkHeaderMap validates a bounded string map for MCP headers or stdio
+// environment entries: at most 32 entries, token names, values bounded to
+// 8,192 bytes with no newline or NUL content.
+func checkHeaderMap(values map[string]string, path string) error {
+	if len(values) > 32 {
+		return configErr("config_mcp_invalid", path)
+	}
+	for key, value := range values {
+		if !mcpHeaderNameRE.MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
+			return configErr("config_mcp_invalid", path)
+		}
+	}
+	return nil
+}
+
+// checkToolFilter validates an MCP tool include/exclude list against the
+// remote tool identifier contract and returns deduplicated names.
+func checkToolFilter(names []string, path string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if !mcpToolFilterRE.MatchString(name) {
+			return nil, configErr("config_mcp_invalid", path)
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
 func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string) error {
 	for name, value := range doc.Providers {
 		providers[name] = value
@@ -361,34 +410,82 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`).MatchString(name) || name == "soul" {
 			return configErr("config_mcp_invalid", base)
 		}
-		transport := server.Transport
-		if transport == "" {
-			transport = "streamable_http"
+		hasURL := strings.TrimSpace(server.URL) != ""
+		hasCommand := strings.TrimSpace(server.Command) != ""
+		if hasURL == hasCommand {
+			return configErr("config_mcp_invalid", base)
 		}
-		if transport != "streamable_http" {
-			return configErr("config_mcp_invalid", base+".transport")
-		}
-		endpoint, err := url.Parse(server.URL)
-		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
-			return configErr("config_mcp_invalid", base+".url")
-		}
-		description := strings.TrimSpace(server.Description)
-		if description == "" || len([]rune(description)) > 500 || strings.ContainsAny(description, "\r\n\x00") {
-			return configErr("config_mcp_invalid", base+".description")
-		}
-		if len(server.Headers) > 32 {
-			return configErr("config_mcp_invalid", base+".headers")
-		}
-		for key, value := range server.Headers {
-			if !regexp.MustCompile(`^[!#$%&'*+.^_`+"`"+`|~0-9A-Za-z-]+$`).MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
+		entry := MCPServer{Name: name}
+		if hasURL {
+			transport := server.Transport
+			if transport == "" {
+				transport = "streamable_http"
+			}
+			if transport != "streamable_http" && transport != "sse" {
+				return configErr("config_mcp_invalid", base+".transport")
+			}
+			endpoint, err := url.Parse(server.URL)
+			if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil {
+				return configErr("config_mcp_invalid", base+".url")
+			}
+			if len(server.Args) > 0 || strings.TrimSpace(server.Cwd) != "" || len(server.Env) > 0 {
+				return configErr("config_mcp_invalid", base+".command")
+			}
+			if err := checkHeaderMap(server.Headers, base+".headers"); err != nil {
+				return err
+			}
+			entry.URL, entry.Transport, entry.Headers = server.URL, transport, server.Headers
+		} else {
+			if strings.TrimSpace(server.Transport) != "" {
+				return configErr("config_mcp_invalid", base+".transport")
+			}
+			if len(server.Headers) > 0 {
 				return configErr("config_mcp_invalid", base+".headers")
 			}
+			command := strings.TrimSpace(server.Command)
+			if len(command) == 0 || len(command) > 1024 || strings.ContainsRune(command, 0) {
+				return configErr("config_mcp_invalid", base+".command")
+			}
+			if len(server.Args) > 32 {
+				return configErr("config_mcp_invalid", base+".args")
+			}
+			for _, arg := range server.Args {
+				if len(arg) > 4096 || strings.ContainsRune(arg, 0) {
+					return configErr("config_mcp_invalid", base+".args")
+				}
+			}
+			cwd := strings.TrimSpace(server.Cwd)
+			if cwd != "" {
+				if len(cwd) > 1024 || strings.ContainsRune(cwd, 0) {
+					return configErr("config_mcp_invalid", base+".cwd")
+				}
+				resolved := cwd
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(cfg.ProfileRoot, resolved)
+				}
+				if rel, err := filepath.Rel(cfg.ProfileRoot, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return configErr("config_mcp_invalid", base+".cwd")
+				}
+				cwd = resolved
+			}
+			if err := checkHeaderMap(server.Env, base+".env"); err != nil {
+				return err
+			}
+			entry.Command, entry.Args, entry.Cwd, entry.Env, entry.Transport = command, server.Args, cwd, server.Env, "stdio"
+		}
+		var err error
+		if entry.Include, err = checkToolFilter(server.Tools.Include, base+".tools.include"); err != nil {
+			return err
+		}
+		if entry.Exclude, err = checkToolFilter(server.Tools.Exclude, base+".tools.exclude"); err != nil {
+			return err
 		}
 		enabled := true
 		if server.Enabled != nil {
 			enabled = *server.Enabled
 		}
-		cfg.MCPServers = append(cfg.MCPServers, MCPServer{Name: name, URL: server.URL, Description: description, Transport: transport, Headers: server.Headers, Enabled: enabled})
+		entry.Enabled = enabled
+		cfg.MCPServers = append(cfg.MCPServers, entry)
 	}
 	sort.Slice(cfg.MCPServers, func(i, j int) bool { return cfg.MCPServers[i].Name < cfg.MCPServers[j].Name })
 	if doc.API.Key != nil {
