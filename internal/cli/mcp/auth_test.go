@@ -32,6 +32,7 @@ func deviceFake(t *testing.T) *httptest.Server {
 			"grant_types_supported":                 []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:device_code"},
 			"code_challenge_methods_supported":      []string{"S256"},
 			"client_id_metadata_document_supported": true,
+			"scopes_supported":                      []string{"read", "write"},
 		})
 	}
 	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +113,9 @@ func TestAuthDeviceFlowStoresTokens(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Authorized login") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "OAuth scope selection: as (2 scope(s)).") {
+		t.Fatalf("missing scope selection: stdout = %q", stdout.String())
+	}
 	if strings.Contains(stdout.String(), "cli-access") || strings.Contains(stderr.String(), "cli-access") {
 		t.Fatal("credential leaked into output")
 	}
@@ -130,6 +134,8 @@ func TestAuthRejectsBadInput(t *testing.T) {
 		{"unknown server", []string{"auth", "missing"}, exitError},
 		{"non-oauth server", []string{"auth", "plain"}, exitError},
 		{"unknown profile", []string{"auth", "--profile", "missing", "login"}, exitError},
+		{"server first unknown profile", []string{"auth", "login", "--profile", "missing"}, exitError},
+		{"server between flags", []string{"auth", "--flow", "device", "login", "--profile", "missing"}, exitError},
 		{"bad flow", []string{"auth", "--flow", "implicit", "login"}, exitError},
 		{"unknown command", []string{"frobnicate"}, exitUsage},
 		{"help", []string{"help"}, exitOK},

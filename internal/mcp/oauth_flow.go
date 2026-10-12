@@ -28,6 +28,10 @@ type FlowOptions struct {
 	Stdin     io.Reader
 	Stdout    io.Writer
 	HTTP      *http.Client
+	// ChallengeScope carries a harvested live-challenge scope (see
+	// fetchChallenge) for automatic scope selection. Empty disables the
+	// challenge rule; explicit oauth.Scopes always win regardless.
+	ChallengeScope string
 }
 
 // oauth2Config builds the token-endpoint configuration for a resolved client.
@@ -71,36 +75,49 @@ func RunBrowserFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, 
 }
 
 func browserAttempt(ctx context.Context, store *tokenStore, oauth *OAuthConfig, meta *serverMetadata, mcpURL string, opts FlowOptions, timeout time.Duration, forceDCR bool) (*TokenSet, bool, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, false, fmt.Errorf("bind OAuth callback: %w", err)
-	}
-	defer listener.Close()
-	redirectURI := "http://" + listener.Addr().String() + "/callback"
-	client, err := resolveFlowClient(ctx, store, oauth, meta, redirectURI, forceDCR)
+	verifier := oauth2.GenerateVerifier()
+	state := rand.Text()
+	listener, redirectURI, err := bindCallbackListener(ctx, store, oauth, forceDCR)
 	if err != nil {
 		return nil, false, err
 	}
-	verifier := oauth2.GenerateVerifier()
-	state := rand.Text()
-	authURL := oauth2Config(client, meta, oauth.Scopes).AuthCodeURL(state,
+	defer listener.Close()
+	// Automatic scope selection: explicit config wins, then the live
+	// challenge, then advertised PRM/AS scopes, else omitted (the server
+	// grants its default set). Scope values are never logged.
+	eff := selectEffectiveScopes(oauth.Scopes, opts.ChallengeScope, meta)
+	client, err := resolveFlowClient(ctx, store, oauth, meta, redirectURI, forceDCR, eff)
+	if err != nil {
+		return nil, false, err
+	}
+	authURL := oauth2Config(client, meta, eff).AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("resource", oauthResource(meta, mcpURL)),
 	)
+	// Start the callback server before printing the URL so there is no
+	// steal window between listen and serve.
+	calls := make(chan callbackResult, 1)
+	server := &http.Server{Handler: callbackHandler(calls, state, meta.Issuer)}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
 	if !opts.NoBrowser {
 		_ = openBrowser(authURL)
 	}
 	fmt.Fprintf(opts.Stdout, "Open this URL to authorize:\n%s\n", authURL)
-	if opts.NoBrowser {
-		fmt.Fprintln(opts.Stdout, "After approving, paste the full redirect URL or the code here:")
+	if opts.Stdin != nil {
+		if opts.NoBrowser {
+			fmt.Fprintln(opts.Stdout, "After approving, paste the full redirect URL or the code here (or type skip to cancel):")
+		} else {
+			fmt.Fprintln(opts.Stdout, "If the browser does not complete the login (remote/headless session), paste the full redirect URL or the code here (or type skip to cancel):")
+		}
 	}
 	codeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	code, callbackErr := waitForCode(codeCtx, listener, state, opts)
+	code, callbackErr := waitForCode(codeCtx, calls, state, opts)
 	if callbackErr != nil {
 		return nil, false, callbackErr
 	}
-	tokens, err := exchangeCode(ctx, client, meta, oauth.Scopes, oauthResource(meta, mcpURL), code, verifier, opts.HTTP)
+	tokens, err := exchangeCode(ctx, client, meta, eff, oauthResource(meta, mcpURL), code, verifier, opts.HTTP)
 	if err != nil {
 		if client.Method == clientMethodCIMD && isInvalidClient(err) {
 			return nil, true, nil
@@ -110,7 +127,99 @@ func browserAttempt(ctx context.Context, store *tokenStore, oauth *OAuthConfig, 
 	return tokens, false, nil
 }
 
-func resolveFlowClient(ctx context.Context, store *tokenStore, oauth *OAuthConfig, meta *serverMetadata, redirectURI string, forceDCR bool) (*resolvedOAuthClient, error) {
+// bindCallbackListener reuses a cached dynamic-client redirect URI when this
+// run will use it, so re-login does not leak a fresh DCR registration per
+// ephemeral port. Otherwise it binds a fresh loopback port.
+func bindCallbackListener(ctx context.Context, store *tokenStore, oauth *OAuthConfig, forceDCR bool) (net.Listener, string, error) {
+	if !forceDCR && strings.TrimSpace(oauth.ClientID) == "" {
+		if cached, ok, err := store.CachedRedirectURI(ctx); err == nil && ok {
+			if listener, redirect, ok := listenRedirectURI(cached); ok {
+				return listener, redirect, nil
+			}
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, "", fmt.Errorf("bind OAuth callback: %w", err)
+	}
+	return listener, "http://" + listener.Addr().String() + "/callback", nil
+}
+
+// listenRedirectURI binds the exact loopback port of a previously registered
+// redirect URI. It reports false when the URI is not a loopback callback or
+// the port is unavailable, in which case the caller binds fresh.
+func listenRedirectURI(raw string) (net.Listener, string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "http" {
+		return nil, "", false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "127.0.0.1" && host != "localhost" {
+		return nil, "", false
+	}
+	port := parsed.Port()
+	if port == "" {
+		return nil, "", false
+	}
+	if parsed.Path != "/callback" && parsed.Path != "/callback/" {
+		return nil, "", false
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		return nil, "", false
+	}
+	return listener, "http://127.0.0.1:" + port + "/callback", true
+}
+
+type callbackResult struct {
+	code string
+	err  error
+}
+
+// callbackHandler validates one authorization redirect: exact state match,
+// optional RFC 9207 iss binding, query-less follow-ups (favicon) ignored so
+// they cannot clobber the real response, first terminal result wins.
+func callbackHandler(calls chan<- callbackResult, state, issuer string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("code") == "" && query.Get("error") == "" && query.Get("state") == "" {
+			_, _ = io.WriteString(w, "Waiting for authorization.")
+			return
+		}
+		fail := func(err error, page string) {
+			select {
+			case calls <- callbackResult{err: err}:
+			default:
+			}
+			_, _ = io.WriteString(w, page)
+		}
+		if errText := query.Get("error"); errText != "" {
+			fail(fmt.Errorf("authorization server refused: %s", errText), "Authorization failed. You can close this tab.")
+			return
+		}
+		if query.Get("state") != state {
+			fail(fmt.Errorf("authorization state mismatch"), "Authorization failed state check. You can close this tab.")
+			return
+		}
+		if iss := query.Get("iss"); iss != "" && !issuerMatches(iss, issuer) {
+			if ok, _ := tolerateOriginIssuer(iss, issuer); !ok {
+				fail(fmt.Errorf("authorization issuer mismatch"), "Authorization failed issuer check. You can close this tab.")
+				return
+			}
+		}
+		if query.Get("code") == "" {
+			fail(fmt.Errorf("authorization response has no code"), "Authorization failed. You can close this tab.")
+			return
+		}
+		select {
+		case calls <- callbackResult{code: query.Get("code")}:
+		default:
+		}
+		_, _ = io.WriteString(w, "Authorized. You can close this tab.")
+	})
+}
+
+func resolveFlowClient(ctx context.Context, store *tokenStore, oauth *OAuthConfig, meta *serverMetadata, redirectURI string, forceDCR bool, scopes []string) (*resolvedOAuthClient, error) {
 	if !forceDCR {
 		if client, err := resolveOAuthClient(ctx, oauth, store, meta, redirectURI); err == nil {
 			return client, nil
@@ -118,39 +227,11 @@ func resolveFlowClient(ctx context.Context, store *tokenStore, oauth *OAuthConfi
 			return nil, err
 		}
 	}
-	return performDCR(ctx, store, meta, redirectURI, oauth.Scopes)
+	return performDCR(ctx, store, meta, redirectURI, scopes)
 }
 
-func waitForCode(ctx context.Context, listener net.Listener, state string, opts FlowOptions) (string, error) {
-	type result struct {
-		code string
-		err  error
-	}
-	calls := make(chan result, 1)
-	go func() {
-		server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			query := r.URL.Query()
-			if errText := query.Get("error"); errText != "" {
-				calls <- result{err: fmt.Errorf("authorization server refused: %s", errText)}
-				_, _ = io.WriteString(w, "Authorization failed. You can close this tab.")
-				return
-			}
-			if query.Get("state") != state {
-				calls <- result{err: fmt.Errorf("authorization state mismatch")}
-				_, _ = io.WriteString(w, "Authorization failed state check. You can close this tab.")
-				return
-			}
-			if query.Get("code") == "" {
-				calls <- result{err: fmt.Errorf("authorization response has no code")}
-				_, _ = io.WriteString(w, "Authorization failed. You can close this tab.")
-				return
-			}
-			calls <- result{code: query.Get("code")}
-			_, _ = io.WriteString(w, "Authorized. You can close this tab.")
-		})}
-		_ = server.Serve(listener)
-	}()
-	if opts.NoBrowser && opts.Stdin != nil {
+func waitForCode(ctx context.Context, calls <-chan callbackResult, state string, opts FlowOptions) (string, error) {
+	if opts.Stdin != nil {
 		pasted := make(chan string, 1)
 		go func() {
 			line, _ := bufio.NewReader(opts.Stdin).ReadString('\n')
@@ -173,10 +254,17 @@ func waitForCode(ctx context.Context, listener net.Listener, state string, opts 
 	}
 }
 
+// errAuthSkipped reports an operator-cancelled authorization run.
+var errAuthSkipped = fmt.Errorf("OAuth authorization skipped")
+
 func parsePastedCode(line, state string) (string, error) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return "", fmt.Errorf("no authorization response pasted")
+	}
+	switch strings.ToLower(line) {
+	case "skip", "quit", "exit", "cancel":
+		return "", errAuthSkipped
 	}
 	if strings.Contains(line, "://") {
 		parsed, err := url.Parse(line)
@@ -214,10 +302,7 @@ func openBrowser(target string) error {
 
 func exchangeCode(ctx context.Context, client *resolvedOAuthClient, meta *serverMetadata, scopes []string, resource, code, verifier string, httpClient *http.Client) (*TokenSet, error) {
 	cfg := oauth2Config(client, meta, scopes)
-	if httpClient == nil {
-		httpClient = discoveryClient()
-	}
-	tokenCtx := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+	tokenCtx := context.WithValue(ctx, oauth2.HTTPClient, oauthHTTPClient(httpClient))
 	token, err := cfg.Exchange(tokenCtx, code,
 		oauth2.VerifierOption(verifier),
 		oauth2.SetAuthURLParam("resource", resource),
@@ -230,6 +315,16 @@ func exchangeCode(ctx context.Context, client *resolvedOAuthClient, meta *server
 
 func isInvalidClient(err error) bool {
 	if err == nil {
+		return false
+	}
+	var refreshErr *refreshError
+	if errors.As(err, &refreshErr) {
+		var body struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(refreshErr.body, &body) == nil {
+			return body.Error == "invalid_client"
+		}
 		return false
 	}
 	if retrieveErr, ok := err.(*oauth2.RetrieveError); ok {
@@ -259,10 +354,11 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 	if strings.TrimSpace(meta.DeviceAuthorizationEndpoint) == "" {
 		return nil, fmt.Errorf("server does not advertise a device authorization endpoint")
 	}
-	httpClient := opts.HTTP
-	if httpClient == nil {
-		httpClient = discoveryClient()
-	}
+	httpClient := oauthHTTPClient(opts.HTTP)
+	// Automatic scope selection, as in browserAttempt: the effective scope
+	// is used for registration, the device request, the token poll config,
+	// and the grant fallback. An omitted scope is omitted on the wire.
+	eff := selectEffectiveScopes(oauth.Scopes, opts.ChallengeScope, meta)
 	// Device flow needs a client but no redirect URI; resolve with a placeholder
 	// loopback URI, then register dynamically when required.
 	client, err := resolveOAuthClient(ctx, oauth, store, meta, "http://127.0.0.1:1/callback")
@@ -270,11 +366,17 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 		if err != errNoCIMD {
 			return nil, err
 		}
-		if client, err = performDCR(ctx, store, meta, "http://127.0.0.1:1/callback", oauth.Scopes); err != nil {
+		if client, err = performDCR(ctx, store, meta, "http://127.0.0.1:1/callback", eff); err != nil {
 			return nil, err
 		}
 	}
-	form := url.Values{"client_id": {client.ClientID}, "scope": {strings.Join(oauth.Scopes, " ")}}
+	form := url.Values{"client_id": {client.ClientID}}
+	// An omitted scope is omitted on the wire: the server grants its default
+	// set. Set oauth.scopes for a narrower grant or a server that requires
+	// an explicit scope.
+	if scope := strings.Join(eff, " "); strings.TrimSpace(scope) != "" {
+		form.Set("scope", scope)
+	}
 	form.Set("resource", oauthResource(meta, mcpURL))
 	if client.ClientSecret != "" {
 		form.Set("client_secret", client.ClientSecret)
@@ -317,7 +419,7 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 			deadline = time.Now().Add(5 * time.Minute)
 		}
 	}
-	cfg := oauth2Config(client, meta, oauth.Scopes)
+	cfg := oauth2Config(client, meta, eff)
 	for {
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("device authorization expired")
@@ -338,7 +440,7 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 			}
 			return nil, err
 		}
-		return tokenSetFromOAuth(token, meta.Issuer, client.ClientID, oauth.Scopes), nil
+		return tokenSetFromOAuth(token, meta.Issuer, client.ClientID, eff), nil
 	}
 }
 
@@ -388,6 +490,11 @@ func pollDeviceToken(ctx context.Context, cfg *oauth2.Config, httpClient *http.C
 	if success.ExpiresIn > 0 {
 		token.Expiry = time.Now().Add(time.Duration(success.ExpiresIn) * time.Second)
 	}
+	if strings.TrimSpace(success.Scope) != "" {
+		// Surface the granted scope through extras so persistence treats
+		// the token response as authoritative.
+		token = token.WithExtra(map[string]any{"scope": success.Scope})
+	}
 	return token, nil
 }
 
@@ -407,8 +514,19 @@ func isDevicePending(err error) bool { return deviceErrorCode(err) == "authoriza
 
 func isDeviceSlowDown(err error) bool { return deviceErrorCode(err) == "slow_down" }
 
+// grantedScopes resolves the persisted scope set for a fresh grant. The
+// token response is authoritative: a returned scope string wins. Otherwise
+// the requested scopes stand (an omitted scope is omitted on the wire and
+// the server grants its default set, which the response then describes).
+func grantedScopes(token *oauth2.Token, requested []string) []string {
+	if raw, ok := token.Extra("scope").(string); ok && strings.TrimSpace(raw) != "" {
+		return strings.Fields(raw)
+	}
+	return append([]string(nil), requested...)
+}
+
 func tokenSetFromOAuth(token *oauth2.Token, issuer, clientID string, scopes []string) *TokenSet {
-	out := &TokenSet{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, Expiry: token.Expiry, Issuer: issuer, ClientID: clientID, Scopes: append([]string(nil), scopes...)}
+	out := &TokenSet{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, Expiry: token.Expiry, Issuer: issuer, ClientID: clientID, Scopes: grantedScopes(token, scopes)}
 	if token.TokenType != "" {
 		out.TokenType = token.TokenType
 	} else {
@@ -417,39 +535,136 @@ func tokenSetFromOAuth(token *oauth2.Token, issuer, clientID string, scopes []st
 	return out
 }
 
-// refreshOAuthToken exchanges a refresh token for a new credential and
-// persists it when the store holds the same refresh token (no clobbering a
-// newer parallel refresh).
-func refreshOAuthToken(ctx context.Context, store *tokenStore, meta *serverMetadata, client *resolvedOAuthClient, scopes []string, httpClient *http.Client) (*TokenSet, error) {
-	current, ok, err := store.LoadTokens(ctx)
+// refreshOAuthToken exchanges a refresh token for a new credential under a
+// cross-process fence held across read→POST→persist, so two processes cannot
+// double-spend a single-use refresh token. When a peer already rotated (the
+// stored grant differs from expectedRefresh and is live), the winner's pair
+// is adopted without POSTing the burned grant. Responses that omit
+// refresh_token or scope (RFC 6749 §6) carry the prior values forward.
+// The resource indicator is sent when resource is non-empty.
+// The scopes argument is the first-grant selection (see
+// selectEffectiveScopes); an empty selection falls back to the stored grant
+// below and is omitted on the wire.
+func refreshOAuthToken(ctx context.Context, store *tokenStore, meta *serverMetadata, client *resolvedOAuthClient, scopes []string, resource string, expectedRefresh string, httpClient *http.Client) (*TokenSet, error) {
+	unlock, err := store.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if !ok || current.RefreshToken == "" || current.Issuer != meta.Issuer {
+	defer unlock()
+	current, ok, err := readTokenFile[TokenSet](store.path(".json"))
+	if err != nil {
+		return nil, err
+	}
+	if !ok || current.RefreshToken == "" || !issuerMatches(current.Issuer, meta.Issuer) {
 		return nil, fmt.Errorf("no refresh token available")
 	}
-	if httpClient == nil {
-		httpClient = discoveryClient()
+	if expectedRefresh != "" && current.RefreshToken != expectedRefresh {
+		if current.Expiry.IsZero() || time.Now().Add(time.Minute).Before(current.Expiry) {
+			return &current, nil
+		}
 	}
-	cfg := oauth2Config(client, meta, scopes)
-	tokenCtx := context.WithValue(ctx, oauth2.HTTPClient, httpClient)
-	source := cfg.TokenSource(tokenCtx, &oauth2.Token{RefreshToken: current.RefreshToken, Expiry: time.Now().Add(-time.Minute)})
-	token, err := source.Token()
+	effectiveScopes := scopes
+	if len(effectiveScopes) == 0 {
+		effectiveScopes = current.Scopes
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {current.RefreshToken},
+		"client_id":     {client.ClientID},
+	}
+	if resource != "" {
+		form.Set("resource", resource)
+	}
+	if len(effectiveScopes) > 0 {
+		form.Set("scope", strings.Join(effectiveScopes, " "))
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, meta.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("refresh OAuth token: %w", err)
+		return nil, err
 	}
-	refreshed := tokenSetFromOAuth(token, meta.Issuer, client.ClientID, scopes)
-	if token.RefreshToken == "" {
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	if client.ClientSecret != "" {
+		if client.AuthStyle == oauth2.AuthStyleInHeader {
+			request.SetBasicAuth(url.QueryEscape(client.ClientID), url.QueryEscape(client.ClientSecret))
+		} else {
+			form.Set("client_secret", client.ClientSecret)
+			request.Body = io.NopCloser(strings.NewReader(form.Encode()))
+			request.ContentLength = int64(len(form.Encode()))
+		}
+	}
+	httpClient = oauthHTTPClient(httpClient)
+	response, err := httpClient.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("refresh OAuth token: request failed")
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxMetadataBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("refresh OAuth token: unreadable response")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, &refreshError{status: response.StatusCode, body: data}
+	}
+	var success struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(data, &success); err != nil || success.AccessToken == "" {
+		return nil, fmt.Errorf("refresh OAuth token: response is invalid")
+	}
+	refreshed := &TokenSet{AccessToken: success.AccessToken, Issuer: meta.Issuer, ClientID: client.ClientID}
+	if success.TokenType != "" {
+		refreshed.TokenType = success.TokenType
+	} else {
+		refreshed.TokenType = "Bearer"
+	}
+	if success.ExpiresIn > 0 {
+		refreshed.Expiry = time.Now().Add(time.Duration(success.ExpiresIn) * time.Second)
+	}
+	if success.RefreshToken != "" {
+		refreshed.RefreshToken = success.RefreshToken
+	} else {
 		refreshed.RefreshToken = current.RefreshToken
 	}
-	latest, ok, err := store.LoadTokens(ctx)
+	if success.Scope != "" {
+		refreshed.Scopes = strings.Fields(success.Scope)
+	} else {
+		refreshed.Scopes = append([]string(nil), effectiveScopes...)
+	}
+	latest, ok, err := readTokenFile[TokenSet](store.path(".json"))
 	if err != nil {
 		return nil, err
 	}
 	if ok && latest.RefreshToken == current.RefreshToken {
-		if err := store.SaveTokens(ctx, *refreshed); err != nil {
+		if err := writeTokenFile(store.path(".json"), *refreshed); err != nil {
 			return nil, err
 		}
+	} else if ok {
+		return &latest, nil
 	}
 	return refreshed, nil
+}
+
+// refreshError carries a non-2xx token-endpoint response for invalid_client
+// detection without logging secrets or payloads.
+type refreshError struct {
+	status int
+	body   []byte
+}
+
+func (e *refreshError) Error() string {
+	var failure struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(e.body, &failure) == nil && failure.Error != "" {
+		return "refresh OAuth token: " + failure.Error
+	}
+	return "refresh OAuth token: unexpected status"
 }

@@ -136,7 +136,7 @@ func TestOAuthHTTPExchangeAndRefresh(t *testing.T) {
 	if err := store.SaveTokens(ctx, *tokens); err != nil {
 		t.Fatal(err)
 	}
-	refreshed, err := refreshOAuthToken(ctx, store, meta, client, nil, oauthMappedClient(server))
+	refreshed, err := refreshOAuthToken(ctx, store, meta, client, nil, origin+"/mcp", "", oauthMappedClient(server))
 	if err != nil || refreshed.Issuer != origin {
 		t.Fatalf("refresh=%v error=%v", refreshed, err)
 	}

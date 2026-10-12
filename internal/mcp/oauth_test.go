@@ -31,6 +31,19 @@ type fakeAuthorizationServer struct {
 	tokenPolls   int64
 	deviceOKAt   int64
 	refreshCount int64
+	// challengeScope, when non-empty, is emitted as the scope parameter
+	// of a Bearer 401 challenge on GET /mcp.
+	challengeScope string
+	// prmScopes/asScopes, when non-empty, are advertised as
+	// scopes_supported on the protected-resource and authorization-server
+	// documents respectively.
+	prmScopes []string
+	asScopes  []string
+	// lastDeviceScope records the scope form field of the most recent
+	// device authorization request; lastDeviceScopeSet reports whether
+	// the field was present at all (absent vs empty matters on the wire).
+	lastDeviceScope    string
+	lastDeviceScopeSet bool
 }
 
 func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizationServer {
@@ -43,17 +56,25 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 		if fake.rootResource {
 			resource = issuer
 		}
-		writeJSON(w, map[string]any{"resource": resource, "authorization_servers": []string{issuer}})
+		doc := map[string]any{"resource": resource, "authorization_servers": []string{issuer}}
+		if len(fake.prmScopes) > 0 {
+			doc["scopes_supported"] = fake.prmScopes
+		}
+		writeJSON(w, doc)
 	})
 	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
 		if fake.rootResource {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, map[string]any{"resource": issuer + "/mcp", "authorization_servers": []string{issuer}})
+		doc := map[string]any{"resource": issuer + "/mcp", "authorization_servers": []string{issuer}}
+		if len(fake.prmScopes) > 0 {
+			doc["scopes_supported"] = fake.prmScopes
+		}
+		writeJSON(w, doc)
 	})
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{
+		doc := map[string]any{
 			"issuer":                                issuer,
 			"authorization_endpoint":                issuer + "/authorize",
 			"token_endpoint":                        issuer + "/token",
@@ -64,7 +85,11 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 			"code_challenge_methods_supported":      []string{"S256"},
 			"client_id_metadata_document_supported": fake.cimdAllowed,
 			"token_endpoint_auth_methods_supported": []string{"none"},
-		})
+		}
+		if len(fake.asScopes) > 0 {
+			doc["scopes_supported"] = fake.asScopes
+		}
+		writeJSON(w, doc)
 	})
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		var meta struct {
@@ -160,6 +185,11 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 				t.Error("device authorization did not use advertised resource")
 			}
 		}
+		_ = r.ParseForm()
+		fake.mu.Lock()
+		_, fake.lastDeviceScopeSet = r.PostForm["scope"]
+		fake.lastDeviceScope = r.PostForm.Get("scope")
+		fake.mu.Unlock()
 		writeJSON(w, map[string]any{
 			"device_code":      "device-code-1",
 			"user_code":        "USER-CODE",
@@ -167,6 +197,16 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 			"expires_in":       300,
 			"interval":         0,
 		})
+	})
+	// MCP endpoint: emits a Bearer 401 challenge carrying the configured
+	// scope when set, so harvest/selection can run end to end.
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if fake.challengeScope == "" {
+			writeJSON(w, map[string]any{})
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+issuer+`/.well-known/oauth-protected-resource/mcp", scope="`+fake.challengeScope+`"`)
+		w.WriteHeader(http.StatusUnauthorized)
 	})
 	server := httptest.NewServer(mux)
 	issuer = server.URL
@@ -457,7 +497,7 @@ func TestOAuthRefreshPersistsRotatedTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &resolvedOAuthClient{ClientID: "operator-client", Method: clientMethodOperator, AuthStyle: oauth2.AuthStyleInParams}
-	refreshed, err := refreshOAuthToken(ctx, store, meta, client, nil, nil)
+	refreshed, err := refreshOAuthToken(ctx, store, meta, client, nil, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

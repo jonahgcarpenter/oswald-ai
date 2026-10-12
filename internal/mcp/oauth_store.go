@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -96,35 +97,59 @@ func (s *tokenStore) path(suffix string) string {
 // locked runs fn while holding the server's exclusive lock file. Token,
 // client, metadata, and marker files are always read and written under it.
 func (s *tokenStore) locked(ctx context.Context, fn func() error) error {
+	unlock, err := s.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
+
+// acquire holds the server's exclusive lock file until the returned release
+// func runs. It backs the cross-process refresh fence: callers must hold it
+// across read→POST→persist so two processes cannot double-spend a
+// single-use refresh token.
+func (s *tokenStore) acquire(ctx context.Context) (func(), error) {
 	lock, err := os.OpenFile(s.path(".lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer lock.Close()
 	info, err := lock.Stat()
 	if err != nil {
-		return err
+		lock.Close()
+		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
-		return errors.New("OAuth lock file is not private")
+		lock.Close()
+		return nil, errors.New("OAuth lock file is not private")
 	}
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			lock.Close()
+			return nil, err
 		}
 		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 			break
 		} else if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
-			return err
+			lock.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			lock.Close()
+			return nil, fmt.Errorf("OAuth refresh fence timeout")
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			lock.Close()
+			return nil, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	return fn()
+	return func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		lock.Close()
+	}, nil
 }
 
 func readTokenFile[T any](path string) (T, bool, error) {
@@ -288,4 +313,69 @@ func (s *tokenStore) SaveMetadata(ctx context.Context, meta serverMetadata) erro
 		return errors.New("OAuth metadata is incomplete")
 	}
 	return s.locked(ctx, func() error { return writeTokenFile(s.path(".meta.json"), meta) })
+}
+
+// ClearTokens discards the stored credential, used when the configured
+// client identity changes or a grant is known dead.
+func (s *tokenStore) ClearTokens(ctx context.Context) error {
+	return s.locked(ctx, func() error {
+		if err := os.Remove(s.path(".json")); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
+}
+
+// ClearClient discards a dynamically registered client alongside stale
+// metadata so the next flow re-registers instead of retrying a dead ID.
+func (s *tokenStore) ClearClient(ctx context.Context) error {
+	return s.locked(ctx, func() error {
+		for _, suffix := range []string{".client.json", ".meta.json"} {
+			if err := os.Remove(s.path(suffix)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// BindIssuerIfEmpty adopts the discovery issuer once for credentials
+// persisted before issuer binding. It binds only files that already hold an
+// access token with an empty issuer; otherwise it reports false.
+func (s *tokenStore) BindIssuerIfEmpty(ctx context.Context, issuer string) (TokenSet, bool, error) {
+	if strings.TrimSpace(issuer) == "" {
+		return TokenSet{}, false, nil
+	}
+	var adopted TokenSet
+	var ok bool
+	if err := s.locked(ctx, func() error {
+		raw, found, err := readTokenFile[TokenSet](s.path(".json"))
+		if err != nil || !found || raw.AccessToken == "" || raw.Issuer != "" {
+			ok = false
+			return err
+		}
+		raw.Issuer = issuer
+		if err := writeTokenFile(s.path(".json"), raw); err != nil {
+			return err
+		}
+		adopted, ok = raw, true
+		return nil
+	}); err != nil {
+		return TokenSet{}, false, err
+	}
+	return adopted, ok, nil
+}
+
+// CachedRedirectURI returns the first redirect URI of a usable cached
+// dynamic client so re-login can reuse it instead of leaking a new
+// registration per ephemeral port.
+func (s *tokenStore) CachedRedirectURI(ctx context.Context) (string, bool, error) {
+	record, ok, err := s.LoadClient(ctx)
+	if err != nil || !ok || len(record.RedirectURIs) == 0 {
+		return "", false, err
+	}
+	if strings.TrimSpace(record.RedirectURIs[0]) == "" {
+		return "", false, nil
+	}
+	return record.RedirectURIs[0], true, nil
 }

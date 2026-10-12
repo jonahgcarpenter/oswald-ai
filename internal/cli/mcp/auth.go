@@ -22,10 +22,42 @@ func auth(ctx context.Context, root string, args []string, stdin io.Reader, stdo
 	flow := fs.String("flow", "", "OAuth flow: browser or device (default from configuration)")
 	noBrowser := fs.Bool("no-browser", false, "print the authorization URL and read a pasted response instead of opening a browser")
 	timeoutRaw := fs.String("timeout", "", "authorization wait bound, e.g. 300s (default from configuration)")
-	if err := fs.Parse(args); err != nil {
+	// Accept the server name in any position: Go's flag package stops at the
+	// first positional, so partition flag tokens from positionals manually.
+	// Known flags: --profile/--flow/--timeout take a value, --no-browser is
+	// boolean; both --flag value and --flag=value forms are accepted.
+	var flagArgs, rest []string
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		name := token
+		var inlineValue bool
+		if j := strings.Index(token, "="); strings.HasPrefix(token, "-") && j >= 0 {
+			name, inlineValue = token[:j], true
+		}
+		switch strings.TrimLeft(name, "-") {
+		case "profile", "flow", "timeout":
+			flagArgs = append(flagArgs, token)
+			if !inlineValue {
+				if i+1 >= len(args) {
+					fmt.Fprintln(stderr, "oswald: mcp auth requires exactly one server name")
+					return exitUsage
+				}
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		case "no-browser", "n":
+			flagArgs = append(flagArgs, token)
+		default:
+			if strings.HasPrefix(token, "-") {
+				flagArgs = append(flagArgs, token)
+			} else {
+				rest = append(rest, token)
+			}
+		}
+	}
+	if err := fs.Parse(flagArgs); err != nil {
 		return exitUsage
 	}
-	rest := fs.Args()
 	if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
 		fmt.Fprintln(stderr, "oswald: mcp auth requires exactly one server name")
 		return exitUsage
