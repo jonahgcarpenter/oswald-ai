@@ -101,10 +101,14 @@ func TestBridgeSearchFindsByKeywordAcrossServers(t *testing.T) {
 	if result.Outcome != governance.OutcomeProductive {
 		t.Fatalf("search outcome = %q: %s", result.Outcome, result.Content)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(result.Content), &fields); err != nil || fields["data"] != nil || fields["untrusted"] != nil || fields["queries"] == nil {
+		t.Fatal("search did not return plain discovery JSON")
+	}
 	var envelope struct {
 		Data bridgeSearchData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatalf("search result is not JSON: %v", err)
 	}
 	if envelope.Data.TotalAvailable != 2 {
@@ -131,7 +135,7 @@ func TestBridgeSearchUnknownWordReturnsHintNotMissing(t *testing.T) {
 	var envelope struct {
 		Data bridgeSearchData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatal(err)
 	}
 	if len(envelope.Data.AvailableSources) != 1 || envelope.Data.AvailableSources[0] != "home" {
@@ -155,7 +159,7 @@ func TestBridgeSearchEnforcesQueryCapAndLimit(t *testing.T) {
 	var envelope struct {
 		Data bridgeSearchData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatal(err)
 	}
 	if len(envelope.Data.Queries) != maxSearchQueries {
@@ -175,7 +179,7 @@ func TestBridgeSearchIsScopedToPrincipal(t *testing.T) {
 	var envelope struct {
 		Data bridgeSearchData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatal(err)
 	}
 	if envelope.Data.TotalAvailable != 0 || len(envelope.Data.Tools) != 0 {
@@ -189,10 +193,14 @@ func TestBridgeDescribeReturnsSchemasNotFoundAndErrors(t *testing.T) {
 	if err != nil || !handled {
 		t.Fatalf("describe handled=%t err=%v", handled, err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(result.Content), &fields); err != nil || fields["data"] != nil || fields["untrusted"] != nil || fields["tools"] == nil {
+		t.Fatal("describe did not return plain schema JSON")
+	}
 	var envelope struct {
 		Data bridgeDescribeData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatal(err)
 	}
 	schema, ok := envelope.Data.Tools["mcp__home__turn_on"]
@@ -238,7 +246,7 @@ func TestBridgeCallInvokesInOrderAndReportsEntryErrors(t *testing.T) {
 	var envelope struct {
 		Data bridgeCallData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatalf("call result is not JSON: %v", err)
 	}
 	if len(envelope.Data.Results) != 3 {
@@ -287,7 +295,7 @@ func TestBridgeCallRejectsBridgeSelfInvocationAndEmpty(t *testing.T) {
 	var envelope struct {
 		Data bridgeCallData `json:"data"`
 	}
-	if err := json.Unmarshal([]byte(result.Content), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(result.Content), &envelope.Data); err != nil {
 		t.Fatal(err)
 	}
 	if len(envelope.Data.Results) != 1 || envelope.Data.Results[0].Error == "" {
@@ -371,5 +379,54 @@ func TestProviderFiltersNamesReservedByBuiltinCatalog(t *testing.T) {
 	}
 	if _, handled, _ := provider.Execute(context.Background(), testPrincipal("user_1"), "web.search", nil); handled {
 		t.Fatal("reserved execution was handled")
+	}
+}
+
+func TestBridgeSingleResultUsesRemoteNameAndContent(t *testing.T) {
+	for _, content := range []string{"", strings.Repeat("界", 31), strings.Repeat("界", 32), `{"success":true,"issue":123,"title":"new issue"}`} {
+		manager := bridgeTestManager(t, "user_1")
+		for _, session := range manager.sessions {
+			session.tools[1].Handler = fixtureHandler(content)
+		}
+		provider := NewProvider(manager)
+		result, _, err := provider.Execute(context.Background(), testPrincipal("user_1"), ToolCall, map[string]interface{}{"calls": []interface{}{map[string]interface{}{"name": "mcp__home__weather", "arguments": map[string]interface{}{}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := governance.RemoteResultText("mcp__home__weather", content, maxBridgeResultChars)
+		if result.ResultName != "mcp__home__weather" || result.Content != want {
+			t.Fatalf("unexpected single-call result: %+v", result)
+		}
+	}
+}
+
+func TestBridgeBatchWrapsEachResultAndKeepsCompleteFraming(t *testing.T) {
+	manager := bridgeTestManager(t, "user_1")
+	for _, session := range manager.sessions {
+		session.tools[1].Handler = fixtureHandler(strings.Repeat("界", 20000))
+	}
+	provider := NewProvider(manager)
+	result, _, err := provider.Execute(context.Background(), testPrincipal("user_1"), ToolCall, map[string]interface{}{"calls": []interface{}{
+		map[string]interface{}{"name": "mcp__home__weather", "arguments": map[string]interface{}{}},
+		map[string]interface{}{"name": "mcp__home__weather", "arguments": map[string]interface{}{}},
+		map[string]interface{}{"name": "mcp__home__missing", "arguments": map[string]interface{}{}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data bridgeCallData
+	if err := json.Unmarshal([]byte(result.Content), &data); err != nil {
+		t.Fatal(err)
+	}
+	if result.ResultName != "" || len([]rune(result.Content)) > maxBridgeResultChars || len(data.Results) != 3 {
+		t.Fatal("batch identity, count, or bound changed")
+	}
+	for _, item := range data.Results[:2] {
+		if !strings.HasPrefix(item.Content, `<untrusted_tool_result source="mcp__home__weather">`) || !strings.HasSuffix(item.Content, "\n</untrusted_tool_result>") {
+			t.Fatal("batch truncation broke wrapper")
+		}
+	}
+	if data.Results[2].Error == "" || strings.Contains(data.Results[2].Error, "untrusted_tool_result") {
+		t.Fatal("local error was wrapped or missing")
 	}
 }

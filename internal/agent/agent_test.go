@@ -1294,10 +1294,15 @@ func TestProcessUsesBridgeToolsForDeferredMCP(t *testing.T) {
 		toolCallResponse("call-tool", "tool_call", map[string]interface{}{"calls": []interface{}{map[string]interface{}{"name": "mcp__home__turn_on", "arguments": map[string]interface{}{"entity": "light.office"}}}}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
-	agent, _ := newTestAgent(t, chat, nil, nil)
+	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
 
-	resp, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "turn on office light", nil, nil)
+	var resultNames []string
+	resp, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "turn on office light", nil, func(chunk StreamChunk) {
+		if chunk.Type == ChunkToolResult && chunk.Tool != nil {
+			resultNames = append(resultNames, chunk.Tool.Name)
+		}
+	})
 	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
@@ -1318,6 +1323,26 @@ func TestProcessUsesBridgeToolsForDeferredMCP(t *testing.T) {
 	}
 	if got := agent.mcpProvider.(*fakeMCPProvider).executed; !slices.Equal(got, []string{"tool_search", "tool_call"}) {
 		t.Fatalf("provider executions = %v, want search then call", got)
+	}
+	if !slices.Equal(resultNames, []string{"tool_search", "mcp__home__turn_on"}) {
+		t.Fatalf("stream result names=%v", resultNames)
+	}
+	var seen bool
+	for _, message := range requests[len(requests)-1].Messages {
+		if message.Role == "tool" && message.ToolCallID == "call-tool" {
+			seen = message.ToolName == "mcp__home__turn_on" && message.Content == "light turned on"
+		}
+	}
+	if !seen {
+		t.Fatal("live tool-result name lost")
+	}
+	turns, err := store.RecentSessionTurns("user-1", "session-mcp", 1, 1)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("history=%v error=%v", turns, err)
+	}
+	call := turns[0].ToolHistory.Batches[1].Calls[0]
+	if call.Name != "tool_call" || call.ResultName != "mcp__home__turn_on" || call.ProviderCallID != "call-tool" {
+		t.Fatalf("stored identities changed: %+v", call)
 	}
 }
 
@@ -1746,7 +1771,9 @@ func (p *fakeMCPProvider) Execute(_ context.Context, _ identity.Principal, name 
 		if scope == "" {
 			scope = mcp.ScopeUser
 		}
-		return mcp.ExecutionResult{Result: productiveResult("light turned on"), Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: "mcp__home__turn_on", RemoteToolName: "turn_on"}, true, nil
+		result := productiveResult("light turned on")
+		result.ResultName = "mcp__home__turn_on"
+		return mcp.ExecutionResult{Result: result, Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: "mcp__home__turn_on", RemoteToolName: "turn_on"}, true, nil
 	}
 	return mcp.ExecutionResult{}, false, nil
 }

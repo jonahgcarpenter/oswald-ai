@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
 const (
@@ -320,6 +321,9 @@ func boundedSearchHistory(source memory.ToolHistory, limit int) (memory.ToolHist
 			}
 			remaining--
 			result, cut := clampRunes(call.Result, min(limit, 1000))
+			if cut && call.ResultName != "" {
+				result = governance.BoundResultText(call.Result, min(limit, 1000))
+			}
 			call.Result, call.ResultTruncated = result, call.ResultTruncated || cut
 			omitted = omitted || cut || call.ResultTruncated || call.ArgumentsTruncated
 			arguments, err := json.Marshal(call.Arguments)

@@ -22,7 +22,7 @@ func SessionTurnMessages(turn SessionTurn) []llm.ChatMessage {
 			if call.Name == "vision_analyze" {
 				content = "[Historical image tool result; image bytes are omitted and are not loaded in this turn. Visibility and delivery statements below describe the original turn. Use vision_analyze with an available image source if needed.]\n\n" + content
 			}
-			messages = append(messages, llm.ChatMessage{Role: "tool", ToolName: call.Name, ToolCallID: callID, Content: content})
+			messages = append(messages, llm.ChatMessage{Role: "tool", ToolName: call.ToolResultName(), ToolCallID: callID, Content: content})
 		}
 	}
 	return append(messages, llm.ChatMessage{Role: "assistant", Content: turn.AssistantText})

@@ -988,7 +988,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
 			}
-			resultPayload := toolStreamPayload(toolName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
+			resultName := toolName
+			if decision.Allowed && execErr == nil && result.ResultName != "" {
+				resultName = result.ResultName
+			}
+			resultPayload := toolStreamPayload(resultName, tc.Function.Arguments, toolContent, time.Since(toolStartedAt), execErr != nil || !decision.Allowed)
 			if toolName == websearch.Name && resultPayload.WebSearch != nil {
 				resultPayload.WebSearch.IsDegraded = result.IsDegraded
 			}
@@ -1013,7 +1017,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 			messages = append(messages, llm.ChatMessage{
 				Role:       "tool",
-				ToolName:   toolName,
+				ToolName:   resultName,
 				ToolCallID: toolCallID,
 				Content:    toolContent,
 				Images:     toolImages,

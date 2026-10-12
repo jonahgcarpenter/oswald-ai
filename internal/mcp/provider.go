@@ -283,7 +283,7 @@ func (p *Provider) search(ctx context.Context, principal identity.Principal, arg
 		p.manager.log.Agent("agent.tool.mcp.search", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...).
 			Debug("agent.tool.mcp.search", "searched deferred MCP tools", config.F("query_count", len(queries)), config.F("tool_count", len(data.Tools)), config.F("total_available", len(catalog)))
 	}
-	return encodeBoundedResult("mcp_tool_search", data, truncateSearchData, matchedAny)
+	return encodeBoundedResult(data, truncateSearchData, matchedAny)
 }
 
 func catalogSources(catalog []registry.CatalogEntry) []string {
@@ -322,7 +322,7 @@ func truncateSearchData(data bridgeSearchData) bridgeSearchData {
 				delete(data.Tools, name)
 			}
 		}
-		if encoded, err := json.Marshal(bridgeEnvelope(data)); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
+		if encoded, err := json.Marshal(data); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
 			break
 		}
 	}
@@ -452,14 +452,14 @@ func (p *Provider) describe(ctx context.Context, principal identity.Principal, a
 		data.Tools[name] = bridgeToolSchema{Description: entry.Description, Parameters: catalogParameters(entry.Parameters)}
 	}
 	if len(data.Tools) == 0 && len(data.Errors) == 0 {
-		return governance.Result{Content: encodeBoundedEnvelope("mcp_tool_describe", data), Outcome: governance.OutcomeUnproductive, ReasonCode: "not_found"}, nil
+		return governance.Result{Content: encodeDescribeResult(data), Outcome: governance.OutcomeUnproductive, ReasonCode: "not_found"}, nil
 	}
 	if p.manager.log != nil {
 		meta := requestctx.MetadataFromContext(ctx)
 		p.manager.log.Agent("agent.tool.mcp.describe", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...).
 			Debug("agent.tool.mcp.describe", "described deferred MCP tools", config.F("name_count", len(names)), config.F("tool_count", len(data.Tools)), config.F("not_found_count", len(data.NotFound)))
 	}
-	return governance.Result{Content: encodeBoundedEnvelope("mcp_tool_describe", data), Outcome: governance.OutcomeProductive}, nil
+	return governance.Result{Content: encodeDescribeResult(data), Outcome: governance.OutcomeProductive}, nil
 }
 
 func catalogParameters(params []registry.ParamSpec) map[string]any {
@@ -526,7 +526,7 @@ func (p *Provider) call(ctx context.Context, principal identity.Principal, args 
 			if err != nil {
 				result.Error = config.SafeErrorText(err)
 			} else {
-				result.Content = execution.Content
+				result.Content = governance.RemoteResultText(entry.Name, execution.Content, maxBridgeResultChars)
 				succeeded++
 			}
 		}
@@ -543,43 +543,32 @@ func (p *Provider) call(ctx context.Context, principal identity.Principal, args 
 		p.manager.log.Agent("agent.tool.mcp.call", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...).
 			Debug("agent.tool.mcp.call", "invoked deferred MCP tools", config.F("call_count", len(entries)), config.F("success_count", succeeded))
 	}
+	if len(data.Results) == 1 && data.Results[0].Error == "" {
+		return governance.Result{Content: data.Results[0].Content, ResultName: data.Results[0].Name, Outcome: outcome, ReasonCode: reason}, nil
+	}
 	return encodeBoundedCallResult(data, outcome, reason)
 }
 
 func encodeBoundedCallResult(data bridgeCallData, outcome governance.Outcome, reason string) (governance.Result, error) {
-	envelope := untrustedEnvelope{Type: "mcp_tool_call", Untrusted: true, Notice: untrustedDataNotice, Data: data}
-	if encoded, err := json.Marshal(envelope); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
+	if encoded, err := json.Marshal(data); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
 		return governance.Result{Content: string(encoded), Outcome: outcome, ReasonCode: reason}, nil
 	}
 	for {
-		reduced := false
+		largest, size := -1, 0
 		for i := range data.Results {
-			if runes := []rune(data.Results[i].Content); len(runes) > 0 {
-				keep := len(runes) / 2
-				if keep == len(runes) {
-					keep = len(runes) - 1
-				}
-				data.Results[i].Content = string(runes[:keep]) + "…[truncated]"
-				reduced = true
-				break
+			if runes := []rune(data.Results[i].Content); len(runes) > size {
+				largest, size = i, len(runes)
 			}
 		}
-		if !reduced {
+		if largest < 0 {
 			break
 		}
-		envelope.Data = data
-		envelope.Truncated = true
-		if encoded, err := json.Marshal(envelope); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
-			return governance.Result{Content: string(encoded), Outcome: outcome, ReasonCode: reason}, nil
+		data.Results[largest].Content = governance.BoundResultText(data.Results[largest].Content, size/2)
+		if encoded := encodeBridgeData(data, true); len([]rune(encoded)) <= maxBridgeResultChars {
+			return governance.Result{Content: encoded, Outcome: outcome, ReasonCode: reason}, nil
 		}
 	}
-	envelope.Data = data
-	envelope.Truncated = true
-	encoded, err := json.Marshal(envelope)
-	if err != nil {
-		return governance.Result{}, fmt.Errorf("encode bridge result: %w", err)
-	}
-	return governance.Result{Content: string(encoded), Outcome: outcome, ReasonCode: reason}, nil
+	return governance.Result{}, fmt.Errorf("bridge result metadata exceeds limit")
 }
 
 func parseBridgeCalls(args map[string]interface{}) ([]bridgeCallEntry, error) {
@@ -639,44 +628,72 @@ func validateBridgeArguments(params []registry.ParamSpec, args map[string]interf
 	return nil
 }
 
-func bridgeEnvelope(data any) untrustedEnvelope {
-	return untrustedEnvelope{Type: "mcp_bridge", Untrusted: true, Notice: untrustedDataNotice, Data: data}
-}
-
-func encodeBoundedEnvelope(kind string, data any) string {
-	envelope := untrustedEnvelope{Type: kind, Untrusted: true, Notice: untrustedDataNotice, Data: data}
-	encoded, err := json.Marshal(envelope)
+func encodeBridgeData(data any, truncated bool) string {
+	encoded, err := json.Marshal(data)
 	if err != nil {
-		return string(mustMarshal(untrustedEnvelope{Type: kind, Untrusted: true, Notice: untrustedDataNotice, Data: "unavailable"}))
+		return `{"error":"unavailable"}`
+	}
+	if truncated {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(encoded, &fields) != nil || fields == nil {
+			return `{"error":"unavailable"}`
+		}
+		fields["truncated"] = json.RawMessage("true")
+		encoded, _ = json.Marshal(fields)
 	}
 	return string(encoded)
 }
 
-func encodeBoundedResult[T any](kind string, data T, truncate func(T) T, matched bool) (governance.Result, error) {
-	envelope := untrustedEnvelope{Type: kind, Untrusted: true, Notice: untrustedDataNotice, Data: data}
-	if encoded, err := json.Marshal(envelope); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
+func encodeBoundedResult[T any](data T, truncate func(T) T, matched bool) (governance.Result, error) {
+	if encoded, err := json.Marshal(data); err == nil && len([]rune(string(encoded))) <= maxBridgeResultChars {
 		if matched {
 			return governance.Result{Content: string(encoded), Outcome: governance.OutcomeProductive}, nil
 		}
 		return governance.Result{Content: string(encoded), Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
 	}
 	data = truncate(data)
-	envelope.Data = data
-	envelope.Truncated = true
-	encoded, err := json.Marshal(envelope)
-	if err != nil {
-		return governance.Result{}, fmt.Errorf("encode bridge result: %w", err)
+	encoded := encodeBridgeData(data, true)
+	if len([]rune(encoded)) > maxBridgeResultChars {
+		return governance.Result{}, fmt.Errorf("bridge search result exceeds limit")
 	}
 	if matched {
-		return governance.Result{Content: string(encoded), Outcome: governance.OutcomeProductive}, nil
+		return governance.Result{Content: encoded, Outcome: governance.OutcomeProductive}, nil
 	}
-	return governance.Result{Content: string(encoded), Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
+	return governance.Result{Content: encoded, Outcome: governance.OutcomeUnproductive, ReasonCode: "no_results"}, nil
+}
+
+func encodeDescribeResult(data bridgeDescribeData) string {
+	truncated := false
+	for {
+		encoded := encodeBridgeData(data, truncated)
+		if len([]rune(encoded)) <= maxBridgeResultChars {
+			return encoded
+		}
+		// Never advertise a partial schema. Omit the largest complete schema
+		// with an explicit error, preserving navigation to all other entries.
+		largest, size := "", 0
+		for name, schema := range data.Tools {
+			encoded, _ := json.Marshal(schema)
+			if len(encoded) > size || (len(encoded) == size && name < largest) {
+				largest, size = name, len(encoded)
+			}
+		}
+		if largest == "" {
+			return `{"error":"schema metadata exceeds limit","truncated":true}`
+		}
+		delete(data.Tools, largest)
+		if data.Errors == nil {
+			data.Errors = map[string]string{}
+		}
+		data.Errors[largest] = "Schema omitted because the result limit was reached. Describe this tool individually."
+		truncated = true
+	}
 }
 
 func mustMarshal(value any) []byte {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return []byte(`{"type":"mcp_bridge","untrusted":true}`)
+		return []byte(`{"error":"unavailable"}`)
 	}
 	return encoded
 }

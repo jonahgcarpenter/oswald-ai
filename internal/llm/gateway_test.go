@@ -57,6 +57,18 @@ func TestMapToGatewayMessagesSerializesImagesAsDataURLs(t *testing.T) {
 	}
 }
 
+func TestGatewayAlignsBridgeResultWireNameWithoutMutation(t *testing.T) {
+	const content = "<untrusted_tool_result source=\"mcp__github__create_issue\">\ndata\n</untrusted_tool_result>"
+	input := []ChatMessage{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_3", Function: ToolFunction{Name: "tool_call"}}}},
+		{Role: "tool", ToolName: "mcp__github__create_issue", ToolCallID: "call_3", Content: content},
+	}
+	wire := mapToGatewayMessages(input)
+	if wire[1].Name != "tool_call" || wire[1].ToolCallID != "call_3" || wire[1].Content != content || input[1].ToolName != "mcp__github__create_issue" {
+		t.Fatal("wire conversion changed original result or lost correlation")
+	}
+}
+
 func TestMapToGatewayMessagesKeepsMultimodalToolResultsCorrelated(t *testing.T) {
 	messages := mapToGatewayMessages([]ChatMessage{
 		{Role: "assistant", ToolCalls: []ToolCall{{ID: "text-call", Function: ToolFunction{Name: "text_tool"}}, {ID: "vision-call", Function: ToolFunction{Name: "vision_analyze"}}}},
