@@ -31,7 +31,6 @@ import (
 
 const (
 	sessionHistoryCandidateLimit  = 1000
-	recentToolExposureTurns       = 4
 	sessionTurnTTL                = 24 * time.Hour
 	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
@@ -375,7 +374,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
 	var recentTurns []memory.SessionTurn
-	var recentToolNames []string
 	var sessionSummary memory.SessionSummary
 	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
 		var err error
@@ -383,15 +381,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if err != nil && err != sql.ErrNoRows {
 			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
 			sessionSummary = memory.SessionSummary{}
-		}
-		recentTools, toolErr := a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, 0, recentToolExposureTurns)
-		if toolErr != nil {
-			reqLog.Warn("agent.session_memory.tools.failed", "failed to load recent tool continuity", config.F("status", "degraded"), config.ErrorField(toolErr))
-		} else {
-			for _, turn := range recentTools {
-				recentToolNames = append(recentToolNames, turn.ToolNames...)
-			}
-			recentToolNames = uniqueToolNames(recentToolNames)
 		}
 		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
 		if err != nil {
@@ -402,15 +391,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				config.F("candidate_turn_count", len(recentTurns)),
 			)
 		}
-	}
-	if a.mcpProvider != nil && len(recentToolNames) > 0 {
-		mcpCandidates := make([]string, 0, len(recentToolNames))
-		for _, name := range recentToolNames {
-			if !a.registry.HasHandler(name) {
-				mcpCandidates = append(mcpCandidates, name)
-			}
-		}
-		toolExposure.ExposeTools(a.mcpProvider.ResolveTools(ctx, request.Principal, mcpCandidates))
 	}
 	var foregroundDebt []memory.SessionTurn
 	if !request.Stateless && a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {

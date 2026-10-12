@@ -28,7 +28,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -1289,10 +1288,10 @@ func TestProviderUserValueStripsStaticSpeakerPrefix(t *testing.T) {
 	}
 }
 
-func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
+func TestProcessUsesBridgeToolsForDeferredMCP(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		toolCallResponse("call-discover", "home.tools", map[string]interface{}{"query": "light"}),
-		toolCallResponse("call-tool", "home.turn_on", map[string]interface{}{"entity": "light.office"}),
+		toolCallResponse("call-search", "tool_search", map[string]interface{}{"queries": "light"}),
+		toolCallResponse("call-tool", "tool_call", map[string]interface{}{"calls": []interface{}{map[string]interface{}{"name": "mcp__home__turn_on", "arguments": map[string]interface{}{"entity": "light.office"}}}}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	agent, _ := newTestAgent(t, chat, nil, nil)
@@ -1309,28 +1308,27 @@ func TestProcessUsesDynamicMCPDiscoveryTools(t *testing.T) {
 	if len(requests) < 2 {
 		t.Fatalf("expected multiple requests, got %d", len(requests))
 	}
-	if !requestHasTool(requests[0], "home.tools") {
-		t.Fatalf("first request did not include home.tools: %+v", toolNames(requests[0]))
+	for i, name := range []string{"tool_search", "tool_describe", "tool_call"} {
+		if !requestHasTool(requests[0], name) {
+			t.Fatalf("first request did not include bridge tool %s (request %d): %+v", name, i, toolNames(requests[0]))
+		}
 	}
-	if requestHasTool(requests[0], "home.turn_on") {
-		t.Fatalf("first request exposed actual MCP tool before discovery")
+	if requestHasTool(requests[0], "mcp__home__turn_on") || requestHasTool(requests[1], "mcp__home__turn_on") {
+		t.Fatalf("deferred MCP tool was advertised directly: %+v / %+v", toolNames(requests[0]), toolNames(requests[1]))
 	}
-	if !requestHasTool(requests[1], "home.turn_on") {
-		t.Fatalf("second request did not expose actual MCP tool: %+v", toolNames(requests[1]))
-	}
-	if description := requestToolDescription(requests[1], "home.turn_on"); description != "Turn on a light" {
-		t.Fatalf("discovered tool description = %q", description)
+	if got := agent.mcpProvider.(*fakeMCPProvider).executed; !slices.Equal(got, []string{"tool_search", "tool_call"}) {
+		t.Fatalf("provider executions = %v, want search then call", got)
 	}
 }
 
-func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
+func TestProcessBridgeDoesNotAuthorizeDirectDeferredCall(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		t.Run(fmt.Sprintf("streaming=%t", streaming), func(t *testing.T) {
-			batch := toolCallResponse("discover", "home.tools", map[string]interface{}{"query": "light"})
-			batch.Message.ToolCalls = append(batch.Message.ToolCalls, toolCallResponse("premature", "home.turn_on", map[string]interface{}{"entity": "light.office"}).Message.ToolCalls...)
+			batch := toolCallResponse("search", "tool_search", map[string]interface{}{"queries": "light"})
+			batch.Message.ToolCalls = append(batch.Message.ToolCalls, toolCallResponse("premature", "mcp__home__turn_on", map[string]interface{}{"entity": "light.office"}).Message.ToolCalls...)
 			chat := &fakeChatter{responses: []*llm.ChatResponse{
 				batch,
-				toolCallResponse("authorized", "home.turn_on", map[string]interface{}{"entity": "light.office"}),
+				toolCallResponse("authorized", "tool_call", map[string]interface{}{"calls": []interface{}{map[string]interface{}{"name": "mcp__home__turn_on", "arguments": map[string]interface{}{"entity": "light.office"}}}}),
 				{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 			}}
 			a, _ := newTestAgent(t, chat, nil, nil)
@@ -1344,19 +1342,19 @@ func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
 			if err != nil || resp == nil || resp.Response != "done" {
 				t.Fatalf("process = %+v, %v", resp, err)
 			}
-			if got := provider.executed; !slices.Equal(got, []string{"home.tools", "home.turn_on"}) {
-				t.Fatalf("provider executions = %v, want discovery and one authorized execution", got)
+			if got := provider.executed; !slices.Equal(got, []string{"tool_search", "tool_call"}) {
+				t.Fatalf("provider executions = %v, want search and one authorized call", got)
 			}
 			if len(chat.requests) != 3 {
 				t.Fatalf("model requests = %d, want 3", len(chat.requests))
 			}
 			for i, req := range chat.requests {
-				if !req.Stream || !requestHasTool(req, "home.tools") || requestHasTool(req, "home.turn_on") != (i > 0) {
+				if !req.Stream || !requestHasTool(req, "tool_search") || requestHasTool(req, "mcp__home__turn_on") {
 					t.Fatalf("request %d: stream=%t tools=%v", i, req.Stream, toolNames(req))
 				}
 			}
 			wantResults := []llm.ChatMessage{
-				{Role: "tool", ToolCallID: "discover", Content: "Available MCP tools from home:\n1. home.turn_on"},
+				{Role: "tool", ToolCallID: "search", Content: `{"results":[{"query":"light","matches":["mcp__home__turn_on"]}]}`},
 				{Role: "tool", ToolCallID: "premature", Content: "Tool call blocked: this tool was not available for this model step. Use only currently available tools."},
 				{Role: "tool", ToolCallID: "authorized", Content: "light turned on"},
 			}
@@ -1385,7 +1383,7 @@ func TestProcessMCPDiscoveryDoesNotAuthorizeSameBatchCall(t *testing.T) {
 	}
 }
 
-func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
+func TestProcessDoesNotPreExposeDeferredMCPTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
@@ -1393,7 +1391,7 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AppendSessionTurnForGeneration(context.Background(), "session-mcp", "user-1", profile.Generation, "prior question", "prior answer", []string{"home.turn_on", "home.tools", "web.search"}, time.Hour); err != nil {
+	if err := store.AppendSessionTurnForGeneration(context.Background(), "session-mcp", "user-1", profile.Generation, "prior question", "prior answer", []string{"mcp__home__turn_on", "tool_search", "web.search"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1401,11 +1399,13 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
-	if !requestHasTool(request, "home.turn_on") {
-		t.Fatalf("first request did not pre-expose recent MCP tool: %+v", toolNames(request))
+	if requestHasTool(request, "mcp__home__turn_on") {
+		t.Fatalf("first request pre-exposed deferred MCP tool: %+v", toolNames(request))
 	}
-	if description := requestToolDescription(request, "home.turn_on"); description != "Turn on a light" {
-		t.Fatalf("pre-exposed tool description = %q", description)
+	for _, name := range []string{"tool_search", "tool_describe", "tool_call"} {
+		if !requestHasTool(request, name) {
+			t.Fatalf("first request missing bridge tool %s: %+v", name, toolNames(request))
+		}
 	}
 	for _, message := range request.Messages {
 		if strings.Contains(message.Content, "Tools used:") {
@@ -1414,7 +1414,7 @@ func TestProcessPreExposesMCPToolsFromRecentSessionTurns(t *testing.T) {
 	}
 }
 
-func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) {
+func TestProcessLegacyDotQualifiedHistoryDoesNotAdvertise(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
@@ -1438,8 +1438,8 @@ func TestProcessPreExposesLatestFourMCPToolsAcrossSummaryBoundary(t *testing.T) 
 		t.Fatal(err)
 	}
 	request := primaryRequests(chat.requests)[0]
-	if !requestHasTool(request, "home.turn_on") {
-		t.Fatalf("summarized fourth-newest MCP tool was not pre-exposed: %+v", toolNames(request))
+	if requestHasTool(request, "home.turn_on") {
+		t.Fatalf("legacy dot-qualified tool was advertised: %+v", toolNames(request))
 	}
 	for _, message := range request.Messages {
 		if strings.Contains(message.Content, "Tools used: home.turn_on") {
@@ -1563,11 +1563,11 @@ func TestProcessNeverIncludesAnotherUsersTenantProfile(t *testing.T) {
 	}
 }
 
-func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
+func TestProcessDoesNotAdvertiseDeferredMCPTools(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 	agent.mcpProvider = &fakeMCPProvider{}
-	if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "old question", "old answer", []string{"home.turn_on"}, time.Hour); err != nil {
+	if err := store.AppendSessionTurn(context.Background(), "session-mcp", "user-1", "old question", "old answer", []string{"mcp__home__turn_on"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 4; i++ {
@@ -1580,8 +1580,8 @@ func TestProcessDoesNotPreExposeMCPToolOutsideRecentFourTurns(t *testing.T) {
 		t.Fatalf("process: %v", err)
 	}
 	request := primaryRequests(chat.requests)[0]
-	if requestHasTool(request, "home.turn_on") {
-		t.Fatalf("first request exposed tool from fifth-oldest turn: %+v", toolNames(request))
+	if requestHasTool(request, "mcp__home__turn_on") {
+		t.Fatalf("first request exposed deferred tool from history: %+v", toolNames(request))
 	}
 	if strings.Contains(request.Messages[0].Content, "old question") {
 		t.Fatalf("system prompt included fifth-oldest turn:\n%s", request.Messages[0].Content)
@@ -1608,8 +1608,8 @@ func TestProcessDoesNotAutomaticallyInjectGlobalMemory(t *testing.T) {
 
 func TestAgentKeepsDefaultVisibleMemoryAfterGlobalMCPResult(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
-		toolCallResponse("discover", "home.tools", nil),
-		toolCallResponse("global-call", "home.turn_on", map[string]interface{}{"entity": "light"}),
+		toolCallResponse("search", "tool_search", map[string]interface{}{"queries": "deployment"}),
+		toolCallResponse("global-call", "tool_call", map[string]interface{}{"calls": []interface{}{map[string]interface{}{"name": "mcp__home__turn_on", "arguments": map[string]interface{}{"entity": "light"}}}}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
@@ -1722,44 +1722,31 @@ type fakeMCPProvider struct {
 	executed []string
 }
 
-func (p *fakeMCPProvider) DiscoveryTools(context.Context, identity.Principal) []llm.Tool {
-	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.tools", Description: "Search Home Assistant tools", Parameters: llm.ToolParameters{Type: "object"}}}}
-}
-
-func (p *fakeMCPProvider) ResolveTools(_ context.Context, _ identity.Principal, names []string) []string {
-	for _, name := range names {
-		if name == "home.turn_on" {
-			return []string{name}
-		}
+func (p *fakeMCPProvider) BridgeTools(context.Context, identity.Principal) []llm.Tool {
+	return []llm.Tool{
+		{Type: "function", Function: llm.ToolDefinition{Name: mcp.ToolSearch, Description: "Search deferred MCP tools", Parameters: llm.ToolParameters{Type: "object"}}},
+		{Type: "function", Function: llm.ToolDefinition{Name: mcp.ToolDescribe, Description: "Describe deferred MCP tools", Parameters: llm.ToolParameters{Type: "object"}}},
+		{Type: "function", Function: llm.ToolDefinition{Name: mcp.ToolCall, Description: "Invoke deferred MCP tools", Parameters: llm.ToolParameters{Type: "object"}}},
 	}
-	return nil
-}
-
-func (p *fakeMCPProvider) LLMTools(_ context.Context, _ identity.Principal, exposed map[string]bool) []llm.Tool {
-	if !exposed["home.turn_on"] {
-		return nil
-	}
-	return []llm.Tool{{Type: "function", Function: llm.ToolDefinition{Name: "home.turn_on", Description: "Turn on a light", Parameters: llm.ToolParameters{Type: "object"}}}}
 }
 
 func (p *fakeMCPProvider) ToolPolicy(string) governance.ToolPolicy {
 	return testToolPolicy()
 }
 
-func (p *fakeMCPProvider) Execute(ctx context.Context, _ identity.Principal, name string, _ map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error) {
+func (p *fakeMCPProvider) Execute(_ context.Context, _ identity.Principal, name string, _ map[string]interface{}) (mcp.ExecutionResult, bool, error) {
 	p.executed = append(p.executed, name)
-	if name == "home.tools" {
-		if exposer := requestctx.ToolExposerFromContext(ctx); exposer != nil {
-			exposer.ExposeTools([]string{"home.turn_on"})
-		}
-		return mcp.ExecutionResult{Result: productiveResult("Available MCP tools from home:\n1. home.turn_on"), IsDiscovery: true}, true, nil
-	}
-	if name == "home.turn_on" && exposed[name] {
+	switch name {
+	case mcp.ToolSearch:
+		return mcp.ExecutionResult{Result: productiveResult(`{"results":[{"query":"light","matches":["mcp__home__turn_on"]}]}`), IsDiscovery: true}, true, nil
+	case mcp.ToolDescribe:
+		return mcp.ExecutionResult{Result: productiveResult(`{"tools":{"mcp__home__turn_on":{"description":"Turn on a light"}}}`), IsDiscovery: true}, true, nil
+	case mcp.ToolCall:
 		scope := p.scope
 		if scope == "" {
 			scope = mcp.ScopeUser
 		}
-		return mcp.ExecutionResult{Result: productiveResult("light turned on"), Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: name, RemoteToolName: "turn_on"}, true, nil
+		return mcp.ExecutionResult{Result: productiveResult("light turned on"), Scope: scope, ServerID: "server-1", ServerName: "home", ToolName: "mcp__home__turn_on", RemoteToolName: "turn_on"}, true, nil
 	}
 	return mcp.ExecutionResult{}, false, nil
 }

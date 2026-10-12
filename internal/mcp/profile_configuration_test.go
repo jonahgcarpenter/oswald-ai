@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -33,12 +34,28 @@ func TestProfileMCPIsolationAndImmutableConfiguration(t *testing.T) {
 	if cfg.Headers["Authorization"] != "Bearer alice" {
 		t.Fatal("caller mutated resolved profile credentials")
 	}
-	tools := NewProvider(alice).DiscoveryTools(ctx, testPrincipal("alice"))
-	if len(tools) != 1 || tools[0].Function.Name != "example.tools" {
-		t.Fatal("profile discovery was not advertised")
+	tools := NewProvider(alice).BridgeTools(ctx, testPrincipal("alice"))
+	if len(tools) != 3 {
+		t.Fatal("profile bridge was not advertised")
 	}
-	if len(NewProvider(alice).DiscoveryTools(ctx, testPrincipal("bob"))) != 0 {
-		t.Fatal("another profile received discovery tools")
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.Function.Name] = true
+	}
+	if !names[ToolSearch] || !names[ToolDescribe] || !names[ToolCall] {
+		t.Fatalf("profile bridge tools = %+v", names)
+	}
+	if got := NewProvider(alice).BridgeTools(ctx, testPrincipal("bob")); len(got) != 3 {
+		t.Fatal("bridge must be advertised per principal without leaking catalog")
+	}
+	// Catalog isolation is enforced at search time, not advertisement time:
+	// bob's search must not return alice's deferred tools.
+	search, _, err := NewProvider(alice).Execute(ctx, testPrincipal("bob"), ToolSearch, map[string]interface{}{"queries": []interface{}{"synthetic"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(search.Content, "mcp__example__") {
+		t.Fatal("MCP catalog crossed profile ownership")
 	}
 }
 

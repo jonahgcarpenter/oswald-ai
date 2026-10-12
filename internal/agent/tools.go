@@ -13,12 +13,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 
-// MCPProvider resolves request-scoped MCP tools for the active canonical user.
+// MCPProvider resolves request-scoped deferred MCP tools through the
+// tool_search, tool_describe, and tool_call bridge.
 type MCPProvider interface {
-	DiscoveryTools(ctx context.Context, principal identity.Principal) []llm.Tool
-	ResolveTools(ctx context.Context, principal identity.Principal, names []string) []string
-	LLMTools(ctx context.Context, principal identity.Principal, exposed map[string]bool) []llm.Tool
-	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}, exposed map[string]bool) (mcp.ExecutionResult, bool, error)
+	BridgeTools(ctx context.Context, principal identity.Principal) []llm.Tool
+	Execute(ctx context.Context, principal identity.Principal, name string, args map[string]interface{}) (mcp.ExecutionResult, bool, error)
 	ToolPolicy(name string) governance.ToolPolicy
 }
 
@@ -48,10 +47,7 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	if a.mcpProvider == nil {
 		return catalog
 	}
-	for _, tool := range a.mcpProvider.DiscoveryTools(ctx, principal) {
-		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
-	}
-	for _, tool := range a.mcpProvider.LLMTools(ctx, principal, exposure.ExposedMCPTools()) {
+	for _, tool := range a.mcpProvider.BridgeTools(ctx, principal) {
 		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
 	}
 	return catalog
@@ -160,7 +156,7 @@ func (a *Agent) executeTool(ctx context.Context, principal identity.Principal, n
 		return a.registry.Execute(ctx, name, args)
 	}
 	if a.mcpProvider != nil {
-		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args, exposure.ExposedMCPTools()); handled {
+		if result, handled, err := a.mcpProvider.Execute(ctx, principal, name, args); handled {
 			return result.Result, err
 		}
 	}

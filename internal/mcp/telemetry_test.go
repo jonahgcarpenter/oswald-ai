@@ -125,7 +125,7 @@ func TestManagerReportsConnectListAndCloseFailuresWithoutPrivateDetails(t *testi
 	}
 	store.closed = true
 	manager.ToolSpecs(ctx, "user")
-	NewProvider(manager).DiscoveryTools(ctx, testPrincipal("user"))
+	NewProvider(manager).BridgeTools(ctx, testPrincipal("user"))
 	for _, event := range []string{"mcp.server.connect.complete", "mcp.server.connect_failed", "mcp.server.close_failed", "mcp.server_configs.list_failed"} {
 		if !strings.Contains(output.String(), `"event":"`+event+`"`) {
 			t.Errorf("missing %s: %s", event, output.String())

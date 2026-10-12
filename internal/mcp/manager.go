@@ -365,9 +365,9 @@ func toolSpec(cfg ServerConfig, tool *gomcp.Tool, session *gomcp.ClientSession, 
 	if err := validateProviderIdentifier(remoteName); err != nil {
 		return ToolSpec{}, fmt.Errorf("invalid remote tool name: %w", err)
 	}
-	localName := cfg.Name + "." + remoteName
-	if len(localName) > maxProviderIdentifierBytes {
-		return ToolSpec{}, fmt.Errorf("qualified tool name exceeds %d bytes", maxProviderIdentifierBytes)
+	localName := bridgeToolName(cfg.Name, remoteName)
+	if err := qualifiedBridgeNameLength(cfg.Name, remoteName); err != nil {
+		return ToolSpec{}, err
 	}
 	params, err := schemaToParams(tool.InputSchema)
 	if err != nil {
@@ -410,9 +410,4 @@ func scopeKey(cfg ServerConfig) string {
 		return ScopeGlobal + ":" + cfg.Name
 	}
 	return ScopeUser + ":" + cfg.OwnerUserID + ":" + cfg.Name
-}
-
-func splitToolName(name string) (string, string, bool) {
-	server, remote, ok := strings.Cut(strings.TrimSpace(name), ".")
-	return server, remote, ok && server != "" && remote != ""
 }

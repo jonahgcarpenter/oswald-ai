@@ -110,7 +110,7 @@ func TestLoadToolSpecsPaginatesSDKAndDiscardsCanceledPartialCatalog(t *testing.T
 					if got.err != nil || len(got.specs) != 2 {
 						t.Fatalf("catalog specs=%v err=%v", got.specs, got.err)
 					}
-					if got.specs[0].Name != "test.first" || got.specs[1].Name != "test.second" {
+					if got.specs[0].Name != "mcp__test__first" || got.specs[1].Name != "mcp__test__second" {
 						t.Fatalf("catalog names=%q, %q", got.specs[0].Name, got.specs[1].Name)
 					}
 				}
