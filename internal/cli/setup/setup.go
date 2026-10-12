@@ -227,9 +227,7 @@ tools:
     generation_timeout: 2m
 # MCP connections are isolated by profile and opened lazily; restart to reload.
 # Each server sets exactly one of url (HTTP) or command (stdio).
-mcp:
-  servers: {}
-  # servers:
+mcp_servers:
   #   example_http:
   #     url: https://example.com/mcp
   #     # transport: sse  # streamable_http default; sse for legacy servers.

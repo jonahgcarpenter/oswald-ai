@@ -9,7 +9,7 @@ import (
 
 func loadMCPConfig(t *testing.T, mcpYAML string) *Config {
 	t.Helper()
-	root := profileConfigFixture(t, syntheticProfileConfig+"mcp:\n  servers:\n"+mcpYAML)
+	root := profileConfigFixture(t, syntheticProfileConfig+"mcp_servers:\n"+mcpYAML)
 	cfg, err := LoadProfiles(root)
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func loadMCPConfig(t *testing.T, mcpYAML string) *Config {
 
 func loadMCPConfigErr(t *testing.T, mcpYAML string) error {
 	t.Helper()
-	root := profileConfigFixture(t, syntheticProfileConfig+"mcp:\n  servers:\n"+mcpYAML)
+	root := profileConfigFixture(t, syntheticProfileConfig+"mcp_servers:\n"+mcpYAML)
 	_, err := LoadProfiles(root)
 	if err == nil {
 		t.Fatal("invalid MCP configuration accepted")
@@ -56,7 +56,7 @@ func TestMCPHTTPSSEAndFilters(t *testing.T) {
 }
 
 func TestMCPStdioServerResolution(t *testing.T) {
-	root := profileConfigFixture(t, syntheticProfileConfig+"mcp:\n  servers:\n    notes:\n      command: npx\n      args: [\"-y\", \"@example/notes-server\"]\n      cwd: work\n      env:\n        LOG_LEVEL: info\n        API_KEY: ${PROFILE_MCP_API_KEY}\n      tools:\n        exclude: [edit]\n")
+	root := profileConfigFixture(t, syntheticProfileConfig+"mcp_servers:\n    notes:\n      command: npx\n      args: [\"-y\", \"@example/notes-server\"]\n      cwd: work\n      env:\n        LOG_LEVEL: info\n        API_KEY: ${PROFILE_MCP_API_KEY}\n      tools:\n        exclude: [edit]\n")
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("PROFILE_MCP_API_KEY=secret-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +82,15 @@ func TestMCPStdioServerResolution(t *testing.T) {
 	}
 	if len(server.Exclude) != 1 || server.Exclude[0] != "edit" {
 		t.Fatalf("exclude = %+v", server.Exclude)
+	}
+}
+
+func TestMCPLegacyNestedKeyRejected(t *testing.T) {
+	root := profileConfigFixture(t, syntheticProfileConfig+"mcp:\n  servers:\n    bad:\n      url: https://example.com/mcp\n")
+	if _, err := LoadProfiles(root); err == nil {
+		t.Fatal("legacy nested mcp key accepted")
+	} else if code := configErrorCode(err); code != "config_yaml_invalid" {
+		t.Fatalf("error code = %q", code)
 	}
 }
 

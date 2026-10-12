@@ -123,9 +123,7 @@ type documentYAML struct {
 	Runtime   *struct {
 		LogLevel string `yaml:"log_level"`
 	} `yaml:"runtime"`
-	MCP struct {
-		Servers map[string]mcpServerYAML `yaml:"servers"`
-	} `yaml:"mcp"`
+	MCPServers map[string]mcpServerYAML `yaml:"mcp_servers"`
 }
 
 type mcpToolsYAML struct {
@@ -402,11 +400,11 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		}
 	}
 	cfg.MCPServers = nil
-	if len(doc.MCP.Servers) > 32 {
-		return configErr("config_mcp_invalid", "mcp.servers")
+	if len(doc.MCPServers) > 32 {
+		return configErr("config_mcp_invalid", "mcp_servers")
 	}
-	for name, server := range doc.MCP.Servers {
-		base := "mcp.servers." + name
+	for name, server := range doc.MCPServers {
+		base := "mcp_servers." + name
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`).MatchString(name) || name == "soul" {
 			return configErr("config_mcp_invalid", base)
 		}

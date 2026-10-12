@@ -272,7 +272,7 @@ func resolveDocument(node *yaml.Node, env profileEnvironment) (documentYAML, err
 			n.Value = value
 			// Numeric and boolean configuration fields remain typed even when
 			// their YAML source is a quoted environment reference.
-			if strings.HasPrefix(path, "platforms.") || (strings.HasPrefix(path, "mcp.servers.") && strings.Count(path, ".") == 3 && strings.HasSuffix(path, ".enabled")) || path == "model.context_length" {
+			if strings.HasPrefix(path, "platforms.") || (strings.HasPrefix(path, "mcp_servers.") && strings.Count(path, ".") == 2 && strings.HasSuffix(path, ".enabled")) || path == "model.context_length" {
 				key := path[strings.LastIndex(path, ".")+1:]
 				switch key {
 				case "api_port", "webhook_port", "context_length":
@@ -330,13 +330,13 @@ func profileDocument(global, override *yaml.Node) (*yaml.Node, error) {
 	base := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	for i := 0; i < len(global.Content); i += 2 {
 		switch global.Content[i].Value {
-		case "providers", "model", "tools", "mcp", "api":
+		case "providers", "model", "tools", "mcp_servers", "api":
 			base.Content = append(base.Content, cloneYAML(global.Content[i]), cloneYAML(global.Content[i+1]))
 		}
 	}
 	for i := 0; i < len(override.Content); i += 2 {
 		switch override.Content[i].Value {
-		case "providers", "model", "tools", "mcp", "api":
+		case "providers", "model", "tools", "mcp_servers", "api":
 		default:
 			return nil, configErr("config_profile_override_invalid", override.Content[i].Value)
 		}
