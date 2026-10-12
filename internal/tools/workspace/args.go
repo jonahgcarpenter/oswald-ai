@@ -182,6 +182,13 @@ func secondsToDuration(secs int) (d time.Duration) {
 	return time.Duration(secs) * time.Second
 }
 
+func appendNote(existing, note string) string {
+	if strings.TrimSpace(existing) == "" {
+		return note
+	}
+	return existing + "\n" + note
+}
+
 func userHome() string {
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		return home

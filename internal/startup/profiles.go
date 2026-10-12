@@ -21,6 +21,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
@@ -85,6 +86,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		for _, worker := range compressionWorkers {
 			worker.Stop()
 		}
+		process.StopAll()
 		for _, manager := range mcpManagers {
 			if err := manager.Close(); err != nil {
 				log.Warn("app.mcp.close_failed", "failed to close profile MCP sessions", config.ErrorField(err))

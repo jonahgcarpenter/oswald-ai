@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
@@ -123,6 +124,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	}
 
 	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
+	pm := process.NewManager(cfg.ProfileRoot)
 	workspaceTools := []struct {
 		name    string
 		policy  governance.ToolPolicy
@@ -132,8 +134,9 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{workspace.WriteFileName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
 		{workspace.PatchName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
 		{workspace.SearchFilesName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
-		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws))},
+		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
 		{workspace.ExecuteCodeName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
+		{workspace.ProcessManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
 	}
 	for _, tool := range workspaceTools {
 		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
@@ -262,4 +265,24 @@ func normalizeExecuteCodeArgs(args map[string]interface{}) interface{} {
 		"code_hash": hex.EncodeToString(sum[:]),
 		"reset":     args["reset"],
 	}
+}
+
+func normalizeProcessManageArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["action"].(string); ok {
+		normalized["action"] = strings.Join(strings.Fields(value), " ")
+	}
+	if value, ok := args["session_id"].(string); ok {
+		normalized["session_id"] = strings.TrimSpace(value)
+	}
+	for _, key := range []string{"timeout", "offset", "limit"} {
+		if value, ok := args[key]; ok {
+			normalized[key] = value
+		}
+	}
+	if data, ok := args["data"].(string); ok {
+		sum := sha256.Sum256([]byte(data))
+		normalized["data_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
 }

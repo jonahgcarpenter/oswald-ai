@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
@@ -20,8 +21,10 @@ const (
 	maxTerminalOutput      = 100 << 10
 )
 
-// NewTerminalHandler returns the sandboxed foreground shell runner.
-func NewTerminalHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// NewTerminalHandler returns the sandboxed shell runner with tracked
+// background support. Background spawns via the profile process manager and
+// returns a session_id for process_manage polling.
+func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -42,31 +45,43 @@ func NewTerminalHandler(ws *Workspace) func(context.Context, map[string]interfac
 		if len(command) > 32<<10 {
 			return governance.Result{}, errors.New("command exceeds size limit")
 		}
-		if background, err := boolArg(args, "background", false); err != nil {
+		background, err := boolArg(args, "background", false)
+		if err != nil {
 			return governance.Result{}, err
-		} else if background {
-			return governance.Result{}, errors.New("background execution is not scheduled here; rerun foreground with a higher timeout")
 		}
 		if pty, err := boolArg(args, "pty", false); err != nil {
 			return governance.Result{}, err
-		} else if pty {
-			return governance.Result{}, errors.New("pty execution is not supported here")
+		} else if pty && !background {
+			return governance.Result{}, errors.New("pty requires background=true")
 		}
-		if persist, err := boolArg(args, "persist_on_release", false); err != nil {
+		persist, err := boolArg(args, "persist_on_release", false)
+		if err != nil {
 			return governance.Result{}, err
-		} else if persist {
-			return governance.Result{}, errors.New("persist_on_release is not supported here")
 		}
-		if _, ok := args["notify"]; ok {
-			if _, isBool := args["notify"].(bool); !isBool {
-				if _, isSlice := args["notify"].([]interface{}); !isSlice {
-					return governance.Result{}, errors.New("notify must be a boolean or string array")
+		notifyNote := ""
+		if raw, ok := args["notify"]; ok {
+			switch v := raw.(type) {
+			case bool:
+				if v && !background {
+					notifyNote = "note: notify applies to background processes only"
 				}
+			case []interface{}:
+				if !background {
+					notifyNote = "note: notify applies to background processes only"
+				} else {
+					notifyNote = "note: watch patterns recorded; poll with process_manage (no live push in this deployment)"
+				}
+			default:
+				return governance.Result{}, errors.New("notify must be a boolean or string array")
 			}
 		}
+		heartbeat, err := intArg(args, "heartbeat", 0)
+		if err != nil || heartbeat < 0 {
+			return governance.Result{}, errors.New("heartbeat must be an integer >= 0")
+		}
 		timeout, err := intArg(args, "timeout", defaultTerminalTimeout)
-		if err != nil || timeout < 1 || timeout > maxTerminalTimeout {
-			return governance.Result{}, errors.New("timeout must be an integer between 1 and 600")
+		if err != nil || timeout < 1 {
+			return governance.Result{}, errors.New("timeout must be an integer >= 1")
 		}
 		workdir := ws.Root()
 		if raw, ok := stringArg(args, "workdir"); ok && strings.TrimSpace(raw) != "" {
@@ -79,6 +94,41 @@ func NewTerminalHandler(ws *Workspace) func(context.Context, map[string]interfac
 		scratch, serr := ws.EnsureScratch()
 		if serr != nil {
 			return governance.Result{}, errors.New("workspace is unavailable")
+		}
+		if background {
+			if pm == nil {
+				return governance.Result{}, errors.New("process manager is unavailable")
+			}
+			if timeout > maxTerminalTimeout {
+				// Over-cap background keeps the requested bound; note it.
+				notifyNote = appendNote(notifyNote, fmt.Sprintf("note: timeout %ds exceeds foreground max; running tracked", timeout))
+			}
+			info, serr := pm.Spawn(requestID(ctx), command, workdir, scratch, timeout)
+			if serr != nil {
+				return governance.Result{}, serr
+			}
+			if persist {
+				_ = pm.SetPersist(info.ID, true)
+			}
+			content := fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nPoll with process_manage (poll/log/wait).", info.ID, info.PID)
+			if heartbeat > 0 {
+				content += "\nnote: heartbeat recorded; poll with process_manage (no live push in this deployment)"
+			}
+			if notifyNote != "" {
+				content += "\n" + notifyNote
+			}
+			return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+		}
+		if timeout > maxTerminalTimeout {
+			// Over-cap foreground promotes to tracked background.
+			if pm == nil {
+				return governance.Result{}, errors.New("process manager is unavailable")
+			}
+			info, serr := pm.Spawn(requestID(ctx), command, workdir, scratch, timeout)
+			if serr != nil {
+				return governance.Result{}, serr
+			}
+			return governance.Result{Content: fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nnote: foreground timeout over cap; promoted to tracked background. Poll with process_manage.", info.ID, info.PID), Outcome: governance.OutcomeProductive}, nil
 		}
 		output, code, runErr := runShell(ctx, command, workdir, scratch, timeout)
 		content := fmt.Sprintf("exit_code: %d\n%s", code, output)
