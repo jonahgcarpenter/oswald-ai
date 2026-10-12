@@ -134,6 +134,15 @@ func (dg *Gateway) runOutbound(ctx context.Context, done chan struct{}) {
 		delay := time.Second
 		var err error
 		for {
+			// Timer-based context expiry can lag behind the virtual deadline
+			// while the worker drains the queue synchronously, so check the
+			// wall clock before attempting. Otherwise already-expired
+			// waiting entries each cost one HTTP attempt before the
+			// post-call expiry check below notices.
+			if deadline, ok := e.ctx.Deadline(); ok && !time.Now().Before(deadline) {
+				err = context.DeadlineExceeded
+				break
+			}
 			attemptCtx, cancel := context.WithTimeout(e.ctx, 15*time.Second)
 			stop := context.AfterFunc(ctx, cancel)
 			e.state.rest = &Gateway{Token: dg.Token, APIBaseURL: dg.APIBaseURL, HTTPClient: dg.HTTPClient, Log: dg.Log, deliveryContext: attemptCtx}
