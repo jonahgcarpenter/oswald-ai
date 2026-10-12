@@ -114,6 +114,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		"terminal":         true,
 		"execute_code":     true,
 		"process_manage":   true,
+		"cronjob_manage":   true,
 	}
 	got := map[string]bool{}
 	for _, tool := range reg.LLMTools() {
@@ -346,7 +347,7 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 			wantFailures = 2
 		}
 		switch name {
-		case "read_file", "search_files", "process_manage":
+		case "read_file", "search_files", "process_manage", "cronjob_manage":
 			wantUnproductive = 2
 			wantFailures = 2
 		case "write_file", "patch", "terminal", "execute_code":

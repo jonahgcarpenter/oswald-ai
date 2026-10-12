@@ -53,6 +53,7 @@ func Definitions() []llm.ToolDefinition {
 		TerminalDefinition(),
 		ExecuteCodeDefinition(),
 		ProcessManageDefinition(),
+		CronjobManageDefinition(),
 	}
 }
 

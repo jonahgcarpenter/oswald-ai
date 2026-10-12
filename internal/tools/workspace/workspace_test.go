@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
@@ -203,8 +204,8 @@ func TestExecuteCodeStateless(t *testing.T) {
 
 func TestDefinitionsContract(t *testing.T) {
 	defs := Definitions()
-	if len(defs) != 7 {
-		t.Fatalf("definitions = %d, want 7", len(defs))
+	if len(defs) != 8 {
+		t.Fatalf("definitions = %d, want 8", len(defs))
 	}
 	seen := map[string]bool{}
 	for _, d := range defs {
@@ -213,7 +214,7 @@ func TestDefinitionsContract(t *testing.T) {
 		}
 		seen[d.Name] = true
 	}
-	for _, name := range []string{ReadFileName, WriteFileName, PatchName, SearchFilesName, TerminalName, ExecuteCodeName, ProcessManageName} {
+	for _, name := range []string{ReadFileName, WriteFileName, PatchName, SearchFilesName, TerminalName, ExecuteCodeName, ProcessManageName, CronjobManageName} {
 		if !seen[name] {
 			t.Fatalf("missing definition %s", name)
 		}
@@ -231,5 +232,35 @@ func TestDynamicDescriptionOCROverride(t *testing.T) {
 	got := DynamicDescription(ReadFileName, base)
 	if !strings.Contains(got, "PDF (scanned or text)") || strings.Contains(got, "PDF (text layer)") {
 		t.Fatalf("ocr override = %q", got)
+	}
+}
+
+func TestCronjobManageCreateListRun(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "job.sh"), []byte("#!/bin/sh\necho cron-hi\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := testContext("req-cron")
+	manage := NewCronjobManageHandler(ws, store)
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "no_agent": true})
+	if err != nil || !strings.Contains(created.Content, "job_id:") {
+		t.Fatalf("create = %+v %v", created, err)
+	}
+	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+	listed, err := manage(ctx, map[string]interface{}{"action": "list"})
+	if err != nil || !strings.Contains(listed.Content, jobID) {
+		t.Fatalf("list = %+v %v", listed, err)
+	}
+	run, err := manage(ctx, map[string]interface{}{"action": "run", "job_id": jobID})
+	if err != nil || !strings.Contains(run.Content, "cron-hi") {
+		t.Fatalf("run = %+v %v", run, err)
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "model": "x"}); err == nil {
+		t.Fatal("model override accepted")
 	}
 }

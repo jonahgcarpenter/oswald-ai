@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
@@ -125,6 +126,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
 	pm := process.NewManager(cfg.ProfileRoot)
+	cronStore := cron.NewStore(cfg.ProfileRoot)
 	workspaceTools := []struct {
 		name    string
 		policy  governance.ToolPolicy
@@ -137,6 +139,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
 		{workspace.ExecuteCodeName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
 		{workspace.ProcessManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
+		{workspace.CronjobManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},
 	}
 	for _, tool := range workspaceTools {
 		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
@@ -283,6 +286,20 @@ func normalizeProcessManageArgs(args map[string]interface{}) interface{} {
 	if data, ok := args["data"].(string); ok {
 		sum := sha256.Sum256([]byte(data))
 		normalized["data_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeCronjobManageArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"action", "job_id", "schedule", "script", "deliver"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	if prompt, ok := args["prompt"].(string); ok {
+		sum := sha256.Sum256([]byte(prompt))
+		normalized["prompt_hash"] = hex.EncodeToString(sum[:])
 	}
 	return normalized
 }
