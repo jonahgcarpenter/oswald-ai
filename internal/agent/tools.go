@@ -205,6 +205,12 @@ func governanceResultText(reason string) string {
 		return "Tool call blocked: the request tool budget was exhausted. Finish the answer using the available results."
 	case governance.ReasonUnadvertised:
 		return "Tool call blocked: this tool was not available for this model step. Use only currently available tools."
+	case governance.ReasonRepeatedExactBlock:
+		return "Tool call blocked: the same tool call failed repeatedly with identical arguments. Stop retrying it unchanged; change strategy or explain the blocker."
+	case governance.ReasonSameToolHalt, governance.ReasonIdenticalStreakHalt, governance.ReasonIdenticalCycleHalt:
+		return "Tool call halted: the same failing tool path repeated without progress. Stop retrying it and choose a different approach."
+	case governance.ReasonIdempotentNoProgressBlock:
+		return "Tool call blocked: the same call returned the same result repeatedly. Use the earlier result or change the query."
 	default:
 		return "Tool call blocked by request policy. Continue with the available information."
 	}

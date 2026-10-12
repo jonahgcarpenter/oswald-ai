@@ -790,10 +790,12 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// multiple to be safe.
 		historyBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
+		batchSeen := make(map[string]struct{}, len(resp.Message.ToolCalls))
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
 			toolStartedAt := time.Now()
+			isClientTool := request.Stateless && a.isClientToolCall(request.ClientTools, toolName)
 
 			// Emit a structured tool-call chunk so UIs can render the invocation.
 			callPayload := toolStreamPayload(toolName, tc.Function.Arguments, "", 0, false)
@@ -811,10 +813,26 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			result := governance.Result{}
 			policy, advertised := catalog.Policies[toolName]
 			decision := governance.Decision{ReasonCode: iterationDecision.ReasonCode}
-			if iterationDecision.Allowed {
-				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
+			var guardAdvice governance.GuardrailAdvice
+			var observeOut governance.ObserveResult
+			if isClientTool {
+				// Caller-owned tools never execute server-side; leave the
+				// verbatim round-trip path to handle them. Mark allowed so
+				// no governance state is touched.
+				decision = governance.Decision{Allowed: true}
+			} else if iterationDecision.Allowed {
+				if dedupeFp, dedupeErr := governance.Fingerprint(toolName, tc.Function.Arguments, policy.NormalizeArgs); dedupeErr == nil {
+					if _, dup := batchSeen[dedupeFp]; dup {
+						decision = toolGovernor.NoteDuplicate(toolName)
+					} else {
+						batchSeen[dedupeFp] = struct{}{}
+						decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
+					}
+				} else {
+					decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
+				}
 			}
-			if decision.Allowed {
+			if decision.Allowed && !isClientTool {
 				toolExecutionCount++
 				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
 				toolMeta := requestctx.MetadataFromContext(ctx)
@@ -931,7 +949,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						}
 					}
 				}
-				toolGovernor.RecordResult(toolName, decision, result, execErr)
+				guardAdvice = toolGovernor.AfterCall(toolName, tc.Function.Arguments, decision.Fingerprint(), result, execErr)
 				status, outcome := "ok", string(result.Outcome)
 				if result.IsDegraded {
 					status = "degraded"
@@ -952,7 +970,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, ctxErr
 				}
-			} else {
+			} else if !isClientTool {
 				toolBlockedCount++
 				usage.SetExecution(requestctx.ExecutionSnapshot{ToolExecutionCount: toolExecutionCount, BlockedCount: toolBlockedCount, PersistenceStatus: "unknown", Model: a.model})
 				toolContent = governanceResultText(decision.ReasonCode)
@@ -964,7 +982,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					config.F("tool_name", safeName),
 					config.F("reason_code", decision.ReasonCode), config.F("status", "rejected"))
 			}
-			if decision.Allowed && execErr != nil {
+			if isClientTool {
+				toolContent = "Tool call deferred to caller; not executed server-side."
+			} else if decision.Allowed && execErr != nil {
 				// Fail gracefully: inject the error so the model can recover.
 				if !errors.Is(execErr, context.Canceled) {
 					reqLog.Warn("tool.failed", "tool execution failed; model may recover", config.F("tool_name", toolName), config.F("status", "degraded"), config.ErrorField(execErr))
@@ -987,6 +1007,25 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				)
 				// Keep the successful-name projection for MCP continuity and legacy turns.
 				toolAnnotations = append(toolAnnotations, toolName)
+			}
+			// modelContent is transient model-visible text (warns/notices/stubs).
+			// toolContent stays the durable full text for history payloads.
+			modelContent := toolContent
+			if !isClientTool && decision.Allowed {
+				failed := execErr != nil
+				observeOut = toolGovernor.ObserveCall(toolName, tc.Function.Arguments, toolContent, toolCallID, failed, decision.Fingerprint())
+				var warnSuffix string
+				if guardAdvice.Warn() {
+					warnSuffix = "\n\n" + governance.FormatGuardrailWarning(guardAdvice.Code, guardAdvice.Tool, guardAdvice.Count, guardAdvice.Message)
+				}
+				if observeOut.Stub != "" {
+					modelContent = observeOut.Stub + warnSuffix
+				} else {
+					modelContent += warnSuffix
+				}
+				if observeOut.Notice != "" {
+					modelContent += "\n\n" + observeOut.Notice
+				}
 			}
 			resultName := toolName
 			if decision.Allowed && execErr == nil && result.ResultName != "" {
@@ -1019,7 +1058,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				Role:       "tool",
 				ToolName:   resultName,
 				ToolCallID: toolCallID,
-				Content:    toolContent,
+				Content:    modelContent,
 				Images:     toolImages,
 			})
 			historyPolicy := policy.History.Effective()
@@ -1046,7 +1085,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				config.F("tool_failure_count", stats.Failures),
 				config.F("tool_duplicate_count", stats.Duplicates),
 				config.F("tool_blocked_count", stats.Blocked),
+				config.F("guardrail_code", guardAdvice.Code),
+				config.F("guardrail_count", guardAdvice.Count),
+				config.F("guardrail_notice", observeOut.Kind),
 				config.F("is_tool_retired", advertised && toolGovernor.IsToolRetired(toolName, policy)))
+			if toolGovernor.HaltDecision() != nil {
+				break
+			}
 		}
 		if len(historyBatch.Calls) > 0 {
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)

@@ -517,8 +517,8 @@ func TestProcessHidesImageGenerationForTextOnlyGateways(t *testing.T) {
 func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
-			{ID: "call-1", Function: llm.ToolFunction{Name: "test.fail"}},
-			{ID: "call-2", Function: llm.ToolFunction{Name: "test.fail"}},
+			{ID: "call-1", Function: llm.ToolFunction{Name: "test.fail", Arguments: map[string]interface{}{"n": 1}}},
+			{ID: "call-2", Function: llm.ToolFunction{Name: "test.fail", Arguments: map[string]interface{}{"n": 2}}},
 		}}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "finished without tools"}},
 	}}
