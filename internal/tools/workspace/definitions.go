@@ -6,13 +6,42 @@ import (
 
 // Tool names exposed to the model.
 const (
-	ReadFileName    = "read_file"
-	WriteFileName   = "write_file"
-	PatchName       = "patch"
-	SearchFilesName = "search_files"
-	TerminalName    = "terminal"
-	ExecuteCodeName = "execute_code"
+	ReadFileName      = "read_file"
+	WriteFileName     = "write_file"
+	PatchName         = "patch"
+	SearchFilesName   = "search_files"
+	TerminalName      = "terminal"
+	ExecuteCodeName   = "execute_code"
+	ProcessManageName = "process_manage"
+	CronjobManageName = "cronjob_manage"
 )
+
+var ocrAvailable bool
+
+// SetOCRAvailable toggles the hosted-OCR description override. It is a
+// process-wide capability flag set once at startup; tests reset it.
+func SetOCRAvailable(available bool) { ocrAvailable = available }
+
+// OCRAvailable reports the hosted-OCR capability flag.
+func OCRAvailable() bool { return ocrAvailable }
+
+// DynamicDescription returns the per-request description for a workspace
+// tool, applying capability overrides to the static definition text.
+func DynamicDescription(name, base string) string {
+	if name == ReadFileName && ocrAvailable {
+		return replaceFirst(base, "PDF (text layer)", "PDF (scanned or text)")
+	}
+	return base
+}
+
+func replaceFirst(s, old, new string) string {
+	for i := 0; i+len(old) <= len(s); i++ {
+		if s[i:i+len(old)] == old {
+			return s[:i] + new + s[i+len(old):]
+		}
+	}
+	return s
+}
 
 // Definitions returns the six workspace tool contracts in stable order.
 func Definitions() []llm.ToolDefinition {

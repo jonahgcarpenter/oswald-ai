@@ -12,6 +12,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
 )
 
 const (
@@ -89,7 +90,8 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		cmd.Stdout = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		cmd.Stderr = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		runErr := cmd.Run()
-		output := strings.TrimRight(buf.String(), "\n")
+		output := outputpkg.Clean(buf.String())
+		output = strings.TrimRight(output, "\n")
 		if output == "" {
 			output = "(no output)"
 		}

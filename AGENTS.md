@@ -47,7 +47,7 @@ The release workflow runs tagged tests before publishing its container; it does 
 - `internal/mcp`: lazy profile-configured bridge (`tool_search`/`tool_describe`/`tool_call`), schema projection, execution; no database/encryption configuration store. `oswald mcp auth` only authorizes; the service never starts interactive flows.
 - `internal/media`: shared normalization/attachments; `media/imagecache` owns private cached images and expiry worker.
 - `internal/soul`: read-only current profile policy with default-template fallback. Runtime never copies, migrates, edits, or deletes operator souls; only `oswald profile create` copies the root template into a new profile as its starting policy.
-- `internal/tools`: builtin composition. Each group owns stable name, description, schema, handler/policy; `registry`, `exposure`, and `governance` remain independent.
+- `internal/tools`: builtin composition. Each group owns stable name, description, schema, handler/policy; `registry`, `exposure`, and `governance` remain independent. `tools/output` owns ANSI stripping and fixed-shape secret redaction for command output. Toolsets are code-owned bundles (`core`, `terminal`, `code_execution`, `cronjob`); gateways map to toolsets and the API intersects them with caller `named`/`allowed_tools` opt-in. Workspace `read_file` descriptions apply a per-request hosted-OCR override (`PDF (text layer)` -> `PDF (scanned or text)`) without mutating registry definitions.
 - `internal/providers/web/{brave,searxng}` and `providers/image_generate/comfy_ui`: backend implementations, never import tool packages.
 - `internal/shared/{requestctx,lease}`: narrow contracts; `shared` is directory grouping, not a utility facade.
 

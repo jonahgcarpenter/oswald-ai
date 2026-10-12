@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
 )
 
 const (
@@ -115,7 +116,7 @@ func runShell(ctx context.Context, command, dir, scratch string, timeoutSecs int
 	cmd.Stderr = &limitedWriter{buf: &buf, limit: maxTerminalOutput}
 	err = cmd.Run()
 	_ = cancel
-	output := buf.String()
+	output := outputpkg.Clean(buf.String())
 	truncated := false
 	if len(output) > maxTerminalOutput {
 		output = output[:maxTerminalOutput]

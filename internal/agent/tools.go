@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 // MCPProvider resolves request-scoped deferred MCP tools through the
@@ -41,6 +42,7 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 	}
 	for _, tool := range a.registry.LLMToolsForVisibility(exposure.Visibility()) {
 		if policy, ok := a.registry.Policy(tool.Function.Name); ok {
+			tool.Function.Description = workspace.DynamicDescription(tool.Function.Name, tool.Function.Description)
 			add(tool, policy)
 		}
 	}

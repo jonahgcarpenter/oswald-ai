@@ -188,3 +188,17 @@ func TestDefinitionsContract(t *testing.T) {
 		}
 	}
 }
+
+func TestDynamicDescriptionOCROverride(t *testing.T) {
+	SetOCRAvailable(false)
+	base := ReadFileDefinition().Description
+	if got := DynamicDescription(ReadFileName, base); got != base {
+		t.Fatal("override applied without OCR")
+	}
+	SetOCRAvailable(true)
+	defer SetOCRAvailable(false)
+	got := DynamicDescription(ReadFileName, base)
+	if !strings.Contains(got, "PDF (scanned or text)") || strings.Contains(got, "PDF (text layer)") {
+		t.Fatalf("ocr override = %q", got)
+	}
+}
