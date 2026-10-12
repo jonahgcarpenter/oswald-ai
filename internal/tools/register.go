@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -19,6 +21,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
@@ -119,6 +122,25 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 	}
 
+	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
+	workspaceTools := []struct {
+		name    string
+		policy  governance.ToolPolicy
+		handler registry.Handler
+	}{
+		{workspace.ReadFileName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandler(ws))},
+		{workspace.WriteFileName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
+		{workspace.PatchName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
+		{workspace.SearchFilesName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
+		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws))},
+		{workspace.ExecuteCodeName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
+	}
+	for _, tool := range workspaceTools {
+		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
+			return fmt.Errorf("register %s tool: %w", tool.name, err)
+		}
+	}
+
 	return nil
 }
 
@@ -178,4 +200,66 @@ func normalizedString(args map[string]interface{}, key string, lower bool) strin
 		value = strings.ToLower(value)
 	}
 	return value
+}
+
+func normalizeReadFileArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"path":   normalizedString(args, "path", false),
+		"offset": args["offset"],
+		"limit":  args["limit"],
+	}
+}
+
+func normalizeWriteFileArgs(args map[string]interface{}) interface{} {
+	content, _ := args["content"].(string)
+	sum := sha256.Sum256([]byte(content))
+	return map[string]interface{}{
+		"path":         normalizedString(args, "path", false),
+		"content_hash": hex.EncodeToString(sum[:]),
+	}
+}
+
+func normalizePatchArgs(args map[string]interface{}) interface{} {
+	oldString, _ := args["old_string"].(string)
+	newString, _ := args["new_string"].(string)
+	oldSum := sha256.Sum256([]byte(oldString))
+	newSum := sha256.Sum256([]byte(newString))
+	return map[string]interface{}{
+		"path":        normalizedString(args, "path", false),
+		"old_hash":    hex.EncodeToString(oldSum[:]),
+		"new_hash":    hex.EncodeToString(newSum[:]),
+		"replace_all": args["replace_all"],
+	}
+}
+
+func normalizeSearchFilesArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"pattern", "target", "path", "file_glob", "order", "output_mode"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	for _, key := range []string{"limit", "offset", "context"} {
+		if value, ok := args[key]; ok {
+			normalized[key] = value
+		}
+	}
+	return normalized
+}
+
+func normalizeTerminalArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"command": normalizedString(args, "command", false),
+		"workdir": normalizedString(args, "workdir", false),
+		"timeout": args["timeout"],
+	}
+}
+
+func normalizeExecuteCodeArgs(args map[string]interface{}) interface{} {
+	code, _ := args["code"].(string)
+	sum := sha256.Sum256([]byte(code))
+	return map[string]interface{}{
+		"code_hash": hex.EncodeToString(sum[:]),
+		"reset":     args["reset"],
+	}
 }

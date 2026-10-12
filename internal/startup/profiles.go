@@ -145,6 +145,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
 		engine.SetForegroundCompactor(compactor)
+		engine.SetWorkspace(profile.ProfileRoot)
 		processor.agents[name] = engine
 		worker := imagecache.NewWorker(cache, rootLog)
 		worker.Start()

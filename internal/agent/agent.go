@@ -57,6 +57,7 @@ type Agent struct {
 	imageCache     *imagecache.Cache
 	toolPolicy     governance.GlobalPolicy
 	compactor      ForegroundCompactor
+	workspaceRoot  string
 	log            *config.Logger
 }
 
@@ -86,6 +87,14 @@ func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 func (a *Agent) SetBillingBaseURL(url string) {
 	if a != nil {
 		a.billingBaseURL = url
+	}
+}
+
+// SetWorkspace installs the profile working directory rendered in the system
+// prompt and bound into workspace tool handlers at registry construction.
+func (a *Agent) SetWorkspace(root string) {
+	if a != nil {
+		a.workspaceRoot = root
 	}
 }
 
@@ -327,6 +336,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
+	appendContext(environmentInfoBlock(a.workspaceRoot))
 	if !request.Stateless {
 		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
 	}
