@@ -26,6 +26,7 @@ type fakeAuthorizationServer struct {
 	server       *httptest.Server
 	mu           sync.Mutex
 	cimdAllowed  bool
+	rootResource bool
 	registered   map[string]bool
 	tokenPolls   int64
 	deviceOKAt   int64
@@ -38,9 +39,17 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 	mux := http.NewServeMux()
 	issuer := ""
 	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"resource": issuer + "/mcp", "authorization_servers": []string{issuer}})
+		resource := issuer + "/mcp"
+		if fake.rootResource {
+			resource = issuer
+		}
+		writeJSON(w, map[string]any{"resource": resource, "authorization_servers": []string{issuer}})
 	})
 	mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if fake.rootResource {
+			http.NotFound(w, r)
+			return
+		}
 		writeJSON(w, map[string]any{"resource": issuer + "/mcp", "authorization_servers": []string{issuer}})
 	})
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +82,9 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 	// Auto-approving authorize endpoint: redirects straight back with a code.
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
+		if fake.rootResource && query.Get("resource") != issuer {
+			t.Error("authorization request did not use advertised resource")
+		}
 		redirect, err := url.Parse(query.Get("redirect_uri"))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -100,6 +112,9 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 		allowed := clientID == "operator-client" || clientID == "dcr-client" || (fake.cimdAllowed && strings.HasPrefix(clientID, "http://127.0.0.1:"))
 		switch grant {
 		case "authorization_code":
+			if fake.rootResource && r.PostForm.Get("resource") != issuer {
+				t.Error("token request did not use advertised resource")
+			}
 			if r.PostForm.Get("code_verifier") == "" {
 				writeOAuthError(w, "invalid_request")
 				return
@@ -121,6 +136,9 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 			}
 			writeJSON(w, map[string]any{"access_token": "rotated-" + clientID, "token_type": "Bearer", "refresh_token": "refresh-" + clientID, "expires_in": 3600})
 		case "urn:ietf:params:oauth:grant-type:device_code":
+			if fake.rootResource && r.PostForm.Get("resource") != issuer {
+				t.Error("device token request did not use advertised resource")
+			}
 			polls := atomic.AddInt64(&fake.tokenPolls, 1)
 			if polls < fake.deviceOKAt {
 				writeOAuthError(w, "authorization_pending")
@@ -136,6 +154,12 @@ func newFakeAuthorizationServer(t *testing.T, cimdAllowed bool) *fakeAuthorizati
 		}
 	})
 	mux.HandleFunc("/device", func(w http.ResponseWriter, r *http.Request) {
+		if fake.rootResource {
+			_ = r.ParseForm()
+			if r.PostForm.Get("resource") != issuer {
+				t.Error("device authorization did not use advertised resource")
+			}
+		}
 		writeJSON(w, map[string]any{
 			"device_code":      "device-code-1",
 			"user_code":        "USER-CODE",
@@ -383,6 +407,7 @@ flow:
 
 func TestDeviceFlowPollsToCompletion(t *testing.T) {
 	fake := newFakeAuthorizationServer(t, true)
+	fake.rootResource = true
 	fake.deviceOKAt = 2
 	defer fake.close()
 	store, _ := testOAuthStore(t)

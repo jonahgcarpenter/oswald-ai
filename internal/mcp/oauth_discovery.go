@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/oauth2"
 )
@@ -20,6 +20,8 @@ const maxMetadataBytes = 64 * 1024
 // serverMetadata is the discovered OAuth configuration for one MCP server.
 // It is cached in <server>.meta.json.
 type serverMetadata struct {
+	// Resource is request-local discovery context, not a persisted field.
+	Resource                    string   `json:"-"`
 	Issuer                      string   `json:"issuer"`
 	AuthorizationEndpoint       string   `json:"authorization_endpoint"`
 	TokenEndpoint               string   `json:"token_endpoint"`
@@ -48,18 +50,21 @@ func discoveryClient() *http.Client {
 
 // discoverOAuthMetadata locates the authorization server for an MCP endpoint
 // through protected-resource metadata with a same-origin fallback, then loads
-// authorization-server metadata the same way the SDK does.
+// authorization-server metadata using the operator-trusted HTTP/HTTPS policy.
 func discoverOAuthMetadata(ctx context.Context, mcpURL string) (*serverMetadata, error) {
-	client := discoveryClient()
-	issuer, err := discoverIssuer(ctx, client, mcpURL)
+	return discoverOAuthMetadataWithClient(ctx, mcpURL, discoveryClient())
+}
+
+func discoverOAuthMetadataWithClient(ctx context.Context, mcpURL string, client *http.Client) (*serverMetadata, error) {
+	issuer, resource, err := discoverIssuer(ctx, client, mcpURL)
 	if err != nil {
 		return nil, err
 	}
-	asm, err := sdkauth.GetAuthServerMetadata(ctx, issuer, client)
+	asm, device, err := fetchAuthorizationMetadata(ctx, client, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("load authorization server metadata: %w", err)
 	}
-	meta := &serverMetadata{Issuer: issuer}
+	meta := &serverMetadata{Issuer: issuer, Resource: resource}
 	if asm != nil {
 		meta.Discovered = true
 		meta.AuthorizationEndpoint = asm.AuthorizationEndpoint
@@ -68,27 +73,23 @@ func discoverOAuthMetadata(ctx context.Context, mcpURL string) (*serverMetadata,
 		meta.CIMDSupported = asm.ClientIDMetadataDocumentSupported
 		meta.ScopesSupported = append([]string(nil), asm.ScopesSupported...)
 		meta.TokenEndpointAuthMethods = append([]string(nil), asm.TokenEndpointAuthMethodsSupported...)
+		meta.DeviceAuthorizationEndpoint = device
 	} else {
 		// Fallback predefined endpoints for servers without metadata discovery.
 		meta.AuthorizationEndpoint = strings.TrimSuffix(issuer, "/") + "/authorize"
 		meta.TokenEndpoint = strings.TrimSuffix(issuer, "/") + "/token"
 		meta.RegistrationEndpoint = strings.TrimSuffix(issuer, "/") + "/register"
 	}
-	if meta.AuthorizationEndpoint == "" || meta.TokenEndpoint == "" {
+	if (meta.AuthorizationEndpoint == "" && meta.DeviceAuthorizationEndpoint == "") || meta.TokenEndpoint == "" {
 		return nil, fmt.Errorf("authorization server metadata is incomplete")
-	}
-	if device, err := discoverDeviceEndpoint(ctx, client, issuer); err != nil {
-		return nil, err
-	} else if device != "" {
-		meta.DeviceAuthorizationEndpoint = device
 	}
 	return meta, nil
 }
 
-func discoverIssuer(ctx context.Context, client *http.Client, mcpURL string) (string, error) {
+func discoverIssuer(ctx context.Context, client *http.Client, mcpURL string) (string, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(mcpURL))
-	if err != nil || parsed.Host == "" {
-		return "", fmt.Errorf("invalid MCP server URL")
+	if err != nil || validateOAuthURL(mcpURL, false) != nil {
+		return "", "", fmt.Errorf("invalid MCP server URL")
 	}
 	resource := parsed.String()
 	candidates := []string{
@@ -96,65 +97,174 @@ func discoverIssuer(ctx context.Context, client *http.Client, mcpURL string) (st
 		parsed.Scheme + "://" + parsed.Host + "/.well-known/oauth-protected-resource",
 	}
 	for _, candidate := range candidates {
-		prm, err := oauthex.GetProtectedResourceMetadata(ctx, candidate, resource, client)
-		if err != nil || prm == nil || len(prm.AuthorizationServers) == 0 {
+		var prm oauthex.ProtectedResourceMetadata
+		found, err := fetchOAuthMetadata(ctx, client, candidate, &prm)
+		if err != nil {
+			return "", "", err
+		}
+		if !found {
 			continue
 		}
-		return prm.AuthorizationServers[0], nil
+		if !oauthResourceCovers(prm.Resource, resource) {
+			return "", "", fmt.Errorf("OAuth protected resource mismatch")
+		}
+		if len(prm.AuthorizationServers) == 0 {
+			return parsed.Scheme + "://" + parsed.Host, prm.Resource, nil
+		}
+		if err := checkIssuerURL(prm.AuthorizationServers[0]); err != nil {
+			return "", "", err
+		}
+		return prm.AuthorizationServers[0], prm.Resource, nil
 	}
 	root := parsed.Scheme + "://" + parsed.Host
 	if err := checkIssuerURL(root); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return root, nil
+	return root, resource, nil
 }
 
-// discoverDeviceEndpoint reads the device_authorization_endpoint, which the
-// SDK metadata struct does not expose. A missing field is not an error;
-// device flow requires it later.
-func discoverDeviceEndpoint(ctx context.Context, client *http.Client, issuer string) (string, error) {
-	metaURL := strings.TrimSuffix(issuer, "/") + "/.well-known/oauth-authorization-server"
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
+// oauthResourceCovers permits an exact resource or a same-origin base whose
+// escaped path covers the endpoint at a segment boundary, never a sibling.
+func oauthResourceCovers(resource, endpoint string) bool {
+	if validateOAuthURL(resource, false) != nil || validateOAuthURL(endpoint, false) != nil {
+		return false
+	}
+	r, _ := url.Parse(resource)
+	e, _ := url.Parse(endpoint)
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		if u.Scheme == "https" {
+			return "443"
+		}
+		return "80"
+	}
+	if r.Scheme != e.Scheme || !strings.EqualFold(r.Hostname(), e.Hostname()) || port(r) != port(e) {
+		return false
+	}
+	for _, u := range []*url.URL{r, e} {
+		for _, segment := range strings.Split(u.Path, "/") {
+			if segment == "." || segment == ".." {
+				return false
+			}
+		}
+	}
+	if resource == endpoint {
+		return true
+	}
+	if r.RawQuery != "" || r.ForceQuery {
+		return false
+	}
+	base := strings.TrimSuffix(r.EscapedPath(), "/")
+	return e.EscapedPath() == base || strings.HasPrefix(e.EscapedPath(), base+"/")
+}
+
+func oauthResource(meta *serverMetadata, endpoint string) string {
+	if meta.Resource != "" {
+		return meta.Resource
+	}
+	return endpoint
+}
+
+// fetchOAuthMetadata deliberately accepts operator-trusted HTTP endpoints.
+// Missing documents permit fallback; invalid documents and transport failures do not.
+func fetchOAuthMetadata(ctx context.Context, client *http.Client, endpoint string, target any) (bool, error) {
+	if err := validateOAuthURL(endpoint, false); err != nil {
+		return false, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	request.Header.Set("Accept", "application/json")
 	response, err := client.Do(request)
 	if err != nil {
-		return "", nil
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("OAuth metadata request canceled: %w", ctx.Err())
+		}
+		return false, fmt.Errorf("OAuth metadata request failed")
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", nil
+	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusGone {
+		return false, nil
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("OAuth metadata returned unexpected status")
+	}
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return false, fmt.Errorf("OAuth metadata content type is invalid")
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxMetadataBytes+1))
 	if err != nil || int64(len(data)) > maxMetadataBytes {
-		return "", nil
+		return false, fmt.Errorf("OAuth metadata exceeds limit or could not be read")
 	}
-	var raw struct {
-		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+	if err := json.Unmarshal(data, target); err != nil {
+		return false, fmt.Errorf("OAuth metadata JSON is invalid")
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return "", nil
+	return true, nil
+}
+
+func fetchAuthorizationMetadata(ctx context.Context, client *http.Client, issuer string) (*oauthex.AuthServerMeta, string, error) {
+	if err := checkIssuerURL(issuer); err != nil {
+		return nil, "", err
 	}
-	endpoint := strings.TrimSpace(raw.DeviceAuthorizationEndpoint)
-	if endpoint == "" {
-		return "", nil
+	base, _ := url.Parse(issuer)
+	path := strings.Trim(base.Path, "/")
+	paths := []string{"/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"}
+	if path != "" {
+		paths = []string{paths[0] + "/" + path, paths[1] + "/" + path, "/" + path + paths[1]}
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return "", fmt.Errorf("device authorization endpoint is invalid")
+	for _, path := range paths {
+		candidate := *base
+		candidate.Path, candidate.RawPath = path, ""
+		var document struct {
+			oauthex.AuthServerMeta
+			DeviceEndpoint string `json:"device_authorization_endpoint"`
+		}
+		found, err := fetchOAuthMetadata(ctx, client, candidate.String(), &document)
+		if err != nil {
+			return nil, "", err
+		}
+		if !found {
+			continue
+		}
+		if document.Issuer != issuer {
+			return nil, "", fmt.Errorf("OAuth metadata issuer mismatch")
+		}
+		if document.AuthorizationEndpoint != "" {
+			s256 := false
+			for _, method := range document.CodeChallengeMethodsSupported {
+				s256 = s256 || method == "S256"
+			}
+			if !s256 {
+				return nil, "", fmt.Errorf("OAuth authorization server does not support S256 PKCE")
+			}
+		}
+		for _, endpoint := range []string{document.AuthorizationEndpoint, document.TokenEndpoint, document.RegistrationEndpoint, document.DeviceEndpoint} {
+			if endpoint != "" {
+				if err := validateOAuthURL(endpoint, false); err != nil {
+					return nil, "", err
+				}
+			}
+		}
+		if document.TokenEndpoint == "" {
+			return nil, "", fmt.Errorf("OAuth token endpoint is missing")
+		}
+		return &document.AuthServerMeta, document.DeviceEndpoint, nil
 	}
-	return endpoint, nil
+	return nil, "", nil
 }
 
 func checkIssuerURL(issuer string) error {
-	parsed, err := url.Parse(strings.TrimSpace(issuer))
-	if err != nil || parsed.Host == "" {
-		return fmt.Errorf("authorization server issuer is invalid")
-	}
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
-		return fmt.Errorf("authorization server issuer is invalid")
+	return validateOAuthURL(issuer, true)
+}
+
+func validateOAuthURL(raw string, issuer bool) error {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || (issuer && parsed.RawQuery != "") {
+		return fmt.Errorf("OAuth URL is invalid")
 	}
 	return nil
 }

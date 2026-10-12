@@ -85,7 +85,7 @@ func browserAttempt(ctx context.Context, store *tokenStore, oauth *OAuthConfig, 
 	state := rand.Text()
 	authURL := oauth2Config(client, meta, oauth.Scopes).AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("resource", mcpURL),
+		oauth2.SetAuthURLParam("resource", oauthResource(meta, mcpURL)),
 	)
 	if !opts.NoBrowser {
 		_ = openBrowser(authURL)
@@ -100,7 +100,7 @@ func browserAttempt(ctx context.Context, store *tokenStore, oauth *OAuthConfig, 
 	if callbackErr != nil {
 		return nil, false, callbackErr
 	}
-	tokens, err := exchangeCode(ctx, client, meta, oauth.Scopes, mcpURL, code, verifier, opts.HTTP)
+	tokens, err := exchangeCode(ctx, client, meta, oauth.Scopes, oauthResource(meta, mcpURL), code, verifier, opts.HTTP)
 	if err != nil {
 		if client.Method == clientMethodCIMD && isInvalidClient(err) {
 			return nil, true, nil
@@ -275,6 +275,7 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 		}
 	}
 	form := url.Values{"client_id": {client.ClientID}, "scope": {strings.Join(oauth.Scopes, " ")}}
+	form.Set("resource", oauthResource(meta, mcpURL))
 	if client.ClientSecret != "" {
 		form.Set("client_secret", client.ClientSecret)
 	}
@@ -326,7 +327,7 @@ func RunDeviceFlow(ctx context.Context, store *tokenStore, oauth *OAuthConfig, m
 			return nil, ctx.Err()
 		case <-time.After(interval):
 		}
-		token, err := pollDeviceToken(ctx, cfg, httpClient, client, device.DeviceCode, mcpURL)
+		token, err := pollDeviceToken(ctx, cfg, httpClient, client, device.DeviceCode, oauthResource(meta, mcpURL))
 		if err != nil {
 			if isDevicePending(err) {
 				continue
@@ -346,6 +347,7 @@ func pollDeviceToken(ctx context.Context, cfg *oauth2.Config, httpClient *http.C
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 		"device_code": {deviceCode},
 		"client_id":   {client.ClientID},
+		"resource":    {resource},
 	}
 	if client.ClientSecret != "" {
 		form.Set("client_secret", client.ClientSecret)
