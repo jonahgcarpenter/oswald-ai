@@ -178,11 +178,11 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	requestBroker.Start()
 	profileDeps := map[string]gatewayruntime.Dependencies{}
 	for name, store := range stores {
-		commands, err := commandbuiltin.NewProfileService(store, requestBroker)
+		profile, _ := directory.Config(name)
+		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}
-		profile, _ := directory.Config(name)
 		worker := compaction.NewProfileService(store, compactors[name], requestBroker, budget.NewContextBudget(profile.ModelContextWindow), rootLog)
 		worker.Start()
 		compressionWorkers = append(compressionWorkers, worker)

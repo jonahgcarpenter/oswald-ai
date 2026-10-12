@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/process"
@@ -222,6 +223,7 @@ func TestDefinitionsContract(t *testing.T) {
 }
 
 func TestDynamicDescriptionOCROverride(t *testing.T) {
+
 	SetOCRAvailable(false)
 	base := ReadFileDefinition().Description
 	if got := DynamicDescription(ReadFileName, base); got != base {
@@ -262,5 +264,96 @@ func TestCronjobManageCreateListRun(t *testing.T) {
 	}
 	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "script": "job.sh", "model": "x"}); err == nil {
 		t.Fatal("model override accepted")
+	}
+}
+
+func TestTerminalDangerousApproveExecutes(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "wiped")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-approve"), StubReviewer{Verdict: VerdictApprove})
+	res, err := term(ctx, map[string]interface{}{"command": "chmod -R 777 " + target, "timeout": float64(30)})
+	if err != nil || !strings.Contains(res.Content, "exit_code: 0") {
+		t.Fatalf("approved dangerous = %+v %v", res, err)
+	}
+}
+
+func TestTerminalDangerousDenyBlocks(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-deny"), StubReviewer{Verdict: VerdictDeny})
+	if _, err := term(ctx, map[string]interface{}{"command": "sudo apt update", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "denied by security review") {
+		t.Fatalf("deny = %v", err)
+	}
+}
+
+func TestTerminalDangerousEscalateParksFullCommand(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-escalate"), StubReviewer{Verdict: VerdictEscalate})
+	full := "sudo rm -rf /tmp/review-target --no-preserve-root"
+	res, err := term(ctx, map[string]interface{}{"command": full, "timeout": float64(30)})
+	if err != nil {
+		t.Fatalf("escalate errored: %v", err)
+	}
+	if !strings.Contains(res.Content, full) || !strings.Contains(res.Content, "/approve") || !strings.Contains(res.Content, "/deny") {
+		t.Fatalf("escalation missing full command or directives: %q", res.Content)
+	}
+	stored, ok, expired := approvals.Take("alice", "req-review-escalate")
+	if !ok || expired || stored.Command != full {
+		t.Fatalf("pending = %+v ok=%t expired=%t", stored, ok, expired)
+	}
+}
+
+func TestTerminalDangerousSingleFlight(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-flight"), StubReviewer{Verdict: VerdictEscalate})
+	if _, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)}); err != nil {
+		t.Fatalf("first escalate: %v", err)
+	}
+	if _, err := term(ctx, map[string]interface{}{"command": "sudo whoami", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "already pending") {
+		t.Fatalf("second escalate = %v", err)
+	}
+}
+
+func TestTerminalDangerousWithoutReviewerFailsClosed(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	if _, err := term(testContext("req-review-none"), map[string]interface{}{"command": "sudo id", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "review is unavailable") {
+		t.Fatalf("no reviewer = %v", err)
 	}
 }

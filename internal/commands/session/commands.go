@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 )
 
@@ -35,5 +36,6 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if err := h.sessions.NewSessionContext(ctx, req.Principal.CanonicalUserID, req.SessionKey); err != nil {
 		return commands.Result{}, err
 	}
+	approvals.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
 	return commands.Result{Text: "Started a new session. Past conversations remain searchable.", Outcome: commands.Outcome{Status: "ok", Operation: "session.new", IsChanged: true, AffectedCount: 1}}, nil
 }

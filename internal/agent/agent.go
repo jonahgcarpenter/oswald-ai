@@ -27,6 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 const (
@@ -261,6 +262,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
+	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
 	toolGovernor := governance.New(a.toolPolicy)
 
 	// Read the canonical user's operator-managed soul fresh on every request.

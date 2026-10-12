@@ -17,12 +17,12 @@ func (r *profileStarter) NewSessionContext(_ context.Context, owner, key string)
 }
 func TestProfileCommandsContainNoAdministrationOrMCP(t *testing.T) {
 	starter := &profileStarter{}
-	service, err := NewProfileService(starter, nil)
+	service, err := NewProfileService(starter, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	definitions := service.Definitions()
-	if len(definitions) != 3 {
+	if len(definitions) != 5 {
 		t.Fatal("unexpected command inventory")
 	}
 	principal := identity.Principal{CanonicalUserID: "alice", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}

@@ -35,6 +35,10 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		if _, ok := requestctx.PrincipalFromContext(ctx); !ok {
 			return governance.Result{}, errors.New("workspace: authenticated principal required")
 		}
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		if !principal.Authenticated() {
+			return governance.Result{}, errors.New("workspace: authenticated principal required")
+		}
 		if err := rejectUnknown(args, "command", "background", "timeout", "workdir", "pty", "notify", "heartbeat", "persist_on_release"); err != nil {
 			return governance.Result{}, err
 		}
@@ -112,61 +116,67 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 			}
 		}
 		if dangerous, reason := DetectDangerous(command); dangerous {
-			return governance.Result{}, errors.New("blocked: dangerous command (" + reason + ") requires operator approval")
+			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, reason)
 		}
-		if background {
-			if pm == nil {
-				return governance.Result{}, errors.New("process manager is unavailable")
-			}
-			if timeout > maxTerminalTimeout {
-				// Over-cap background keeps the requested bound; note it.
-				notifyNote = appendNote(notifyNote, fmt.Sprintf("note: timeout %ds exceeds foreground max; running tracked", timeout))
-			}
-			info, serr := pm.Spawn(requestID(ctx), command, workdir, scratch, timeout)
-			if serr != nil {
-				return governance.Result{}, serr
-			}
-			if persist {
-				_ = pm.SetPersist(info.ID, true)
-			}
-			content := fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nPoll with process_manage (poll/log/wait).", info.ID, info.PID)
-			if heartbeat > 0 {
-				content += "\nnote: heartbeat recorded; poll with process_manage (no live push in this deployment)"
-			}
-			if notifyNote != "" {
-				content += "\n" + notifyNote
-			}
-			return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+		return executeTerminalCommand(ctx, pm, requestID(ctx), command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote)
+	}
+}
+
+// executeTerminalCommand runs the background, promotion, and foreground
+// execution paths shared by direct calls and reviewer-approved replays.
+func executeTerminalCommand(ctx context.Context, pm *process.Manager, ownerRequest, command, workdir, scratch string, timeout int, background, persist bool, heartbeat int, notifyNote string) (governance.Result, error) {
+	if background {
+		if pm == nil {
+			return governance.Result{}, errors.New("process manager is unavailable")
 		}
 		if timeout > maxTerminalTimeout {
-			// Over-cap foreground promotes to tracked background.
-			if pm == nil {
-				return governance.Result{}, errors.New("process manager is unavailable")
-			}
-			info, serr := pm.Spawn(requestID(ctx), command, workdir, scratch, timeout)
-			if serr != nil {
-				return governance.Result{}, serr
-			}
-			return governance.Result{Content: fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nnote: foreground timeout over cap; promoted to tracked background. Poll with process_manage.", info.ID, info.PID), Outcome: governance.OutcomeProductive}, nil
+			// Over-cap background keeps the requested bound; note it.
+			notifyNote = appendNote(notifyNote, fmt.Sprintf("note: timeout %ds exceeds foreground max; running tracked", timeout))
 		}
-		var output string
-		var code int
-		var runErr error
-		for attempt := 0; attempt < 3; attempt++ {
-			output, code, runErr = runShell(ctx, command, workdir, scratch, timeout)
-			if runErr == nil || code >= 0 {
-				break
-			}
-			if ctx.Err() != nil {
-				break
-			}
+		info, serr := pm.Spawn(ownerRequest, command, workdir, scratch, timeout)
+		if serr != nil {
+			return governance.Result{}, serr
 		}
-		content := fmt.Sprintf("exit_code: %d\n%s", code, output)
-		if runErr != nil && code < 0 {
-			return governance.Result{}, runErr
+		if persist {
+			_ = pm.SetPersist(info.ID, true)
+		}
+		content := fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nPoll with process_manage (poll/log/wait).", info.ID, info.PID)
+		if heartbeat > 0 {
+			content += "\nnote: heartbeat recorded; poll with process_manage (no live push in this deployment)"
+		}
+		if notifyNote != "" {
+			content += "\n" + notifyNote
 		}
 		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 	}
+	if timeout > maxTerminalTimeout {
+		// Over-cap foreground promotes to tracked background.
+		if pm == nil {
+			return governance.Result{}, errors.New("process manager is unavailable")
+		}
+		info, serr := pm.Spawn(ownerRequest, command, workdir, scratch, timeout)
+		if serr != nil {
+			return governance.Result{}, serr
+		}
+		return governance.Result{Content: fmt.Sprintf("session_id: %s\npid: %d\nexit_code: 0\nstatus: running\nnote: foreground timeout over cap; promoted to tracked background. Poll with process_manage.", info.ID, info.PID), Outcome: governance.OutcomeProductive}, nil
+	}
+	var output string
+	var code int
+	var runErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		output, code, runErr = runShell(ctx, command, workdir, scratch, timeout)
+		if runErr == nil || code >= 0 {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	content := fmt.Sprintf("exit_code: %d\n%s", code, output)
+	if runErr != nil && code < 0 {
+		return governance.Result{}, runErr
+	}
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 }
 
 func runShell(ctx context.Context, command, dir, scratch string, timeoutSecs int) (string, int, error) {

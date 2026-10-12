@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/commands"
 )
@@ -30,6 +31,7 @@ func (h handler) Execute(_ context.Context, req commands.Request) (commands.Resu
 		return commands.Result{}, fmt.Errorf("stop command is unavailable")
 	}
 	report := h.canceler.CancelActiveAgentWork(req.Principal.CanonicalUserID, req.SessionKey)
+	approvals.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
 	if report.ActiveSignaled == 0 {
 		return commands.Result{Text: "Nothing is currently running in this conversation.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "stop.session"}}, nil
 	}

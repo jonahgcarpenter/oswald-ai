@@ -68,6 +68,27 @@ type Manager struct {
 
 var globalMu sync.Mutex
 var globalManagers = make(map[*Manager]struct{})
+var managersByRoot = make(map[string]*Manager)
+
+// Shared returns the manager for a profile root, creating it on first use
+// so tool handlers and command handlers operate on one instance.
+func Shared(profileRoot string) *Manager {
+	abs := strings.TrimSpace(profileRoot)
+	if abs != "" {
+		if resolved, err := filepath.Abs(abs); err == nil {
+			abs = resolved
+		}
+	}
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if m, ok := managersByRoot[abs]; ok {
+		return m
+	}
+	m := &Manager{root: abs, running: make(map[string]*liveProc), handoffs: make(map[string]int)}
+	globalManagers[m] = struct{}{}
+	managersByRoot[abs] = m
+	return m
+}
 
 // StopAll terminates non-persistent processes across all managers.
 func StopAll() {
@@ -82,19 +103,10 @@ func StopAll() {
 	}
 }
 
-// NewManager binds a manager to a profile root. An empty root fails closed.
+// NewManager binds a manager to a profile root. Prefer Shared so command
+// and tool handlers use one instance per root. An empty root fails closed.
 func NewManager(profileRoot string) *Manager {
-	abs := strings.TrimSpace(profileRoot)
-	if abs != "" {
-		if resolved, err := filepath.Abs(abs); err == nil {
-			abs = resolved
-		}
-	}
-	m := &Manager{root: abs, running: make(map[string]*liveProc), handoffs: make(map[string]int)}
-	globalMu.Lock()
-	globalManagers[m] = struct{}{}
-	globalMu.Unlock()
-	return m
+	return Shared(profileRoot)
 }
 
 func (m *Manager) baseDir() (string, error) {
