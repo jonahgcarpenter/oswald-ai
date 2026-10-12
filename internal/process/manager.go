@@ -201,13 +201,13 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 	live.info.PID = cmd.Process.Pid
 	m.mu.Lock()
 	m.running[id] = live
+	outcome := live.info
 	m.mu.Unlock()
-	if err := writeMeta(dir, live.info); err != nil {
+	if err := writeMeta(dir, outcome); err != nil {
 		// Best effort; the watcher will still finalize.
 	}
 	go m.watch(id, dir, live, timeoutSecs)
 	m.pruneAsync()
-	outcome := live.info
 	return outcome, nil
 }
 
