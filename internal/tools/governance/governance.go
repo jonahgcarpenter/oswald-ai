@@ -282,6 +282,17 @@ func (g *Governor) RecordResult(name string, decision Decision, result Result, e
 	g.AfterCall(name, nil, decision.fingerprint, result, execErr)
 }
 
+// NoteDuplicate records an intra-batch duplicate without executing. It keeps
+// attempt/duplicate/blocked statistics consistent for callers that dedupe a
+// model response before BeforeExecution.
+func (g *Governor) NoteDuplicate(name string) Decision {
+	stats := g.toolStats(name)
+	stats.Attempts++
+	stats.Duplicates++
+	stats.Blocked++
+	return Decision{ReasonCode: ReasonDuplicate}
+}
+
 // IsToolRetired reports whether one tool has exhausted a per-tool limit.
 func (g *Governor) IsToolRetired(name string, policy ToolPolicy) bool {
 	return retiredReason(*g.toolStats(name), policy) != ""
