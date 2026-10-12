@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func loadMCPConfig(t *testing.T, mcpYAML string) *Config {
@@ -82,6 +83,50 @@ func TestMCPStdioServerResolution(t *testing.T) {
 	}
 	if len(server.Exclude) != 1 || server.Exclude[0] != "edit" {
 		t.Fatalf("exclude = %+v", server.Exclude)
+	}
+}
+
+func TestMCPOAuthConfiguration(t *testing.T) {
+	t.Setenv("PROFILE_MCP_SECRET", "synthetic-secret")
+	cfg := loadMCPConfig(t, "    login:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        flow: device\n        scopes: [read, write]\n        timeout: 120s\n")
+	if len(cfg.MCPServers) != 1 {
+		t.Fatalf("servers = %+v", cfg.MCPServers)
+	}
+	server := cfg.MCPServers[0]
+	if server.Auth != "oauth" {
+		t.Fatalf("server = %+v", server)
+	}
+	if server.OAuth.Flow != "device" || len(server.OAuth.Scopes) != 2 || server.OAuth.Timeout != 2*time.Minute {
+		t.Fatalf("oauth = %+v", server.OAuth)
+	}
+	confidential := loadMCPConfig(t, "    login:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        client_id: my-client\n        client_secret: ${PROFILE_MCP_SECRET}\n")
+	if confidential.MCPServers[0].OAuth.ClientID != "my-client" {
+		t.Fatalf("server = %+v", confidential.MCPServers[0])
+	}
+	browser := loadMCPConfig(t, "    login:\n      url: https://example.com/mcp\n      auth: oauth\n")
+	if browser.MCPServers[0].OAuth.Flow != "browser" || browser.MCPServers[0].OAuth.Timeout != 5*time.Minute {
+		t.Fatalf("oauth defaults = %+v", browser.MCPServers[0].OAuth)
+	}
+}
+
+func TestMCPOAuthValidation(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{"bad auth value", "    bad:\n      url: https://example.com/mcp\n      auth: basic\n"},
+		{"oauth block without auth", "    bad:\n      url: https://example.com/mcp\n      oauth:\n        flow: device\n"},
+		{"oauth with stdio", "    bad:\n      command: npx\n      auth: oauth\n"},
+		{"oauth with sse", "    bad:\n      url: https://example.com/mcp\n      transport: sse\n      auth: oauth\n"},
+		{"static authorization with oauth", "    bad:\n      url: https://example.com/mcp\n      auth: oauth\n      headers:\n        Authorization: Bearer token\n"},
+		{"bad flow", "    bad:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        flow: implicit\n"},
+		{"bad timeout", "    bad:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        timeout: forever\n"},
+		{"short timeout", "    bad:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        timeout: 5s\n"},
+		{"bad scope", "    bad:\n      url: https://example.com/mcp\n      auth: oauth\n      oauth:\n        scopes: [\"\"]\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := loadMCPConfigErr(t, tc.yaml)
+			if code := configErrorCode(err); code != "config_mcp_invalid" {
+				t.Fatalf("error code = %q (%v)", code, err)
+			}
+		})
 	}
 }
 

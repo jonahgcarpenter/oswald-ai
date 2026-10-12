@@ -22,13 +22,14 @@ import (
 
 // Manager owns scoped MCP client sessions and resolves tools for active users.
 type Manager struct {
-	store      configurationSource
-	resolver   hostnameResolver
-	sessions   map[string]*server
-	generation uint64
-	closed     bool
-	mu         sync.Mutex
-	log        *config.Logger
+	store       configurationSource
+	resolver    hostnameResolver
+	profileRoot string
+	sessions    map[string]*server
+	generation  uint64
+	closed      bool
+	mu          sync.Mutex
+	log         *config.Logger
 }
 
 func newManager(store configurationSource, log *config.Logger) *Manager {
@@ -256,7 +257,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 		}
 		switch cfg.Transport {
 		case TransportStreamableHTTP, "":
-			session, closeFn, err = connectStreamableHTTP(ctx, cfg)
+			session, closeFn, err = m.connectStreamableHTTP(ctx, cfg)
 		case TransportSSE:
 			session, closeFn, err = connectSSE(ctx, cfg)
 		default:
@@ -314,7 +315,7 @@ func (m *Manager) rememberError(key string, cfg ServerConfig, generation uint64,
 	m.sessions[key] = &server{config: cfg, reason: config.SafeErrorText(err)}
 }
 
-func connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
+func (m *Manager) connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.ClientSession, func() error, error) {
 	httpClient := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &headerTransport{
@@ -324,6 +325,13 @@ func connectStreamableHTTP(ctx context.Context, cfg ServerConfig) (*gomcp.Client
 	}
 	client := gomcp.NewClient(&gomcp.Implementation{Name: "oswald-ai", Version: "1.0.0"}, &gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
 	transport := &gomcp.StreamableClientTransport{Endpoint: cfg.URL, HTTPClient: httpClient, DisableStandaloneSSE: true}
+	if cfg.OAuth != nil {
+		handler, err := newOAuthRuntime(m.profileRoot, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		transport.OAuthHandler = handler
+	}
 	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	session, err := client.Connect(connectCtx, transport, nil)

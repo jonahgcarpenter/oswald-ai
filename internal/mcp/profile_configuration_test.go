@@ -12,13 +12,13 @@ import (
 func TestProfileMCPIsolationAndImmutableConfiguration(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
 	entries := []config.MCPServer{{Name: "example", URL: "https://example.com/mcp", Transport: TransportStreamableHTTP, Enabled: true, Headers: map[string]string{"Authorization": "Bearer alice"}}}
-	alice, err := NewProfileManager("alice", entries, log)
+	alice, err := NewProfileManager("alice", t.TempDir(), entries, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer alice.Close()
 	entries[0].Headers["Authorization"] = "Bearer changed"
-	bob, err := NewProfileManager("bob", entries, log)
+	bob, err := NewProfileManager("bob", t.TempDir(), entries, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestProfileMCPIsolationAndImmutableConfiguration(t *testing.T) {
 }
 
 func TestProfileMCPCloseFencesLateConnectionAndIsIdempotent(t *testing.T) {
-	manager, err := NewProfileManager("alice", nil, config.NewLogger(config.LevelError))
+	manager, err := NewProfileManager("alice", t.TempDir(), nil, config.NewLogger(config.LevelError))
 	if err != nil {
 		t.Fatal(err)
 	}

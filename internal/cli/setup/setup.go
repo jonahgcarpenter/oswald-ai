@@ -242,6 +242,12 @@ mcp_servers:
   #     cwd: "."  # relative paths resolve against the profile root.
   #     env:
   #       API_KEY: ${EXAMPLE_MCP_API_KEY}
+  #   example_oauth:
+  #     url: https://example.com/mcp
+  #     auth: oauth
+  #     oauth:
+  #       flow: browser  # or device; client_id/client_secret only if the server needs them.
+  #     Run: oswald mcp auth example_oauth
 `
 
 // defaultEnv is a private placeholder credential file. godotenv can parse it as

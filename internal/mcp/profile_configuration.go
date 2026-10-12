@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
@@ -23,7 +24,7 @@ type profileConfiguration struct {
 // NewProfileManager creates isolated lazy MCP sessions from resolved profile
 // configuration. No database, encrypted settings, or account service is used.
 // Configuration changes take effect on restart.
-func NewProfileManager(owner string, servers []config.MCPServer, log *config.Logger) (*Manager, error) {
+func NewProfileManager(owner, profileRoot string, servers []config.MCPServer, log *config.Logger) (*Manager, error) {
 	if owner == "" {
 		return nil, errors.New("MCP profile owner is required")
 	}
@@ -47,6 +48,7 @@ func NewProfileManager(owner string, servers []config.MCPServer, log *config.Log
 		source.servers = append(source.servers, resolved)
 	}
 	manager := newManager(source, log)
+	manager.profileRoot = profileRoot
 	manager.log.Debug("mcp.profile.configured", "configured profile MCP servers", config.F("profile", owner), config.F("server_count", len(servers)))
 	return manager, nil
 }
@@ -67,6 +69,9 @@ func resolveProfileServer(entry config.MCPServer) (ServerConfig, error) {
 		}
 		if len(entry.Headers) > 0 {
 			return ServerConfig{}, errors.New("profile MCP stdio server does not use headers")
+		}
+		if strings.TrimSpace(entry.Auth) != "" {
+			return ServerConfig{}, errors.New("profile MCP stdio server does not use OAuth")
 		}
 		if strings.TrimSpace(entry.Command) == "" {
 			return ServerConfig{}, errors.New("invalid profile MCP command")
@@ -101,11 +106,37 @@ func resolveProfileServer(entry config.MCPServer) (ServerConfig, error) {
 	for key, value := range entry.Headers {
 		headers[key] = value
 	}
-	return ServerConfig{
+	resolved := ServerConfig{
 		Name: entry.Name, Transport: transport, URL: entry.URL, Headers: headers,
 		Include: append([]string(nil), entry.Include...), Exclude: append([]string(nil), entry.Exclude...),
 		Enabled: entry.Enabled,
-	}, nil
+	}
+	if strings.TrimSpace(entry.Auth) != "" {
+		if entry.Auth != "oauth" || transport != TransportStreamableHTTP {
+			return ServerConfig{}, errors.New("profile MCP OAuth requires a Streamable HTTP url")
+		}
+		for key := range entry.Headers {
+			if strings.EqualFold(key, "Authorization") {
+				return ServerConfig{}, errors.New("profile MCP OAuth owns the Authorization header")
+			}
+		}
+		flow := entry.OAuth.Flow
+		if flow == "" {
+			flow = "browser"
+		}
+		if flow != "browser" && flow != "device" {
+			return ServerConfig{}, errors.New("unsupported profile MCP OAuth flow")
+		}
+		timeout := entry.OAuth.Timeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		resolved.OAuth = &OAuthConfig{
+			ClientID: entry.OAuth.ClientID, ClientSecret: entry.OAuth.ClientSecret,
+			Flow: flow, Scopes: append([]string(nil), entry.OAuth.Scopes...), Timeout: timeout,
+		}
+	}
+	return resolved, nil
 }
 
 func (s *profileConfiguration) ListForUser(ctx context.Context, owner string) ([]ServerConfig, error) {

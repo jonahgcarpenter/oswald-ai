@@ -127,15 +127,6 @@ func validateScope(scope, ownerUserID string) error {
 	return nil
 }
 
-func validateTransport(transport string) error {
-	switch strings.TrimSpace(transport) {
-	case TransportStreamableHTTP, TransportSSE:
-		return nil
-	default:
-		return fmt.Errorf("unsupported MCP transport %q", transport)
-	}
-}
-
 func parseAndValidateURL(ctx context.Context, rawURL string, resolver hostnameResolver) (*url.URL, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	parsed, err := url.Parse(rawURL)

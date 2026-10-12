@@ -78,7 +78,8 @@ func TestLoadToolSpecsPaginatesSDKAndDiscardsCanceledPartialCatalog(t *testing.T
 			defer server.Close()
 			defer close(release)
 			cfg := ServerConfig{Name: "test", URL: server.URL}
-			session, closeSession, err := connectStreamableHTTP(ctx, cfg)
+			manager := newManager(testStore(t), config.NewLogger(config.LevelError))
+			session, closeSession, err := manager.connectStreamableHTTP(ctx, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}

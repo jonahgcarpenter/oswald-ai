@@ -135,7 +135,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		compactor.SetBillingBaseURL(profile.LLMGatewayURL)
 		compactors[name] = compactor
-		manager, err := mcp.NewProfileManager(name, profile.MCPServers, rootLog)
+		manager, err := mcp.NewProfileManager(name, profile.ProfileRoot, profile.MCPServers, rootLog)
 		if err != nil {
 			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
 		}

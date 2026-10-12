@@ -195,7 +195,7 @@ func TestToolAllowedSemantics(t *testing.T) {
 
 func TestProfileManagerAcceptsStdioAndSSE(t *testing.T) {
 	log := config.NewLogger(config.LevelError)
-	manager, err := NewProfileManager("alice", []config.MCPServer{
+	manager, err := NewProfileManager("alice", t.TempDir(), []config.MCPServer{
 		{Name: "local", Command: "npx", Args: []string{"-y", "x"}, Cwd: ".", Env: map[string]string{"A": "b"}, Transport: TransportStdio, Exclude: []string{"edit"}, Enabled: true},
 		{Name: "remote", URL: "http://localhost:8080/mcp", Transport: TransportSSE, Enabled: true},
 	}, log)
@@ -235,7 +235,7 @@ func TestProfileManagerRejectsMixedTransports(t *testing.T) {
 		{{Name: "bad", Command: "npx", Headers: map[string]string{"A": "b"}, Enabled: true}},
 		{{Name: "bad", Enabled: true}},
 	} {
-		if _, err := NewProfileManager("alice", servers, log); err == nil {
+		if _, err := NewProfileManager("alice", t.TempDir(), servers, log); err == nil {
 			t.Fatalf("mixed configuration accepted: %+v", servers)
 		}
 	}

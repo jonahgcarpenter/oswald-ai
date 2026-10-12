@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
@@ -73,6 +74,16 @@ type ServerInfo struct {
 	Reason      string
 }
 
+// OAuthConfig holds resolved per-server OAuth parameters. Secrets must not
+// be logged. A nil *OAuthConfig on ServerConfig disables OAuth.
+type OAuthConfig struct {
+	ClientID     string
+	ClientSecret string
+	Flow         string
+	Scopes       []string
+	Timeout      time.Duration
+}
+
 // ServerConfig is a resolved, in-memory MCP connection configuration.
 type ServerConfig struct {
 	ID          string
@@ -88,6 +99,7 @@ type ServerConfig struct {
 	Env         map[string]string
 	Include     []string
 	Exclude     []string
+	OAuth       *OAuthConfig
 	Enabled     bool
 }
 

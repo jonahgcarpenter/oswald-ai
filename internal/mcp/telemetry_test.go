@@ -52,7 +52,8 @@ func TestCatalogTelemetryAggregatesUnsupportedEntriesAndUsesCurrentCaller(t *tes
 	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&output)
 	cfg := ServerConfig{Name: "test", URL: server.URL}
-	session, closeFn, err := connectStreamableHTTP(context.Background(), cfg)
+	manager := newManager(testStore(t), log)
+	session, closeFn, err := manager.connectStreamableHTTP(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

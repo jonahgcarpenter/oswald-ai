@@ -131,6 +131,14 @@ type mcpToolsYAML struct {
 	Exclude []string `yaml:"exclude"`
 }
 
+type mcpOAuthYAML struct {
+	ClientID     string   `yaml:"client_id"`
+	ClientSecret string   `yaml:"client_secret"`
+	Flow         string   `yaml:"flow"`
+	Scopes       []string `yaml:"scopes"`
+	Timeout      string   `yaml:"timeout"`
+}
+
 type mcpServerYAML struct {
 	URL       string            `yaml:"url"`
 	Command   string            `yaml:"command"`
@@ -140,16 +148,29 @@ type mcpServerYAML struct {
 	Transport string            `yaml:"transport"`
 	Headers   map[string]string `yaml:"headers"`
 	Tools     mcpToolsYAML      `yaml:"tools"`
+	Auth      string            `yaml:"auth"`
+	OAuth     mcpOAuthYAML      `yaml:"oauth"`
 	Enabled   *bool             `yaml:"enabled"`
 }
 
+// MCPOAuth holds resolved per-server OAuth parameters. Secrets must not be logged.
+type MCPOAuth struct {
+	ClientID     string
+	ClientSecret string
+	Flow         string
+	Scopes       []string
+	Timeout      time.Duration
+}
+
 // MCPServer holds one resolved operator-owned profile connection. It is never
-// persisted in SQLite, and its URL/command/headers/environment must not be logged.
+// persisted in SQLite, and its URL/command/headers/environment/secrets must not be logged.
 type MCPServer struct {
 	Name, URL, Command, Cwd, Transport string
 	Args                               []string
 	Headers, Env                       map[string]string
 	Include, Exclude                   []string
+	Auth                               string
+	OAuth                              MCPOAuth
 	Enabled                            bool
 }
 
@@ -336,6 +357,69 @@ func checkToolFilter(names []string, path string) ([]string, error) {
 	return out, nil
 }
 
+// checkMCPOAuth validates the optional per-server OAuth block. OAuth requires
+// an HTTP Streamable URL: it is rejected for stdio commands and SSE
+// transports, and a static Authorization header alongside OAuth is rejected so
+// exactly one credential owns the header. Secrets are bounded like other
+// credentials and never logged.
+func checkMCPOAuth(server mcpServerYAML, base string, hasURL bool, transport string, entry *MCPServer) error {
+	auth := strings.TrimSpace(server.Auth)
+	oauthEmpty := strings.TrimSpace(server.OAuth.ClientID) == "" && strings.TrimSpace(server.OAuth.ClientSecret) == "" &&
+		strings.TrimSpace(server.OAuth.Flow) == "" && len(server.OAuth.Scopes) == 0 && strings.TrimSpace(server.OAuth.Timeout) == ""
+	switch auth {
+	case "":
+		if !oauthEmpty {
+			return configErr("config_mcp_invalid", base+".oauth")
+		}
+		return nil
+	case "oauth":
+	default:
+		return configErr("config_mcp_invalid", base+".auth")
+	}
+	if !hasURL || transport != "streamable_http" {
+		return configErr("config_mcp_invalid", base+".auth")
+	}
+	for key := range server.Headers {
+		if strings.EqualFold(key, "Authorization") {
+			return configErr("config_mcp_invalid", base+".headers")
+		}
+	}
+	flow := strings.TrimSpace(server.OAuth.Flow)
+	if flow == "" {
+		flow = "browser"
+	}
+	if flow != "browser" && flow != "device" {
+		return configErr("config_mcp_invalid", base+".oauth.flow")
+	}
+	if value := server.OAuth.ClientID; len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
+		return configErr("config_mcp_invalid", base+".oauth.client_id")
+	}
+	if value := server.OAuth.ClientSecret; len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
+		return configErr("config_mcp_invalid", base+".oauth.client_secret")
+	}
+	if len(server.OAuth.Scopes) > 32 {
+		return configErr("config_mcp_invalid", base+".oauth.scopes")
+	}
+	scopes := make([]string, 0, len(server.OAuth.Scopes))
+	for _, scope := range server.OAuth.Scopes {
+		if scope == "" || len(scope) > 256 || strings.ContainsAny(scope, "\r\n\x00") {
+			return configErr("config_mcp_invalid", base+".oauth.scopes")
+		}
+		scopes = append(scopes, scope)
+	}
+	timeout := 5 * time.Minute
+	if raw := strings.TrimSpace(server.OAuth.Timeout); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed < 30*time.Second || parsed > 30*time.Minute {
+			return configErr("config_mcp_invalid", base+".oauth.timeout")
+		}
+		timeout = parsed
+	}
+	entry.Auth = "oauth"
+	entry.OAuth = MCPOAuth{ClientID: server.OAuth.ClientID, ClientSecret: server.OAuth.ClientSecret, Flow: flow, Scopes: scopes, Timeout: timeout}
+	return nil
+}
+
 func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string) error {
 	for name, value := range doc.Providers {
 		providers[name] = value
@@ -414,8 +498,9 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 			return configErr("config_mcp_invalid", base)
 		}
 		entry := MCPServer{Name: name}
+		transport := ""
 		if hasURL {
-			transport := server.Transport
+			transport = server.Transport
 			if transport == "" {
 				transport = "streamable_http"
 			}
@@ -476,6 +561,9 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 			return err
 		}
 		if entry.Exclude, err = checkToolFilter(server.Tools.Exclude, base+".tools.exclude"); err != nil {
+			return err
+		}
+		if err := checkMCPOAuth(server, base, hasURL, transport, &entry); err != nil {
 			return err
 		}
 		enabled := true
