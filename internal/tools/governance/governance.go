@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
@@ -148,6 +149,10 @@ type Decision struct {
 	fingerprint string
 }
 
+// Fingerprint returns the request-local duplicate key recorded for an allowed
+// decision, or "" when the decision carries no fingerprint.
+func (d Decision) Fingerprint() string { return d.fingerprint }
+
 const (
 	ReasonDuplicate          = "duplicate_call"
 	ReasonToolLimit          = "tool_execution_limit"
@@ -168,16 +173,40 @@ type Governor struct {
 	toolIterations  int
 	totalExecutions int
 	globalReason    string
+
+	// Loop-guardrail state. Successful fingerprints stay in seen;
+	// failure/no-progress ladders are tracked separately so exact-error
+	// replays warn instead of silently retrying forever.
+	exactFailures    map[string]int
+	sameToolFailures map[string]int
+	noProgress       map[string]noProgressEntry
+	identicalSig     string
+	identicalHash    string
+	identicalCount   int
+	identicalFirstID string
+	history          []historyEntry
+	haltDecision     *Decision
+	hardStop         bool
 }
 
 // New creates request-local governance state.
 func New(global GlobalPolicy) *Governor {
 	return &Governor{
-		global: global,
-		stats:  make(map[string]*ToolStats),
-		seen:   make(map[string]struct{}),
+		global:           global,
+		stats:            make(map[string]*ToolStats),
+		seen:             make(map[string]struct{}),
+		exactFailures:    make(map[string]int),
+		sameToolFailures: make(map[string]int),
+		noProgress:       make(map[string]noProgressEntry),
 	}
 }
+
+// SetHardStopEnabled toggles blocking/halt behavior. It stays false in v1
+// (warn-only); phase 3 flips it on unattended paths after log observation.
+func (g *Governor) SetHardStopEnabled(enabled bool) { g.hardStop = enabled }
+
+// HaltDecision returns the first block/halt decision, if any.
+func (g *Governor) HaltDecision() *Decision { return g.haltDecision }
 
 // BeginToolIteration records a model response containing at least one tool call.
 func (g *Governor) BeginToolIteration() Decision {
@@ -217,6 +246,22 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 			stats.Blocked++
 			return Decision{ReasonCode: ReasonInvalidFingerprint}
 		}
+		if g.hardStop {
+			if count := g.exactFailures[fingerprint]; count >= ExactBlockAfter {
+				stats.Blocked++
+				blocked := Decision{ReasonCode: ReasonRepeatedExactBlock}
+				g.setHaltDecision(&blocked)
+				return blocked
+			}
+			if isIdempotent(name) {
+				if entry, ok := g.noProgress[fingerprint]; ok && entry.count >= NoProgressBlockAfter {
+					stats.Blocked++
+					blocked := Decision{ReasonCode: ReasonIdempotentNoProgressBlock}
+					g.setHaltDecision(&blocked)
+					return blocked
+				}
+			}
+		}
 		if _, exists := g.seen[fingerprint]; exists {
 			stats.Duplicates++
 			stats.Blocked++
@@ -230,21 +275,11 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 	return decision
 }
 
-// RecordResult accounts for a completed permitted execution.
+// RecordResult accounts for a completed permitted execution. It preserves the
+// legacy statistics contract and updates loop-guardrail ladders; advice is
+// discarded. Prefer AfterCall when model-visible warn text is needed.
 func (g *Governor) RecordResult(name string, decision Decision, result Result, execErr error) {
-	stats := g.toolStats(name)
-	if execErr != nil {
-		if decision.fingerprint != "" {
-			delete(g.seen, decision.fingerprint)
-		}
-		stats.Failures++
-		return
-	}
-	if result.Outcome != OutcomeProductive {
-		stats.Unproductive++
-		return
-	}
-	stats.Productive++
+	g.AfterCall(name, nil, decision.fingerprint, result, execErr)
 }
 
 // IsToolRetired reports whether one tool has exhausted a per-tool limit.
@@ -262,6 +297,9 @@ func (g *Governor) GlobalStopReason() string {
 			g.setGlobalReason(ReasonIterationLimit)
 		}
 	}
+	if g.globalReason == "" && g.haltDecision != nil {
+		return g.haltDecision.ReasonCode
+	}
 	return g.globalReason
 }
 
@@ -273,6 +311,12 @@ func (g *Governor) TotalExecutions() int { return g.totalExecutions }
 
 // ToolIterations returns the number of model responses containing tool calls.
 func (g *Governor) ToolIterations() int { return g.toolIterations }
+
+// ExactFailures returns the exact-signature failure count for a fingerprint.
+func (g *Governor) ExactFailures(fingerprint string) int { return g.exactFailures[fingerprint] }
+
+// SameToolFailures returns the same-tool failure count for a tool name.
+func (g *Governor) SameToolFailures(name string) int { return g.sameToolFailures[name] }
 
 func (g *Governor) toolStats(name string) *ToolStats {
 	stats := g.stats[name]
@@ -286,6 +330,13 @@ func (g *Governor) toolStats(name string) *ToolStats {
 func (g *Governor) setGlobalReason(reason string) {
 	if g.globalReason == "" {
 		g.globalReason = reason
+	}
+}
+
+func (g *Governor) setHaltDecision(decision *Decision) {
+	if g.haltDecision == nil && decision != nil {
+		cp := *decision
+		g.haltDecision = &cp
 	}
 }
 
@@ -315,4 +366,47 @@ func Fingerprint(name string, args map[string]interface{}, normalize ArgumentNor
 	}
 	digest := sha256.Sum256(append(append([]byte(name), 0), encoded...))
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// classifyCall separates execution failures from unproductive successes.
+// Degraded successes (e.g. web_search fallback) are neither.
+func classifyCall(execErr error, result Result) (failed, unproductive bool) {
+	if execErr != nil {
+		return true, false
+	}
+	if result.Outcome != OutcomeProductive {
+		return false, true
+	}
+	return false, false
+}
+
+func isRepeatablePoller(name string) bool {
+	if name == "process_manage" {
+		return true
+	}
+	for _, suffix := range []string{"_poll", "_get_result", "_status", "_progress"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIdempotent(name string) bool {
+	switch name {
+	case "session_search", "web_search", "vision_analyze":
+		return true
+	}
+	return false
+}
+
+func isFailureTolerant(name string) bool {
+	if name == "web_search" || name == "tool_call" || name == "tool_search" || name == "tool_describe" {
+		return true
+	}
+	return strings.HasPrefix(name, "mcp__")
+}
+
+func isProgressReset(name string) bool {
+	return name == "memory" || name == "image_generate"
 }
