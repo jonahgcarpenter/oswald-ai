@@ -29,6 +29,7 @@ type ToolHistoryBatch struct {
 // ToolHistoryCall preserves one call and its exactly correlated result.
 type ToolHistoryCall struct {
 	Name               string                 `json:"name"`
+	ResultName         string                 `json:"result_name,omitempty"`
 	ProviderCallID     string                 `json:"provider_call_id,omitempty"`
 	HistoryMode        string                 `json:"history_mode,omitempty"`
 	Arguments          map[string]interface{} `json:"arguments,omitempty"`
@@ -41,6 +42,30 @@ type ToolHistoryCall struct {
 	ArgumentsTruncated bool                   `json:"arguments_truncated,omitempty"`
 	ResultTruncated    bool                   `json:"result_truncated,omitempty"`
 	SearchResult       bool                   `json:"search_result,omitempty"`
+}
+
+// ToolResultName identifies the tool-result message without changing the
+// assistant invocation name. Older history defaults to the invocation name.
+func (c ToolHistoryCall) ToolResultName() string {
+	if c.ResultName != "" {
+		return c.ResultName
+	}
+	return c.Name
+}
+
+func validToolResultName(call ToolHistoryCall) bool {
+	if call.ResultName == "" {
+		return true
+	}
+	if call.Name != "tool_call" || call.Status != "succeeded" || len(call.ResultName) > 64 || !strings.HasPrefix(call.ResultName, "mcp__") {
+		return false
+	}
+	for _, c := range call.ResultName {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // EmptyToolHistory returns the canonical empty trace.
@@ -67,7 +92,7 @@ func EncodeToolHistory(history ToolHistory) (string, string, error) {
 		for callIndex := range batch.Calls {
 			call := &batch.Calls[callIndex]
 			call.Name = strings.TrimSpace(call.Name)
-			if call.Name == "" || strings.TrimSpace(call.Status) == "" {
+			if call.Name == "" || strings.TrimSpace(call.Status) == "" || !validToolResultName(*call) {
 				return "", "", fmt.Errorf("tool history call %d:%d is incomplete", batchIndex, callIndex)
 			}
 			if call.Arguments == nil {
@@ -109,7 +134,7 @@ func DecodeToolHistory(encoded string) (ToolHistory, error) {
 			return ToolHistory{}, fmt.Errorf("tool history batch %d has no calls", batchIndex)
 		}
 		for callIndex, call := range batch.Calls {
-			if strings.TrimSpace(call.Name) == "" || strings.TrimSpace(call.Status) == "" {
+			if strings.TrimSpace(call.Name) == "" || strings.TrimSpace(call.Status) == "" || !validToolResultName(call) {
 				return ToolHistory{}, fmt.Errorf("tool history call %d:%d is incomplete", batchIndex, callIndex)
 			}
 		}
@@ -126,6 +151,10 @@ func ToolHistorySearchText(history ToolHistory) string {
 				b.WriteByte('\n')
 			}
 			b.WriteString(call.Name)
+			if call.ResultName != "" {
+				b.WriteByte('\n')
+				b.WriteString(call.ResultName)
+			}
 			if call.SearchResult && strings.TrimSpace(call.Result) != "" {
 				b.WriteByte('\n')
 				b.WriteString(strings.TrimSpace(call.Result))

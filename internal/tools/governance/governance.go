@@ -23,6 +23,8 @@ const (
 
 // Result is the shared result returned by builtin and MCP tools.
 type Result struct {
+	// ResultName is an optional display/history name distinct from the invocation.
+	ResultName  string
 	Content     string
 	Outcome     Outcome
 	ReasonCode  string

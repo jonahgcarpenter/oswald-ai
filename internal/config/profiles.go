@@ -123,25 +123,55 @@ type documentYAML struct {
 	Runtime   *struct {
 		LogLevel string `yaml:"log_level"`
 	} `yaml:"runtime"`
-	MCP struct {
-		Servers map[string]mcpServerYAML `yaml:"servers"`
-	} `yaml:"mcp"`
+	MCPServers map[string]mcpServerYAML `yaml:"mcp_servers"`
+}
+
+type mcpToolsYAML struct {
+	Include []string `yaml:"include"`
+	Exclude []string `yaml:"exclude"`
+}
+
+type mcpOAuthYAML struct {
+	ClientID     string   `yaml:"client_id"`
+	ClientSecret string   `yaml:"client_secret"`
+	Flow         string   `yaml:"flow"`
+	Scopes       []string `yaml:"scopes"`
+	Timeout      string   `yaml:"timeout"`
 }
 
 type mcpServerYAML struct {
-	URL         string            `yaml:"url"`
-	Description string            `yaml:"description"`
-	Transport   string            `yaml:"transport"`
-	Headers     map[string]string `yaml:"headers"`
-	Enabled     *bool             `yaml:"enabled"`
+	URL       string            `yaml:"url"`
+	Command   string            `yaml:"command"`
+	Args      []string          `yaml:"args"`
+	Cwd       string            `yaml:"cwd"`
+	Env       map[string]string `yaml:"env"`
+	Transport string            `yaml:"transport"`
+	Headers   map[string]string `yaml:"headers"`
+	Tools     mcpToolsYAML      `yaml:"tools"`
+	Auth      string            `yaml:"auth"`
+	OAuth     mcpOAuthYAML      `yaml:"oauth"`
+	Enabled   *bool             `yaml:"enabled"`
+}
+
+// MCPOAuth holds resolved per-server OAuth parameters. Secrets must not be logged.
+type MCPOAuth struct {
+	ClientID     string
+	ClientSecret string
+	Flow         string
+	Scopes       []string
+	Timeout      time.Duration
 }
 
 // MCPServer holds one resolved operator-owned profile connection. It is never
-// persisted in SQLite, and its URL/headers must not be logged.
+// persisted in SQLite, and its URL/command/headers/environment/secrets must not be logged.
 type MCPServer struct {
-	Name, URL, Description, Transport string
-	Headers                           map[string]string
-	Enabled                           bool
+	Name, URL, Command, Cwd, Transport string
+	Args                               []string
+	Headers, Env                       map[string]string
+	Include, Exclude                   []string
+	Auth                               string
+	OAuth                              MCPOAuth
+	Enabled                            bool
 }
 
 var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -289,6 +319,107 @@ func pruneDisabledPlatforms(raw *yaml.Node, env profileEnvironment) (*yaml.Node,
 	return pruned, nil
 }
 
+var mcpHeaderNameRE = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
+var mcpToolFilterRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+
+// checkHeaderMap validates a bounded string map for MCP headers or stdio
+// environment entries: at most 32 entries, token names, values bounded to
+// 8,192 bytes with no newline or NUL content.
+func checkHeaderMap(values map[string]string, path string) error {
+	if len(values) > 32 {
+		return configErr("config_mcp_invalid", path)
+	}
+	for key, value := range values {
+		if !mcpHeaderNameRE.MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
+			return configErr("config_mcp_invalid", path)
+		}
+	}
+	return nil
+}
+
+// checkToolFilter validates an MCP tool include/exclude list against the
+// remote tool identifier contract and returns deduplicated names.
+func checkToolFilter(names []string, path string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if !mcpToolFilterRE.MatchString(name) {
+			return nil, configErr("config_mcp_invalid", path)
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// checkMCPOAuth validates the optional per-server OAuth block. OAuth requires
+// an HTTP Streamable URL: it is rejected for stdio commands and SSE
+// transports, and a static Authorization header alongside OAuth is rejected so
+// exactly one credential owns the header. Secrets are bounded like other
+// credentials and never logged.
+func checkMCPOAuth(server mcpServerYAML, base string, hasURL bool, transport string, entry *MCPServer) error {
+	auth := strings.TrimSpace(server.Auth)
+	oauthEmpty := strings.TrimSpace(server.OAuth.ClientID) == "" && strings.TrimSpace(server.OAuth.ClientSecret) == "" &&
+		strings.TrimSpace(server.OAuth.Flow) == "" && len(server.OAuth.Scopes) == 0 && strings.TrimSpace(server.OAuth.Timeout) == ""
+	switch auth {
+	case "":
+		if !oauthEmpty {
+			return configErr("config_mcp_invalid", base+".oauth")
+		}
+		return nil
+	case "oauth":
+	default:
+		return configErr("config_mcp_invalid", base+".auth")
+	}
+	if !hasURL || transport != "streamable_http" {
+		return configErr("config_mcp_invalid", base+".auth")
+	}
+	for key := range server.Headers {
+		if strings.EqualFold(key, "Authorization") {
+			return configErr("config_mcp_invalid", base+".headers")
+		}
+	}
+	flow := strings.TrimSpace(server.OAuth.Flow)
+	if flow == "" {
+		flow = "browser"
+	}
+	if flow != "browser" && flow != "device" {
+		return configErr("config_mcp_invalid", base+".oauth.flow")
+	}
+	if value := server.OAuth.ClientID; len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
+		return configErr("config_mcp_invalid", base+".oauth.client_id")
+	}
+	if value := server.OAuth.ClientSecret; len(value) > 4096 || strings.ContainsAny(value, "\r\n\x00") {
+		return configErr("config_mcp_invalid", base+".oauth.client_secret")
+	}
+	if len(server.OAuth.Scopes) > 32 {
+		return configErr("config_mcp_invalid", base+".oauth.scopes")
+	}
+	scopes := make([]string, 0, len(server.OAuth.Scopes))
+	for _, scope := range server.OAuth.Scopes {
+		if scope == "" || len(scope) > 256 || strings.ContainsAny(scope, "\r\n\x00") {
+			return configErr("config_mcp_invalid", base+".oauth.scopes")
+		}
+		scopes = append(scopes, scope)
+	}
+	timeout := 5 * time.Minute
+	if raw := strings.TrimSpace(server.OAuth.Timeout); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed < 30*time.Second || parsed > 30*time.Minute {
+			return configErr("config_mcp_invalid", base+".oauth.timeout")
+		}
+		timeout = parsed
+	}
+	entry.Auth = "oauth"
+	entry.OAuth = MCPOAuth{ClientID: server.OAuth.ClientID, ClientSecret: server.OAuth.ClientSecret, Flow: flow, Scopes: scopes, Timeout: timeout}
+	return nil
+}
+
 func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerYAML, selected *string) error {
 	for name, value := range doc.Providers {
 		providers[name] = value
@@ -353,42 +484,94 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 		}
 	}
 	cfg.MCPServers = nil
-	if len(doc.MCP.Servers) > 32 {
-		return configErr("config_mcp_invalid", "mcp.servers")
+	if len(doc.MCPServers) > 32 {
+		return configErr("config_mcp_invalid", "mcp_servers")
 	}
-	for name, server := range doc.MCP.Servers {
-		base := "mcp.servers." + name
+	for name, server := range doc.MCPServers {
+		base := "mcp_servers." + name
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{1,39}$`).MatchString(name) || name == "soul" {
 			return configErr("config_mcp_invalid", base)
 		}
-		transport := server.Transport
-		if transport == "" {
-			transport = "streamable_http"
+		hasURL := strings.TrimSpace(server.URL) != ""
+		hasCommand := strings.TrimSpace(server.Command) != ""
+		if hasURL == hasCommand {
+			return configErr("config_mcp_invalid", base)
 		}
-		if transport != "streamable_http" {
-			return configErr("config_mcp_invalid", base+".transport")
-		}
-		endpoint, err := url.Parse(server.URL)
-		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
-			return configErr("config_mcp_invalid", base+".url")
-		}
-		description := strings.TrimSpace(server.Description)
-		if description == "" || len([]rune(description)) > 500 || strings.ContainsAny(description, "\r\n\x00") {
-			return configErr("config_mcp_invalid", base+".description")
-		}
-		if len(server.Headers) > 32 {
-			return configErr("config_mcp_invalid", base+".headers")
-		}
-		for key, value := range server.Headers {
-			if !regexp.MustCompile(`^[!#$%&'*+.^_`+"`"+`|~0-9A-Za-z-]+$`).MatchString(key) || len(value) > 8192 || strings.ContainsAny(value, "\r\n\x00") {
+		entry := MCPServer{Name: name}
+		transport := ""
+		if hasURL {
+			transport = server.Transport
+			if transport == "" {
+				transport = "streamable_http"
+			}
+			if transport != "streamable_http" && transport != "sse" {
+				return configErr("config_mcp_invalid", base+".transport")
+			}
+			endpoint, err := url.Parse(server.URL)
+			if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil {
+				return configErr("config_mcp_invalid", base+".url")
+			}
+			if len(server.Args) > 0 || strings.TrimSpace(server.Cwd) != "" || len(server.Env) > 0 {
+				return configErr("config_mcp_invalid", base+".command")
+			}
+			if err := checkHeaderMap(server.Headers, base+".headers"); err != nil {
+				return err
+			}
+			entry.URL, entry.Transport, entry.Headers = server.URL, transport, server.Headers
+		} else {
+			if strings.TrimSpace(server.Transport) != "" {
+				return configErr("config_mcp_invalid", base+".transport")
+			}
+			if len(server.Headers) > 0 {
 				return configErr("config_mcp_invalid", base+".headers")
 			}
+			command := strings.TrimSpace(server.Command)
+			if len(command) == 0 || len(command) > 1024 || strings.ContainsRune(command, 0) {
+				return configErr("config_mcp_invalid", base+".command")
+			}
+			if len(server.Args) > 32 {
+				return configErr("config_mcp_invalid", base+".args")
+			}
+			for _, arg := range server.Args {
+				if len(arg) > 4096 || strings.ContainsRune(arg, 0) {
+					return configErr("config_mcp_invalid", base+".args")
+				}
+			}
+			cwd := strings.TrimSpace(server.Cwd)
+			if cwd != "" {
+				if len(cwd) > 1024 || strings.ContainsRune(cwd, 0) {
+					return configErr("config_mcp_invalid", base+".cwd")
+				}
+				resolved := cwd
+				if !filepath.IsAbs(resolved) {
+					resolved = filepath.Join(cfg.ProfileRoot, resolved)
+				}
+				if rel, err := filepath.Rel(cfg.ProfileRoot, resolved); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return configErr("config_mcp_invalid", base+".cwd")
+				}
+				cwd = resolved
+			}
+			if err := checkHeaderMap(server.Env, base+".env"); err != nil {
+				return err
+			}
+			entry.Command, entry.Args, entry.Cwd, entry.Env, entry.Transport = command, server.Args, cwd, server.Env, "stdio"
+		}
+		var err error
+		if entry.Include, err = checkToolFilter(server.Tools.Include, base+".tools.include"); err != nil {
+			return err
+		}
+		if entry.Exclude, err = checkToolFilter(server.Tools.Exclude, base+".tools.exclude"); err != nil {
+			return err
+		}
+		if err := checkMCPOAuth(server, base, hasURL, transport, &entry); err != nil {
+			return err
 		}
 		enabled := true
 		if server.Enabled != nil {
 			enabled = *server.Enabled
 		}
-		cfg.MCPServers = append(cfg.MCPServers, MCPServer{Name: name, URL: server.URL, Description: description, Transport: transport, Headers: server.Headers, Enabled: enabled})
+		entry.Enabled = enabled
+		cfg.MCPServers = append(cfg.MCPServers, entry)
 	}
 	sort.Slice(cfg.MCPServers, func(i, j int) bool { return cfg.MCPServers[i].Name < cfg.MCPServers[j].Name })
 	if doc.API.Key != nil {

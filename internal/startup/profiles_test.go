@@ -63,9 +63,9 @@ func profileStartupFixture(t *testing.T) *config.Config {
 
 func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) {
 	cfg := profileStartupFixture(t)
-	cfg.MCPServers = []config.MCPServer{{Name: "default_tools", URL: "https://example.com/mcp", Description: "Synthetic default tools.", Transport: "streamable_http", Enabled: true}}
-	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Description: "Synthetic API tools.", Transport: "streamable_http", Enabled: true}}
-	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Description: "Synthetic Alice tools.", Transport: "streamable_http", Enabled: true}}
+	cfg.MCPServers = []config.MCPServer{{Name: "default_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
+	cfg.Profiles["api"].MCPServers = []config.MCPServer{{Name: "api_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
+	cfg.Profiles["alice"].MCPServers = []config.MCPServer{{Name: "alice_tools", URL: "https://example.com/mcp", Transport: "streamable_http", Enabled: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := &profileFakeModel{}
@@ -100,7 +100,7 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				}
 			}
 			responses := make(chan broker.Result, 1)
-			err = selected.Broker.Submit(&broker.Request{Principal: principal, SessionKey: "openai:test", Stateless: true, Prompt: "synthetic prompt", ClientToolChoice: agent.ClientToolChoice{Mode: "allowed", Allowed: []string{"default_tools.tools"}, AllowedMode: "auto"}, ResponseChan: responses})
+			err = selected.Broker.Submit(&broker.Request{Principal: principal, SessionKey: "openai:test", Stateless: true, Prompt: "synthetic prompt", ClientToolChoice: agent.ClientToolChoice{Mode: "allowed", Allowed: []string{"tool_search"}, AllowedMode: "auto"}, ResponseChan: responses})
 			if err == nil {
 				response := <-responses
 				err = response.Err
@@ -127,15 +127,15 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 	}
 	foundMCP := false
 	for _, tool := range model.requests[0].Tools {
-		if tool.Function.Name == "alice_tools.tools" || tool.Function.Name == "api_tools.tools" {
+		switch tool.Function.Name {
+		case "mcp__alice_tools__synthetic", "mcp__api_tools__synthetic":
 			t.Fatal("another profile's MCP tools were advertised")
-		}
-		if tool.Function.Name == "default_tools.tools" {
+		case "tool_search", "tool_describe", "tool_call":
 			foundMCP = true
 		}
 	}
 	if !foundMCP {
-		t.Fatal("startup did not wire profile MCP discovery")
+		t.Fatal("startup did not wire profile MCP bridge")
 	}
 	for _, root := range []string{cfg.ProfileRoot, cfg.Profiles["alice"].ProfileRoot, cfg.Profiles["api"].ProfileRoot} {
 		if _, err := os.Stat(filepath.Join(root, "state.db")); err != nil {

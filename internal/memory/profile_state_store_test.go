@@ -366,6 +366,30 @@ func TestAppendPersistsToolTranscriptRows(t *testing.T) {
 	}
 }
 
+func TestAppendBridgeResultStoresRemoteName(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	if _, err := s.ResolveSessionContext(ctx, "alice", key, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	history := ToolHistory{Version: 1, Batches: []ToolHistoryBatch{{Calls: []ToolHistoryCall{{Name: "tool_call", ResultName: "mcp__github__create_issue", ProviderCallID: "call_3", Status: "succeeded", Result: "remote content", ExecutedAt: time.Now().UTC().Format(time.RFC3339Nano)}}}}}
+	_, err := s.AppendPendingSessionTurn(ctx, SessionTurnWrite{UserID: "alice", SessionID: key, Generation: 1, UserText: "hello", AssistantText: "done", History: history, Pressure: SessionPromptPressure{Tokens: 1, Limit: 100, Version: "v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var name, content, callID, calls string
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT tool_name,content,tool_call_id FROM messages WHERE role='tool'`).Scan(&name, &content, &callID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT tool_calls FROM messages WHERE finish_reason='tool_calls'`).Scan(&calls); err != nil {
+		t.Fatal(err)
+	}
+	if name != "mcp__github__create_issue" || callID != "call_3" || content != "remote content" || !strings.Contains(calls, `"name":"tool_call"`) {
+		t.Fatalf("stored bridge/result identity changed: name=%s call=%s calls=%s", name, callID, calls)
+	}
+}
+
 func TestProfileStoreOperationsEmitSafeDebugMeasurements(t *testing.T) {
 	for _, level := range []config.Level{config.LevelDebug} {
 		t.Run(level.String(), func(t *testing.T) {

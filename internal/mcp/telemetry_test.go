@@ -52,7 +52,8 @@ func TestCatalogTelemetryAggregatesUnsupportedEntriesAndUsesCurrentCaller(t *tes
 	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&output)
 	cfg := ServerConfig{Name: "test", URL: server.URL}
-	session, closeFn, err := connectStreamableHTTP(context.Background(), cfg)
+	manager := newManager(testStore(t), log)
+	session, closeFn, err := manager.connectStreamableHTTP(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestManagerReportsConnectListAndCloseFailuresWithoutPrivateDetails(t *testi
 	}
 	store.closed = true
 	manager.ToolSpecs(ctx, "user")
-	NewProvider(manager).DiscoveryTools(ctx, testPrincipal("user"))
+	NewProvider(manager).BridgeTools(ctx, testPrincipal("user"))
 	for _, event := range []string{"mcp.server.connect.complete", "mcp.server.connect_failed", "mcp.server.close_failed", "mcp.server_configs.list_failed"} {
 		if !strings.Contains(output.String(), `"event":"`+event+`"`) {
 			t.Errorf("missing %s: %s", event, output.String())

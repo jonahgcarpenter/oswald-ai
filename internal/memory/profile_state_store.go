@@ -591,7 +591,7 @@ func (s *ProfileStore) AppendPendingSessionTurn(ctx context.Context, input Sessi
 			return result, err
 		}
 		for callIndex, call := range batch.Calls {
-			toolName := strings.TrimSpace(call.Name)
+			toolName := strings.TrimSpace(call.ToolResultName())
 			providerID := providerIDs[callIndex]
 			callResult := call.Result
 			if _, err := tx.ExecContext(ctx, `INSERT INTO messages(session_id,role,content,tool_call_id,tool_name,display_identity,timestamp,active) VALUES(?,'tool',?,?,?,?,?,0)`, id, call.Result, providerIDs[callIndex], toolName, displayIdentity("tool", &callResult, seconds, &providerID, nil, &toolName), seconds); err != nil {

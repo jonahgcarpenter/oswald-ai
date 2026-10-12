@@ -113,7 +113,7 @@ func TestProfileMCPConfigurationUsesProfileEnvironment(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", ".env"), []byte("OSWALD_TEST_MCP_TOKEN=alice-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", "config.yaml"), []byte("mcp:\n  servers:\n    example:\n      url: https://example.com/mcp\n      description: Synthetic tools.\n      headers:\n        Authorization: Bearer ${OSWALD_TEST_MCP_TOKEN}\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "profiles", "alice", "config.yaml"), []byte("mcp_servers:\n    example:\n      url: https://example.com/mcp\n      headers:\n        Authorization: Bearer ${OSWALD_TEST_MCP_TOKEN}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadProfiles(root)

@@ -135,12 +135,12 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		compactor.SetBillingBaseURL(profile.LLMGatewayURL)
 		compactors[name] = compactor
-		manager, err := mcp.NewProfileManager(name, profile.MCPServers, rootLog)
+		manager, err := mcp.NewProfileManager(name, profile.ProfileRoot, profile.MCPServers, rootLog)
 		if err != nil {
 			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
 		}
 		mcpManagers = append(mcpManagers, manager)
-		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, profile.LLMGatewayProvider, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager))
+		engine := agent.NewAgent(client, registry, profile.LLMGatewayModel, profile.LLMGatewayProvider, soul.NewProfileStore(profile.ProfileRoot, name, filepath.Join(cfg.ProfileRoot, "SOUL.md")), store, budget.NewContextBudget(profile.ModelContextWindow), governance.DefaultGlobalPolicy(), rootLog, mcp.NewProvider(manager, registry.EnabledBuiltinNames()...))
 		engine.SetBillingBaseURL(profile.LLMGatewayURL)
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)

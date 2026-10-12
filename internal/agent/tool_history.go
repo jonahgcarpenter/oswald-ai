@@ -19,6 +19,7 @@ func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result go
 	}
 	call := memory.ToolHistoryCall{
 		Name:           strings.TrimSpace(tc.Function.Name),
+		ResultName:     result.ResultName,
 		ProviderCallID: strings.TrimSpace(tc.ID),
 		HistoryMode:    string(governance.HistoryFull),
 		Arguments:      args,
@@ -30,10 +31,12 @@ func foregroundToolCall(tc llm.ToolCall, decision governance.Decision, result go
 		ExecutedAt:     executedAt.Format(time.RFC3339Nano),
 	}
 	if !decision.Allowed {
+		call.ResultName = ""
 		call.Status = "blocked"
 		call.Outcome = ""
 		call.ReasonCode = decision.ReasonCode
 	} else if execErr != nil {
+		call.ResultName = ""
 		call.Status = "failed"
 		call.Outcome = ""
 		call.ReasonCode = "execution_error"
@@ -62,12 +65,16 @@ func persistedToolCall(tc llm.ToolCall, policy governance.HistoryPolicy, decisio
 	}
 	runes := []rune(call.Result)
 	if len(runes) > policy.MaxResultRunes {
-		notice := []rune("\n[Historical result truncated.]")
-		keep := policy.MaxResultRunes - len(notice)
-		if keep > 0 {
-			call.Result = string(runes[:keep]) + string(notice)
+		if call.ResultName != "" {
+			call.Result = governance.BoundResultText(call.Result, policy.MaxResultRunes)
 		} else {
-			call.Result = string(notice[:policy.MaxResultRunes])
+			notice := []rune("\n[Historical result truncated.]")
+			keep := policy.MaxResultRunes - len(notice)
+			if keep > 0 {
+				call.Result = string(runes[:keep]) + string(notice)
+			} else {
+				call.Result = string(notice[:policy.MaxResultRunes])
+			}
 		}
 		call.ResultTruncated = true
 	}

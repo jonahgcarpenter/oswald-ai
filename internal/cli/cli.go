@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/cli/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/cli/setup"
 	"github.com/jonahgcarpenter/oswald-ai/internal/cli/start"
@@ -48,6 +49,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return start.Run(ctx, *root, stdout)
 	case "profile":
 		return profiles.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+	case "mcp":
+		return mcp.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "help":
 		usage(stdout)
 		return exitOK
@@ -66,5 +69,6 @@ commands:
   start                  run the oswald service
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
+  mcp auth <server>      authorize a profile MCP server with OAuth
 `)
 }

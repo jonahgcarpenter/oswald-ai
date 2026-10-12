@@ -140,10 +140,14 @@ func decodeToolArguments(raw string) map[string]interface{} {
 
 func mapToGatewayMessages(msgs []ChatMessage) []gatewayMessage {
 	result := make([]gatewayMessage, len(msgs))
+	callNames := make(map[string]string)
 	for i, m := range msgs {
 		bm := gatewayMessage{Role: m.Role, Name: m.Name}
 		if m.Role == "tool" {
 			bm.ToolCallID = m.ToolCallID
+			// Wire names identify the correlated invocation, not its display name.
+			// This copy never mutates request/history messages.
+			bm.Name = callNames[m.ToolCallID]
 		}
 		if len(m.Images) > 0 {
 			parts := make([]gatewayContentPart, 0, 1+len(m.Images))
@@ -164,6 +168,7 @@ func mapToGatewayMessages(msgs []ChatMessage) []gatewayMessage {
 		if len(m.ToolCalls) > 0 {
 			bm.ToolCalls = make([]gatewayToolCall, len(m.ToolCalls))
 			for j, tc := range m.ToolCalls {
+				callNames[tc.ID] = tc.Function.Name
 				bm.ToolCalls[j] = gatewayToolCall{
 					ID:   tc.ID,
 					Type: "function",
