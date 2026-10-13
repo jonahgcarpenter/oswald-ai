@@ -50,39 +50,15 @@ var gatewayLifecycle = []struct {
 	{regexp.MustCompile(`(?i)\boswald(-server)?\b.*\b(bootstrap|submit)\b`), "gateway bootstrap"},
 }
 
-// stripInert removes quoted spans, backticks, and heredoc bodies so
-// detachment/lifecycle regexes match live shell structure, not inert text.
+// stripInert is the single choke point for shell matching: it normalizes
+// evasion spellings (line continuations, $IFS splits, fullwidth unicode,
+// home-as-absolute-path) and blanks prose (notably echo/printf operands and
+// inert quotes) while keeping executed payloads — command substitutions,
+// backticks, live-sink quoted operands, and shell-fed heredoc bodies — so
+// detachment/lifecycle/destructive regexes match live shell structure.
+// `echo "rm -rf /"` stays prose; `sh -c "rm -rf /"` stays live.
 func stripInert(command string) string {
-	var sb strings.Builder
-	inSingle, inDouble, inBacktick := false, false, false
-	lines := strings.Split(command, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "<<") {
-			// Heredoc body: skip until terminator is managed by the shell;
-			// conservatively drop the rest of the script body.
-			_ = i
-			break
-		}
-		for _, r := range line {
-			switch {
-			case r == '\'' && !inDouble && !inBacktick:
-				inSingle = !inSingle
-			case r == '"' && !inSingle && !inBacktick:
-				inDouble = !inDouble
-			case r == '`' && !inSingle && !inDouble:
-				inBacktick = !inBacktick
-			default:
-				if !inSingle && !inDouble && !inBacktick {
-					sb.WriteRune(r)
-				} else {
-					sb.WriteRune(' ')
-				}
-			}
-		}
-		sb.WriteRune('\n')
-	}
-	return sb.String()
+	return liveShellText(normalizeCommand(command))
 }
 
 // RefuseDetachableForeground rejects long-lived server patterns on the

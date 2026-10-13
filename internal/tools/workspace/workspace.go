@@ -154,6 +154,80 @@ func (w *Workspace) ResolveDir(raw string) (string, error) {
 	return abs, nil
 }
 
+// DenyCategory classifies denied workspace paths for model-visible messages.
+type DenyCategory int
+
+const (
+	denyNone DenyCategory = iota
+	denyState
+	denyCredential
+	denyEnv
+	denyMemory
+	denySoul
+	denyConfig
+	denyProfile
+)
+
+// DenyError marks a path refused by the workspace sandbox. Error stays
+// generic for logs; handlers render DenyMessage for the model instead.
+type DenyError struct {
+	Rel      string
+	Category DenyCategory
+}
+
+func (e *DenyError) Error() string { return "path is not accessible" }
+
+// DenyMessage renders the category message for a read (write=false) or
+// write (write=true) refusal. The relative path is workspace-inside, so
+// naming it is safe.
+func DenyMessage(rel string, category DenyCategory, write bool) string {
+	switch category {
+	case denyState:
+		if write {
+			return "Write denied: '" + rel + "' is a protected system file and cannot be written by tools."
+		}
+		return "Access denied: " + rel + " is application-owned state and cannot be read directly; use session_search for conversation history."
+	case denyCredential:
+		if write {
+			return "Write denied: '" + rel + "' is a protected credential file and cannot be written by tools."
+		}
+		return "Access denied: " + rel + " is a credential store and cannot be read directly."
+	case denyEnv:
+		if write {
+			return "Write denied: '" + rel + "' is a secret-bearing environment file and cannot be written by tools."
+		}
+		return "Access denied: " + rel + " is a secret-bearing environment file and cannot be read to prevent leakage."
+	case denyMemory:
+		if write {
+			return "Memory write denied by policy \u2014 use the memory tool; direct file edits bypass locking, bounds, and validation."
+		}
+		return "Access denied: " + rel + " is managed memory state; use the memory tool to read durable memory."
+	case denySoul:
+		if write {
+			return "Write denied: '" + rel + "' is protected operator policy and cannot be written by tools."
+		}
+		return "Access denied: " + rel + " is operator policy and cannot be read directly; the active policy is already in your system prompt."
+	case denyConfig:
+		if write {
+			return "Write denied: '" + rel + "' is protected operator configuration and cannot be written by tools."
+		}
+		return "Access denied: " + rel + " is operator configuration and cannot be read by tools."
+	case denyProfile:
+		return "Access denied: " + rel + " belongs to another profile and cannot be accessed."
+	default:
+		return "path is not accessible"
+	}
+}
+
+// AsDeny extracts a sandbox denial from a Resolve error.
+func AsDeny(err error) (string, DenyCategory, bool) {
+	var derr *DenyError
+	if errors.As(err, &derr) {
+		return derr.Rel, derr.Category, true
+	}
+	return "", denyNone, false
+}
+
 func (w *Workspace) checkDenied(rel string) error {
 	// Operator secrets are never reachable through workspace tools, even
 	// though they live inside a profile directory.
@@ -164,23 +238,34 @@ func (w *Workspace) checkDenied(rel string) error {
 	}
 	base := filepath.Base(rel)
 	switch base {
-	case "config.yaml", ".env", "state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.db-journal-mode":
-		return errors.New("path is not accessible")
+	case "state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.db-journal-mode":
+		return &DenyError{Rel: rel, Category: denyState}
+	case "config.yaml":
+		return &DenyError{Rel: rel, Category: denyConfig}
+	case ".env":
+		return &DenyError{Rel: rel, Category: denyEnv}
+	case "SOUL.md":
+		return &DenyError{Rel: rel, Category: denySoul}
+	}
+	if strings.HasPrefix(base, ".env") {
+		return &DenyError{Rel: rel, Category: denyEnv}
+	}
+	if base == "credentials" || strings.HasPrefix(base, "credentials.") ||
+		strings.HasSuffix(base, "credentials.json") ||
+		strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
+		return &DenyError{Rel: rel, Category: denyEnv}
 	}
 	switch first {
 	case "mcp-tokens":
-		return errors.New("path is not accessible")
+		return &DenyError{Rel: rel, Category: denyCredential}
 	case "profiles":
 		if w.isDefault {
-			return errors.New("path is not accessible")
+			return &DenyError{Rel: rel, Category: denyProfile}
 		}
 	}
 	// Memory-tool state bypasses entry validation and locking.
 	if first == "memories" {
-		return errors.New("path is not accessible")
-	}
-	if base == "SOUL.md" {
-		return errors.New("path is not accessible")
+		return &DenyError{Rel: rel, Category: denyMemory}
 	}
 	return nil
 }

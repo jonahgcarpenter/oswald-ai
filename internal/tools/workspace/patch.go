@@ -47,6 +47,9 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		}
 		abs, _, err := ws.Resolve(rawPath)
 		if err != nil {
+			if rel, category, ok := AsDeny(err); ok {
+				return governance.Result{}, errors.New(DenyMessage(rel, category, true))
+			}
 			return governance.Result{}, err
 		}
 		data, err := readRegularFile(abs)
