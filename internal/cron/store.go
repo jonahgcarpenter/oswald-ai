@@ -649,6 +649,15 @@ func (s *Store) ClaimDue(now time.Time) []Job {
 		}
 		parsed, err := ParseSchedule(job.Schedule, now)
 		if err != nil {
+			// A due absolute one-shot no longer parses (ParseSchedule
+			// requires RFC3339 times to be in the future), which would
+			// miss its only slot. Claim it anyway.
+			if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(job.Schedule)); perr == nil && t.Unix() == slot {
+				parsed = Parsed{Next: t, Repeat: false}
+				err = nil
+			}
+		}
+		if err != nil {
 			job.LastStatus = "blocked_config"
 			job.LastError = "schedule no longer parses"
 			changed = true
