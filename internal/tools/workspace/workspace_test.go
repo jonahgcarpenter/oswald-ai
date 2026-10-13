@@ -145,15 +145,22 @@ func TestTerminalForeground(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
+	pm := process.NewManager(root)
 	ctx := testContext("req-t")
-	term := NewTerminalHandler(ws, process.NewManager(root))
+	term := NewTerminalHandler(ws, pm)
 	res, err := term(ctx, map[string]interface{}{"command": "echo hi", "timeout": float64(10)})
 	if err != nil || !strings.Contains(res.Content, "exit_code: 0") || !strings.Contains(res.Content, "hi") {
 		t.Fatalf("terminal = %+v %v", res, err)
 	}
-	if _, err := term(ctx, map[string]interface{}{"command": "echo hi", "background": true}); err != nil {
+	spawned, err := term(ctx, map[string]interface{}{"command": "echo hi", "background": true})
+	if err != nil {
 		// Background spawns are valid; poll them to completion.
 		t.Fatalf("background spawn failed: %v", err)
+	}
+	// Join the background spawn so its watcher finishes all disk writes
+	// before TempDir cleanup; otherwise removal races completion metadata.
+	if _, err := pm.Wait(sessionFrom(spawned.Content), 10); err != nil {
+		t.Fatalf("background wait failed: %v", err)
 	}
 	if _, err := term(ctx, map[string]interface{}{"command": "echo hi", "workdir": "../"}); err == nil {
 		t.Fatal("escaping workdir accepted")
