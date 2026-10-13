@@ -357,3 +357,71 @@ func TestTerminalDangerousWithoutReviewerFailsClosed(t *testing.T) {
 		t.Fatalf("no reviewer = %v", err)
 	}
 }
+
+func TestDenyMessagesCategorized(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "default")
+	read := NewReadFileHandler(ws)
+	write := NewWriteFileHandler(ws)
+	cases := []struct {
+		call string
+		args map[string]interface{}
+		want string
+	}{
+		{"read", map[string]interface{}{"path": ".env.local"}, "secret-bearing environment file"},
+		{"read", map[string]interface{}{"path": "state.db"}, "application-owned state"},
+		{"read", map[string]interface{}{"path": "config.yaml"}, "operator configuration"},
+		{"read", map[string]interface{}{"path": "profiles/alice/x"}, "another profile"},
+		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, "managed memory state"},
+		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, "protected operator policy"},
+		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "Memory write denied"},
+		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "secret-bearing"},
+	}
+	for _, tc := range cases {
+		var err error
+		if tc.call == "read" {
+			_, err = read(testContext("req-deny"), tc.args)
+		} else {
+			_, err = write(testContext("req-deny"), tc.args)
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s %v = %v, want %q", tc.call, tc.args["path"], err, tc.want)
+		}
+	}
+}
+
+func TestTerminalUnrecoverableEnvelope(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-unrec"), StubReviewer{Verdict: VerdictApprove})
+	res, err := term(ctx, map[string]interface{}{"command": "rm -rf /", "timeout": float64(30)})
+	if err != nil {
+		t.Fatalf("unrecoverable errored: %v", err)
+	}
+	for _, want := range []string{`"status":"blocked"`, `"exit_code":1`, "Do NOT retry"} {
+		if !strings.Contains(res.Content, want) {
+			t.Fatalf("envelope missing %q: %s", want, res.Content)
+		}
+	}
+}
+
+func TestExecuteApprovedRefusesUnrecoverable(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	pending := approvals.Pending{Profile: "alice", SessionKey: "s", Command: "rm -rf /", Workdir: root, Scratch: root, Timeout: 30}
+	if _, err := ExecuteApproved(context.Background(), ws, process.NewManager(root), pending); err == nil || !strings.Contains(err.Error(), "refused on re-scan") {
+		t.Fatalf("replay allowed unrecoverable: %v", err)
+	}
+}

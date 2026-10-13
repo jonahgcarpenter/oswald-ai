@@ -103,7 +103,10 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 			return governance.Result{}, errors.New("workspace is unavailable")
 		}
 		// Security chain: lifecycle first (force cannot bypass), then
-		// self-repo, then foreground guidance, then dangerous detection.
+		// self-repo, then foreground guidance, then the normalized semantic
+		// layer (unrecoverable deny, fetch policy, store/config scans,
+		// recoverable escalations), then destructive-pattern review.
+		// The LLM reviewer from step 5 runs only on escalated ambiguity.
 		if err := ScanLifecycle(command, workdir); err != nil {
 			return governance.Result{}, err
 		}
@@ -114,6 +117,29 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 			if err := RefuseDetachableForeground(command); err != nil {
 				return governance.Result{}, err
 			}
+		}
+		live := stripInert(command)
+		quoted := proseBlanked(normalizeCommand(command))
+		if reason, blocked := ScanUnrecoverable(live); blocked {
+			return deniedResult(reason), nil
+		}
+		if verdict, reason := classifyFetch(command, live, workdir); verdict == fetchDeny {
+			return deniedResult(reason), nil
+		}
+		if ScanStoreAccess(quoted) {
+			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, "direct store access")
+		}
+		if ScanSecretRead(quoted) {
+			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, "read secrets")
+		}
+		if reason, blocked := ScanConfigEdit(quoted); blocked {
+			return deniedResult(reason), nil
+		}
+		if detectHiddenUnicode(command) {
+			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, "hidden unicode content")
+		}
+		if reason, hit := ScanRecoverable(live); hit {
+			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, reason)
 		}
 		if dangerous, reason := DetectDangerous(command); dangerous {
 			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, reason)

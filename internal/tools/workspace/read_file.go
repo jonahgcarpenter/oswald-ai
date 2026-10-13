@@ -50,6 +50,9 @@ func readFileCall(ctx context.Context, ws *Workspace, args map[string]interface{
 	}
 	abs, _, err := ws.Resolve(rawPath)
 	if err != nil {
+		if rel, category, ok := AsDeny(err); ok {
+			return governance.Result{}, errors.New(DenyMessage(rel, category, false))
+		}
 		if suggestion := suggestSimilar(ws.Root(), rawPath); suggestion != "" {
 			return governance.Result{}, fmt.Errorf("file not found; did you mean %s", suggestion)
 		}

@@ -35,5 +35,19 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 	if err := BlockSelfRepo(pending.Command, pending.Workdir); err != nil {
 		return governance.Result{}, err
 	}
+	// Replay re-checks every deny-class rule: approval overrides the
+	// recoverable reviewer path only, never unrecoverable, fetch, or
+	// config denials.
+	live := stripInert(pending.Command)
+	quoted := proseBlanked(normalizeCommand(pending.Command))
+	if reason, blocked := ScanUnrecoverable(live); blocked {
+		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
+	}
+	if verdict, reason := classifyFetch(pending.Command, live, pending.Workdir); verdict == fetchDeny {
+		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
+	}
+	if reason, blocked := ScanConfigEdit(quoted); blocked {
+		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
+	}
 	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, pending.Timeout, pending.Background, pending.Persist, 0, "")
 }

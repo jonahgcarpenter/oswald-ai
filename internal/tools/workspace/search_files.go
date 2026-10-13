@@ -77,6 +77,9 @@ func NewSearchFilesHandler(ws *Workspace) func(context.Context, map[string]inter
 		}
 		searchRoot, err := ws.ResolveDir(base)
 		if err != nil {
+			if rel, category, ok := AsDeny(err); ok {
+				return governance.Result{}, errors.New(DenyMessage(rel, category, false))
+			}
 			return governance.Result{}, err
 		}
 		// A direct file path searches just that file.
