@@ -20,7 +20,15 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
+
+func workspaceForTest(root, profile string) *workspace.Workspace {
+	if err := os.Chmod(root, 0o700); err != nil {
+		panic(err)
+	}
+	return workspace.NewWorkspace(root, profile)
+}
 
 func visionContext(profile, gateway string) context.Context {
 	return requestctx.WithPrincipal(context.Background(), identity.Principal{CanonicalUserID: profile, ExternalID: "synthetic", Gateway: gateway, Assurance: identity.AssuranceDiscordGateway})
@@ -55,7 +63,7 @@ func TestHandlerSourcesAndCrop(t *testing.T) {
 			handler := newHandler(cache, func(ctx context.Context, raw string) ([]byte, string, error) {
 				downloads++
 				return data, "image/png", nil
-			})
+			}, nil)
 			result, err := handler(visionContext("alice", "discord"), map[string]interface{}{"image_url": source, "question": "Read this", "region": []interface{}{float64(2), float64(1), float64(5), float64(4)}})
 			if err != nil {
 				t.Fatal(err)
@@ -91,7 +99,7 @@ func TestHandlerRejectsInvalidArgumentsAndSources(t *testing.T) {
 	valid := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
 	handler := newHandler(nil, func(context.Context, string) ([]byte, string, error) {
 		return nil, "", errors.New("private source canary")
-	})
+	}, nil)
 	cases := []map[string]interface{}{
 		{}, {"question": ""}, {"question": strings.Repeat("q", 2001)}, {"question": 1},
 		{"unknown": true}, {"image_url": " "}, {"image_url": "relative.png"}, {"image_url": "/etc/passwd"},
@@ -157,9 +165,83 @@ func TestHandlerOwnershipExpiryAndCancellation(t *testing.T) {
 	handler = newHandler(cache, func(context.Context, string) ([]byte, string, error) {
 		cancel()
 		return nil, "", errors.New("network failure")
-	})
+	}, nil)
 	if _, err := handler(ctx, map[string]interface{}{"image_url": "https://public.example/image", "question": "Inspect"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("late cancellation=%v", err)
+	}
+}
+
+func TestHandlerWorkspaceImages(t *testing.T) {
+	data := sourcePNG(t)
+	root := t.TempDir()
+	nested := filepath.Join(root, "spank_bank", "spank_bank_1.jpg")
+	if err := os.MkdirAll(filepath.Dir(nested), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandlerWithWorkspace(imagecache.New(t.TempDir()), workspaceForTest(root, "jonah"))
+
+	result, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": nested, "question": "Describe"})
+	if err != nil || len(result.Images) != 1 {
+		t.Fatalf("workspace image load: result=%+v err=%v", result, err)
+	}
+
+	// Relative paths stay rejected (absolute-only).
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": "spank_bank/spank_bank_1.jpg", "question": "Describe"}); err == nil {
+		t.Fatal("relative workspace image load succeeded")
+	}
+
+	// Escapes fail closed.
+	outside := filepath.Join(filepath.Dir(root), "outside.png")
+	if err := os.WriteFile(outside, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": outside, "question": "Describe"}); err == nil {
+		t.Fatal("workspace escape load succeeded")
+	}
+
+	// Operator state is denied with a category message, not the generic error.
+	statePath := filepath.Join(root, "state.db")
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": statePath, "question": "Describe"})
+	if err == nil || !strings.Contains(err.Error(), "application-owned state") {
+		t.Fatalf("state denial=%v", err)
+	}
+
+	// Non-image workspace files are rejected.
+	textPath := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(textPath, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": textPath, "question": "Describe"}); err == nil {
+		t.Fatal("non-image workspace load succeeded")
+	}
+
+	// Cross-profile isolation: default profile cannot reach profiles/*.
+	defaultRoot := t.TempDir()
+	other := filepath.Join(defaultRoot, "profiles", "jonah", "pic.png")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defaultHandler := NewHandlerWithWorkspace(imagecache.New(t.TempDir()), workspaceForTest(defaultRoot, "default"))
+	if _, err := defaultHandler(visionContext("default", "discord"), map[string]interface{}{"image_url": other, "question": "Describe"}); err == nil {
+		t.Fatal("cross-profile workspace load succeeded")
+	}
+
+	// Symlinks escaping the workspace fail closed.
+	link := filepath.Join(root, "link.png")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": link, "question": "Describe"}); err == nil {
+		t.Fatal("workspace symlink escape load succeeded")
 	}
 }
 

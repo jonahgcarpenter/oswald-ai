@@ -29,8 +29,9 @@ import (
 // registerHandlers wires configured builtin handlers and policies into the registry.
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) error {
 	bootstrapLog := log.Server("tool.bootstrap")
+	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
 	visionPolicy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
-	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandler(cache))); err != nil {
+	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandlerWithWorkspace(cache, ws))); err != nil {
 		return fmt.Errorf("register vision_analyze tool: %w", err)
 	}
 	comfyURL := strings.TrimSpace(cfg.ComfyUIURL)
@@ -121,7 +122,6 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 	}
 
-	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
 	pm := process.NewManager(cfg.ProfileRoot)
 	cronStore := cron.NewStore(cfg.ProfileRoot)
 	workspaceTools := []struct {

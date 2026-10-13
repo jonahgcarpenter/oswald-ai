@@ -15,7 +15,7 @@ func Definition() llm.ToolDefinition {
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{
-				"image_url": {Type: "string", Description: "Public HTTP/HTTPS image URL, an absolute path to an unexpired image in the current profile's managed image cache, or a base64 data URL for PNG/JPEG/GIF/WebP. Other local files are not allowed."},
+				"image_url": {Type: "string", Description: "Public HTTP/HTTPS image URL, an absolute path to an unexpired image in the current profile's managed image cache, an absolute image path inside the current profile workspace, or a base64 data URL for PNG/JPEG/GIF/WebP. Relative paths and other profiles' files are not allowed."},
 				"question":  {Type: "string", Description: "Your question or request about the image (1–2000 characters)."},
 				"region":    {Type: "array", Items: &llm.ToolParameterProperty{Type: "integer"}, MinItems: &four, MaxItems: &four, Description: "Optional [x1, y1, x2, y2] crop in source-image pixel coordinates; x2/y2 are exclusive. Applied before further downscaling. Load the full image first to get source dimensions, then re-call to zoom into detail. Cached attachments may already have been resized; original detail cannot be recovered."},
 			},
