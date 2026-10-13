@@ -1,13 +1,17 @@
 package tools
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
@@ -19,6 +23,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
@@ -119,6 +124,29 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 	}
 
+	ws := workspace.NewWorkspace(cfg.ProfileRoot, cfg.ProfileName)
+	pm := process.NewManager(cfg.ProfileRoot)
+	cronStore := cron.NewStore(cfg.ProfileRoot)
+	workspaceTools := []struct {
+		name    string
+		policy  governance.ToolPolicy
+		handler registry.Handler
+	}{
+		{workspace.ReadFileName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandler(ws))},
+		{workspace.WriteFileName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
+		{workspace.PatchName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
+		{workspace.SearchFilesName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
+		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
+		{workspace.ExecuteCodeName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
+		{workspace.ProcessManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
+		{workspace.CronjobManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},
+	}
+	for _, tool := range workspaceTools {
+		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
+			return fmt.Errorf("register %s tool: %w", tool.name, err)
+		}
+	}
+
 	return nil
 }
 
@@ -178,4 +206,100 @@ func normalizedString(args map[string]interface{}, key string, lower bool) strin
 		value = strings.ToLower(value)
 	}
 	return value
+}
+
+func normalizeReadFileArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"path":   normalizedString(args, "path", false),
+		"offset": args["offset"],
+		"limit":  args["limit"],
+	}
+}
+
+func normalizeWriteFileArgs(args map[string]interface{}) interface{} {
+	content, _ := args["content"].(string)
+	sum := sha256.Sum256([]byte(content))
+	return map[string]interface{}{
+		"path":         normalizedString(args, "path", false),
+		"content_hash": hex.EncodeToString(sum[:]),
+	}
+}
+
+func normalizePatchArgs(args map[string]interface{}) interface{} {
+	oldString, _ := args["old_string"].(string)
+	newString, _ := args["new_string"].(string)
+	oldSum := sha256.Sum256([]byte(oldString))
+	newSum := sha256.Sum256([]byte(newString))
+	return map[string]interface{}{
+		"path":        normalizedString(args, "path", false),
+		"old_hash":    hex.EncodeToString(oldSum[:]),
+		"new_hash":    hex.EncodeToString(newSum[:]),
+		"replace_all": args["replace_all"],
+	}
+}
+
+func normalizeSearchFilesArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"pattern", "target", "path", "file_glob", "order", "output_mode"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	for _, key := range []string{"limit", "offset", "context"} {
+		if value, ok := args[key]; ok {
+			normalized[key] = value
+		}
+	}
+	return normalized
+}
+
+func normalizeTerminalArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{
+		"command": normalizedString(args, "command", false),
+		"workdir": normalizedString(args, "workdir", false),
+		"timeout": args["timeout"],
+	}
+}
+
+func normalizeExecuteCodeArgs(args map[string]interface{}) interface{} {
+	code, _ := args["code"].(string)
+	sum := sha256.Sum256([]byte(code))
+	return map[string]interface{}{
+		"code_hash": hex.EncodeToString(sum[:]),
+		"reset":     args["reset"],
+	}
+}
+
+func normalizeProcessManageArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["action"].(string); ok {
+		normalized["action"] = strings.Join(strings.Fields(value), " ")
+	}
+	if value, ok := args["session_id"].(string); ok {
+		normalized["session_id"] = strings.TrimSpace(value)
+	}
+	for _, key := range []string{"timeout", "offset", "limit"} {
+		if value, ok := args[key]; ok {
+			normalized[key] = value
+		}
+	}
+	if data, ok := args["data"].(string); ok {
+		sum := sha256.Sum256([]byte(data))
+		normalized["data_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeCronjobManageArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"action", "job_id", "schedule", "script", "deliver"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	if prompt, ok := args["prompt"].(string); ok {
+		sum := sha256.Sum256([]byte(prompt))
+		normalized["prompt_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
 }

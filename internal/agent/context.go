@@ -3,6 +3,9 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -146,6 +149,38 @@ func formatRuntimeTime(value time.Time, loc *time.Location) string {
 		loc = time.Local
 	}
 	return value.In(loc).Format("Monday, January 02, 2006 (MST, UTC-07:00)")
+}
+
+// environmentInfoBlock reports the profile filesystem sandbox. It is trusted
+// server-rendered context placed above the untrusted session block. Empty
+// root omits the block.
+func environmentInfoBlock(workspaceRoot string) string {
+	cwd := strings.TrimSpace(workspaceRoot)
+	if cwd == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(cwd); err == nil {
+		cwd = abs
+	}
+	cwd = sanitizeLabelText(cwd, 500)
+	if cwd == "" {
+		return ""
+	}
+	host := sanitizeLabelText(runtime.GOOS, 64)
+	home := ""
+	if value, err := os.UserHomeDir(); err == nil {
+		home = sanitizeLabelText(strings.TrimSpace(value), 500)
+	}
+	scratch := sanitizeLabelText(filepath.Join(cwd, "cache", "scratch"), 500)
+	var sb strings.Builder
+	sb.WriteString("# Oswald runtime environment")
+	sb.WriteString("\n\nHost: " + firstNonEmpty(host, "unknown"))
+	if home != "" {
+		sb.WriteString("\nUser home directory: " + home)
+	}
+	sb.WriteString("\nCurrent working directory: " + cwd)
+	sb.WriteString("\nScratch directory: " + scratch + " (TMPDIR points here; write temporary files and probes there, never under the system temp dir; entries idle for 24h are pruned)")
+	return sb.String()
 }
 
 // sessionContextBlock renders untrusted transport conversation metadata. Chat

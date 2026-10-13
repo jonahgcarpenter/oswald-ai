@@ -107,6 +107,14 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		visionanalyze.Name: true,
 		websearch.Name:     true,
 		toolmemory.Name:    true,
+		"read_file":        true,
+		"write_file":       true,
+		"patch":            true,
+		"search_files":     true,
+		"terminal":         true,
+		"execute_code":     true,
+		"process_manage":   true,
+		"cronjob_manage":   true,
 	}
 	got := map[string]bool{}
 	for _, tool := range reg.LLMTools() {
@@ -336,6 +344,13 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 			wantFailures = 2
 		}
 		if name == visionanalyze.Name {
+			wantFailures = 2
+		}
+		switch name {
+		case "read_file", "search_files", "process_manage", "cronjob_manage":
+			wantUnproductive = 2
+			wantFailures = 2
+		case "write_file", "patch", "terminal", "execute_code":
 			wantFailures = 2
 		}
 		if policy.MaxExecutions != wantExecutions {

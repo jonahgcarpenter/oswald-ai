@@ -302,6 +302,29 @@ func TestPlatformNotesPerGateway(t *testing.T) {
 	}
 }
 
+func TestEnvironmentInfoBlockRendersSandbox(t *testing.T) {
+	if got := environmentInfoBlock(""); got != "" {
+		t.Fatalf("empty workspace rendered: %q", got)
+	}
+	dir := t.TempDir()
+	got := environmentInfoBlock(dir)
+	if !strings.Contains(got, "# Oswald runtime environment") || !strings.Contains(got, "Current working directory:") || !strings.Contains(got, "Scratch directory:") || !strings.Contains(got, "TMPDIR points here") {
+		t.Fatalf("environment block = %q", got)
+	}
+	files := renderFileMemory("profile", "")
+	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")
+	env := environmentInfoBlock(dir)
+	session := sessionContextBlock("discord", `"DM with fragsap"`, "fragsap")
+	assembled := AssemblePromptContext("soul", files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	content := assembled.Messages[0].Content
+	envAt := strings.Index(content, "# Oswald runtime environment")
+	sessionAt := strings.Index(content, "## Current Session Context")
+	runtimeAt := strings.Index(content, "Conversation started:")
+	if envAt < 0 || sessionAt < 0 || runtimeAt < 0 || envAt < runtimeAt || envAt > sessionAt {
+		t.Fatalf("environment block misordered:\n%s", content)
+	}
+}
+
 func roles(messages []llm.ChatMessage) string {
 	values := make([]string, len(messages))
 	for i, message := range messages {

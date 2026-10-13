@@ -27,6 +27,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 const (
@@ -57,6 +58,7 @@ type Agent struct {
 	imageCache     *imagecache.Cache
 	toolPolicy     governance.GlobalPolicy
 	compactor      ForegroundCompactor
+	workspaceRoot  string
 	log            *config.Logger
 }
 
@@ -86,6 +88,14 @@ func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
 func (a *Agent) SetBillingBaseURL(url string) {
 	if a != nil {
 		a.billingBaseURL = url
+	}
+}
+
+// SetWorkspace installs the profile working directory rendered in the system
+// prompt and bound into workspace tool handlers at registry construction.
+func (a *Agent) SetWorkspace(root string) {
+	if a != nil {
+		a.workspaceRoot = root
 	}
 }
 
@@ -252,6 +262,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		toolExposure.HideBuiltins(imagegenerate.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
+	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
 	toolGovernor := governance.New(a.toolPolicy)
 
 	// Read the canonical user's operator-managed soul fresh on every request.
@@ -327,6 +338,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 	appendContext(runtimeInfoBlock(request.Stateless, sessionStartedAt, time.Now(), time.Local, a.model, a.provider, gateway))
+	appendContext(environmentInfoBlock(a.workspaceRoot))
 	if !request.Stateless {
 		appendContext(sessionContextBlock(gateway, request.ChatLabel, request.DisplayName))
 	}

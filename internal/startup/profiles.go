@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction"
 	"github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
@@ -21,10 +22,12 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
 )
 
 type profileProcessor struct{ agents map[string]*agent.Agent }
@@ -62,6 +65,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	compactors := map[string]*compaction.LLMCompactor{}
 	var imageWorkers []*imagecache.Worker
 	var compressionWorkers []*compaction.ProfileService
+	var cronTickers []*cron.Ticker
 	var maintenanceStops []func()
 	var requestBroker *broker.Broker
 	var gateways []gateway.Service
@@ -85,6 +89,10 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		for _, worker := range compressionWorkers {
 			worker.Stop()
 		}
+		for _, ticker := range cronTickers {
+			ticker.Stop()
+		}
+		process.StopAll()
 		for _, manager := range mcpManagers {
 			if err := manager.Close(); err != nil {
 				log.Warn("app.mcp.close_failed", "failed to close profile MCP sessions", config.ErrorField(err))
@@ -145,21 +153,36 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
 		engine.SetForegroundCompactor(compactor)
+		engine.SetWorkspace(profile.ProfileRoot)
 		processor.agents[name] = engine
 		worker := imagecache.NewWorker(cache, rootLog)
 		worker.Start()
 		imageWorkers = append(imageWorkers, worker)
+		cronRunner := &cron.Runner{Root: profile.ProfileRoot}
+		if ws := workspace.NewWorkspace(profile.ProfileRoot, name); ws.Root() != "" {
+			cronRunner.Resolve = func(raw string) (string, error) {
+				abs, _, err := ws.Resolve(raw)
+				return abs, err
+			}
+			cronRunner.ResolveDir = func(raw string) (string, error) { return ws.ResolveDir(raw) }
+			if scratch, err := ws.EnsureScratch(); err == nil {
+				cronRunner.Scratch = scratch
+			}
+		}
+		ticker := cron.NewTicker(cron.NewStore(profile.ProfileRoot), cronRunner, 30*time.Second)
+		ticker.Start()
+		cronTickers = append(cronTickers, ticker)
 		log.Debug("app.profile.initialized", "initialized profile runtime", config.F("profile", name))
 	}
 	requestBroker = broker.NewBroker(processor, brokerWorkerCount, rootLog.Server("broker"))
 	requestBroker.Start()
 	profileDeps := map[string]gatewayruntime.Dependencies{}
 	for name, store := range stores {
-		commands, err := commandbuiltin.NewProfileService(store, requestBroker)
+		profile, _ := directory.Config(name)
+		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}
-		profile, _ := directory.Config(name)
 		worker := compaction.NewProfileService(store, compactors[name], requestBroker, budget.NewContextBudget(profile.ModelContextWindow), rootLog)
 		worker.Start()
 		compressionWorkers = append(compressionWorkers, worker)
