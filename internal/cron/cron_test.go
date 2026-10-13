@@ -136,6 +136,34 @@ func TestClaimDueCatchUpSkip(t *testing.T) {
 	}
 }
 
+func TestClaimDueFiresDueOneShot(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	job := mustCreate(t, store, Job{Schedule: "in 1s", Prompt: "hi"})
+	slot := time.Now().Add(-30 * time.Second).UTC().Truncate(time.Second)
+	_, err := store.mutateID(job.ID, func(j *Job) error {
+		j.Schedule = slot.Format(time.RFC3339)
+		j.NextRunUnix = slot.Unix()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := store.ClaimDue(time.Now())
+	if len(due) != 1 || due[0].ID != job.ID {
+		t.Fatalf("due = %+v", due)
+	}
+	if due[0].NextRunUnix != 0 || due[0].State != StateRunning {
+		t.Fatalf("not advanced: %+v", due[0])
+	}
+	jobs, _ := store.List()
+	for _, j := range jobs {
+		if j.ID == job.ID && (j.NextRunUnix != 0 || j.LastStatus == "blocked_config") {
+			t.Fatalf("one-shot not settled: %+v", j)
+		}
+	}
+}
+
 func TestRepeatCompletesJob(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
