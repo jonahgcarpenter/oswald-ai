@@ -26,37 +26,107 @@ import (
 // AllowedToolsets bounds enabled_toolsets entries.
 var AllowedToolsets = []string{"core", "terminal", "code_execution", "cronjob"}
 
+// Job states for the scheduling state machine.
+const (
+	StateScheduled = "scheduled"
+	StatePaused    = "paused"
+	StateCompleted = "completed"
+	StateRunning   = "running"
+)
+
+// RepeatState counts bounded runs: Times <= 0 repeats forever.
+type RepeatState struct {
+	Times     int `json:"times"`
+	Completed int `json:"completed"`
+}
+
+// PendingSlot marks a dispatched-but-unfinished occurrence for restore-once.
+type PendingSlot struct {
+	Instant     int64 `json:"instant"`
+	ClaimedUnix int64 `json:"claimed_unix"`
+}
+
 // Job is one scheduled unit of work.
 type Job struct {
-	ID              string   `json:"id"`
-	Schedule        string   `json:"schedule"`
-	Prompt          string   `json:"prompt"`
-	Skills          []string `json:"skills,omitempty"`
-	Script          string   `json:"script,omitempty"`
-	MonitorURL      string   `json:"monitor_url,omitempty"`
-	MonitorScript   string   `json:"monitor_script,omitempty"`
-	BaselineHash    string   `json:"baseline_hash,omitempty"`
-	NoAgent         bool     `json:"no_agent"`
-	Deliver         string   `json:"deliver,omitempty"`
-	FailureDeliver  string   `json:"failure_deliver,omitempty"`
-	ContextFrom     []string `json:"context_from,omitempty"`
-	Continuity      bool     `json:"continuity"`
-	EnabledToolsets []string `json:"enabled_toolsets,omitempty"`
-	Workdir         string   `json:"workdir,omitempty"`
-	AttachToSession string   `json:"attach_to_session,omitempty"`
-	Repeat          *bool    `json:"repeat,omitempty"`
-	Paused          bool     `json:"paused"`
-	PausedReason    string   `json:"paused_reason,omitempty"`
-	NextRunUnix     int64    `json:"next_run_at"`
-	LastStatus      string   `json:"last_status,omitempty"`
-	LastError       string   `json:"last_delivery_error,omitempty"`
-	CreatedUnix     int64    `json:"created_unix"`
-	UpdatedUnix     int64    `json:"updated_unix"`
+	ID              string      `json:"id"`
+	Name            string      `json:"name,omitempty"`
+	Schedule        string      `json:"schedule"`
+	Prompt          string      `json:"prompt"`
+	Skills          []string    `json:"skills,omitempty"`
+	Script          string      `json:"script,omitempty"`
+	MonitorURL      string      `json:"monitor_url,omitempty"`
+	MonitorScript   string      `json:"monitor_script,omitempty"`
+	BaselineHash    string      `json:"baseline_hash,omitempty"`
+	NoAgent         bool        `json:"no_agent"`
+	Deliver         string      `json:"deliver,omitempty"`
+	FailureDeliver  string      `json:"failure_deliver,omitempty"`
+	ContextFrom     []string    `json:"context_from,omitempty"`
+	Continuity      bool        `json:"continuity"`
+	EnabledToolsets []string    `json:"enabled_toolsets,omitempty"`
+	Workdir         string      `json:"workdir,omitempty"`
+	AttachToSession string      `json:"attach_to_session,omitempty"`
+	Repeat          RepeatState `json:"repeat"`
+	CatchUp         *bool       `json:"catch_up,omitempty"`
+	Paused          bool        `json:"paused"`
+	State           string      `json:"state,omitempty"`
+	OriginGateway   string      `json:"origin_gateway,omitempty"`
+	OriginSession   string      `json:"origin_session,omitempty"`
+	PausedReason    string      `json:"paused_reason,omitempty"`
+	FailureCount    int         `json:"failure_count"`
+	Pending         PendingSlot `json:"pending_slot"`
+	LastInstant     int64       `json:"last_instant"`
+	NextRunUnix     int64       `json:"next_run_at"`
+	LastRunUnix     int64       `json:"last_run_at"`
+	LastStatus      string      `json:"last_status,omitempty"`
+	LastError       string      `json:"last_delivery_error,omitempty"`
+	CreatedUnix     int64       `json:"created_unix"`
+	UpdatedUnix     int64       `json:"updated_unix"`
+}
+
+// UnmarshalJSON keeps old jobs readable: a legacy boolean "repeat" meant
+// catch-up behavior, and "paused" implies the paused state.
+func (j *Job) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	repeatRaw := raw["repeat"]
+	delete(raw, "repeat")
+	rest, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	type plain Job
+	if err := json.Unmarshal(rest, (*plain)(j)); err != nil {
+		return err
+	}
+	if len(repeatRaw) > 0 {
+		var legacy bool
+		if err := json.Unmarshal(repeatRaw, &legacy); err == nil {
+			j.CatchUp = &legacy
+		} else if err := json.Unmarshal(repeatRaw, &j.Repeat); err != nil {
+			return err
+		}
+	}
+	if j.State == "" {
+		j.State = StateScheduled
+		if j.Paused {
+			j.State = StatePaused
+		}
+	}
+	j.Paused = j.State == StatePaused
+	return nil
+}
+
+// EffectivePaused reports whether a job must never fire.
+func (j *Job) EffectivePaused() bool {
+	return j.State == StatePaused || j.State == StateCompleted
 }
 
 // Execution is one ledger entry.
 type Execution struct {
 	JobID         string `json:"job_id"`
+	Instant       int64  `json:"scheduled_instant"`
 	StartedUnix   int64  `json:"started_unix"`
 	FinishedUnix  int64  `json:"finished_unix"`
 	Status        string `json:"status"`
@@ -67,8 +137,9 @@ type Execution struct {
 
 // Store owns jobs.json for one profile root.
 type Store struct {
-	root string
-	mu   sync.Mutex
+	root     string
+	mu       sync.Mutex
+	inFlight map[string]bool
 }
 
 // NewStore binds a store to a profile root.
@@ -79,7 +150,40 @@ func NewStore(profileRoot string) *Store {
 			abs = resolved
 		}
 	}
-	return &Store{root: abs}
+	return &Store{root: abs, inFlight: make(map[string]bool)}
+}
+
+// Root returns the bound profile root.
+func (s *Store) Root() string {
+	if s == nil {
+		return ""
+	}
+	return s.root
+}
+
+// TryClaim takes the in-flight slot for a job. False means a tick or a
+// manual run already owns it.
+func (s *Store) TryClaim(id string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inFlight[id] {
+		return false
+	}
+	s.inFlight[id] = true
+	return true
+}
+
+// Release frees the in-flight slot for a job.
+func (s *Store) Release(id string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inFlight, id)
 }
 
 func (s *Store) dir() (string, error) {
@@ -158,23 +262,6 @@ func (s *Store) List() ([]Job, error) {
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].CreatedUnix > jobs[j].CreatedUnix })
 	return jobs, nil
-}
-
-// appendLedger adds one execution record (best effort).
-func (s *Store) appendLedger(e Execution) {
-	dir, err := s.dir()
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(dir, 0700)
-	f, err := os.OpenFile(filepath.Join(dir, "executions.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	data, _ := json.Marshal(e)
-	data = append(data, '\n')
-	_, _ = f.Write(data)
 }
 
 func newJobID() string {
@@ -493,4 +580,44 @@ func nextCron(fields []string, now time.Time) (time.Time, error) {
 		candidate = candidate.Add(time.Minute)
 	}
 	return time.Time{}, errors.New("no cron occurrence within a year")
+}
+
+// SchedulePeriod estimates the recurrence period for grace math: exact
+// for durations and every-phrases, measured from two cron occurrences,
+// zero for one-shots.
+func SchedulePeriod(expr string, now time.Time) time.Duration {
+	lower := strings.ToLower(strings.TrimSpace(expr))
+	if rest, ok := strings.CutPrefix(lower, "in "); ok {
+		if _, err := parseDurationWord(strings.TrimSpace(rest)); err == nil {
+			return 0
+		}
+	}
+	if _, err := time.Parse(time.RFC3339, strings.TrimSpace(expr)); err == nil {
+		return 0
+	}
+	if rest, ok := strings.CutPrefix(lower, "every "); ok {
+		if d, err := parseDurationWord(strings.TrimSpace(rest)); err == nil {
+			return d
+		}
+		fields := strings.Fields(strings.TrimSpace(rest))
+		if len(fields) > 0 && (fields[0] == "day" || fields[0] == "daily") {
+			return 24 * time.Hour
+		}
+		return 7 * 24 * time.Hour
+	}
+	if d, err := parseDurationWord(lower); err == nil {
+		return d
+	}
+	if fields := strings.Fields(strings.TrimSpace(expr)); len(fields) == 5 {
+		first, err := nextCron(fields, now)
+		if err != nil {
+			return 24 * time.Hour
+		}
+		second, err := nextCron(fields, first)
+		if err != nil || !second.After(first) {
+			return 24 * time.Hour
+		}
+		return second.Sub(first)
+	}
+	return 24 * time.Hour
 }

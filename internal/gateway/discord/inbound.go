@@ -138,6 +138,7 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		IsFromBot:   false,
 		CreatedAt:   time.Now(),
 	})
+	rememberCronChannel(sessionKey, msg.ChannelID)
 
 	responder := newRuntimeResponder(dg, requestID, msg.ChannelID, replyToID, sessionKey, msg.Author.ID)
 	// The plain conversation name rides alongside the formatted chat label

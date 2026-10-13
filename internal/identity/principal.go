@@ -17,6 +17,9 @@ const (
 	AssuranceLocalLoopback Assurance = "local_loopback"
 	// AssuranceAPIKey identifies an OpenAI API caller presenting a per-profile bearer key.
 	AssuranceAPIKey Assurance = "api_key"
+	// AssuranceCronScheduler identifies a scheduled job dispatched by the
+	// profile's own cron ticker. It carries no transport identity.
+	AssuranceCronScheduler Assurance = "cron_scheduler"
 )
 
 // LocalOpenAIIdentifier is the fixed account identity for the loopback listener.
@@ -47,6 +50,8 @@ func (p Principal) Valid() bool {
 			return p.ExternalID == LocalOpenAIIdentifier
 		}
 		return p.Assurance == AssuranceAPIKey
+	case "cron":
+		return p.Assurance == AssuranceCronScheduler
 	}
 	return false
 }
@@ -58,7 +63,7 @@ func (p Principal) Authenticated() bool {
 		return false
 	}
 	switch p.Assurance {
-	case AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback, AssuranceAPIKey:
+	case AssuranceDiscordGateway, AssuranceBlueBubblesWebhook, AssuranceLocalLoopback, AssuranceAPIKey, AssuranceCronScheduler:
 		return true
 	default:
 		return false

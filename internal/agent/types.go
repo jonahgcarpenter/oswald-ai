@@ -101,6 +101,13 @@ type Request struct {
 	// Stateless prevents session reads/writes and uses ClientHistory as untrusted context.
 	Stateless     bool
 	ClientHistory []llm.ChatMessage
+	// SkipMemory loads the soul but skips session file-memory binding so
+	// scheduled turns neither read the frozen pair nor disturb it.
+	SkipMemory bool
+	// EnabledToolsets restricts the builtin catalog for this request. Nil
+	// disables filtering; an empty list hides every builtin and suppresses
+	// the MCP bridge.
+	EnabledToolsets []string
 	// ClientTools are caller-supplied function definitions for this request only.
 	ClientTools []llm.Tool
 	// ClientToolChoice is the normalized caller preference. Mode is one of

@@ -55,6 +55,73 @@ func runProfiles(ctx context.Context, cfg *config.Config, rootLog *config.Logger
 	}, newGateways: gateway.NewServicesFromConfig})
 }
 
+// cronGateway exposes scheduler delivery for one gateway.
+type cronGateway interface {
+	CronSender() cron.Sender
+	CronGatewayName() string
+}
+
+// wireCronDispatchers attaches live agent dispatch and gateway senders to
+// every profile ticker after the broker and gateways exist.
+func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cronRunners map[string]*cron.Runner, stores map[string]*memory.ProfileStore, requestBroker *broker.Broker, gateways []gateway.Service, tickers []*cron.Ticker) {
+	senders := make(map[string]cron.Sender)
+	for _, service := range gateways {
+		if Stockholder, ok := service.(cronGateway); ok {
+			senders[Stockholder.CronGatewayName()] = Stockholder.CronSender()
+		}
+	}
+	agentCall := func(ctx context.Context, call cron.AgentCall) (cron.AgentResult, error) {
+		resp := make(chan broker.Result, 1)
+		err := requestBroker.Submit(&broker.Request{
+			RequestID:   config.NewRequestID(),
+			Principal:   identity.Principal{CanonicalUserID: call.Profile, Gateway: "cron", ExternalID: "cron:" + call.Profile, Assurance: identity.AssuranceCronScheduler},
+			DisplayName: call.DisplayName, SessionKey: call.SessionKey, Prompt: call.Prompt,
+			SkipMemory: call.SkipMemory, EnabledToolsets: call.EnabledToolsets,
+			ResponseChan: resp,
+		})
+		if err != nil {
+			return cron.AgentResult{}, err
+		}
+		select {
+		case result := <-resp:
+			if result.Err != nil {
+				return cron.AgentResult{}, result.Err
+			}
+			if result.Response == nil {
+				return cron.AgentResult{}, errors.New("empty agent response")
+			}
+			if result.Response.Error != "" {
+				return cron.AgentResult{Text: result.Response.Response}, errors.New(result.Response.Error)
+			}
+			return cron.AgentResult{Text: result.Response.Response}, nil
+		case <-ctx.Done():
+			return cron.AgentResult{}, ctx.Err()
+		}
+	}
+	newGeneration := func(ctx context.Context, profile, session string) error {
+		store, ok := stores[profile]
+		if !ok || store == nil {
+			return errors.New("profile store is unavailable")
+		}
+		return store.NewSessionContext(ctx, profile, session)
+	}
+	for i, name := range names {
+		if i >= len(tickers) {
+			break
+		}
+		store, ok := cronStores[name]
+		if !ok || store == nil {
+			continue
+		}
+		dispatcher := &cron.Dispatcher{
+			Store: store, Runner: cronRunners[name], Profile: name,
+			Agent: agentCall, Senders: senders, NewGeneration: newGeneration,
+		}
+		tickers[i].SetDispatcher(dispatcher)
+		cron.RegisterDispatcher(store.Root(), dispatcher)
+	}
+}
+
 func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Logger, seams profileDependencies) (resultErr error) {
 	if ctx.Err() != nil {
 		return nil
@@ -66,6 +133,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	var imageWorkers []*imagecache.Worker
 	var compressionWorkers []*compaction.ProfileService
 	var cronTickers []*cron.Ticker
+	cronStores := make(map[string]*cron.Store)
+	cronRunners := make(map[string]*cron.Runner)
 	var maintenanceStops []func()
 	var requestBroker *broker.Broker
 	var gateways []gateway.Service
@@ -169,7 +238,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 				cronRunner.Scratch = scratch
 			}
 		}
-		ticker := cron.NewTicker(cron.NewStore(profile.ProfileRoot), cronRunner, 30*time.Second)
+		cronStores[name] = cron.NewStore(profile.ProfileRoot)
+		cronRunners[name] = cronRunner
+		ticker := cron.NewTicker(cronStores[name], cronRunner, 30*time.Second)
 		ticker.Start()
 		cronTickers = append(cronTickers, ticker)
 		log.Debug("app.profile.initialized", "initialized profile runtime", config.F("profile", name))
@@ -196,6 +267,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	if err != nil {
 		return &Error{Event: "app.gateways.init_failed", Message: "failed to initialize gateways", Cause: err}
 	}
+	wireCronDispatchers(names, cronStores, cronRunners, stores, requestBroker, gateways, cronTickers)
 	for _, service := range gateways {
 		go func(service gateway.Service) {
 			if err := service.Start(requestBroker); err != nil {

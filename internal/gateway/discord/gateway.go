@@ -19,6 +19,11 @@ func (dg *Gateway) Name() string {
 	return "Discord"
 }
 
+// CronGatewayName identifies this gateway for scheduler delivery.
+func (dg *Gateway) CronGatewayName() string {
+	return "discord"
+}
+
 // Start initializes the resilient connection loop.
 // It blocks forever, automatically reconnecting if the websocket drops.
 func (dg *Gateway) Start(b *broker.Broker) error {

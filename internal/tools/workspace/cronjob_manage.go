@@ -20,10 +20,11 @@ import (
 func CronjobManageDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        CronjobManageName,
-		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m). Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing); monitor URL/script diff-gates execution with a first-tick baseline. Delivery targets: local, all, origin, bot-chat[:profile], or platform:chat[:thread].",
+		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m). Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing); monitor URL/script diff-gates execution with a first-tick baseline. Jobs run agent turns on a schedule and deliver results to the creating chat (origin) or the profile output directory (local). Operate by job_id or unique name; ambiguous names error instead of guessing.",
 		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
 			"action":            {Type: "string", Description: "create|list|update|pause|resume|remove|run"},
-			"job_id":            {Type: "string", Description: "Job ID for update/pause/resume/remove/run"},
+			"job_id":            {Type: "string", Description: "Job ID or unique name for update/pause/resume/remove/run"},
+			"name":              {Type: "string", Description: "Human job name for create/update"},
 			"schedule":          {Type: "string", Description: "30m, every 2h, every monday 9am, 0 9 * * *, RFC3339 one-shot, or in 30m"},
 			"prompt":            {Type: "string", Description: "Self-contained prompt; the final response is delivered and cannot ask questions"},
 			"skills":            {Type: "array", Description: "Skill names available to the run", Items: &llm.ToolParameterProperty{Type: "string"}},
@@ -31,14 +32,15 @@ func CronjobManageDefinition() llm.ToolDefinition {
 			"monitor_url":       {Type: "string", Description: "Monitor URL (exclusive with monitor_script)"},
 			"monitor_script":    {Type: "string", Description: "Monitor script path (exclusive with monitor_url)"},
 			"no_agent":          {Type: "boolean", Description: "Script is the job; stdout verbatim, empty sends nothing", Default: false},
-			"deliver":           {Type: "string", Description: "local|all|origin|bot-chat[:profile]|platform:chat[:thread]"},
+			"deliver":           {Type: "string", Description: "origin|local (other targets validate but record only)"},
 			"failure_deliver":   {Type: "string", Description: "Delivery target on failure"},
 			"context_from":      {Type: "array", Description: "Workspace paths injected as context", Items: &llm.ToolParameterProperty{Type: "string"}},
-			"continuity":        {Type: "boolean", Description: "Continue prior run context", Default: false},
+			"continuity":        {Type: "boolean", Description: "Chain the last run output into the next prompt", Default: false},
 			"enabled_toolsets":  {Type: "array", Description: "Toolset allowlist ([] = zero-tool)", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"workdir":           {Type: "string", Description: "Job working directory inside the workspace"},
 			"attach_to_session": {Type: "string", Description: "Attach execution to a session key"},
-			"repeat":            {Type: "boolean", Description: "Catch up missed runs (default true)"},
+			"repeat_times":      {Type: "integer", Description: "Run N times then auto-complete (0 = forever)", Minimum: float64Ptr(0)},
+			"catch_up":          {Type: "boolean", Description: "Fire once for backlog past grace (default true)"},
 			"paused":            {Type: "boolean", Description: "Create paused with a reason via paused_reason"},
 			"paused_reason":     {Type: "string", Description: "Reason when creating paused"},
 		}, Required: []string{"action"}, AdditionalProperties: boolPtr(false)},
@@ -70,7 +72,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 		if !ok || !principal.Authenticated() {
 			return governance.Result{}, errors.New("workspace: authenticated principal required")
 		}
-		if err := rejectUnknown(args, "action", "job_id", "schedule", "prompt", "skills", "script", "monitor_url", "monitor_script", "no_agent", "deliver", "failure_deliver", "context_from", "continuity", "enabled_toolsets", "workdir", "attach_to_session", "repeat", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
+		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "monitor_url", "monitor_script", "no_agent", "deliver", "failure_deliver", "context_from", "continuity", "enabled_toolsets", "workdir", "attach_to_session", "repeat_times", "catch_up", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
 			return governance.Result{}, err
 		}
 		if _, has := args["model"]; has {
@@ -94,11 +96,20 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 			}
 			var sb strings.Builder
 			for _, job := range jobs {
-				fmt.Fprintf(&sb, "%s %s paused=%t next=%d status=%s\n", job.ID, outputpkg.Clean(job.Schedule), job.Paused, job.NextRunUnix, job.LastStatus)
+				fmt.Fprintf(&sb, "%s %s %s state=%s next=%d status=%s\n", job.ID, outputpkg.Clean(job.Name), outputpkg.Clean(job.Schedule), job.State, job.NextRunUnix, job.LastStatus)
 			}
 			return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n"), Outcome: governance.OutcomeProductive}, nil
 		case "create":
-			job, err := store.Create(time.Now(), runner, decodeCronInput(args))
+			if _, ok := args["repeat_times"]; ok {
+				if _, err := intArg(args, "repeat_times", 0); err != nil {
+					return governance.Result{}, errors.New("repeat_times must be an integer >= 0")
+				}
+			}
+			input := decodeCronInput(args)
+			meta := requestctx.MetadataFromContext(ctx)
+			input.OriginGateway = strings.TrimSpace(principal.Gateway)
+			input.OriginSession = strings.TrimSpace(meta.SessionID)
+			job, err := store.Create(time.Now(), runner, input)
 			if err != nil {
 				return governance.Result{}, err
 			}
@@ -116,7 +127,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 			id, _ := stringArg(args, "job_id")
 			reason, _ := stringArg(args, "paused_reason")
 			updated, err := store.Mutate(strings.TrimSpace(id), func(job *cron.Job) error {
-				job.Paused = true
+				job.State = cron.StatePaused
 				job.PausedReason = strings.TrimSpace(reason)
 				return nil
 			})
@@ -127,7 +138,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 		case "resume":
 			id, _ := stringArg(args, "job_id")
 			updated, err := store.Mutate(strings.TrimSpace(id), func(job *cron.Job) error {
-				job.Paused = false
+				job.State = cron.StateScheduled
 				job.PausedReason = ""
 				return nil
 			})
@@ -161,6 +172,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 
 func decodeCronInput(args map[string]interface{}) cron.Job {
 	var job cron.Job
+	job.Name, _ = stringArg(args, "name")
 	job.Schedule, _ = stringArg(args, "schedule")
 	job.Prompt, _ = stringArg(args, "prompt")
 	job.Script, _ = stringArg(args, "script")
@@ -180,9 +192,14 @@ func decodeCronInput(args map[string]interface{}) cron.Job {
 	if v, err := boolArg(args, "paused", false); err == nil && v {
 		job.Paused = true
 	}
-	if raw, ok := args["repeat"]; ok {
+	if _, ok := args["repeat_times"]; ok {
+		if v, err := intArg(args, "repeat_times", 0); err == nil && v >= 0 {
+			job.Repeat.Times = v
+		}
+	}
+	if raw, ok := args["catch_up"]; ok {
 		if v, ok := raw.(bool); ok {
-			job.Repeat = &v
+			job.CatchUp = &v
 		}
 	}
 	job.Skills = stringSlice(args["skills"])
@@ -212,6 +229,23 @@ func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interfa
 			return err
 		}
 		job.Prompt = strings.TrimSpace(prompt)
+	}
+	if raw, ok := args["name"]; ok {
+		if name, ok := raw.(string); ok {
+			job.Name = strings.TrimSpace(name)
+		}
+	}
+	if _, present := args["repeat_times"]; present {
+		if v, err := intArg(args, "repeat_times", 0); err != nil || v < 0 {
+			return errors.New("repeat_times must be an integer >= 0")
+		} else {
+			job.Repeat.Times = v
+		}
+	}
+	if raw, ok := args["catch_up"]; ok {
+		if v, ok := raw.(bool); ok {
+			job.CatchUp = &v
+		}
 	}
 	if raw, ok := args["script"]; ok {
 		script, _ := raw.(string)
