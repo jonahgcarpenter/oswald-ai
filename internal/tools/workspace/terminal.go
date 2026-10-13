@@ -117,6 +117,9 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		if ScanProfileEscapeShell(command, workdir) {
 			return deniedResult("cross-profile access"), nil
 		}
+		if ScanManagedCacheShell(command, workdir) {
+			return deniedResult("managed cache access: write temporary files under cache/scratch/"), nil
+		}
 		if !background {
 			if err := RefuseDetachableForeground(command); err != nil {
 				return governance.Result{}, err

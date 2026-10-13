@@ -108,6 +108,9 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			if ScanProfileEscapeCode(data, ws.Root()) {
 				return governance.Result{}, errors.New("cross-profile access is not allowed")
 			}
+			if ScanManagedCacheCode(data, ws.Root()) {
+				return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
+			}
 			if err := pm.Write(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
@@ -115,6 +118,9 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 		case "submit":
 			if ScanProfileEscapeCode(data, ws.Root()) {
 				return governance.Result{}, errors.New("cross-profile access is not allowed")
+			}
+			if ScanManagedCacheCode(data, ws.Root()) {
+				return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
 			}
 			if err := pm.Submit(sessionID, data); err != nil {
 				return governance.Result{}, err
