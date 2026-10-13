@@ -44,6 +44,9 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		if len(code) > 200<<10 {
 			return governance.Result{}, errors.New("code exceeds size limit")
 		}
+		if ScanProfileEscapeCode(code, ws.Root()) {
+			return governance.Result{}, errors.New("cross-profile access is not allowed")
+		}
 		reset, err := boolArg(args, "reset", false)
 		if err != nil {
 			return governance.Result{}, err

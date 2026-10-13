@@ -103,15 +103,19 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 			return governance.Result{}, errors.New("workspace is unavailable")
 		}
 		// Security chain: lifecycle first (force cannot bypass), then
-		// self-repo, then foreground guidance, then the normalized semantic
-		// layer (unrecoverable deny, fetch policy, store/config scans,
-		// recoverable escalations), then destructive-pattern review.
+		// self-repo, then cross-profile containment, then foreground
+		// guidance, then the normalized semantic layer (unrecoverable deny,
+		// fetch policy, store/config scans, recoverable escalations), then
+		// destructive-pattern review.
 		// The LLM reviewer from step 5 runs only on escalated ambiguity.
 		if err := ScanLifecycle(command, workdir); err != nil {
 			return governance.Result{}, err
 		}
 		if err := BlockSelfRepo(command, workdir); err != nil {
 			return governance.Result{}, err
+		}
+		if ScanProfileEscapeShell(command, workdir) {
+			return deniedResult("cross-profile access"), nil
 		}
 		if !background {
 			if err := RefuseDetachableForeground(command); err != nil {
