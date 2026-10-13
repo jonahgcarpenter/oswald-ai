@@ -20,7 +20,7 @@ import (
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 )
 
-func TestGeneratedToolResultPreviewAndRetryPreserveOriginalDelivery(t *testing.T) {
+func TestGeneratedToolResultPreviewAndRetryCachesOriginalWithoutDelivery(t *testing.T) {
 	chat := &fakeChatter{outcomes: []fakeChatOutcome{
 		{response: toolCallResponse("generate", imagegenerate.Name, map[string]interface{}{"prompt": "private-generation-prompt"})},
 		{err: &llm.ChatHTTPError{StatusCode: 500, Body: "model runner has unexpectedly stopped"}},
@@ -44,8 +44,8 @@ func TestGeneratedToolResultPreviewAndRetryPreserveOriginalDelivery(t *testing.T
 	a.log = config.NewLogger(config.LevelInfo)
 	a.log.SetOutput(&logs)
 	response, err := processAgent(a, "generated-tool", "discord", "session", "user-1", "User", "Generate an image", nil, nil)
-	if err != nil || response == nil || len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, data) {
-		t.Fatalf("generated original was not preserved for delivery: err=%v", err)
+	if err != nil || response == nil || len(response.Attachments) != 0 {
+		t.Fatalf("generated image was automatically delivered: err=%v attachments=%d", err, len(response.Attachments))
 	}
 	if len(chat.requests) != 3 {
 		t.Fatalf("model calls=%d, want generation, preview, and retry", len(chat.requests))
@@ -100,6 +100,14 @@ func TestGeneratedToolResultPreviewAndRetryPreserveOriginalDelivery(t *testing.T
 			t.Fatal("generated tool result logged private data")
 		}
 	}
+	chat.responses = []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "Here it is MEDIA:" + path}}}
+	delivered, err := processAgent(a, "generated-media", "discord", "session", "user-1", "User", "Send it", nil, nil)
+	if err != nil || delivered == nil || len(delivered.Attachments) != 1 || !bytes.Equal(delivered.Attachments[0].Data, data) {
+		t.Fatalf("MEDIA token did not deliver the cached original: err=%v", err)
+	}
+	if strings.Contains(delivered.Response, "MEDIA:") {
+		t.Fatalf("token leaked into response: %q", delivered.Response)
+	}
 }
 
 func TestGeneratedAndLoadedToolPreviewsHaveIndependentBounds(t *testing.T) {
@@ -120,7 +128,7 @@ func TestGeneratedAndLoadedToolPreviewsHaveIndependentBounds(t *testing.T) {
 	}
 }
 
-func TestGeneratedGIFToolPreviewUsesFirstFrameAndDeliversOriginal(t *testing.T) {
+func TestGeneratedGIFToolPreviewCachesOriginalWithoutDelivery(t *testing.T) {
 	palette := color.Palette{color.Black, color.White}
 	first := image.NewPaletted(image.Rect(0, 0, 3, 2), palette)
 	second := image.NewPaletted(first.Bounds(), palette)
@@ -138,8 +146,8 @@ func TestGeneratedGIFToolPreviewUsesFirstFrameAndDeliversOriginal(t *testing.T) 
 		t.Fatal(err)
 	}
 	response, err := processAgent(a, "generated-gif", "discord", "session", "user-1", "User", "Generate an animation", nil, nil)
-	if err != nil || len(response.Attachments) != 1 || !bytes.Equal(response.Attachments[0].Data, original.Bytes()) {
-		t.Fatalf("original GIF delivery changed: err=%v", err)
+	if err != nil || len(response.Attachments) != 0 {
+		t.Fatalf("generated GIF was automatically delivered: err=%v attachments=%d", err, len(response.Attachments))
 	}
 	result := toolResultByID(chat.requests[1].Messages, "gif")
 	if result == nil || len(result.Images) != 1 || !strings.Contains(result.Content, "Showing only the first frame") || result.Images[0].IsGIFContactSheet {

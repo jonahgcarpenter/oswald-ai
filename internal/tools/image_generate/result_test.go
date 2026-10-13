@@ -11,9 +11,14 @@ import (
 func TestResultTextIncludesPathAndApplicablePreviewNotes(t *testing.T) {
 	geometry := &llm.ImageGeometry{SourceWidth: 1280, SourceHeight: 720, Width: 1280, Height: 720}
 	text := ResultText("/private/generated.png", geometry, false)
-	for _, want := range []string{"Image generated successfully", "latest successful version", "Image: /private/generated.png", "Source image: 1280×720."} {
+	for _, want := range []string{"Image generated successfully", "Image: /private/generated.png", "Source image: 1280×720."} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in generated result: %q", want, text)
+		}
+	}
+	for _, unwanted := range []string{"will be delivered to the user", "latest successful version"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("auto-delivery promise %q survived in generated result: %q", unwanted, text)
 		}
 	}
 	if strings.Contains(text, "Note:") {
@@ -26,7 +31,7 @@ func TestResultTextIncludesPathAndApplicablePreviewNotes(t *testing.T) {
 		t.Fatal("resize note lost path or used incorrect geometry")
 	}
 	gif := ResultText("/private/generated.gif", geometry, true)
-	if !strings.Contains(gif, "Showing only the first frame") || !strings.Contains(gif, "original GIF will be delivered") {
-		t.Fatal("GIF preview did not explain first-frame loading and original delivery")
+	if !strings.Contains(gif, "Showing only the first frame") || !strings.Contains(gif, "MEDIA") {
+		t.Fatal("GIF preview did not explain first-frame loading and MEDIA delivery")
 	}
 }

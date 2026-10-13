@@ -50,7 +50,7 @@ func planGeneratedImage(args map[string]interface{}, sources, selected []request
 		}
 	}
 	if len(selected) >= 4 {
-		return image, -1, fmt.Errorf("at most four logical images can be delivered per request; edit an existing generated image using its image_url path or ask for another request")
+		return image, -1, fmt.Errorf("at most four logical images can be generated per request; edit an existing generated image using its image_url path or ask for another request")
 	}
 	return image, -1, nil
 }

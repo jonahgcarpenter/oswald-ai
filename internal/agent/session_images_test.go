@@ -353,8 +353,8 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 						if response.Error != "" || response.Response != wantContent || response.Kind != wantKind || response.SourceTurnID == 0 || response.PersistenceStatus != "pending" {
 							t.Fatalf("partial response not finalized: %+v", response)
 						}
-						if len(response.Attachments) != 1 || response.Attachments[0].Filename != "image-2.jpg" {
-							t.Fatal("lost selected final image")
+						if len(response.Attachments) != 0 {
+							t.Fatal("generated images were automatically delivered on failure")
 						}
 						if streaming && fallbackChunks != 1 {
 							t.Fatalf("fallback chunks=%d", fallbackChunks)
@@ -384,7 +384,7 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 	}
 }
 
-func TestExplicitImageEditUsesProductionRecencyNotDeliveryOrder(t *testing.T) {
+func TestExplicitImageEditUsesProductionRecency(t *testing.T) {
 	chat := &fakeChatter{}
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, store := newTestAgent(t, chat, nil, reg)
@@ -420,8 +420,8 @@ func TestExplicitImageEditUsesProductionRecencyNotDeliveryOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Attachments) != 2 || response.Attachments[0].Filename != "image-3.jpg" || response.Attachments[1].Filename != "image-2.jpg" {
-		t.Fatal("delivery order changed")
+	if len(response.Attachments) != 0 {
+		t.Fatalf("generated images were automatically delivered: %d", len(response.Attachments))
 	}
 	images, err := store.SessionImages(context.Background(), "user-1", "session", response.SessionGeneration)
 	if err != nil || len(images) != 2 || images[0].ImageID != logicalA || images[0].Version != 2 {
@@ -513,10 +513,10 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 || len(response.Attachments) != 3 {
+	if count != 6 || len(response.Attachments) != 1 {
 		t.Fatalf("calls=%d attachments=%d", count, len(response.Attachments))
 	}
-	for i, want := range []string{"image-3.jpg", "report.txt", "image-5.jpg"} {
+	for i, want := range []string{"report.txt"} {
 		if response.Attachments[i].Filename != want {
 			t.Fatalf("slot %d=%s", i, response.Attachments[i].Filename)
 		}
@@ -564,8 +564,8 @@ func TestGeneratedImageCapacityRejectsBeforeProvider(t *testing.T) {
 	}
 	chat.responses = append(chat.responses, &llm.ChatResponse{Message: llm.ChatMessage{Role: "assistant", Content: "Four images."}})
 	response, err := processAgent(a, "capacity", "discord", "session", "user-1", "User", "generate", nil, nil)
-	if err != nil || calls != 4 || len(response.Attachments) != 4 {
-		t.Fatalf("calls=%d err=%v", calls, err)
+	if err != nil || calls != 4 || len(response.Attachments) != 0 {
+		t.Fatalf("calls=%d err=%v attachments=%d", calls, err, len(response.Attachments))
 	}
 	result := toolResultByID(chat.requests[len(chat.requests)-1].Messages, "4")
 	if result == nil || !strings.Contains(result.Content, "at most four logical images") {
@@ -781,8 +781,11 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 		t.Fatalf("correlated tool results=%d", results)
 	}
 	assets, err := store.SessionImages(context.Background(), "user-1", "session", response.SessionGeneration)
-	if err != nil || len(assets) != 1 || assets[0].Data != previous || assets[0].Version != 6 || len(response.Attachments) != 1 {
+	if err != nil || len(assets) != 1 || assets[0].Data != previous || assets[0].Version != 6 {
 		t.Fatalf("assets=%d err=%v", len(assets), err)
+	}
+	if len(response.Attachments) != 0 {
+		t.Fatalf("generated images were automatically delivered: %d", len(response.Attachments))
 	}
 }
 

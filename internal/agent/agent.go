@@ -36,7 +36,7 @@ const (
 	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
 	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
 	contextCompactionFallback     = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
-	generatedImagePartialResponse = "The model could not finish the request. I am returning the latest successfully generated images; any completed actions have not been undone. Ask again to continue editing."
+	generatedImagePartialResponse = "The model could not finish the request. The generated images were cached but not delivered; any completed actions have not been undone. Ask again to continue editing."
 	sessionPromptPressurePrefix   = "session-prompt-pressure-v1"
 )
 
@@ -527,7 +527,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	var outputAttachments []media.OutputAttachment
 	var generatedImages []requestctx.InputImage
 	generatedPreviewCount := 0
-	var generatedAttachmentSlots []int
 	imageHighwater := make(map[string]int)
 	for _, image := range contextImages {
 		if image.VersionHighwater > imageHighwater[image.ImageID] {
@@ -888,81 +887,86 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				if execErr == nil && len(result.Attachments) > 0 {
 					if gateway == "openai" {
 						execErr = fmt.Errorf("attachments are not supported by this gateway")
-					} else {
-						candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
-						if isGenerated && selectedSlot >= 0 && len(result.Attachments) == 1 {
-							candidate = append([]media.OutputAttachment(nil), outputAttachments...)
-							candidate[generatedAttachmentSlots[selectedSlot]] = result.Attachments[0]
-						}
+					} else if isGenerated {
+						// Generated images are never delivered automatically. The model
+						// delivers one by emitting its MEDIA:/absolute/path token, which
+						// finalization resolves against the managed cache. Cache the
+						// original bytes for that path plus the model preview, and keep
+						// logical-version bookkeeping so edits keep working.
 						if result.Outcome != governance.OutcomeProductive {
 							execErr = fmt.Errorf("tool returned attachments without a productive result")
-						} else if isGenerated && len(result.Attachments) != 1 {
+						} else if len(result.Attachments) != 1 {
 							execErr = fmt.Errorf("generation must return exactly one image")
-						} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
+						} else if attachmentErr := media.ValidateOutputAttachments(result.Attachments); attachmentErr != nil {
 							execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
 						} else {
-							if isGenerated {
-								for _, attachment := range result.Attachments {
-									normalized, err := media.NormalizeVisionImage(ctx, attachment.Data, attachment.MIMEType, nil)
-									if err != nil {
-										execErr = fmt.Errorf("normalize generated image: %w", err)
-										break
+							for _, attachment := range result.Attachments {
+								normalized, err := media.NormalizeVisionImage(ctx, attachment.Data, attachment.MIMEType, nil)
+								if err != nil {
+									execErr = fmt.Errorf("normalize generated image: %w", err)
+									break
+								}
+								image := plannedImage
+								image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
+								image.VersionHighwater = image.Version
+								var metadata map[string]json.RawMessage
+								if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
+									execErr = fmt.Errorf("invalid generated image metadata")
+									break
+								}
+								if a.imageCache == nil {
+									execErr = fmt.Errorf("image cache is unavailable")
+									break
+								}
+								image.Path, err = a.imageCache.SaveAsset(ctx, senderID, image.ID, attachment.Data, attachment.MIMEType)
+								if err != nil {
+									execErr = fmt.Errorf("cache generated image: %w", err)
+									break
+								}
+								preview := normalized.Image
+								preview.Source = "generated"
+								preview.Geometry = &llm.ImageGeometry{SourceWidth: normalized.OriginalWidth, SourceHeight: normalized.OriginalHeight, Width: normalized.Width, Height: normalized.Height}
+								result.Images = []llm.InputImage{preview}
+								result.Content = imagegenerate.ResultText(image.Path, preview.Geometry, normalized.DecodedFormat == "gif")
+								generatedPreviewCount = min(generatedPreviewCount+1, maxToolResultImages)
+								for i := range contextImages {
+									if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
+										contextImages[i].ImageID = image.ImageID
 									}
-									image := plannedImage
-									image.ID, image.MIMEType, image.Data, image.Source = config.NewRequestID(), normalized.Image.MimeType, normalized.Image.Data, "generated"
-									image.VersionHighwater = image.Version
-									var metadata map[string]json.RawMessage
-									if err := json.Unmarshal([]byte(result.Content), &metadata); err != nil || metadata == nil {
-										execErr = fmt.Errorf("invalid generated image metadata")
-										break
-									}
-									if a.imageCache == nil {
-										execErr = fmt.Errorf("image cache is unavailable")
-										break
-									}
-									image.Path, err = a.imageCache.SaveAsset(ctx, senderID, image.ID, attachment.Data, attachment.MIMEType)
-									if err != nil {
-										execErr = fmt.Errorf("cache generated image: %w", err)
-										break
-									}
-									preview := normalized.Image
-									preview.Source = "generated"
-									preview.Geometry = &llm.ImageGeometry{SourceWidth: normalized.OriginalWidth, SourceHeight: normalized.OriginalHeight, Width: normalized.Width, Height: normalized.Height}
-									result.Images = []llm.InputImage{preview}
-									result.Content = imagegenerate.ResultText(image.Path, preview.Geometry, normalized.DecodedFormat == "gif")
-									generatedPreviewCount = min(generatedPreviewCount+1, maxToolResultImages)
-									for i := range contextImages {
-										if contextImages[i].ID == image.ParentSourceImageID && contextImages[i].ImageID == "" {
-											contextImages[i].ImageID = image.ImageID
-										}
-									}
-									if selectedSlot >= 0 {
-										generatedImages[selectedSlot] = image
-									} else {
-										generatedImages = append(generatedImages, image)
-										generatedAttachmentSlots = append(generatedAttachmentSlots, len(outputAttachments))
-									}
-									contextImages = append([]requestctx.InputImage{image}, contextImages...)
-									if len(contextImages) > 24 {
-										// Keep selected deliverables editable even after many retries.
-										for i := len(contextImages) - 1; i >= 0; i-- {
-											pinned := false
-											for _, selected := range generatedImages {
-												if selected.ID == contextImages[i].ID {
-													pinned = true
-													break
-												}
-											}
-											if !pinned {
-												contextImages = append(contextImages[:i], contextImages[i+1:]...)
+								}
+								if selectedSlot >= 0 {
+									generatedImages[selectedSlot] = image
+								} else {
+									generatedImages = append(generatedImages, image)
+								}
+								contextImages = append([]requestctx.InputImage{image}, contextImages...)
+								if len(contextImages) > 24 {
+									// Keep selected generated outputs editable even after many retries.
+									for i := len(contextImages) - 1; i >= 0; i-- {
+										pinned := false
+										for _, selected := range generatedImages {
+											if selected.ID == contextImages[i].ID {
+												pinned = true
 												break
 											}
 										}
+										if !pinned {
+											contextImages = append(contextImages[:i], contextImages[i+1:]...)
+											break
+										}
 									}
-									ctx = requestctx.WithInputImages(ctx, contextImages)
-									reqLog.Debug("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)))
 								}
+								ctx = requestctx.WithInputImages(ctx, contextImages)
+								reqLog.Debug("agent.images.generated", "normalized generated image for active context", config.F("image_bytes", normalized.NormalizedBytes), config.F("image_count", generatedPreviewCount), config.F("selected_image_count", len(generatedImages)), config.F("catalog_image_count", len(contextImages)))
 							}
+						}
+					} else {
+						candidate := append(append([]media.OutputAttachment(nil), outputAttachments...), result.Attachments...)
+						if result.Outcome != governance.OutcomeProductive {
+							execErr = fmt.Errorf("tool returned attachments without a productive result")
+						} else if attachmentErr := media.ValidateOutputAttachments(candidate); attachmentErr != nil {
+							execErr = fmt.Errorf("tool returned invalid attachments: %w", attachmentErr)
+						} else {
 							if execErr == nil {
 								outputAttachments = candidate
 							}
@@ -1332,6 +1336,7 @@ finalize:
 	// MEDIA:/absolute/path tokens in final model text are delivery directives:
 	// resolve them against the sender's managed image cache, attach what
 	// resolves, and persist the stripped text so tokens never re-fire.
+	// Generated images have no automatic delivery; they attach only through these tokens.
 	if strings.Contains(finalContent, "MEDIA:") {
 		stripped, mediaAttachments := a.resolveResponseMedia(ctx, reqLog, gateway, senderID, finalContent, outputAttachments)
 		finalContent = stripped
@@ -1352,7 +1357,7 @@ finalize:
 	for i := range generatedImages {
 		generatedImages[i].VersionHighwater = imageHighwater[generatedImages[i].ImageID]
 	}
-	// Delivery stays in first-logical-production order. Storage ordinals instead
+	// Stored generated images stay in first-logical-production order. Storage ordinals instead
 	// encode successful generation recency so the next default is the newest asset.
 	imagesForStorage := make([]requestctx.InputImage, 0, len(generatedImages))
 	for i := len(contextImages) - 1; i >= 0; i-- {
