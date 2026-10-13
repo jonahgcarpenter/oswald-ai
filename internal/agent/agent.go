@@ -275,7 +275,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	reqLog.Debug("agent.soul.loaded", "loaded private soul file", config.F("duration_ms", time.Since(soulStarted).Milliseconds()), config.F("soul_chars", len([]rune(soulContent))))
 
 	// The session-bound memory snapshot joins the operator soul in the system message.
+	// Code-owned operating directives sit between the soul and the memory blocks.
 	dynamicSystemPrompt := soulContent
+	if directives := operatingDirectivesBlock(); directives != "" {
+		if strings.TrimSpace(dynamicSystemPrompt) == "" {
+			dynamicSystemPrompt = directives
+		} else {
+			dynamicSystemPrompt += "\n\n" + directives
+		}
+	}
 	speakerLine := ""
 	contextBlock := ""
 	sessionGeneration := 0

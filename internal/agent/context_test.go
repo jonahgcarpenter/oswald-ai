@@ -325,6 +325,42 @@ func TestEnvironmentInfoBlockRendersSandbox(t *testing.T) {
 	}
 }
 
+func TestOperatingDirectivesBlockContent(t *testing.T) {
+	got := operatingDirectivesBlock()
+	for _, want := range []string{
+		"You run on Oswald-AI (by Jonah Carpenter).",
+		"https://github.com/jonahgcarpenter/oswald-ai",
+		"# Finishing the job",
+		"# Parallel tool calls",
+		"# Persistent memory",
+		"# Tool-use enforcement",
+		"# Execution discipline",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("operating directives block missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestOperatingDirectivesBlockOrderedAboveSessionContext(t *testing.T) {
+	dir := t.TempDir()
+	files := renderFileMemory("profile", "")
+	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")
+	env := environmentInfoBlock(dir)
+	directives := operatingDirectivesBlock()
+	session := sessionContextBlock("discord", `"DM with fragsap"`, "fragsap")
+	policy := "soul\n\n" + directives
+	assembled := AssemblePromptContext(policy, files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	content := assembled.Messages[0].Content
+	soulAt := strings.Index(content, "soul")
+	directivesAt := strings.Index(content, "# Finishing the job")
+	filesAt := strings.Index(content, "USER PROFILE (who the user is)")
+	sessionAt := strings.Index(content, "## Current Session Context")
+	if soulAt < 0 || directivesAt < 0 || filesAt < 0 || sessionAt < 0 || soulAt > directivesAt || directivesAt > filesAt || filesAt > sessionAt {
+		t.Fatalf("operating directives block misordered:\n%s", content)
+	}
+}
+
 func roles(messages []llm.ChatMessage) string {
 	values := make([]string, len(messages))
 	for i, message := range messages {
