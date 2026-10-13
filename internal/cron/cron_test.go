@@ -251,7 +251,7 @@ func TestDispatchAgentOriginDelivery(t *testing.T) {
 	if err != nil || !ex.Delivered || ex.Status == "delivery_failed" {
 		t.Fatalf("dispatch = %+v %q %v", ex, out, err)
 	}
-	if got := sent["discord:chan1:user1"]; !strings.Contains(got, "Bills 24") || !strings.Contains(got, "Scheduled job") {
+	if got := sent["discord:chan1:user1"]; !strings.Contains(got, "Bills 24") || strings.Contains(got, "Scheduled job") {
 		t.Fatalf("sent = %q", got)
 	}
 	_ = job

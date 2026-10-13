@@ -315,17 +315,14 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
 	ex.Status = "delivery_failed"
 }
 
-// wrapDelivery adds the job header and the no-mirror footer.
+// wrapDelivery bounds delivered text. The agent response goes out
+// verbatim: no job header, no footer.
 func wrapDelivery(job *Job, text string) string {
-	name := strings.TrimSpace(job.Name)
-	if name == "" {
-		name = job.ID
+	_ = job
+	if utf8.RuneCountInString(text) > 6000 {
+		return string([]rune(text)[:6000]) + "\n[truncated]"
 	}
-	out := "Scheduled job " + name + ":\n" + text + "\n\n— delivered by scheduler; the agent cannot see this message in conversation."
-	if utf8.RuneCountInString(out) > 6000 {
-		out = string([]rune(out)[:6000]) + "\n[truncated]"
-	}
-	return out
+	return text
 }
 
 // RunDue executes claimed jobs through a bounded pool.
