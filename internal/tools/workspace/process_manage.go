@@ -105,11 +105,17 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			}
 			return governance.Result{Content: fmt.Sprintf("session_id: %s\nstatus: %s\nexit_code: %d", info.ID, info.Status, info.ExitCode), Outcome: governance.OutcomeProductive}, nil
 		case "write":
+			if ScanProfileEscapeCode(data, ws.Root()) {
+				return governance.Result{}, errors.New("cross-profile access is not allowed")
+			}
 			if err := pm.Write(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
 			return governance.Result{Content: "stdin written", Outcome: governance.OutcomeProductive}, nil
 		case "submit":
+			if ScanProfileEscapeCode(data, ws.Root()) {
+				return governance.Result{}, errors.New("cross-profile access is not allowed")
+			}
 			if err := pm.Submit(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
