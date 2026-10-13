@@ -78,9 +78,6 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 	stats := g.toolStats(name)
 	failed, unproductive := classifyCall(execErr, result)
 	if failed {
-		if decisionFp := fp; decisionFp != "" {
-			delete(g.seen, decisionFp)
-		}
 		stats.Failures++
 	} else if unproductive {
 		stats.Unproductive++

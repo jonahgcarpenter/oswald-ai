@@ -78,27 +78,17 @@ func (p HistoryPolicy) Effective() HistoryPolicy {
 // detection. It must not retain or mutate the supplied map.
 type ArgumentNormalizer func(map[string]interface{}) interface{}
 
-// ToolPolicy controls request-local limits for one model-visible tool.
+// ToolPolicy controls request-local history retention for one model-visible
+// tool. Execution itself is never blocked per tool: failures and empty
+// results return to the model with loop-guardrail advice, and only the
+// request-wide global budget can stop the loop.
 type ToolPolicy struct {
-	MaxExecutions   int
-	MaxFailures     int
-	MaxUnproductive int
-	BlockDuplicates bool
-	NormalizeArgs   ArgumentNormalizer
-	History         HistoryPolicy
+	NormalizeArgs ArgumentNormalizer
+	History       HistoryPolicy
 }
 
-// Validate rejects negative limits. A zero limit disables that guard.
+// Validate rejects invalid history modes and limits.
 func (p ToolPolicy) Validate() error {
-	if p.MaxExecutions < 0 {
-		return fmt.Errorf("max executions must not be negative")
-	}
-	if p.MaxFailures < 0 {
-		return fmt.Errorf("max failures must not be negative")
-	}
-	if p.MaxUnproductive < 0 {
-		return fmt.Errorf("max unproductive results must not be negative")
-	}
 	history := p.History.Effective()
 	if history.Mode != HistoryNone && history.Mode != HistoryMetadata && history.Mode != HistoryFull {
 		return fmt.Errorf("invalid history mode %q", history.Mode)
@@ -154,29 +144,24 @@ type Decision struct {
 func (d Decision) Fingerprint() string { return d.fingerprint }
 
 const (
-	ReasonDuplicate          = "duplicate_call"
-	ReasonToolLimit          = "tool_execution_limit"
-	ReasonToolFailures       = "tool_failure_limit"
-	ReasonToolUnproductive   = "tool_unproductive_limit"
-	ReasonGlobalLimit        = "global_execution_limit"
-	ReasonIterationLimit     = "global_iteration_limit"
-	ReasonUnadvertised       = "tool_not_advertised"
-	ReasonInvalidFingerprint = "invalid_arguments"
+	ReasonGlobalLimit    = "global_execution_limit"
+	ReasonIterationLimit = "global_iteration_limit"
+	ReasonUnadvertised   = "tool_not_advertised"
 )
 
-// Governor enforces one request's tool policies. It is intentionally not safe
-// for concurrent use because Agent.Process executes one tool batch serially.
+// Governor tracks one request's tool usage and request-wide budget. It is
+// intentionally not safe for concurrent use because Agent.Process executes
+// one tool batch serially. Per-tool blocking is gone: every advertised call
+// executes, and loop-guardrail ladders advise instead of refusing.
 type Governor struct {
 	global          GlobalPolicy
 	stats           map[string]*ToolStats
-	seen            map[string]struct{}
 	toolIterations  int
 	totalExecutions int
 	globalReason    string
 
-	// Loop-guardrail state. Successful fingerprints stay in seen;
-	// failure/no-progress ladders are tracked separately so exact-error
-	// replays warn instead of silently retrying forever.
+	// Loop-guardrail state. Failure/no-progress ladders track repeated
+	// signatures so exact-error replays warn instead of retrying blindly.
 	exactFailures    map[string]int
 	sameToolFailures map[string]int
 	noProgress       map[string]noProgressEntry
@@ -194,7 +179,6 @@ func New(global GlobalPolicy) *Governor {
 	return &Governor{
 		global:           global,
 		stats:            make(map[string]*ToolStats),
-		seen:             make(map[string]struct{}),
 		exactFailures:    make(map[string]int),
 		sameToolFailures: make(map[string]int),
 		noProgress:       make(map[string]noProgressEntry),
@@ -219,6 +203,8 @@ func (g *Governor) BeginToolIteration() Decision {
 }
 
 // BeforeExecution determines whether one advertised model call may execute.
+// Only the request-wide budget and the advertised catalog gate execution:
+// per-tool failures, empty results, and repeats always execute.
 func (g *Governor) BeforeExecution(name string, args map[string]interface{}, policy ToolPolicy, advertised bool) Decision {
 	stats := g.toolStats(name)
 	stats.Attempts++
@@ -230,46 +216,36 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 		stats.Blocked++
 		return Decision{ReasonCode: g.globalReason}
 	}
-	if reason := retiredReason(*stats, policy); reason != "" {
-		stats.Blocked++
-		return Decision{ReasonCode: reason}
-	}
 	if g.totalExecutions >= g.global.MaxExecutions {
 		g.setGlobalReason(ReasonGlobalLimit)
 		stats.Blocked++
 		return Decision{ReasonCode: ReasonGlobalLimit}
 	}
 	decision := Decision{Allowed: true}
-	if policy.BlockDuplicates {
-		fingerprint, err := Fingerprint(name, args, policy.NormalizeArgs)
-		if err != nil {
+	// Fingerprints still feed the loop-guardrail ladders; repeats execute.
+	// The hard-stop ladder blocks below stay dormant until hard-stop is
+	// enabled.
+	fingerprint, ferr := Fingerprint(name, args, policy.NormalizeArgs)
+	if ferr != nil {
+		fingerprint = ""
+	}
+	if g.hardStop && fingerprint != "" {
+		if count := g.exactFailures[fingerprint]; count >= ExactBlockAfter {
 			stats.Blocked++
-			return Decision{ReasonCode: ReasonInvalidFingerprint}
+			blocked := Decision{ReasonCode: ReasonRepeatedExactBlock}
+			g.setHaltDecision(&blocked)
+			return blocked
 		}
-		if g.hardStop {
-			if count := g.exactFailures[fingerprint]; count >= ExactBlockAfter {
+		if isIdempotent(name) {
+			if entry, ok := g.noProgress[fingerprint]; ok && entry.count >= NoProgressBlockAfter {
 				stats.Blocked++
-				blocked := Decision{ReasonCode: ReasonRepeatedExactBlock}
+				blocked := Decision{ReasonCode: ReasonIdempotentNoProgressBlock}
 				g.setHaltDecision(&blocked)
 				return blocked
 			}
-			if isIdempotent(name) {
-				if entry, ok := g.noProgress[fingerprint]; ok && entry.count >= NoProgressBlockAfter {
-					stats.Blocked++
-					blocked := Decision{ReasonCode: ReasonIdempotentNoProgressBlock}
-					g.setHaltDecision(&blocked)
-					return blocked
-				}
-			}
 		}
-		if _, exists := g.seen[fingerprint]; exists {
-			stats.Duplicates++
-			stats.Blocked++
-			return Decision{ReasonCode: ReasonDuplicate}
-		}
-		g.seen[fingerprint] = struct{}{}
-		decision.fingerprint = fingerprint
 	}
+	decision.fingerprint = fingerprint
 	stats.Executions++
 	g.totalExecutions++
 	return decision
@@ -280,22 +256,6 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 // discarded. Prefer AfterCall when model-visible warn text is needed.
 func (g *Governor) RecordResult(name string, decision Decision, result Result, execErr error) {
 	g.AfterCall(name, nil, decision.fingerprint, result, execErr)
-}
-
-// NoteDuplicate records an intra-batch duplicate without executing. It keeps
-// attempt/duplicate/blocked statistics consistent for callers that dedupe a
-// model response before BeforeExecution.
-func (g *Governor) NoteDuplicate(name string) Decision {
-	stats := g.toolStats(name)
-	stats.Attempts++
-	stats.Duplicates++
-	stats.Blocked++
-	return Decision{ReasonCode: ReasonDuplicate}
-}
-
-// IsToolRetired reports whether one tool has exhausted a per-tool limit.
-func (g *Governor) IsToolRetired(name string, policy ToolPolicy) bool {
-	return retiredReason(*g.toolStats(name), policy) != ""
 }
 
 // GlobalStopReason returns the reason all tools must be removed, if any.
@@ -349,19 +309,6 @@ func (g *Governor) setHaltDecision(decision *Decision) {
 		cp := *decision
 		g.haltDecision = &cp
 	}
-}
-
-func retiredReason(stats ToolStats, policy ToolPolicy) string {
-	if policy.MaxExecutions > 0 && stats.Executions >= policy.MaxExecutions {
-		return ReasonToolLimit
-	}
-	if policy.MaxFailures > 0 && stats.Failures >= policy.MaxFailures {
-		return ReasonToolFailures
-	}
-	if policy.MaxUnproductive > 0 && stats.Unproductive >= policy.MaxUnproductive {
-		return ReasonToolUnproductive
-	}
-	return ""
 }
 
 // Fingerprint returns a request-local-safe digest for a tool name and canonical

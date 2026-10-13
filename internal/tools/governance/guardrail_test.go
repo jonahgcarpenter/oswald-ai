@@ -57,10 +57,10 @@ func TestAfterCallDegradedNotFailure(t *testing.T) {
 	}
 }
 
-func TestAfterCallUnproductiveStillRetires(t *testing.T) {
+func TestAfterCallUnproductiveNeverRetires(t *testing.T) {
 	g := New(GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 50})
-	policy := ToolPolicy{MaxUnproductive: 2, BlockDuplicates: true}
-	for i := 0; i < 2; i++ {
+	policy := ToolPolicy{}
+	for i := 0; i < 4; i++ {
 		args := map[string]interface{}{"n": i}
 		d := g.BeforeExecution("session_search", args, policy, true)
 		if !d.Allowed {
@@ -68,8 +68,8 @@ func TestAfterCallUnproductiveStillRetires(t *testing.T) {
 		}
 		g.AfterCall("session_search", args, d.Fingerprint(), Result{Outcome: OutcomeUnproductive}, nil)
 	}
-	if !g.IsToolRetired("session_search", policy) {
-		t.Fatal("unproductive tool was not retired")
+	if g.GlobalStopReason() != "" {
+		t.Fatal("unproductive results stopped the request")
 	}
 }
 
@@ -118,7 +118,7 @@ func TestObserveCycleNotice(t *testing.T) {
 func TestHardStopExactBlock(t *testing.T) {
 	g := New(GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 50})
 	g.SetHardStopEnabled(true)
-	policy := ToolPolicy{BlockDuplicates: true}
+	policy := ToolPolicy{}
 	args := map[string]interface{}{"q": "same"}
 	for i := 0; i < 5; i++ {
 		d := g.BeforeExecution("memory", args, policy, true)

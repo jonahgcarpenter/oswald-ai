@@ -139,7 +139,7 @@ func TestVisionRegisteredWithoutComfyUIAndUsesTextHistory(t *testing.T) {
 	reg := newTestRegistry(t, &config.Config{})
 	tool, visible := visibleTestTool(reg, visionanalyze.Name)
 	policy, configured := reg.Policy(visionanalyze.Name)
-	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || !policy.BlockDuplicates || policy.MaxFailures != 2 || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult {
+	if !visible || !configured || !reg.HasHandler(visionanalyze.Name) || len(tool.Function.Parameters.Properties) != 3 || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult {
 		t.Fatal("vision tool was not independently registered with bounded nonsearchable text history")
 	}
 	if reg.HasHandler(imagegenerate.Name) {
@@ -169,7 +169,7 @@ func TestSessionSearchRequiresProfileStoreAndIsPolicyBounded(t *testing.T) {
 		t.Fatalf("session_search must require no arguments: %+v", tool.Function.Parameters.Required)
 	}
 	policy, ok := reg.Policy(sessionsearch.Name)
-	if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult || policy.MaxUnproductive != 2 || !policy.BlockDuplicates {
+	if !ok || policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult || policy.NormalizeArgs == nil {
 		t.Fatalf("session_search policy = %+v", policy)
 	}
 }
@@ -232,8 +232,8 @@ func TestSearchFingerprintsIncludeEffectiveResultLimit(t *testing.T) {
 	name := websearch.Name
 	defaultLimit, maxLimit := websearch.DefaultWebResults, websearch.MaxWebResults
 	policy, ok := reg.Policy(name)
-	if !ok || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
-		t.Fatal("missing duplicate policy")
+	if !ok || policy.NormalizeArgs == nil {
+		t.Fatal("missing normalize policy")
 	}
 	omitted, err := governance.Fingerprint(name, map[string]interface{}{"query": " Search   Query "}, policy.NormalizeArgs)
 	if err != nil {
@@ -328,7 +328,7 @@ func TestRegisterWebSearchProviderMatrix(t *testing.T) {
 	}
 }
 
-func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
+func TestRegisterPoliciesAreHistoryOnly(t *testing.T) {
 	reg := newTestRegistry(t, testConfig())
 
 	for _, name := range reg.EnabledBuiltinNames() {
@@ -336,31 +336,11 @@ func TestRegisterLimitsWebSearchFailuresAndUnproductiveResults(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing policy for %s", name)
 		}
-		wantExecutions := 0
-		wantUnproductive := 0
-		wantFailures := 0
-		if name == websearch.Name {
-			wantUnproductive = 2
-			wantFailures = 2
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("%s policy invalid: %v", name, err)
 		}
-		if name == visionanalyze.Name {
-			wantFailures = 2
-		}
-		switch name {
-		case "read_file", "search_files", "process_manage", "cronjob_manage":
-			wantUnproductive = 2
-			wantFailures = 2
-		case "write_file", "patch", "terminal", "execute_code":
-			wantFailures = 2
-		}
-		if policy.MaxExecutions != wantExecutions {
-			t.Fatalf("%s max executions = %d, want %d", name, policy.MaxExecutions, wantExecutions)
-		}
-		if policy.MaxUnproductive != wantUnproductive {
-			t.Fatalf("%s max unproductive = %d, want %d", name, policy.MaxUnproductive, wantUnproductive)
-		}
-		if policy.MaxFailures != wantFailures {
-			t.Fatalf("%s max failures = %d, want %d", name, policy.MaxFailures, wantFailures)
+		if policy.History.Mode == "" {
+			t.Fatalf("%s policy has no history mode", name)
 		}
 	}
 }
@@ -405,7 +385,7 @@ func TestRegisterImageGenerateProviderMatrix(t *testing.T) {
 			}
 			if test.enabled {
 				policy, ok := reg.Policy(imagegenerate.Name)
-				if !ok || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
+				if !ok || policy.History.Mode != governance.HistoryFull || policy.History.SearchResult || policy.NormalizeArgs == nil {
 					t.Fatalf("image_generate policy=%+v", policy)
 				}
 			}
@@ -445,8 +425,8 @@ func TestImageGenerateFingerprintScope(t *testing.T) {
 	reg := newTestRegistry(t, cfg)
 	name := imagegenerate.Name
 	policy, ok := reg.Policy(name)
-	if !ok || !policy.BlockDuplicates || policy.NormalizeArgs == nil {
-		t.Fatalf("missing image_generate duplicate policy: %+v", policy)
+	if !ok || policy.NormalizeArgs == nil {
+		t.Fatalf("missing image_generate normalize policy: %+v", policy)
 	}
 	fingerprint := func(args map[string]interface{}) string {
 		t.Helper()

@@ -138,7 +138,7 @@ func (p *Provider) Execute(ctx context.Context, principal identity.Principal, na
 
 // ToolPolicy returns the request-governance policy for a bridge tool.
 func (p *Provider) ToolPolicy(name string) governance.ToolPolicy {
-	policy := governance.ToolPolicy{BlockDuplicates: true, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}
+	policy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}
 	switch strings.TrimSpace(name) {
 	case ToolSearch:
 		policy.NormalizeArgs = func(args map[string]interface{}) interface{} {

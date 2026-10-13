@@ -133,7 +133,7 @@ func registerTestTool(t *testing.T, reg *Registry, name string) {
 }
 
 func testToolPolicy() governance.ToolPolicy {
-	return governance.ToolPolicy{MaxExecutions: 1, MaxFailures: 1, MaxUnproductive: 1}
+	return governance.ToolPolicy{}
 }
 
 func TestRegistryVisibilityAndOrdering(t *testing.T) {

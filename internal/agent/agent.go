@@ -422,7 +422,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
-	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure)
 	if request.Stateless {
 		var choiceErr error
 		initialCatalog, choiceErr = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
@@ -556,13 +556,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// provider, and must not count as model calls in the usage ledger.
 		respSynthetic := false
 
-		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, toolGovernor)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure)
 		if request.Stateless {
 			var choiceErr error
 			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)
 			if choiceErr != nil {
 				// The initial catalog already validated the choice; a later
-				// failure means governance retired an offered tool mid-request.
+				// failure means the offered catalog changed mid-request.
 				// Degrade to no tools rather than failing streamed work.
 				reqLog.Debug("agent.loop.client_tool_choice", "degraded stateless tool choice",
 					config.F("iteration", iteration),
@@ -809,7 +809,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// multiple to be safe.
 		historyBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
-		batchSeen := make(map[string]struct{}, len(resp.Message.ToolCalls))
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
@@ -840,16 +839,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				// no governance state is touched.
 				decision = governance.Decision{Allowed: true}
 			} else if iterationDecision.Allowed {
-				if dedupeFp, dedupeErr := governance.Fingerprint(toolName, tc.Function.Arguments, policy.NormalizeArgs); dedupeErr == nil {
-					if _, dup := batchSeen[dedupeFp]; dup {
-						decision = toolGovernor.NoteDuplicate(toolName)
-					} else {
-						batchSeen[dedupeFp] = struct{}{}
-						decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
-					}
-				} else {
-					decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
-				}
+				decision = toolGovernor.BeforeExecution(toolName, tc.Function.Arguments, policy, advertised)
 			}
 			if decision.Allowed && !isClientTool {
 				toolExecutionCount++
@@ -1111,8 +1101,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				config.F("tool_blocked_count", stats.Blocked),
 				config.F("guardrail_code", guardAdvice.Code),
 				config.F("guardrail_count", guardAdvice.Count),
-				config.F("guardrail_notice", observeOut.Kind),
-				config.F("is_tool_retired", advertised && toolGovernor.IsToolRetired(toolName, policy)))
+				config.F("guardrail_notice", observeOut.Kind))
 			if toolGovernor.HaltDecision() != nil {
 				break
 			}

@@ -3,7 +3,7 @@ package governance
 import "testing"
 
 func testPolicy() ToolPolicy {
-	return ToolPolicy{MaxExecutions: 3, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true}
+	return ToolPolicy{}
 }
 
 func testGlobal() GlobalPolicy {
@@ -41,14 +41,10 @@ func TestPoliciesValidateSafetyLimits(t *testing.T) {
 	if err := testGlobal().Validate(); err != nil {
 		t.Fatal(err)
 	}
-	invalidTool := testPolicy()
-	invalidTool.MaxUnproductive = -1
-	if err := invalidTool.Validate(); err == nil {
-		t.Fatal("negative unproductive limit was accepted")
-	}
-	unlimited := ToolPolicy{}
-	if err := unlimited.Validate(); err != nil {
-		t.Fatalf("zero-value unlimited policy was rejected: %v", err)
+	invalidHistory := testPolicy()
+	invalidHistory.History = HistoryPolicy{Mode: "unknown"}
+	if err := invalidHistory.Validate(); err == nil {
+		t.Fatal("unknown history mode was accepted")
 	}
 	invalidGlobal := testGlobal()
 	invalidGlobal.MaxExecutions = 0
@@ -57,20 +53,18 @@ func TestPoliciesValidateSafetyLimits(t *testing.T) {
 	}
 }
 
-func TestGovernorBlocksDuplicatesWithoutConsumingExecution(t *testing.T) {
+func TestGovernorExecutesRepeatsWithoutBlocking(t *testing.T) {
 	g := New(testGlobal())
 	policy := testPolicy()
-	decision := g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
-	if !decision.Allowed {
-		t.Fatalf("first decision = %+v", decision)
-	}
-	g.RecordResult("test.tool", decision, Result{Outcome: OutcomeProductive}, nil)
-	decision = g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
-	if decision.Allowed || decision.ReasonCode != ReasonDuplicate {
-		t.Fatalf("duplicate decision = %+v", decision)
+	for i := 0; i < 3; i++ {
+		decision := g.BeforeExecution("test.tool", map[string]interface{}{"q": "one"}, policy, true)
+		if !decision.Allowed {
+			t.Fatalf("repeat %d blocked: %+v", i, decision)
+		}
+		g.RecordResult("test.tool", decision, Result{Outcome: OutcomeProductive}, nil)
 	}
 	stats := g.Stats("test.tool")
-	if stats.Attempts != 2 || stats.Executions != 1 || stats.Duplicates != 1 || g.TotalExecutions() != 1 {
+	if stats.Attempts != 3 || stats.Executions != 3 || g.TotalExecutions() != 3 {
 		t.Fatalf("unexpected stats: %+v total=%d", stats, g.TotalExecutions())
 	}
 }
@@ -92,15 +86,15 @@ func TestGovernorAllowsExactRetryAfterExecutionFailure(t *testing.T) {
 	}
 	g.RecordResult("test.tool", retry, Result{Outcome: OutcomeProductive}, nil)
 
-	duplicate := g.BeforeExecution("test.tool", args, policy, true)
-	if duplicate.Allowed || duplicate.ReasonCode != ReasonDuplicate {
-		t.Fatalf("post-success duplicate decision = %+v", duplicate)
+	third := g.BeforeExecution("test.tool", args, policy, true)
+	if !third.Allowed {
+		t.Fatalf("post-success repeat decision = %+v", third)
 	}
 }
 
-func TestGovernorZeroLimitsDoNotRetireTool(t *testing.T) {
+func TestGovernorNeverRetiresToolsOnFailures(t *testing.T) {
 	g := New(GlobalPolicy{MaxExecutions: 20, MaxToolIterations: 20})
-	policy := ToolPolicy{BlockDuplicates: true}
+	policy := ToolPolicy{}
 	for i := 0; i < 10; i++ {
 		decision := g.BeforeExecution("unlimited.tool", map[string]interface{}{"n": i}, policy, true)
 		if !decision.Allowed {
@@ -108,58 +102,27 @@ func TestGovernorZeroLimitsDoNotRetireTool(t *testing.T) {
 		}
 		g.RecordResult("unlimited.tool", decision, Result{Outcome: OutcomeUnproductive}, assertError{})
 	}
-	if g.IsToolRetired("unlimited.tool", policy) {
-		t.Fatal("zero-limit tool was retired")
-	}
 	if g.GlobalStopReason() != "" || g.Stats("unlimited.tool").Failures != 10 {
-		t.Fatalf("failures must remain statistics, not a global ceiling: %+v", g.Stats("unlimited.tool"))
+		t.Fatalf("failures must remain statistics, not a ceiling: %+v", g.Stats("unlimited.tool"))
 	}
 }
 
-func TestGovernorRetiresOnlyExhaustedTool(t *testing.T) {
-	g := New(testGlobal())
+func TestGovernorNeverRetiresToolsOnUnproductiveResults(t *testing.T) {
+	g := New(GlobalPolicy{MaxExecutions: 20, MaxToolIterations: 20})
 	policy := testPolicy()
-	for i := 0; i < policy.MaxUnproductive; i++ {
+	for i := 0; i < 4; i++ {
 		decision := g.BeforeExecution("empty.tool", map[string]interface{}{"n": i}, policy, true)
 		if !decision.Allowed {
 			t.Fatalf("call %d blocked: %+v", i, decision)
 		}
 		g.RecordResult("empty.tool", decision, Result{Outcome: OutcomeUnproductive}, nil)
 	}
-	if !g.IsToolRetired("empty.tool", policy) {
-		t.Fatal("empty tool was not retired")
-	}
-	if g.IsToolRetired("other.tool", policy) {
-		t.Fatal("unrelated tool was retired")
-	}
-}
-
-func TestGovernorFailuresRetireOnlyExhaustedTool(t *testing.T) {
-	g := New(testGlobal())
-	policy := testPolicy()
-	badDecision := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true)
-	if !badDecision.Allowed {
-		t.Fatal(badDecision)
-	}
-	g.RecordResult("bad.tool", badDecision, Result{}, assertError{})
-	retry := g.BeforeExecution("bad.tool", map[string]interface{}{"n": 1}, policy, true)
-	if !retry.Allowed {
-		t.Fatal(retry)
-	}
-	g.RecordResult("bad.tool", retry, Result{}, assertError{})
-	if !g.IsToolRetired("bad.tool", policy) || g.GlobalStopReason() != "" {
-		t.Fatal("per-tool failures did not remain isolated")
-	}
-	if blocked := g.BeforeExecution("bad.tool", nil, policy, true); blocked.Allowed || blocked.ReasonCode != ReasonToolFailures {
-		t.Fatalf("retired tool decision = %+v", blocked)
+	if g.GlobalStopReason() != "" {
+		t.Fatal("per-tool unproductive results stopped the request")
 	}
 	goodDecision := g.BeforeExecution("good.tool", map[string]interface{}{"n": 1}, policy, true)
 	if !goodDecision.Allowed {
 		t.Fatal(goodDecision)
-	}
-	g.RecordResult("good.tool", goodDecision, Result{Outcome: OutcomeProductive}, nil)
-	if g.Stats("bad.tool").Failures != 2 {
-		t.Fatal("per-tool failure count was reset")
 	}
 }
 

@@ -552,7 +552,7 @@ func TestProcessDisablesToolsAfterIterationBudget(t *testing.T) {
 	}
 }
 
-func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
+func TestProcessExecutesRepeatAndDistinctCalls(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("first", "test.lookup", map[string]interface{}{"q": "same"}),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
@@ -574,13 +574,13 @@ func TestProcessBlocksExactDuplicateButAllowsDistinctCall(t *testing.T) {
 	if _, err := processAgent(agent, "duplicate", "imessage", "session", "user-1", "User", "lookup", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(invocations, ","); got != "same,different" {
-		t.Fatalf("handler invocations = %q, want same,different", got)
+	if got := strings.Join(invocations, ","); got != "same,same,different" {
+		t.Fatalf("handler invocations = %q, want same,same,different", got)
 	}
 	requests := primaryRequests(chat.requests)
 	duplicateResult := toolResultByID(requests[2].Messages, "duplicate")
-	if duplicateResult == nil || !strings.Contains(duplicateResult.Content, "same tool and arguments") {
-		t.Fatalf("duplicate call was not blocked with a matching result: %+v", requests[2].Messages)
+	if duplicateResult == nil || duplicateResult.Content != "result same" {
+		t.Fatalf("repeat call did not execute: %+v", requests[2].Messages)
 	}
 	if distinctResult := toolResultByID(requests[2].Messages, "distinct"); distinctResult == nil || distinctResult.Content != "result different" {
 		t.Fatalf("distinct call did not execute: %+v", requests[2].Messages)
@@ -619,15 +619,13 @@ func TestProcessAllowsExactRetryAfterToolFailure(t *testing.T) {
 	}
 }
 
-func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
+func TestProcessKeepsUnproductiveToolAdvertised(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		toolCallResponse("stale", "test.stale", nil),
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	policy := testToolPolicy()
-	policy.MaxUnproductive = 1
-	if err := registerTestTool(t, reg, testToolSpec{Name: "test.stale", Description: "Stale"}, policy, func(context.Context, map[string]interface{}) (governance.Result, error) {
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.stale", Description: "Stale"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return governance.Result{Content: "nothing useful", Outcome: governance.OutcomeUnproductive}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -643,8 +641,8 @@ func TestProcessRetiresOnlyUnproductiveTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := primaryRequests(chat.requests)
-	if requestHasTool(requests[1], "test.stale") || !requestHasTool(requests[1], "test.useful") {
-		t.Fatalf("per-tool retirement changed the wrong catalog: %+v", toolNames(requests[1]))
+	if !requestHasTool(requests[1], "test.stale") || !requestHasTool(requests[1], "test.useful") {
+		t.Fatalf("unproductive result removed the tool from the catalog: %+v", toolNames(requests[1]))
 	}
 }
 
@@ -1665,7 +1663,7 @@ func toolCallResponse(id, name string, args map[string]interface{}) *llm.ChatRes
 }
 
 func testToolPolicy() governance.ToolPolicy {
-	return governance.ToolPolicy{MaxExecutions: 4, MaxFailures: 2, MaxUnproductive: 2, BlockDuplicates: true}
+	return governance.ToolPolicy{}
 }
 
 func testGlobalPolicy() governance.GlobalPolicy {

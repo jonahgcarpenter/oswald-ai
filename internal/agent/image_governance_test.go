@@ -28,33 +28,33 @@ func TestImageGovernanceUsesExplicitCatalogSelector(t *testing.T) {
 		blocked int
 	}{
 		{
-			name:    "same explicit selector is duplicate",
+			name:    "same explicit selector executes twice",
 			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": "current-1"}},
-			uploads: []image.Point{image.Pt(2, 3)}, blocked: 1,
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 0,
 		},
 		{
 			name: "invalid selector values never submit",
 			args: []map[string]interface{}{{"image_url": ""}, {"image_url": nil}, {"image_url": 1}},
 		},
 		{
-			name:    "same source changed aspect ratio permits retry but same ratio blocks",
+			name:    "same source changed aspect ratio permits retry and repeats execute",
 			args:    []map[string]interface{}{{"image_url": "current-1", "aspect_ratio": "square"}, {"image_url": "current-1", "aspect_ratio": "portrait"}, {"image_url": "current-1", "aspect_ratio": "portrait"}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3)}, blocked: 1,
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(2, 3), image.Pt(2, 3)}, blocked: 0,
 		},
 		{
-			name:    "distinct explicit sources and exact duplicate",
+			name:    "distinct explicit sources and exact repeat all execute",
 			args:    []map[string]interface{}{{"image_url": "current-1"}, {"image_url": "current-2"}, {"image_url": "current-1"}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, blocked: 1,
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5), image.Pt(2, 3)}, blocked: 0,
 		},
 		{
-			name: "omitted selector always generates from text and duplicate is blocked",
+			name: "omitted selector always generates from text and repeats execute",
 			args: []map[string]interface{}{{}, {}, {}},
-			text: 1, blocked: 2,
+			text: 3, blocked: 0,
 		},
 		{
-			name:    "omitted and explicit selectors have different fingerprints",
+			name:    "omitted and explicit selectors all execute",
 			args:    []map[string]interface{}{{}, {"image_url": "current-1"}, {"image_url": "current-2"}, {"image_url": "current-2"}},
-			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5)}, text: 1, blocked: 1,
+			uploads: []image.Point{image.Pt(2, 3), image.Pt(4, 5), image.Pt(4, 5)}, text: 1, blocked: 0,
 		},
 		{
 			name:    "invalid explicit selectors still reach validation",

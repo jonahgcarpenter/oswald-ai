@@ -27,14 +27,11 @@ type offeredToolCatalog struct {
 	Policies map[string]governance.ToolPolicy
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, governor *governance.Governor) offeredToolCatalog {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure) offeredToolCatalog {
 	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
 	add := func(tool llm.Tool, policy governance.ToolPolicy) {
 		name := tool.Function.Name
 		if _, exists := catalog.Policies[name]; name == "" || exists {
-			return
-		}
-		if governor != nil && governor.IsToolRetired(name, policy) {
 			return
 		}
 		catalog.Tools = append(catalog.Tools, tool)
@@ -195,14 +192,6 @@ func normalizeToolCallIDs(message *llm.ChatMessage, iteration int) {
 
 func governanceResultText(reason string) string {
 	switch reason {
-	case governance.ReasonDuplicate:
-		return "Tool call blocked: the same tool and arguments were already executed in this request. Use the existing result or try meaningfully different arguments."
-	case governance.ReasonToolLimit:
-		return "Tool call blocked: this tool reached its execution limit for the request. Continue with the available results."
-	case governance.ReasonToolFailures:
-		return "Tool call blocked: the tool failure limit was reached. Continue without retrying this tool."
-	case governance.ReasonToolUnproductive:
-		return "Tool call blocked: this tool returned too many unproductive results. Continue with the available information."
 	case governance.ReasonGlobalLimit, governance.ReasonIterationLimit:
 		return "Tool call blocked: the request tool budget was exhausted. Finish the answer using the available results."
 	case governance.ReasonUnadvertised:
