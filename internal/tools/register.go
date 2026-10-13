@@ -29,7 +29,7 @@ import (
 // registerHandlers wires configured builtin handlers and policies into the registry.
 func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *files.Store, profileStore *memory.ProfileStore, cache *imagecache.Cache, log *config.Logger, peerMaps ...map[string]*memory.ProfileStore) error {
 	bootstrapLog := log.Server("tool.bootstrap")
-	visionPolicy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
+	visionPolicy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
 	if err := reg.RegisterHandler(visionanalyze.Name, visionPolicy, registry.Handler(visionanalyze.NewHandler(cache))); err != nil {
 		return fmt.Errorf("register vision_analyze tool: %w", err)
 	}
@@ -53,8 +53,8 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 			return fmt.Errorf("initialize ComfyUI client: %w", err)
 		}
 		policy := governance.ToolPolicy{
-			BlockDuplicates: true, NormalizeArgs: normalizeImageGenerateArgs,
-			History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
+			NormalizeArgs: normalizeImageGenerateArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
 		}
 		if err := reg.RegisterHandler(imagegenerate.Name, policy, registry.Handler(imagegenerate.NewHandler(textWorkflow, imageWorkflow, client, cache, log))); err != nil {
 			return fmt.Errorf("initialize %s tool: %w", imagegenerate.Name, err)
@@ -100,8 +100,7 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		bootstrapLog.Debug("tool.bootstrap.disabled", "disabled web search because no search provider is configured", config.F("tool_name", websearch.Name))
 	}
 	if searcher != nil {
-		searchPolicy := toolPolicy(2, normalizeWebSearchArgs)
-		searchPolicy.MaxFailures = 2
+		searchPolicy := toolPolicy(normalizeWebSearchArgs)
 		if err := reg.RegisterHandler(websearch.Name, searchPolicy, registry.Handler(websearch.NewHandler(searcher, log))); err != nil {
 			return fmt.Errorf("failed to initialize web_search tool: %w", err)
 		}
@@ -114,10 +113,8 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	if profileStore != nil {
 		sessionPolicy := governance.ToolPolicy{
-			MaxUnproductive: 2,
-			BlockDuplicates: true,
-			NormalizeArgs:   normalizeSessionSearchArgs,
-			History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
+			NormalizeArgs: normalizeSessionSearchArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 		}
 		if err := reg.RegisterHandler(sessionsearch.Name, sessionPolicy, registry.Handler(sessionsearch.NewHandler(profileStore, peerMaps...))); err != nil {
 			return fmt.Errorf("register session_search tool: %w", err)
@@ -132,14 +129,14 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		policy  governance.ToolPolicy
 		handler registry.Handler
 	}{
-		{workspace.ReadFileName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandler(ws))},
-		{workspace.WriteFileName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
-		{workspace.PatchName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
-		{workspace.SearchFilesName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
-		{workspace.TerminalName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
-		{workspace.ExecuteCodeName, governance.ToolPolicy{MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
-		{workspace.ProcessManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
-		{workspace.CronjobManageName, governance.ToolPolicy{MaxUnproductive: 2, MaxFailures: 2, BlockDuplicates: true, NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},
+		{workspace.ReadFileName, governance.ToolPolicy{NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandler(ws))},
+		{workspace.WriteFileName, governance.ToolPolicy{NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
+		{workspace.PatchName, governance.ToolPolicy{NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
+		{workspace.SearchFilesName, governance.ToolPolicy{NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},
+		{workspace.TerminalName, governance.ToolPolicy{NormalizeArgs: normalizeTerminalArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewTerminalHandler(ws, pm))},
+		{workspace.ExecuteCodeName, governance.ToolPolicy{NormalizeArgs: normalizeExecuteCodeArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewExecuteCodeHandler(ws))},
+		{workspace.ProcessManageName, governance.ToolPolicy{NormalizeArgs: normalizeProcessManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewProcessManageHandler(ws, pm))},
+		{workspace.CronjobManageName, governance.ToolPolicy{NormalizeArgs: normalizeCronjobManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewCronjobManageHandler(ws, cronStore))},
 	}
 	for _, tool := range workspaceTools {
 		if err := reg.RegisterHandler(tool.name, tool.policy, tool.handler); err != nil {
@@ -150,12 +147,10 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 	return nil
 }
 
-func toolPolicy(maxUnproductive int, normalize governance.ArgumentNormalizer) governance.ToolPolicy {
+func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 	return governance.ToolPolicy{
-		MaxUnproductive: maxUnproductive,
-		BlockDuplicates: true,
-		NormalizeArgs:   normalize,
-		History:         governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
+		NormalizeArgs: normalize,
+		History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
 }
 

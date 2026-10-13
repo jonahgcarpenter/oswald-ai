@@ -27,7 +27,7 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 	if err := reg.RegisterDefinition(visionanalyze.Definition()); err != nil {
 		t.Fatal(err)
 	}
-	policy := governance.ToolPolicy{BlockDuplicates: true, MaxFailures: 2, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
+	policy := governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}
 	if err := reg.RegisterHandler(visionanalyze.Name, policy, registry.Handler(visionanalyze.NewHandler(a.imageCache))); err != nil {
 		t.Fatal(err)
 	}

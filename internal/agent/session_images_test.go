@@ -252,7 +252,6 @@ func TestModelFailureAfterImagesFinalizesSelectedOutputs(t *testing.T) {
 						a.log = config.NewLogger(config.LevelDebug)
 						a.log.SetOutput(&logs)
 						policy := testToolPolicy()
-						policy.MaxExecutions = 0
 						count := 0
 						editArgs := map[string]interface{}{"prompt": "edit"}
 						chat.onChat = func(req llm.ChatRequest) {
@@ -441,7 +440,6 @@ func TestGeneratedImageVersionsSelectFinalsAndPreserveOtherAttachments(t *testin
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, store := newTestAgent(t, chat, nil, reg)
 	policy := testToolPolicy()
-	policy.MaxExecutions = 0
 	policy.History.Mode = governance.HistoryMetadata
 	firstEditArgs := map[string]interface{}{"prompt": "purple"}
 	ancestorArgs := map[string]interface{}{"prompt": "retry ancestor"}
@@ -549,7 +547,6 @@ func TestGeneratedImageCapacityRejectsBeforeProvider(t *testing.T) {
 	reg := registry.New(config.NewLogger(config.LevelError))
 	a, _ := newTestAgent(t, chat, nil, reg)
 	policy := testToolPolicy()
-	policy.MaxExecutions = 0
 	calls := 0
 	image := testInputImage(t, 2, 3)
 	data, _ := base64.StdEncoding.DecodeString(image.Data)
@@ -707,7 +704,6 @@ func TestGeneratedImagesChainWithinBatchAndReachToolsDisabledFinal(t *testing.T)
 	previous := current.Data
 	count := 0
 	policy := testToolPolicy()
-	policy.MaxExecutions = 0
 	policy.History.Mode = governance.HistoryMetadata
 	err := registerTestTool(t, reg, testToolSpec{Name: imagegenerate.Name, Description: "edit"}, policy, func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		sources := requestctx.InputImagesFromContext(ctx)

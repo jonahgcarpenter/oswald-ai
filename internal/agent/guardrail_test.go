@@ -54,8 +54,7 @@ func TestProcessStubIsTransientOnly(t *testing.T) {
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}},
 	}}
 	reg := registry.New(config.NewLogger(config.LevelError))
-	// No BlockDuplicates so the identical success executes twice and the
-	// streak/stub path is exercised (mirrors the memory tool policy).
+	// Identical calls always execute, so the streak/stub path is exercised.
 	if err := registerTestTool(t, reg, testToolSpec{Name: "test.big", Description: "Big"}, governance.ToolPolicy{}, func(context.Context, map[string]interface{}) (governance.Result, error) {
 		return productiveResult(full), nil
 	}); err != nil {
@@ -98,7 +97,7 @@ func TestProcessStubIsTransientOnly(t *testing.T) {
 	}
 }
 
-func TestProcessIntraBatchDuplicateBlocked(t *testing.T) {
+func TestProcessIntraBatchRepeatExecutes(t *testing.T) {
 	args := map[string]interface{}{"q": "same"}
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
@@ -119,12 +118,12 @@ func TestProcessIntraBatchDuplicateBlocked(t *testing.T) {
 	if _, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "User", "go", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("handler invocations=%d, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("handler invocations=%d, want 2", calls)
 	}
 	requests := primaryRequests(chat.requests)
 	second := toolResultByID(requests[1].Messages, "two")
-	if second == nil || !strings.Contains(second.Content, "same tool and arguments") {
-		t.Fatalf("second in-batch call not blocked as duplicate: %+v", requests[1].Messages)
+	if second == nil || second.Content != "ok" {
+		t.Fatalf("second in-batch call did not execute: %+v", requests[1].Messages)
 	}
 }

@@ -343,11 +343,8 @@ func TestBridgeToolPoliciesHaveNoPerToolLimits(t *testing.T) {
 	provider := &Provider{}
 	for _, name := range []string{ToolSearch, ToolDescribe, ToolCall} {
 		policy := provider.ToolPolicy(name)
-		if policy.MaxExecutions != 0 || policy.MaxFailures != 0 || policy.MaxUnproductive != 0 {
-			t.Fatalf("%s policy has per-tool limits: %+v", name, policy)
-		}
-		if !policy.BlockDuplicates {
-			t.Fatalf("%s does not block completed duplicates", name)
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("%s policy invalid: %v", name, err)
 		}
 		if policy.History.Mode != governance.HistoryFull || !policy.History.SearchResult {
 			t.Fatalf("%s history policy = %+v", name, policy.History)
