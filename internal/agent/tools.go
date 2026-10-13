@@ -9,6 +9,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
@@ -27,11 +28,15 @@ type offeredToolCatalog struct {
 	Policies map[string]governance.ToolPolicy
 }
 
-func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure) offeredToolCatalog {
+func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principal, exposure *exposure.Exposure, enabledToolsets []string) offeredToolCatalog {
 	catalog := offeredToolCatalog{Policies: make(map[string]governance.ToolPolicy)}
+	allowed := allowedBuiltins(enabledToolsets)
 	add := func(tool llm.Tool, policy governance.ToolPolicy) {
 		name := tool.Function.Name
 		if _, exists := catalog.Policies[name]; name == "" || exists {
+			return
+		}
+		if allowed != nil && !allowed[name] {
 			return
 		}
 		catalog.Tools = append(catalog.Tools, tool)
@@ -43,13 +48,45 @@ func (a *Agent) toolsForRequest(ctx context.Context, principal identity.Principa
 			add(tool, policy)
 		}
 	}
-	if a.mcpProvider == nil {
+	// The background-polling hint names process_manage, so it is injected
+	// only when that tool is actually advertised; the static description
+	// never references tools from other toolsets.
+	if catalogHas(catalog, workspace.TerminalName) && catalogHas(catalog, workspace.ProcessManageName) {
+		for i := range catalog.Tools {
+			if catalog.Tools[i].Function.Name == workspace.TerminalName && !strings.Contains(catalog.Tools[i].Function.Description, "process_manage") {
+				catalog.Tools[i].Function.Description += " Use background=true only for processes that must outlive the call, then poll with process_manage."
+			}
+		}
+	}
+	// A restricted toolset list suppresses the MCP bridge so scheduled runs
+	// get deterministic catalogs; nil leaves interactive behavior unchanged.
+	if enabledToolsets != nil || a.mcpProvider == nil {
 		return catalog
 	}
 	for _, tool := range a.mcpProvider.BridgeTools(ctx, principal) {
 		add(tool, a.mcpProvider.ToolPolicy(tool.Function.Name))
 	}
 	return catalog
+}
+
+// allowedBuiltins maps toolset names to their member tools. Nil means no
+// filtering; an empty list hides every builtin.
+func allowedBuiltins(enabledToolsets []string) map[string]bool {
+	if enabledToolsets == nil {
+		return nil
+	}
+	allowed := make(map[string]bool)
+	for _, set := range enabledToolsets {
+		for _, name := range tools.ToolsetMembers(set) {
+			allowed[name] = true
+		}
+	}
+	return allowed
+}
+
+func catalogHas(catalog offeredToolCatalog, name string) bool {
+	_, ok := catalog.Policies[name]
+	return ok
 }
 
 // toolsForStatelessRequest combines caller-supplied client tools with Oswald

@@ -17,6 +17,11 @@ func (g *Gateway) Name() string {
 	return "iMessage"
 }
 
+// CronGatewayName identifies this gateway for scheduler delivery.
+func (g *Gateway) CronGatewayName() string {
+	return "imessage"
+}
+
 // Start initializes the BlueBubbles webhook listener.
 func (g *Gateway) Start(b *broker.Broker) error {
 	g.Broker = b

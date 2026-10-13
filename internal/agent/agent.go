@@ -305,7 +305,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			}
 		}
 	}
-	if a.fileMemory != nil {
+	if a.fileMemory != nil && !request.SkipMemory {
 		filesStarted := time.Now()
 		var userContent, memoryContent string
 		bound := false
@@ -422,7 +422,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 	}
 
-	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure)
+	initialCatalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets)
 	if request.Stateless {
 		var choiceErr error
 		initialCatalog, choiceErr = a.toolsForStatelessRequest(initialCatalog, request.ClientTools, request.ClientToolChoice)
@@ -556,7 +556,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// provider, and must not count as model calls in the usage ledger.
 		respSynthetic := false
 
-		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure)
+		catalog := a.toolsForRequest(ctx, request.Principal, toolExposure, request.EnabledToolsets)
 		if request.Stateless {
 			var choiceErr error
 			catalog, choiceErr = a.toolsForStatelessRequest(catalog, request.ClientTools, request.ClientToolChoice)

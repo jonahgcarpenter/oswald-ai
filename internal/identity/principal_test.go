@@ -18,6 +18,8 @@ func TestPrincipalValidityAndAuthentication(t *testing.T) {
 		{name: "openai local", principal: Principal{CanonicalUserID: "usr_1", Gateway: "openai", ExternalID: LocalOpenAIIdentifier, Assurance: AssuranceLocalLoopback}, valid: true, authenticated: true},
 		{name: "openai wrong identifier", principal: Principal{CanonicalUserID: "usr_1", Gateway: "openai", ExternalID: "other", Assurance: AssuranceLocalLoopback}, valid: false},
 		{name: "openai wrong assurance", principal: Principal{CanonicalUserID: "usr_1", Gateway: "openai", ExternalID: LocalOpenAIIdentifier, Assurance: AssuranceSelfAsserted}, valid: false},
+		{name: "cron scheduler", principal: Principal{CanonicalUserID: "alice", Gateway: "cron", ExternalID: "cron:alice", Assurance: AssuranceCronScheduler}, valid: true, authenticated: true},
+		{name: "cron wrong assurance", principal: Principal{CanonicalUserID: "alice", Gateway: "cron", ExternalID: "cron:alice", Assurance: AssuranceSelfAsserted}, valid: false},
 	}
 
 	for _, tt := range tests {

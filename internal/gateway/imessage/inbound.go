@@ -127,6 +127,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	canonicalUserID := principal.CanonicalUserID
 
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
+	rememberCronChat(sessionKey, chat.GUID)
 	log = log.With(config.F("profile", canonicalUserID))
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
