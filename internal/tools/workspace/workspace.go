@@ -166,6 +166,7 @@ const (
 	denySoul
 	denyConfig
 	denyProfile
+	denyCache
 )
 
 // DenyError marks a path refused by the workspace sandbox. Error stays
@@ -214,6 +215,11 @@ func DenyMessage(rel string, category DenyCategory, write bool) string {
 		return "Access denied: " + rel + " is operator configuration and cannot be read by tools."
 	case denyProfile:
 		return "Access denied: " + rel + " belongs to another profile and cannot be accessed."
+	case denyCache:
+		if write {
+			return "Write denied: '" + rel + "' is managed cache; write temporary files under 'cache/scratch/'."
+		}
+		return "Access denied: " + rel + " is managed cache; use 'cache/scratch/' for temporary files."
 	default:
 		return "path is not accessible"
 	}
@@ -266,6 +272,18 @@ func (w *Workspace) checkDenied(rel string) error {
 	// Memory-tool state bypasses entry validation and locking.
 	if first == "memories" {
 		return &DenyError{Rel: rel, Category: denyMemory}
+	}
+	// Managed cache is never written directly: the model may use
+	// cache/scratch/ for temporary files, but cache siblings (processes,
+	// ad-hoc GOPATH-style dirs) and .cache/images are service-owned.
+	if first == "cache" {
+		if rel == "cache/scratch" || strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator)) {
+			return nil
+		}
+		return &DenyError{Rel: rel, Category: denyCache}
+	}
+	if first == ".cache" {
+		return &DenyError{Rel: rel, Category: denyCache}
 	}
 	return nil
 }

@@ -52,5 +52,8 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 	if ScanProfileEscapeShell(pending.Command, pending.Workdir) {
 		return governance.Result{}, errors.New("approved command refused on re-scan: cross-profile access")
 	}
+	if ScanManagedCacheShell(pending.Command, pending.Workdir) {
+		return governance.Result{}, errors.New("approved command refused on re-scan: managed cache access")
+	}
 	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, pending.Timeout, pending.Background, pending.Persist, 0, "")
 }

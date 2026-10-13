@@ -131,6 +131,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	stores := map[string]*memory.ProfileStore{}
 	compactors := map[string]*compaction.LLMCompactor{}
 	var imageWorkers []*imagecache.Worker
+	var scratchWorkers []*workspace.Worker
 	var compressionWorkers []*compaction.ProfileService
 	var cronTickers []*cron.Ticker
 	cronStores := make(map[string]*cron.Store)
@@ -147,6 +148,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			}
 		}
 		for _, worker := range imageWorkers {
+			worker.Stop()
+		}
+		for _, worker := range scratchWorkers {
 			worker.Stop()
 		}
 		for _, stop := range maintenanceStops {
@@ -227,6 +231,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		worker := imagecache.NewWorker(cache, rootLog)
 		worker.Start()
 		imageWorkers = append(imageWorkers, worker)
+		scratchWorker := workspace.NewWorker(profile.ProfileRoot, rootLog)
+		scratchWorker.Start()
+		scratchWorkers = append(scratchWorkers, scratchWorker)
 		cronRunner := &cron.Runner{Root: profile.ProfileRoot}
 		if ws := workspace.NewWorkspace(profile.ProfileRoot, name); ws.Root() != "" {
 			cronRunner.Resolve = func(raw string) (string, error) {

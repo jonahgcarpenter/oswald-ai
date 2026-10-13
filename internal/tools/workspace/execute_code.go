@@ -47,6 +47,9 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		if ScanProfileEscapeCode(code, ws.Root()) {
 			return governance.Result{}, errors.New("cross-profile access is not allowed")
 		}
+		if ScanManagedCacheCode(code, ws.Root()) {
+			return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
+		}
 		reset, err := boolArg(args, "reset", false)
 		if err != nil {
 			return governance.Result{}, err
