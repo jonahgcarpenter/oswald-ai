@@ -59,7 +59,6 @@ func TestDiscoveryRolesTitlesAndNativeToolSearchPolicy(t *testing.T) {
 		{"deploy*", nil, 1, "title"},
 		{"Deployment", map[string]bool{"tool": true}, 0, ""},
 		{"privateimageword", map[string]bool{"tool": true}, 0, ""},
-		{"pendingword OR pendingtoolword", map[string]bool{"user": true, "tool": true}, 0, ""},
 		{"userword NOT assistantword", nil, 1, "user"},
 	} {
 		t.Run(test.query+fmt.Sprint(test.roles), func(t *testing.T) {
@@ -74,6 +73,11 @@ func TestDiscoveryRolesTitlesAndNativeToolSearchPolicy(t *testing.T) {
 				t.Fatal("native tool match did not use its stable assistant message anchor")
 			}
 		})
+	}
+	// Pending turns are searchable alongside delivered turns.
+	pendingResults, err := s.DiscoverySessions(ctx, s.profile, SearchFilter{Query: "pendingword OR pendingtoolword", Roles: map[string]bool{"user": true, "tool": true}})
+	if err != nil || len(pendingResults) != 1 {
+		t.Fatalf("pending results=%+v err=%v", pendingResults, err)
 	}
 	first, _, _, err := s.SessionTranscript(ctx, s.profile, id, 20, 10)
 	if err != nil || len(first) != 4 || len(first[3].History.Batches) != 1 || first[3].History.Batches[0].Calls[0].Result != "connection refused toolword" {
@@ -168,7 +172,7 @@ func TestSearchWindowsStayInsideConcreteSessionAndReadWholeShortSessions(t *test
 	}
 }
 
-func TestBrowseOnlyDeliveredDistinctLineagesAndResetHistoryRemainsSearchable(t *testing.T) {
+func TestBrowseDistinctLineagesAndResetHistoryRemainsSearchable(t *testing.T) {
 	s, _ := newProfileStateFixture(t)
 	ctx := context.Background()
 	_, id := searchTurn(t, s, "discord:dm:past", "resetkeyword", "answer", EmptyToolHistory(), true)
@@ -187,9 +191,22 @@ func TestBrowseOnlyDeliveredDistinctLineagesAndResetHistoryRemainsSearchable(t *
 			t.Fatal(err)
 		}
 	}
-	records, err := s.RecentSessionsExcluding(ctx, s.profile, live, 1)
-	if err != nil || len(records) != 1 || records[0].SessionID != id || records[0].MessageCount != 2 {
+	records, err := s.RecentSessionsExcluding(ctx, s.profile, live, 2)
+	if err != nil || len(records) != 2 {
 		t.Fatalf("browse was starved by pending/live lineage: %+v err=%v", records, err)
+	}
+	foundPast := false
+	foundPending := false
+	for _, record := range records {
+		if record.SessionID == id && record.MessageCount == 2 {
+			foundPast = true
+		}
+		if record.SessionID != id && record.MessageCount == 2 {
+			foundPending = true
+		}
+	}
+	if !foundPast || !foundPending {
+		t.Fatalf("browse missed stored sessions: %+v", records)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()

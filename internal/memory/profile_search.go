@@ -22,7 +22,7 @@ type SearchSession struct {
 	Snippet        string
 }
 
-// SearchMessage is one delivered message rendered in a window or transcript.
+// SearchMessage is one stored message rendered in a window or transcript.
 type SearchMessage struct {
 	ID         int64
 	Role       string
@@ -34,7 +34,7 @@ type SearchMessage struct {
 	Timestamp  time.Time
 }
 
-// SessionSummaryRecord describes one delivered session for browse results.
+// SessionSummaryRecord describes one stored session for browse results.
 type SessionSummaryRecord struct {
 	SessionID    string
 	Source       string
@@ -47,10 +47,10 @@ type SessionSummaryRecord struct {
 }
 
 const (
-	// searchEligible is the delivery and profile filter shared by every shape.
+	// searchEligible is the profile filter shared by every shape.
 	// Generation equality is intentionally not required: /new keeps prior
-	// sessions as searchable history, and nothing eager-deletes delivered rows.
-	searchEligible       = `m.active=1 AND s.profile_name=?`
+	// sessions as searchable history, and nothing eager-deletes stored rows.
+	searchEligible       = `s.profile_name=?`
 	searchMessageColumns = `m.id,m.role,COALESCE(m.content,''),COALESCE(m.tool_name,''),COALESCE(m.tool_calls,''),COALESCE(m.tool_call_id,''),m.timestamp,COALESCE(v.value,'')`
 	searchMessageJoin    = ` FROM messages m JOIN sessions s ON s.id=m.session_id LEFT JOIN state_meta v ON m.role='assistant' AND v.key=('oswald:v1:turn:'||m.session_id||':'||m.id) `
 )
@@ -126,7 +126,7 @@ func (s *ProfileStore) SessionKeyFor(ctx context.Context, owner, id string) (ses
 	return sessionKey, source, nil
 }
 
-// DiscoverySessions runs an FTS5 search over delivered messages and returns one
+// DiscoverySessions runs an FTS5 search over stored messages and returns one
 // deduplicated session per lineage. It performs no LLM work and returns stored
 // message rows only.
 func (s *ProfileStore) DiscoverySessions(ctx context.Context, owner string, filter SearchFilter) ([]SearchSession, error) {
@@ -208,7 +208,7 @@ func (s *ProfileStore) excludedLineage(ctx context.Context, owner string, ids []
 	return excluded, nil
 }
 
-// lineageRoot walks parents to the oldest related session delivered to owner.
+// lineageRoot walks parents to the oldest related session stored for owner.
 // The supplied identifier may be a session id or a session key; the latter is
 // accepted so an `@session` link echoed from older context still resolves.
 func (s *ProfileStore) lineageRoot(ctx context.Context, owner, id string) (string, error) {
@@ -241,7 +241,7 @@ func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*S
 	var summary SearchSession
 	var started, last sql.NullFloat64
 	var title, model sql.NullString
-	err := s.db.SQL().QueryRowContext(ctx, `SELECT s.id,s.source,COALESCE(s.model,''),COALESCE(s.title,''),s.started_at,COALESCE(s.last_activity_at,s.started_at),(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id AND m.active=1) FROM sessions s WHERE s.id=? AND s.profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount)
+	err := s.db.SQL().QueryRowContext(ctx, `SELECT s.id,s.source,COALESCE(s.model,''),COALESCE(s.title,''),s.started_at,COALESCE(s.last_activity_at,s.started_at),(SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id) FROM sessions s WHERE s.id=? AND s.profile_name=?`, id, owner).Scan(&summary.SessionID, &summary.Source, &model, &title, &started, &last, &summary.MessageCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -255,8 +255,8 @@ func (s *ProfileStore) sessionSummary(ctx context.Context, owner, id string) (*S
 	return &summary, nil
 }
 
-// SessionWindow returns an anchored slice of delivered messages around anchorID.
-// window is clamped to [1,20]. Only delivered rows from this session apply.
+// SessionWindow returns an anchored slice of stored messages around anchorID.
+// window is clamped to [1,20]. Only rows from this session apply.
 func (s *ProfileStore) SessionWindow(ctx context.Context, owner, sessionID string, anchorID int64, window int) (before []SearchMessage, anchor *SearchMessage, after []SearchMessage, err error) {
 	if owner != s.profile {
 		return nil, nil, nil, errors.New("invalid profile search scope")
@@ -295,7 +295,7 @@ func (s *ProfileStore) SessionWindow(ctx context.Context, owner, sessionID strin
 	return before, anchor, after, nil
 }
 
-// SessionWindowRemainder counts delivered messages outside a returned window.
+// SessionWindowRemainder counts stored messages outside a returned window.
 // Boundary ids must be from the requested session, just like scroll anchors.
 func (s *ProfileStore) SessionWindowRemainder(ctx context.Context, owner, sessionID string, firstID, lastID int64) (before, after int, err error) {
 	if owner != s.profile || firstID <= 0 || lastID < firstID {
@@ -366,7 +366,7 @@ func (s *ProfileStore) windowMessages(ctx context.Context, owner, sessionID stri
 	return messages, nil
 }
 
-// SessionTranscript returns the transcript for one delivered session, bounded
+// SessionTranscript returns the transcript for one stored session, bounded
 // to first and last rows when the session is larger than the chunk.
 func (s *ProfileStore) SessionTranscript(ctx context.Context, owner, sessionID string, head, tail int) (first, last []SearchMessage, count int, err error) {
 	if owner != s.profile {
@@ -433,7 +433,7 @@ func (s *ProfileStore) transcriptChunk(ctx context.Context, owner, sessionID str
 	return messages, nil
 }
 
-// RecentSessions returns the most recently active delivered sessions.
+// RecentSessions returns the most recently active stored sessions.
 func (s *ProfileStore) RecentSessions(ctx context.Context, owner string, limit int) ([]SessionSummaryRecord, error) {
 	return s.recentSessions(ctx, owner, "", limit)
 }
@@ -450,18 +450,18 @@ func (s *ProfileStore) recentSessions(ctx context.Context, owner, liveSessionID 
 		return nil, err
 	}
 	// Only the live session and the sessions forked from it are omitted;
-	// older generations are delivered history and remain browsable.
+	// older generations are stored history and remain browsable.
 	subtree, err := s.lineageSubtree(ctx, owner, liveSessionID)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.SQL().QueryContext(ctx, `
 SELECT s.id, s.source, COALESCE(s.model,''), COALESCE(s.title,''),
-       s.started_at, COALESCE(s.last_activity_at, s.started_at), (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id AND m.active=1),
-       COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id AND m.active=1 ORDER BY m.id LIMIT 1),'')
+       s.started_at, COALESCE(s.last_activity_at, s.started_at), (SELECT COUNT(*) FROM messages m WHERE m.session_id=s.id),
+       COALESCE((SELECT m.content FROM messages m WHERE m.session_id=s.id ORDER BY m.id LIMIT 1),'')
 FROM sessions s
 WHERE s.profile_name=? AND s.source IN ('discord','imessage')
-AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.active=1)
+AND EXISTS(SELECT 1 FROM messages m WHERE m.session_id=s.id)
 ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC,s.id`, owner)
 	if err != nil {
 		return nil, err
@@ -525,7 +525,7 @@ func secondsToTime(seconds float64) time.Time {
 // Profile returns the trusted profile this store serves.
 func (s *ProfileStore) Profile() string { return s.profile }
 
-// SessionSummaryFor returns delivered session metadata for one session id.
+// SessionSummaryFor returns stored session metadata for one session id.
 func (s *ProfileStore) SessionSummaryFor(ctx context.Context, owner, id string) (*SearchSession, error) {
 	if owner != s.profile {
 		return nil, errors.New("invalid profile search scope")
@@ -588,7 +588,7 @@ func (s *ProfileStore) SharesLineage(ctx context.Context, owner, left, right str
 	return leftRoot == rightRoot, nil
 }
 
-// RecentSessionsExcluding returns recent delivered sessions with the live
+// RecentSessionsExcluding returns recent stored sessions with the live
 // conversation and its forks omitted. Lineage mates dedupe to one entry per
 // lineage root.
 func (s *ProfileStore) RecentSessionsExcluding(ctx context.Context, owner, liveSessionID string, limit int) ([]SessionSummaryRecord, error) {
