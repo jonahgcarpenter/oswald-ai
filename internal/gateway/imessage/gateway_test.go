@@ -542,6 +542,135 @@ func TestIMessageAcceptedMessageStartsTypingAndMarksRead(t *testing.T) {
 	}
 }
 
+func TestIMessageStopsTypingAfterAgentResponse(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:   "msg-stop-1",
+		Text:   "hello imessage",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+	})
+
+	const typingPath = "/api/v1/chat/chat-direct/typing"
+	if !bb.waitForMethodPath(http.MethodPost, typingPath) {
+		t.Fatalf("expected typing start, got %+v", bb.orderedMethodPaths())
+	}
+	if !bb.waitForSentCount(1) {
+		t.Fatal("expected agent response to be sent")
+	}
+	if !bb.waitForMethodPath(http.MethodDelete, typingPath) {
+		t.Fatalf("expected typing stop after send, got %+v", bb.orderedMethodPaths())
+	}
+	postIdx, deleteIdx := -1, -1
+	for i, req := range bb.orderedMethodPaths() {
+		if req.path != typingPath {
+			continue
+		}
+		if req.method == http.MethodPost && postIdx < 0 {
+			postIdx = i
+		}
+		if req.method == http.MethodDelete && deleteIdx < 0 {
+			deleteIdx = i
+		}
+	}
+	if postIdx < 0 || deleteIdx < 0 || deleteIdx < postIdx {
+		t.Fatalf("expected typing stop after start, got post=%d delete=%d in %+v", postIdx, deleteIdx, bb.orderedMethodPaths())
+	}
+}
+
+func TestIMessageStopsTypingAfterCommandResponse(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	g.processIncomingMessage(webhookMessage{
+		GUID:   "msg-stop-cmd",
+		Text:   "/help",
+		Handle: messageHandle{Address: "+15551234567"},
+		Chats:  []messageChat{{GUID: "chat-direct", Style: chatStyleDirect}},
+	})
+
+	const typingPath = "/api/v1/chat/chat-direct/typing"
+	if !bb.waitForSentCount(1) {
+		t.Fatal("expected command response to be sent")
+	}
+	if !bb.waitForMethodPath(http.MethodPost, typingPath) {
+		t.Fatalf("expected typing start, got %+v", bb.orderedMethodPaths())
+	}
+	if !bb.waitForMethodPath(http.MethodDelete, typingPath) {
+		t.Fatalf("expected typing stop after command send, got %+v", bb.orderedMethodPaths())
+	}
+	postIdx, deleteIdx := -1, -1
+	for i, req := range bb.orderedMethodPaths() {
+		if req.path != typingPath {
+			continue
+		}
+		if req.method == http.MethodPost && postIdx < 0 {
+			postIdx = i
+		}
+		if req.method == http.MethodDelete && deleteIdx < 0 {
+			deleteIdx = i
+		}
+	}
+	if postIdx < 0 || deleteIdx < 0 || deleteIdx < postIdx {
+		t.Fatalf("expected typing stop after start on fast command path, got post=%d delete=%d in %+v", postIdx, deleteIdx, bb.orderedMethodPaths())
+	}
+}
+
+func TestIMessageResponderStopsTypingOnAllTerminalSends(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	gate := newTypingGate()
+	gate.finish()
+	g := &Gateway{BlueBubblesURL: bb.server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	r := &runtimeResponder{gateway: g, requestID: "stop-test", chatGUID: "chat-direct", sessionKey: "session", senderID: "sender", typingGate: gate}
+
+	attachment := []commands.Attachment{{Filename: "note.txt", MIMEType: "text/plain", Data: []byte("data")}}
+	sends := []func() error{
+		func() error { return r.SendFallback("fallback") },
+		func() error { return r.SendCommandResponse(commands.Result{Text: "command"}) },
+		func() error { return r.SendCommandResponse(commands.Result{Attachments: attachment}) },
+		func() error { return r.SendAgentError("error") },
+		func() error { return r.SendAgentResponse(nil) },
+		func() error { return r.SendAgentResponse(&agent.Response{Response: "  "}) },
+		func() error {
+			return r.SendAgentResponse(&agent.Response{Response: "agent", Attachments: []media.OutputAttachment{{Filename: "out.txt", MIMEType: "text/plain", Data: []byte("data")}}})
+		},
+		func() error { return r.CancelAgentResponse() },
+	}
+	for i, send := range sends {
+		if err := send(); err != nil {
+			t.Fatalf("send %d failed: %v", i, err)
+		}
+	}
+	if err := r.SendCommandResponse(commands.Result{Attachments: []commands.Attachment{{}}}); err == nil {
+		t.Fatal("expected invalid attachments to fail")
+	}
+
+	want := len(sends) + 1
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		count := 0
+		for _, req := range bb.orderedMethodPaths() {
+			if req.method == http.MethodDelete && req.path == "/api/v1/chat/chat-direct/typing" {
+				count++
+			}
+		}
+		if count >= want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected %d typing stops, got %d in %+v", want, count, bb.orderedMethodPaths())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestIMessageBannedIdentitySendsNothing(t *testing.T) {
 	bb := newFakeBlueBubbles(t)
 	defer bb.server.Close()
@@ -940,11 +1069,17 @@ type fakeBlueBubbles struct {
 	mu               sync.Mutex
 	sent             []sendTextRequest
 	seenPaths        []string
+	seenRequests     []fakeRequest
 	privateAPI       bool
 	helperConnected  bool
 	serverInfoCount  int
 	helperReadyAfter int
 	messageLookup    http.HandlerFunc
+}
+
+type fakeRequest struct {
+	method string
+	path   string
 }
 
 func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
@@ -956,6 +1091,7 @@ func newFakeBlueBubbles(t *testing.T) *fakeBlueBubbles {
 		w.Header().Set("Content-Type", "application/json")
 		bb.mu.Lock()
 		bb.seenPaths = append(bb.seenPaths, r.URL.EscapedPath())
+		bb.seenRequests = append(bb.seenRequests, fakeRequest{method: r.Method, path: r.URL.EscapedPath()})
 		privateAPI := bb.privateAPI
 		helperConnected := bb.helperConnected
 		messageLookup := bb.messageLookup
@@ -1035,6 +1171,28 @@ func (bb *fakeBlueBubbles) waitForPath(path string) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return false
+}
+
+func (bb *fakeBlueBubbles) waitForMethodPath(method, path string) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bb.mu.Lock()
+		seen := append([]fakeRequest(nil), bb.seenRequests...)
+		bb.mu.Unlock()
+		for _, req := range seen {
+			if req.method == method && req.path == path {
+				return true
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
+}
+
+func (bb *fakeBlueBubbles) orderedMethodPaths() []fakeRequest {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	return append([]fakeRequest(nil), bb.seenRequests...)
 }
 
 func (bb *fakeBlueBubbles) sentMessages() []sendTextRequest {

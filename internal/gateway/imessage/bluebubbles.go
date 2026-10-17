@@ -99,11 +99,18 @@ func (g *Gateway) blueBubblesPrivateAPIAvailable(scoped ...*config.Logger) bool 
 
 // startTyping enables the typing indicator for the given chat.
 func (g *Gateway) startTyping(chatGUID string, scoped ...*config.Logger) error {
-	return g.sendTypingRequest(chatGUID, scoped...)
+	return g.sendTypingRequest(http.MethodPost, chatGUID, scoped...)
+}
+
+// stopTyping disables the typing indicator for the given chat. Sending a
+// message usually clears it server-side; this is a backup for when that
+// automatic clear fails and the indicator would otherwise stick.
+func (g *Gateway) stopTyping(chatGUID string, scoped ...*config.Logger) error {
+	return g.sendTypingRequest(http.MethodDelete, chatGUID, scoped...)
 }
 
 // sendTypingRequest sends a BlueBubbles typing request for the given chat.
-func (g *Gateway) sendTypingRequest(chatGUID string, scoped ...*config.Logger) error {
+func (g *Gateway) sendTypingRequest(method, chatGUID string, scoped ...*config.Logger) error {
 	if !g.blueBubblesPrivateAPIAvailable(scoped...) {
 		return nil
 	}
@@ -111,7 +118,7 @@ func (g *Gateway) sendTypingRequest(chatGUID string, scoped ...*config.Logger) e
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, nil)
+	req, err := http.NewRequest(method, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("build BlueBubbles typing request: %w", err)
 	}

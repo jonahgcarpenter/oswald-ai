@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
@@ -173,6 +174,16 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 			chatDisplayName = name
 		}
 	}
+	responder := &runtimeResponder{
+		gateway:             g,
+		requestID:           requestID,
+		chatGUID:            chat.GUID,
+		selectedMessageGUID: selectedMessageGUID,
+		sessionKey:          sessionKey,
+		senderID:            normalizedSenderID,
+		typingGate:          newTypingGate(),
+		typingAllowed:       make(chan struct{}),
+	}
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
 		RequestID:  requestID,
@@ -201,21 +212,42 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		Unsupported:      unsupported,
 		Reply:            reply,
 		OnAllowed: func() {
-			g.startProcessingIndicators(chat.GUID, requestID)
+			close(responder.typingAllowed)
+			g.startProcessingIndicators(chat.GUID, requestID, responder.typingGate)
 		},
-	}, g.runtimeDependencies(), &runtimeResponder{
-		gateway:             g,
-		requestID:           requestID,
-		chatGUID:            chat.GUID,
-		selectedMessageGUID: selectedMessageGUID,
-		sessionKey:          sessionKey,
-		senderID:            normalizedSenderID,
-	})
+	}, g.runtimeDependencies(), responder)
 }
 
-func (g *Gateway) startProcessingIndicators(chatGUID, requestID string) {
+// typingGate orders the delayed typing start before the stop that follows a
+// send: the stop waits for the start attempt to finish so a fast
+// command/fallback cannot DELETE before the pending POST fires.
+type typingGate struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newTypingGate() *typingGate {
+	return &typingGate{done: make(chan struct{})}
+}
+
+func (t *typingGate) finish() {
+	if t == nil {
+		return
+	}
+	t.once.Do(func() { close(t.done) })
+}
+
+func (t *typingGate) wait() {
+	if t == nil {
+		return
+	}
+	<-t.done
+}
+
+func (g *Gateway) startProcessingIndicators(chatGUID, requestID string, gate *typingGate) {
 	log := g.log().With(config.F("request_id", requestID))
 	go func() {
+		defer gate.finish()
 		g.markRead(chatGUID, log)
 		time.Sleep(typingAfterReadDelay)
 		if err := g.startTyping(chatGUID, log); err != nil {

@@ -16,6 +16,11 @@ type runtimeResponder struct {
 	selectedMessageGUID string
 	sessionKey          string
 	senderID            string
+	typingGate          *typingGate
+	// typingAllowed is closed synchronously by OnAllowed. A stop only waits
+	// for the delayed start when admission actually ran; paths that return
+	// before OnAllowed never started typing, so they stop immediately.
+	typingAllowed chan struct{}
 }
 
 func (r *runtimeResponder) StartProcessing() (func(), error) {
@@ -23,10 +28,12 @@ func (r *runtimeResponder) StartProcessing() (func(), error) {
 }
 
 func (r *runtimeResponder) SendFallback(text string) error {
+	defer r.stopProcessingIndicators()
 	return r.sendAndRemember(text)
 }
 
 func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
+	defer r.stopProcessingIndicators()
 	if err := result.ValidateAttachments(); err != nil {
 		return err
 	}
@@ -46,12 +53,17 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 }
 
 func (r *runtimeResponder) SendAgentError(text string) error {
+	defer r.stopProcessingIndicators()
 	return r.sendAndRemember(text)
 }
 
-func (r *runtimeResponder) CancelAgentResponse() error { return nil }
+func (r *runtimeResponder) CancelAgentResponse() error {
+	r.stopProcessingIndicators()
+	return nil
+}
 
 func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
+	defer r.stopProcessingIndicators()
 	if response == nil {
 		return nil
 	}
@@ -69,6 +81,24 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 		return nil
 	}
 	return r.sendAndRemember(responseText)
+}
+
+// stopProcessingIndicators clears the typing indicator after a send so a
+// missed server-side clear cannot leave it stuck. It waits for the delayed
+// start attempt first, runs off the send path, and never fails delivery.
+func (r *runtimeResponder) stopProcessingIndicators() {
+	gate, allowed := r.typingGate, r.typingAllowed
+	go func() {
+		select {
+		case <-allowed:
+			gate.wait()
+		default:
+		}
+		log := r.gateway.log().With(config.F("request_id", r.requestID))
+		if err := r.gateway.stopTyping(r.chatGUID, log); err != nil {
+			log.Debug("gateway.typing.stop_failed", "failed to stop BlueBubbles typing indicator", config.F("status", "degraded"), config.ErrorField(err))
+		}
+	}()
 }
 
 func (r *runtimeResponder) sendAndRemember(text string) error {
