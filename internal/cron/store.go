@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -51,7 +50,6 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 		MonitorScript:   strings.TrimSpace(input.MonitorScript),
 		NoAgent:         input.NoAgent,
 		Deliver:         strings.TrimSpace(input.Deliver),
-		FailureDeliver:  strings.TrimSpace(input.FailureDeliver),
 		ContextFrom:     append([]string(nil), input.ContextFrom...),
 		Continuity:      input.Continuity,
 		EnabledToolsets: append([]string(nil), input.EnabledToolsets...),
@@ -65,6 +63,11 @@ func (s *Store) Create(now time.Time, r *Runner, input Job) (Job, error) {
 		NextRunUnix:     parsed.Next.Unix(),
 		CreatedUnix:     now.Unix(),
 		UpdatedUnix:     now.Unix(),
+	}
+	// Delivery is always populated: an omitted target delivers to the
+	// creating chat.
+	if job.Deliver == "" {
+		job.Deliver = "origin"
 	}
 	if job.Repeat.Times < 0 {
 		return Job{}, errors.New("repeat times must not be negative")
@@ -102,9 +105,6 @@ func (s *Store) validate(r *Runner, job *Job) error {
 		return errors.New("monitor_script and monitor_url are exclusive")
 	}
 	if err := ValidateDeliver(job.Deliver); err != nil {
-		return err
-	}
-	if err := ValidateDeliver(job.FailureDeliver); err != nil {
 		return err
 	}
 	if job.OriginSession != "" && job.OriginGateway == "" {
@@ -392,71 +392,6 @@ func (s *Store) persistBaseline(id, hash string) {
 		}
 	}
 	_ = s.saveJobs(jobs)
-}
-
-// deliverLocal saves output to the per-profile output directory for local
-// delivery targets. True means it handled the target.
-func (s *Store) deliverLocal(r *Runner, job *Job, output string) (bool, error) {
-	target := strings.TrimSpace(job.Deliver)
-	if target != "" && target != "local" {
-		return false, nil
-	}
-	if r == nil || r.Root == "" {
-		return false, errors.New("workspace is unavailable")
-	}
-	dir := filepath.Join(r.Root, "cron", "output")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return false, err
-	}
-	name := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return -1
-	}, strings.ToLower(strings.TrimSpace(job.Name)))
-	if name == "" {
-		name = "job"
-	}
-	path := filepath.Join(dir, time.Now().UTC().Format("20060102-150405")+"-"+job.ID+"-"+name+".txt")
-	if err := os.WriteFile(path, []byte(output), 0600); err != nil {
-		return false, err
-	}
-	s.pruneOutputDir(dir)
-	return true, nil
-}
-
-func (s *Store) pruneOutputDir(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	type file struct {
-		name string
-		mod  time.Time
-	}
-	var files []file
-	now := time.Now()
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if now.Sub(info.ModTime()) > 7*24*time.Hour {
-			_ = os.Remove(filepath.Join(dir, e.Name()))
-			continue
-		}
-		files = append(files, file{e.Name(), info.ModTime()})
-	}
-	if len(files) <= 64 {
-		return
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod.Before(files[j].mod) })
-	for _, f := range files[:len(files)-64] {
-		_ = os.Remove(filepath.Join(dir, f.name))
-	}
 }
 
 // ledgerCompleted reports whether an execution row completed that exact

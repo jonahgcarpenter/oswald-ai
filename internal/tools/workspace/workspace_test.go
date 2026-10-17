@@ -295,6 +295,9 @@ func TestCronjobManageNameAndOrigin(t *testing.T) {
 	if stored.Name != "brief" || stored.OriginGateway != "discord" || stored.OriginSession != "discord:chan1:alice" {
 		t.Fatalf("origin not captured: %+v", stored)
 	}
+	if stored.Deliver != "origin" {
+		t.Fatalf("deliver not defaulted to origin: %+v", stored)
+	}
 	// Fuzzy name resolution on update.
 	updated, err := manage(ctx, map[string]interface{}{"action": "pause", "job_id": "brie", "paused_reason": "test"})
 	if err != nil || !strings.Contains(updated.Content, "paused") {
@@ -305,6 +308,37 @@ func TestCronjobManageNameAndOrigin(t *testing.T) {
 	}
 	if _, err := manage(ctx, map[string]interface{}{"action": "remove", "job_id": "rief"}); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous remove = %v", err)
+	}
+}
+
+func TestCronjobManageDeliverOriginOnly(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	store := cron.NewStore(root)
+	ctx := requestctx.WithMetadata(testContext("req-cron-deliver"), requestctx.Metadata{RequestID: "req-cron-deliver", SessionID: "discord:chan1:alice"})
+	manage := NewCronjobManageHandler(ws, store)
+	created, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi"})
+	if err != nil {
+		t.Fatalf("create = %v", err)
+	}
+	jobID := strings.TrimSpace(strings.Split(strings.Split(created.Content, "\n")[0], ":")[1])
+	for _, target := range []string{"local", "all", "discord:chan1:user1"} {
+		if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver": target}); err == nil {
+			t.Fatalf("target %q accepted", target)
+		}
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "update", "job_id": jobID, "deliver": ""}); err != nil {
+		t.Fatalf("empty reset = %v", err)
+	}
+	stored, err := store.Resolve(jobID)
+	if err != nil || stored.Deliver != "origin" {
+		t.Fatalf("reset = %+v %v", stored, err)
+	}
+	if _, err := manage(ctx, map[string]interface{}{"action": "create", "schedule": "in 1h", "prompt": "hi", "failure_deliver": "origin"}); err == nil {
+		t.Fatal("failure_deliver accepted")
 	}
 }
 

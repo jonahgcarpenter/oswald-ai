@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -59,7 +58,6 @@ type Job struct {
 	BaselineHash    string      `json:"baseline_hash,omitempty"`
 	NoAgent         bool        `json:"no_agent"`
 	Deliver         string      `json:"deliver,omitempty"`
-	FailureDeliver  string      `json:"failure_deliver,omitempty"`
 	ContextFrom     []string    `json:"context_from,omitempty"`
 	Continuity      bool        `json:"continuity"`
 	EnabledToolsets []string    `json:"enabled_toolsets,omitempty"`
@@ -115,6 +113,11 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		}
 	}
 	j.Paused = j.State == StatePaused
+	// Delivery is always populated: legacy jobs stored before the
+	// origin-only contract default to the creating chat.
+	if strings.TrimSpace(j.Deliver) == "" {
+		j.Deliver = "origin"
+	}
 	return nil
 }
 
@@ -291,44 +294,15 @@ func ScanPrompt(prompt string) error {
 	return nil
 }
 
-// ValidateDeliver checks delivery targets.
+// ValidateDeliver checks delivery targets. Origin (the creating chat) is
+// the only supported target; the tool keeps the deliver parameter so future
+// targets can be added without a schema change.
 func ValidateDeliver(target string) error {
 	target = strings.TrimSpace(target)
-	if target == "" || target == "local" || target == "all" || target == "origin" {
+	if target == "origin" {
 		return nil
 	}
-	if target == "bot-chat" || strings.HasPrefix(target, "bot-chat:") {
-		rest := strings.TrimPrefix(target, "bot-chat")
-		rest = strings.TrimPrefix(rest, ":")
-		if rest != "" && !validProfileName(rest) {
-			return errors.New("invalid bot-chat target")
-		}
-		if strings.Contains(target, ":") && strings.Count(target, ":") > 1 {
-			return errors.New("invalid bot-chat target")
-		}
-		return nil
-	}
-	parts := strings.Split(target, ":")
-	if len(parts) < 2 || len(parts) > 3 {
-		return errors.New("invalid deliver target")
-	}
-	if parts[0] != "discord" && parts[0] != "imessage" {
-		return errors.New("invalid deliver platform")
-	}
-	for _, p := range parts[1:] {
-		if strings.TrimSpace(p) == "" {
-			return errors.New("invalid deliver target")
-		}
-	}
-	return nil
-}
-
-func validProfileName(name string) bool {
-	if name == "" || len(name) > 64 {
-		return false
-	}
-	matched, _ := regexp.MatchString(`^[a-z0-9][a-z0-9_-]*$`, name)
-	return matched
+	return errors.New("invalid deliver target: origin is the only delivery target")
 }
 
 // Parsed is a resolved schedule.
