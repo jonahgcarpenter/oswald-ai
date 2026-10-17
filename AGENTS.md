@@ -11,6 +11,8 @@ Source, the operator-approved `internal/database/schema.sql`, and tests define i
 - Use `gofmt`, standard-library/third-party/internal import groups, exported API doc comments, context-first cancelable APIs, wrapped causes, typed errors, and explicit failure/state transitions.
 - Only `main` exits or logs fatal errors. Domain/startup APIs return errors after cleanup. Preserve resource ownership, rollback, row iteration checks, exact-token leases, delivery gates, and generation fences.
 - Preserve external tool names, JSON fields, commands, routes, environment references, log keys, and persisted formats during internal refactors. Do not add compatibility APIs solely for obsolete fixtures.
+- Branches use a short kebab-case summary only (for example `imessage-stop-typing`, `scratch-sweep-cache-jail`).
+- Commit subjects always use `<type>: <change>` (for example `fix: stop typing indicator after each send`). The body is one to two lines naming the area plus what changed, with no preamble (for example `imessage typing path to DELETE after terminal sends.`); use bullets only when multiple areas were touched.
 
 ## Build and Verification
 
