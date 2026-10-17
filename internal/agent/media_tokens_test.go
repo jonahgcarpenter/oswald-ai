@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +101,104 @@ func TestMediaTokenRejectsForeignAndArbitraryPaths(t *testing.T) {
 	}
 	if len(response.Attachments) != 0 || strings.Contains(response.Response, "MEDIA:") {
 		t.Fatalf("arbitrary path attached: %+v", response)
+	}
+}
+
+func TestMediaTokenAttachesCWDImage(t *testing.T) {
+	chat := &fakeChatter{}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	a, _ := newTestAgent(t, chat, nil, reg)
+	ws := t.TempDir()
+	input := testInputImage(t, 3, 2)
+	data, err := base64.StdEncoding.DecodeString(input.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgPath := filepath.Join(ws, "spank_bank_1.jpg")
+	if err := os.WriteFile(imgPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.SetWorkspace(ws)
+	chat.responses = []*llm.ChatResponse{{Message: llm.ChatMessage{Role: "assistant", Content: "Here it is MEDIA:" + imgPath + " enjoy"}}}
+	response, err := processAgent(a, "req-1", "discord", "discord:dm:123", "user-1", "User", "Send it", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Attachments) != 1 || string(response.Attachments[0].Data) != string(data) {
+		t.Fatalf("attachments=%d", len(response.Attachments))
+	}
+	if strings.Contains(response.Response, "MEDIA:") {
+		t.Fatalf("token leaked into response: %q", response.Response)
+	}
+}
+
+func TestMediaTokenRejectsOutsideAndSecretCWDPaths(t *testing.T) {
+	chat := &fakeChatter{}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	a, _ := newTestAgent(t, chat, nil, reg)
+	ws := t.TempDir()
+	input := testInputImage(t, 3, 2)
+	data, err := base64.StdEncoding.DecodeString(input.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Valid control image inside the workspace.
+	good := filepath.Join(ws, "ok.jpg")
+	if err := os.WriteFile(good, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Secret, state, and cache-managed paths must stay denied.
+	for _, name := range []string{".env", "state.db", "SOUL.md"} {
+		if err := os.WriteFile(filepath.Join(ws, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	managed := filepath.Join(ws, "cache", "images")
+	if err := os.MkdirAll(managed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	managedImg := filepath.Join(managed, "managed.jpg")
+	if err := os.WriteFile(managedImg, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(ws, "cache", "scratch")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scratchImg := filepath.Join(scratch, "tmp.jpg")
+	if err := os.WriteFile(scratchImg, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Non-image content with an image extension must fail MIME validation.
+	if err := os.WriteFile(filepath.Join(ws, "note.jpg"), []byte("not an image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.SetWorkspace(ws)
+	for _, tc := range []struct {
+		name   string
+		path   string
+		attach bool
+	}{
+		{"control", good, true},
+		{"scratch", scratchImg, true},
+		{"secret env", filepath.Join(ws, ".env"), false},
+		{"state db", filepath.Join(ws, "state.db"), false},
+		{"soul", filepath.Join(ws, "SOUL.md"), false},
+		{"managed cache bypass", managedImg, false},
+		{"non image", filepath.Join(ws, "note.jpg"), false},
+		{"outside cwd", "/etc/passwd", false},
+		{"escape", filepath.Join(ws, "..", "outside.jpg"), false},
+	} {
+		stripped, attached := a.resolveResponseMedia(context.Background(), config.NewLogger(config.LevelError), "discord", "user-1", "See MEDIA:"+tc.path, nil)
+		if strings.Contains(stripped, "MEDIA:") {
+			t.Fatalf("%s: token leaked: %q", tc.name, stripped)
+		}
+		if tc.attach && len(attached) != 1 {
+			t.Fatalf("%s: expected attachment, got %d", tc.name, len(attached))
+		}
+		if !tc.attach && len(attached) != 0 {
+			t.Fatalf("%s: expected drop, got %d attachments", tc.name, len(attached))
+		}
 	}
 }
 
