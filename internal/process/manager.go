@@ -3,13 +3,14 @@
 // Each profile owns one Manager bound to its profile root. Process output
 // and metadata persist under <root>/cache/processes/<id>/ with private
 // permissions so completed results survive agent turns (but not necessarily
-// restarts for running processes). Completed records are retained 7 days,
-// newest 64 per profile. Running entries exist only in memory; a record
+// restarts for running processes). Completed records are retained 24 hours
+// after creation, newest 64 per profile. Running entries exist only in memory; a record
 // found on disk with status running but no live entry belongs to a dead
 // owner and is marked killed on first observation.
 package process
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -627,46 +628,7 @@ func (m *Manager) Stop() {
 func (m *Manager) pruneAsync() { m.prune() }
 
 func (m *Manager) prune() {
-	base, err := m.baseDir()
-	if err != nil {
-		return
-	}
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		return
-	}
-	type candidate struct {
-		id      string
-		updated int64
-	}
-	var completed []candidate
-	now := time.Now().Unix()
-	for _, e := range entries {
-		if !e.IsDir() || !validID(e.Name()) {
-			continue
-		}
-		info, err := readMeta(filepath.Join(base, e.Name()))
-		if err != nil {
-			continue
-		}
-		m.mu.Lock()
-		_, live := m.running[e.Name()]
-		m.mu.Unlock()
-		if live || info.Status == StatusRunning {
-			continue
-		}
-		if now-info.UpdatedUnix > 7*24*3600 {
-			_ = os.RemoveAll(filepath.Join(base, e.Name()))
-			continue
-		}
-		completed = append(completed, candidate{id: e.Name(), updated: info.UpdatedUnix})
-	}
-	if len(completed) > 64 {
-		sort.Slice(completed, func(i, j int) bool { return completed[i].updated < completed[j].updated })
-		for _, c := range completed[:len(completed)-64] {
-			_ = os.RemoveAll(filepath.Join(base, c.id))
-		}
-	}
+	_, _ = m.PruneOld(context.Background(), time.Now())
 }
 
 func writeMeta(dir string, info Info) error {

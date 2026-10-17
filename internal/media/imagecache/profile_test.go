@@ -7,9 +7,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/prune"
 )
 
 func TestProfileCacheUsesDirectRootAndSweepsOnlyOwnImages(t *testing.T) {
+	prune.SetBirthtimeHookForTest(func(string) (time.Time, bool) { return time.Time{}, false })
+	t.Cleanup(func() { prune.SetBirthtimeHookForTest(nil) })
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
@@ -20,7 +24,7 @@ func TestProfileCacheUsesDirectRootAndSweepsOnlyOwnImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(path, filepath.Join(root, ".cache", "images")+string(os.PathSeparator)) {
+	if !strings.HasPrefix(path, filepath.Join(root, "cache", "images")+string(os.PathSeparator)) {
 		t.Fatal("incorrect profile image path")
 	}
 	if _, _, err := cache.Resolve(ctx, "bob", path); err == nil {

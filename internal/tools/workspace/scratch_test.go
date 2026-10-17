@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/prune"
 )
 
 func chtimes(t *testing.T, path string, mod time.Time) {
@@ -179,7 +180,8 @@ func TestScratchWorkerImmediateSweep(t *testing.T) {
 	var logs bytes.Buffer
 	log := config.NewLogger(config.LevelDebug)
 	log.SetOutput(&logs)
-	w := NewWorker(root, log)
+	w := &prune.Worker{}
+	w.Add(SweepHook(root, log))
 	w.Start()
 	deadline := time.After(5 * time.Second)
 	for {

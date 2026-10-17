@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/prune"
 	_ "golang.org/x/image/webp"
 	"golang.org/x/sys/unix"
 )
@@ -40,7 +41,7 @@ type Counts struct {
 	RemovedBytes int64
 }
 
-// Cache owns only files in root/<user>/.cache/images.
+// Cache owns only files in root/<user>/cache/images.
 type Cache struct {
 	root    string
 	profile string
@@ -72,7 +73,7 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 	if err != nil {
 		return -1, "", err
 	}
-	path := filepath.Join(root, user, ".cache", "images")
+	path := filepath.Join(root, user, "cache", "images")
 	if c.profile != "" {
 		if user != c.profile {
 			return -1, "", errors.New("image cache profile mismatch")
@@ -82,7 +83,7 @@ func (c *Cache) directory(ctx context.Context, user string, create bool) (int, s
 			return -1, "", err
 		}
 		unix.Close(profileFD)
-		path = filepath.Join(root, ".cache", "images")
+		path = filepath.Join(root, "cache", "images")
 	}
 	fd, err := openDirectory(ctx, path, create, 3)
 	return fd, path, err
@@ -361,13 +362,15 @@ func (c *Cache) Resolve(ctx context.Context, userID, path string) ([]byte, strin
 	return data, mime, nil
 }
 
-// Sweep removes expired cache images across user directories; it never descends
+// Sweep removes expired cache images judged by creation time (birthtime,
+// mtime fallback when the filesystem reports none); it never descends
 // into other directories or removes files not matching cache image names.
 func (c *Cache) Sweep(ctx context.Context, now time.Time) (Counts, error) {
 	var counts Counts
 	if c != nil && c.profile != "" {
 		err := c.walkImages(ctx, c.profile, func(fd int, name string, stat unix.Stat_t) error {
-			if now.Sub(time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)) < lifetime {
+			fallback := time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)
+			if now.Sub(prune.CreationTimeAt(fd, name, fallback, now)) < lifetime {
 				return nil
 			}
 			if err := unix.Unlinkat(fd, name, 0); err != nil {
@@ -405,7 +408,8 @@ func (c *Cache) Sweep(ctx context.Context, now time.Time) (Counts, error) {
 			continue
 		}
 		err = c.walkImages(ctx, user.Name(), func(fd int, name string, stat unix.Stat_t) error {
-			if now.Sub(time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)) < lifetime {
+			fallback := time.Unix(stat.Mtim.Sec, stat.Mtim.Nsec)
+			if now.Sub(prune.CreationTimeAt(fd, name, fallback, now)) < lifetime {
 				return nil
 			}
 			if err := unix.Unlinkat(fd, name, 0); err != nil {

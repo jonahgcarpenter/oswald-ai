@@ -10,7 +10,7 @@ import (
 //
 // File tools (read_file/write_file/patch/search_files) jail paths through
 // Workspace.Resolve, which allows cache/scratch/ but denies every other
-// cache/ sibling and .cache/. Shell and Python do not resolve paths: the
+// cache/ sibling. Shell and Python do not resolve paths: the
 // command runs with the profile root as its working directory but the text
 // can name cache/scratch-gopath-style siblings directly. The scans below
 // close that gap by resolving path-shaped tokens lexically against the
@@ -28,7 +28,7 @@ var (
 )
 
 // cacheFileSink reports whether text looks like a filesystem operation. Bare
-// "cache"/".cache" literals only fire alongside a sink so print("cache")
+// "cache" literals only fire alongside a sink so print("cache")
 // stays prose while open("cache") and ls cache do not.
 func cacheFileSink(text string) bool {
 	lowered := strings.ToLower(text)
@@ -48,7 +48,7 @@ func cacheFileSink(text string) bool {
 
 // managedCacheResolved reports whether a workspace-absolute path reaches
 // managed cache the model must not touch: anything under <root>/cache
-// outside <root>/cache/scratch, or anything under <root>/.cache.
+// outside <root>/cache/scratch.
 func managedCacheResolved(resolved, root string) bool {
 	under := func(p, dir string) bool {
 		return p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))
@@ -56,14 +56,10 @@ func managedCacheResolved(resolved, root string) bool {
 	root = filepath.Clean(root)
 	cacheRoot := filepath.Join(root, "cache")
 	scratchRoot := filepath.Join(cacheRoot, "scratch")
-	dotCache := filepath.Join(root, ".cache")
 	if resolved == scratchRoot || under(resolved, scratchRoot) {
 		return false
 	}
 	if resolved == cacheRoot || under(resolved, cacheRoot) {
-		return true
-	}
-	if resolved == dotCache || under(resolved, dotCache) {
 		return true
 	}
 	return false
@@ -132,7 +128,7 @@ func managedCacheInText(text, workdir string, shell bool) bool {
 		// rejected by resolveCandidate but still name a workspace path.
 		if i := strings.Index(token, "="); i >= 0 {
 			rhs := strings.Trim(strings.TrimSpace(token[i+1:]), "\"'();,")
-			if rhs == "" || (!strings.Contains(rhs, "/") && rhs != "cache" && rhs != ".cache") {
+			if rhs == "" || (!strings.Contains(rhs, "/") && rhs != "cache") {
 				continue
 			}
 			if !strings.Contains(strings.ToLower(rhs), "cache") {
@@ -176,7 +172,7 @@ func managedCacheInText(text, workdir string, shell bool) bool {
 				}
 				continue
 			}
-			if trimmed == "cache" || trimmed == ".cache" {
+			if trimmed == "cache" {
 				if sink {
 					if resolved := filepath.Join(root, trimmed); managedCacheResolved(resolved, root) {
 						return true
@@ -190,7 +186,7 @@ func managedCacheInText(text, workdir string, shell bool) bool {
 	if sink {
 		for _, field := range strings.Fields(text) {
 			t := strings.Trim(field, "\"'();,")
-			if t == "cache" || t == ".cache" {
+			if t == "cache" {
 				if resolved := filepath.Join(root, t); managedCacheResolved(resolved, root) {
 					return true
 				}
