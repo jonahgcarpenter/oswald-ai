@@ -1,4 +1,4 @@
-// Package session_search exposes delivered past conversation history to the
+// Package session_search exposes stored past conversation history to the
 // model through bounded, database-backed search and read shapes.
 package session_search
 

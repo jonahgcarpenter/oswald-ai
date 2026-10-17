@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// discoverIndexed builds a disposable FTS5 projection of eligible delivered
+// discoverIndexed builds a disposable FTS5 projection of eligible stored
 // records. Native traces live in state_meta, not messages_fts. The projection
 // keeps their search policy intact without changing operator database objects.
 func (s *ProfileStore) discoverIndexed(ctx context.Context, owner string, filter SearchFilter) ([]SearchSession, error) {
@@ -241,9 +241,6 @@ func searchExchangeHistory(encoded string) (ToolHistory, error) {
 	state, err := decodeProfileExchange(encoded)
 	if err != nil {
 		return ToolHistory{}, err
-	}
-	if state.Delivery != "delivered" {
-		return EmptyToolHistory(), nil
 	}
 	return DecodeToolHistory(state.History)
 }

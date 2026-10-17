@@ -19,7 +19,7 @@ func deliveredExchange(t *testing.T, s *ProfileStore, generation int, user, answ
 	return turn
 }
 
-func TestProfileDiscoveryExcludesPendingAndForeignProfiles(t *testing.T) {
+func TestProfileDiscoveryIncludesPendingAndRejectsForeignProfiles(t *testing.T) {
 	s, _ := newProfileStateFixture(t)
 	ctx := context.Background()
 	session, err := s.ResolveSessionContext(ctx, "alice", "discord:dm:123", time.Hour)
@@ -38,10 +38,18 @@ func TestProfileDiscoveryExcludesPendingAndForeignProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(results) != 1 || results[0].MatchMessageID == 0 {
-		t.Fatalf("delivered discovery mismatch: %+v", results)
+		t.Fatalf("stored discovery mismatch: %+v", results)
 	}
 	if results[0].Snippet == "" {
 		t.Fatal("missing snippet")
+	}
+	// Pending turns are searchable alongside delivered turns.
+	pendingResults, err := s.DiscoverySessions(ctx, "alice", SearchFilter{Query: "pending"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingResults) != 1 {
+		t.Fatalf("pending discovery mismatch: %+v", pendingResults)
 	}
 	// Cross-profile and cross-generation reads fail closed.
 	if _, err := s.DiscoverySessions(ctx, "bob", SearchFilter{Query: "docker"}); err == nil {

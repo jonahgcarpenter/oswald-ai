@@ -158,7 +158,7 @@ func buildDiscover(ctx context.Context, parsed discoveryArgs, hits []discoverHit
 		envelope.Results = append(envelope.Results, result)
 	}
 	if len(hits) == 0 {
-		envelope.Message = "No delivered messages matched. Broaden with FTS5 syntax: OR between synonyms, \"quoted phrases\", NOT to exclude, and prefix* wildcards."
+		envelope.Message = "No stored messages matched. Broaden with FTS5 syntax: OR between synonyms, \"quoted phrases\", NOT to exclude, and prefix* wildcards."
 	}
 	return marshalBounded(envelope)
 }
@@ -204,7 +204,7 @@ func hydrateDiscover(ctx context.Context, store *memory.ProfileStore, owner stri
 	return result, nil
 }
 
-// bookends returns the first and last delivered messages of a session.
+// bookends returns the first and last stored messages of a session.
 func bookends(ctx context.Context, store *memory.ProfileStore, owner, sessionID string) ([]messageJSON, []messageJSON, error) {
 	first, last, count, err := store.SessionTranscript(ctx, owner, sessionID, 3, 3)
 	if err != nil || count == 0 {
@@ -258,7 +258,7 @@ func buildRead(profile string, summary *memory.SearchSession, sessionID string, 
 	}
 	envelope := readEnvelope{Success: true, Mode: "read", SessionID: sessionID, Profile: profile, Link: sessionLink(profile, sessionID), SessionMeta: meta, MessageCount: count, Messages: []messageJSON{}}
 	if count == 0 {
-		envelope.Message = "Session has no delivered messages in this profile."
+		envelope.Message = "Session has no stored messages in this profile."
 		return marshalBounded(envelope)
 	}
 	for _, message := range first {
@@ -284,7 +284,7 @@ func buildBrowse(owner string, records []memory.SessionSummaryRecord) (string, e
 		})
 	}
 	if len(records) == 0 {
-		envelope.Message = "No delivered sessions exist for this profile yet."
+		envelope.Message = "No stored sessions exist for this profile yet."
 	}
 	return marshalBounded(envelope)
 }
