@@ -213,7 +213,7 @@ platforms:
       server_password: ${BLUEBUBBLES_PASSWORD:-}
       webhook_host: 0.0.0.0
       webhook_port: 8080
-      webhook_path: /bluebubbles/webhook
+      webhook_path: /bluebubbles-webhook
       allowed_users: []
       banned_users: []
       require_mention: true  # Group messages must begin with a mention.
