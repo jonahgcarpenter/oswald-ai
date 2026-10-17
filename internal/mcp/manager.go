@@ -214,7 +214,7 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 	}
 	meta.OperationID, meta.ParentOperationID = rand.Text(), parent
 	ctx = requestctx.WithMetadata(ctx, meta)
-	connectionLog := m.requestLog(ctx).With(config.F("server_id", cfg.ID), config.F("scope", cfg.Scope))
+	connectionLog := m.requestLog(ctx).With(config.F("server_id", cfg.ID), config.F("server", cfg.Name), config.F("scope", cfg.Scope))
 	phase := "validate"
 	defer func() {
 		status, outcome := "ok", "ok"
@@ -232,7 +232,11 @@ func (m *Manager) ensureConnected(ctx context.Context, cfg ServerConfig) (_ *ser
 		}
 		connectionLog.Debug("mcp.server.connect.complete", "MCP connection completed", fields...)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			connectionLog.Warn("mcp.server.connect_failed", "MCP server unavailable", config.F("status", "degraded"), config.ErrorField(err))
+			msg := "MCP server unavailable"
+			if validateServerName(cfg.Name) == nil {
+				msg = cfg.Name + " MCP server unavailable"
+			}
+			connectionLog.Warn("mcp.server.connect_failed", msg, config.F("status", "degraded"), config.ErrorField(err))
 		}
 	}()
 	if cfg.Scope == ScopeUser {
