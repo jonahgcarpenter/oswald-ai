@@ -763,8 +763,11 @@ func TestProcessRetriesEmptyVisibleResponse(t *testing.T) {
 	if len(primary) != 2 {
 		t.Fatalf("expected retry chat call, got %d calls", len(primary))
 	}
-	if len(primary[1].Tools) != 0 {
-		t.Fatalf("expected retry with tools disabled, got %+v", primary[1].Tools)
+	if len(primary[1].Tools) == 0 {
+		t.Fatalf("expected retry with tools preserved, got no tools")
+	}
+	if len(primary[1].Tools) != len(primary[0].Tools) {
+		t.Fatalf("expected retry with same tools, got %+v vs %+v", primary[1].Tools, primary[0].Tools)
 	}
 	lastMessage := primary[1].Messages[len(primary[1].Messages)-1]
 	if lastMessage.Role != "user" || lastMessage.Content != emptyResponseRetryPrompt {
