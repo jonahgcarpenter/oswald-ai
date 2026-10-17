@@ -20,7 +20,7 @@ import (
 func CronjobManageDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        CronjobManageName,
-		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m). Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing); monitor URL/script diff-gates execution with a first-tick baseline. Jobs run agent turns on a schedule and deliver results to the creating chat (origin) or the profile output directory (local). Operate by job_id or unique name; ambiguous names error instead of guessing.",
+		Description: "Manage scheduled jobs: create, list, update, pause, resume, remove, or run now. Schedules accept durations (30m), every-phrases (every 2h, every monday 9am), cron (0 9 * * *), RFC3339 one-shots, or in-phrases (in 30m). Prompts must be self-contained: the final response is delivered and cannot ask questions. Use script for stdout-injected work (no_agent=true runs the script as the job, empty output sends nothing); monitor URL/script diff-gates execution with a first-tick baseline. Jobs run agent turns on a schedule and deliver results to the creating chat. Operate by job_id or unique name; ambiguous names error instead of guessing.",
 		Parameters: llm.ToolParameters{Type: "object", Properties: map[string]llm.ToolParameterProperty{
 			"action":            {Type: "string", Description: "create|list|update|pause|resume|remove|run"},
 			"job_id":            {Type: "string", Description: "Job ID or unique name for update/pause/resume/remove/run"},
@@ -32,8 +32,7 @@ func CronjobManageDefinition() llm.ToolDefinition {
 			"monitor_url":       {Type: "string", Description: "Monitor URL (exclusive with monitor_script)"},
 			"monitor_script":    {Type: "string", Description: "Monitor script path (exclusive with monitor_url)"},
 			"no_agent":          {Type: "boolean", Description: "Script is the job; stdout verbatim, empty sends nothing", Default: false},
-			"deliver":           {Type: "string", Description: "origin|local (other targets validate but record only)"},
-			"failure_deliver":   {Type: "string", Description: "Delivery target on failure"},
+			"deliver":           {Type: "string", Description: "Delivery target: origin only (the creating chat). Omit to default to origin."},
 			"context_from":      {Type: "array", Description: "Workspace paths injected as context", Items: &llm.ToolParameterProperty{Type: "string"}},
 			"continuity":        {Type: "boolean", Description: "Chain the last run output into the next prompt", Default: false},
 			"enabled_toolsets":  {Type: "array", Description: "Toolset allowlist ([] = zero-tool)", Items: &llm.ToolParameterProperty{Type: "string"}},
@@ -72,7 +71,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 		if !ok || !principal.Authenticated() {
 			return governance.Result{}, errors.New("workspace: authenticated principal required")
 		}
-		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "monitor_url", "monitor_script", "no_agent", "deliver", "failure_deliver", "context_from", "continuity", "enabled_toolsets", "workdir", "attach_to_session", "repeat_times", "catch_up", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
+		if err := rejectUnknown(args, "action", "job_id", "name", "schedule", "prompt", "skills", "script", "monitor_url", "monitor_script", "no_agent", "deliver", "context_from", "continuity", "enabled_toolsets", "workdir", "attach_to_session", "repeat_times", "catch_up", "paused", "paused_reason", "model", "provider", "base_url"); err != nil {
 			return governance.Result{}, err
 		}
 		if _, has := args["model"]; has {
@@ -179,7 +178,6 @@ func decodeCronInput(args map[string]interface{}) cron.Job {
 	job.MonitorURL, _ = stringArg(args, "monitor_url")
 	job.MonitorScript, _ = stringArg(args, "monitor_script")
 	job.Deliver, _ = stringArg(args, "deliver")
-	job.FailureDeliver, _ = stringArg(args, "failure_deliver")
 	job.Workdir, _ = stringArg(args, "workdir")
 	job.AttachToSession, _ = stringArg(args, "attach_to_session")
 	job.PausedReason, _ = stringArg(args, "paused_reason")
@@ -280,10 +278,15 @@ func applyCronUpdate(runner *cron.Runner, job *cron.Job, args map[string]interfa
 	}
 	if raw, ok := args["deliver"]; ok {
 		deliver, _ := raw.(string)
-		if err := cron.ValidateDeliver(deliver); err != nil {
-			return err
+		if strings.TrimSpace(deliver) == "" {
+			// Explicit empty resets to the default target.
+			job.Deliver = "origin"
+		} else {
+			if err := cron.ValidateDeliver(deliver); err != nil {
+				return err
+			}
+			job.Deliver = strings.TrimSpace(deliver)
 		}
-		job.Deliver = strings.TrimSpace(deliver)
 	}
 	if raw, ok := args["no_agent"]; ok {
 		if v, ok := raw.(bool); ok {

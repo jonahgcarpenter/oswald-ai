@@ -70,7 +70,7 @@ func TestClaimDueAdvancesBeforeDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	job, err := store.Create(now, testRunner(root), Job{Schedule: "in 1s", Script: "job.sh", NoAgent: true, Prompt: ""})
+	job, err := store.Create(now, testRunner(root), Job{Schedule: "in 1s", Script: "job.sh", NoAgent: true, Prompt: "", OriginGateway: "discord", OriginSession: "discord:chan1:user1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestClaimDueAdvancesBeforeDispatch(t *testing.T) {
 	if due[0].NextRunUnix != 0 || due[0].State != StateRunning {
 		t.Fatalf("not advanced: %+v", due[0])
 	}
-	d := &Dispatcher{Store: store, Runner: testRunner(root), Profile: "alice"}
+	d := &Dispatcher{Store: store, Runner: testRunner(root), Profile: "alice", Senders: map[string]Sender{"discord": stubSender{sent: make(map[string]string)}}}
 	ex, out, err := d.RunOne(context.Background(), due[0], time.Minute)
 	if err != nil || ex.Status != "completed_script" || !strings.Contains(out, "tick-hi") {
 		t.Fatalf("run = %+v %q %v", ex, out, err)
@@ -340,11 +340,11 @@ func TestTickerWakeDispatchesDue(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\necho woken\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(time.Now(), testRunner(root), Job{Schedule: "in 1s", Script: "job.sh", NoAgent: true}); err != nil {
+	if _, err := store.Create(time.Now(), testRunner(root), Job{Schedule: "in 1s", Script: "job.sh", NoAgent: true, OriginGateway: "discord", OriginSession: "discord:chan1:user1"}); err != nil {
 		t.Fatal(err)
 	}
 	ticker := NewTicker(store, testRunner(root), 30*time.Second)
-	ticker.SetDispatcher(&Dispatcher{Store: store, Runner: testRunner(root), Profile: "alice"})
+	ticker.SetDispatcher(&Dispatcher{Store: store, Runner: testRunner(root), Profile: "alice", Senders: map[string]Sender{"discord": stubSender{sent: make(map[string]string)}}})
 	ticker.Start()
 	defer ticker.Stop()
 	time.Sleep(1200 * time.Millisecond)
@@ -406,4 +406,79 @@ func mustCreate(t *testing.T, store *Store, in Job) Job {
 		t.Fatal(err)
 	}
 	return job
+}
+
+func TestDeliverDefaultsToOriginAndRejectsOthers(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	job := mustCreate(t, store, Job{Schedule: "in 1h", Prompt: "hi"})
+	if job.Deliver != "origin" {
+		t.Fatalf("deliver default = %q", job.Deliver)
+	}
+	for _, target := range []string{"local", "all", "", "bot-chat", "discord:chan1", "  local  "} {
+		if target == "" {
+			continue
+		}
+		if _, err := store.Create(time.Now(), testRunner(root), Job{Schedule: "in 1h", Prompt: "hi", Deliver: target}); err == nil {
+			t.Fatalf("target %q accepted", target)
+		}
+	}
+	if _, err := store.Create(time.Now(), testRunner(root), Job{Schedule: "in 1h", Prompt: "hi", Deliver: "origin"}); err != nil {
+		t.Fatalf("origin rejected: %v", err)
+	}
+}
+
+func TestLegacyEmptyDeliverLoadsAsOrigin(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "cron")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `[{"id":"abc","schedule":"in 1h","prompt":"hi","next_run_at":99,"created_unix":1,"updated_unix":1}]`
+	if err := os.WriteFile(filepath.Join(dir, "jobs.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(root)
+	jobs, err := store.List()
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("list = %+v %v", jobs, err)
+	}
+	if jobs[0].Deliver != "origin" {
+		t.Fatalf("legacy deliver = %q", jobs[0].Deliver)
+	}
+}
+
+func TestLegacyLocalTargetFailsClosedAtDispatch(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent: func(ctx context.Context, call AgentCall) (AgentResult, error) {
+			return AgentResult{Text: "hi"}, nil
+		},
+		Senders:       map[string]Sender{"discord": stubSender{sent: make(map[string]string)}},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+	}
+	job := mustCreate(t, store, Job{
+		Schedule: "in 1s", Prompt: "x", Deliver: "origin",
+		OriginGateway: "discord", OriginSession: "discord:chan1:user1",
+	})
+	if _, err := store.mutateID(job.ID, func(j *Job) error {
+		j.Deliver = "local"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	due := store.ClaimDue(time.Now())
+	if len(due) != 1 {
+		t.Fatalf("due = %+v", due)
+	}
+	ex, _, err := d.RunOne(context.Background(), due[0], time.Minute)
+	if err != nil || ex.Delivered || ex.Status != "delivery_failed" {
+		t.Fatalf("legacy target = %+v %v", ex, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cron", "output")); !os.IsNotExist(err) {
+		t.Fatal("output directory was created")
+	}
 }

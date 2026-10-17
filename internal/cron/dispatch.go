@@ -263,56 +263,44 @@ func displayName(job *Job) string {
 	return "scheduled job " + job.ID
 }
 
-// deliver routes finished output by target. Local and origin delivery mark
-// delivered; every other target records honestly instead of silently
+// deliver routes finished output to the creating chat. Origin is the only
+// delivery target; every other value records honestly instead of silently
 // skipping. Only failures rename the status to delivery_failed.
 func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
 	target := strings.TrimSpace(job.Deliver)
-	if target == "" || target == "local" {
-		if d.Store != nil {
-			if delivered, err := d.Store.deliverLocal(d.Runner, job, text); err == nil && delivered {
-				ex.Delivered = true
-				return
-			} else if err != nil {
-				ex.Delivered = false
-				ex.DeliveryError = err.Error()
-				ex.Status = "delivery_failed"
-				return
-			}
-		}
+	if target != "" && target != "origin" {
 		ex.Delivered = false
-		ex.DeliveryError = "local delivery is unavailable"
+		ex.DeliveryError = "delivery target " + target + " is not supported; origin is the only delivery target"
 		ex.Status = "delivery_failed"
 		return
 	}
-	if target == "origin" {
-		if strings.TrimSpace(job.OriginSession) == "" || strings.TrimSpace(job.OriginGateway) == "" {
-			ex.Delivered = false
-			ex.DeliveryError = "unknown origin — recreate the job from the target chat"
-			ex.Status = "delivery_failed"
-			return
-		}
-		sender, ok := d.Senders[strings.TrimSpace(job.OriginGateway)]
-		if !ok || sender == nil {
-			ex.Delivered = false
-			ex.DeliveryError = "no live sender for origin gateway"
-			ex.Status = "delivery_failed"
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		if err := sender.SendText(ctx, d.Profile, strings.TrimSpace(job.OriginSession), wrapDelivery(job, text)); err != nil {
-			ex.Delivered = false
-			ex.DeliveryError = err.Error()
-			ex.Status = "delivery_failed"
-			return
-		}
-		ex.Delivered = true
+	if target == "" {
+		// Belt and braces: stored jobs always carry a target, but an
+		// in-memory job may predate the origin-only default.
+		target = "origin"
+	}
+	if strings.TrimSpace(job.OriginSession) == "" || strings.TrimSpace(job.OriginGateway) == "" {
+		ex.Delivered = false
+		ex.DeliveryError = "unknown origin — recreate the job from the target chat"
+		ex.Status = "delivery_failed"
 		return
 	}
-	ex.Delivered = false
-	ex.DeliveryError = "delivery target " + target + " is not implemented in this deployment; recorded only"
-	ex.Status = "delivery_failed"
+	sender, ok := d.Senders[strings.TrimSpace(job.OriginGateway)]
+	if !ok || sender == nil {
+		ex.Delivered = false
+		ex.DeliveryError = "no live sender for origin gateway"
+		ex.Status = "delivery_failed"
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := sender.SendText(ctx, d.Profile, strings.TrimSpace(job.OriginSession), wrapDelivery(job, text)); err != nil {
+		ex.Delivered = false
+		ex.DeliveryError = err.Error()
+		ex.Status = "delivery_failed"
+		return
+	}
+	ex.Delivered = true
 }
 
 // wrapDelivery bounds delivered text. The agent response goes out
