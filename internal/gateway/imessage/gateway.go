@@ -44,6 +44,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 	if err != nil {
 		return err
 	}
+	g.ensureWebhookRegistered(log)
 	log.Debug("gateway.listen", "imessage gateway listener starting", config.F("port", g.Port))
 	listenAddr := listener.Addr().String()
 	if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
