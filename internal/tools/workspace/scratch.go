@@ -10,10 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"sync"
 	"time"
-
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
 )
 
 // scratchLifetime matches the system-prompt contract and the image-cache TTL.
@@ -197,74 +194,4 @@ func Sweep(ctx context.Context, profileRoot string, now time.Time) (Counts, erro
 		}
 	}
 	return counts, nil
-}
-
-// Worker sweeps one profile scratch directory immediately and then hourly
-// until stopped. It mirrors the imagecache worker lifecycle.
-type Worker struct {
-	root   string
-	log    *config.Logger
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
-}
-
-// NewWorker binds a sweeper to a profile root.
-func NewWorker(root string, log *config.Logger) *Worker {
-	return &Worker{root: root, log: log.Server("workspace")}
-}
-
-// Start begins an independent worker lifetime; Stop must join it.
-func (w *Worker) Start() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.done != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	w.cancel = cancel
-	w.done = make(chan struct{})
-	go w.run(ctx, time.Hour)
-}
-
-func (w *Worker) run(ctx context.Context, interval time.Duration) {
-	defer close(w.done)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		started := time.Now()
-		counts, err := Sweep(ctx, w.root, started)
-		status := "ok"
-		outcome := "complete"
-		if err != nil {
-			status = "error"
-			if errors.Is(err, context.Canceled) {
-				status = "ok"
-				outcome = "canceled"
-			} else {
-				w.log.Warn("workspace.scratch.sweep.failed", "scratch sweep failed", config.ErrorField(err), config.F("status", "error"))
-			}
-		}
-		w.log.Debug("workspace.scratch.sweep.complete", "scratch sweep completed",
-			config.F("status", status), config.F("outcome", outcome),
-			config.F("removed_file_count", counts.RemovedFiles), config.F("removed_dir_count", counts.RemovedDirs),
-			config.F("removed_bytes", counts.RemovedBytes),
-			config.F("duration_ms", time.Since(started).Milliseconds()))
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-// Stop cancels and joins any running sweep.
-func (w *Worker) Stop() {
-	w.mu.Lock()
-	cancel, done := w.cancel, w.done
-	w.mu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
-	}
 }

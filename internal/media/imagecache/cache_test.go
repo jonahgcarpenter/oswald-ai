@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/shared/prune"
 )
 
 func samplePNG(t *testing.T) []byte {
@@ -34,6 +35,10 @@ func samplePNG(t *testing.T) []byte {
 }
 
 func TestSaveResolveSweepAndDelete(t *testing.T) {
+	// Legacy mtime-aged fixtures: force the mtime fallback so Chtimes
+	// controls expiry on filesystems that report birthtime.
+	prune.SetBirthtimeHookForTest(func(string) (time.Time, bool) { return time.Time{}, false })
+	t.Cleanup(func() { prune.SetBirthtimeHookForTest(nil) })
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "data")
 	c := New(root)
@@ -44,7 +49,7 @@ func TestSaveResolveSweepAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(path) || !strings.HasPrefix(path, filepath.Join(root, "alice", ".cache", "images")+string(os.PathSeparator)) {
+	if !filepath.IsAbs(path) || !strings.HasPrefix(path, filepath.Join(root, "alice", "cache", "images")+string(os.PathSeparator)) {
 		t.Fatalf("wrong path: %q", path)
 	}
 	got, mime, err := c.Resolve(ctx, "alice", path)
@@ -62,7 +67,7 @@ func TestSaveResolveSweepAndDelete(t *testing.T) {
 	if _, err := c.Save(ctx, "alice", []byte("not an image"), ""); err == nil {
 		t.Fatal("accepted invalid image")
 	}
-	other := filepath.Join(root, "alice", ".cache", "images", "unrelated.txt")
+	other := filepath.Join(root, "alice", "cache", "images", "unrelated.txt")
 	if err := os.WriteFile(other, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -297,22 +302,22 @@ func TestValidationAndUnsafeSweep(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(c.root, "bob"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "bob", ".cache")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "bob", "cache")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Sweep(ctx, time.Now().Add(48*time.Hour)); err != nil {
 		t.Fatalf("unsafe cache blocked sweep: %v", err)
 	}
-	if _, _, err := c.Resolve(ctx, "bob", filepath.Join(c.root, "bob", ".cache", "images", filepath.Base(gifPath))); err == nil {
+	if _, _, err := c.Resolve(ctx, "bob", filepath.Join(c.root, "bob", "cache", "images", filepath.Base(gifPath))); err == nil {
 		t.Fatal("resolved through symlink")
 	}
 	if err := os.Mkdir(filepath.Join(c.root, "carol"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(c.root, "carol", ".cache"), 0700); err != nil {
+	if err := os.Mkdir(filepath.Join(c.root, "carol", "cache"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "carol", ".cache", "images")); err != nil {
+	if err := os.Symlink(t.TempDir(), filepath.Join(c.root, "carol", "cache", "images")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Sweep(ctx, time.Now().Add(48*time.Hour)); err != nil {

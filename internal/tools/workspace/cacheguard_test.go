@@ -29,9 +29,8 @@ func TestCacheDeniedExceptScratch(t *testing.T) {
 		"cache/scratch_go/x",
 		"cache/scratch-gopath/x",
 		"cache/processes/x",
+		"cache/images/x",
 		"cache/foo",
-		".cache/images/x",
-		".cache",
 	}
 	for _, raw := range deny {
 		_, _, err := ws.Resolve(raw)
@@ -56,7 +55,7 @@ func TestScanManagedCacheShell(t *testing.T) {
 		"mkdir cache/foo && touch cache/foo/a",
 		"GOPATH=cache/scratch-gopath go build ./...",
 		"ls cache/processes",
-		"cat .cache/images/x",
+		"cat cache/images/x",
 		"cp out.bin cache/foo.bin",
 		"mkdir " + filepath.Join(root, "cache", "scratch_go"),
 	}
@@ -88,7 +87,7 @@ func TestScanManagedCacheCode(t *testing.T) {
 		`open("cache/scratch_go/x").read()`,
 		`import os; os.makedirs("cache/foo")`,
 		`from pathlib import Path; Path("cache/foo").mkdir()`,
-		`open('.cache/images/x', 'rb').read()`,
+		`open('cache/images/x', 'rb').read()`,
 		`open(os.path.join("cache", "x"), "w")`,
 		`open('` + filepath.Join(root, "cache", "foo") + `')`,
 	}

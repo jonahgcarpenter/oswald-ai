@@ -275,14 +275,11 @@ func (w *Workspace) checkDenied(rel string) error {
 	}
 	// Managed cache is never written directly: the model may use
 	// cache/scratch/ for temporary files, but cache siblings (processes,
-	// ad-hoc GOPATH-style dirs) and .cache/images are service-owned.
+	// images, ad-hoc GOPATH-style dirs) are service-owned.
 	if first == "cache" {
 		if rel == "cache/scratch" || strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator)) {
 			return nil
 		}
-		return &DenyError{Rel: rel, Category: denyCache}
-	}
-	if first == ".cache" {
 		return &DenyError{Rel: rel, Category: denyCache}
 	}
 	return nil
