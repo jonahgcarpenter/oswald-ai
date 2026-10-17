@@ -33,7 +33,7 @@ import (
 const (
 	sessionHistoryCandidateLimit  = 1000
 	sessionTurnTTL                = 24 * time.Hour
-	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Answer the user's last request now using only visible response content."
+	emptyResponseRetryPrompt      = "Your previous completion contained no visible response. Review the question and continue where you left off."
 	emptyResponseFallback         = "I blanked on the actual answer. Try again and I'll take another shot."
 	contextCompactionFallback     = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
 	generatedImagePartialResponse = "The model could not finish the request. The generated images were cached but not delivered; any completed actions have not been undone. Ask again to continue editing."
@@ -536,6 +536,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
+	emptyRetryDone := false
 	useFallback := func(content string) {
 		accumulatedContent.Reset()
 		accumulatedContent.WriteString(content)
@@ -623,6 +624,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			goto finalize
 		}
 		messages = preparedMessages
+		if compactionStats.Compacted && emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
+			// Compaction rebuilds from the original current prompt and drops
+			// the injected empty-response continue prompt. Restore it.
+			messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+		}
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
 			return &Response{Kind: "over_budget", Model: a.model}, nil
@@ -654,6 +660,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					}
 				}
 				if compactErr == nil && recoveryStats.Compacted {
+					if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
+						messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+					}
 					req.Messages = messages
 					reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
 						config.F("iteration", iteration), config.F("compacted_unit_count", recoveryStats.DebtCount), config.F("status", "retry"))
@@ -735,6 +744,16 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
 					}
 				}
+			} else if emptyRetryDone && len(generatedImages) == 0 {
+				// The empty-response continue already spent the one extra model
+				// call. A generic failure here maps to the empty fallback, not
+				// a provider error, matching the previous retry semantics.
+				reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
+					config.F("status", "degraded"),
+					config.ErrorField(err),
+				)
+				useFallback(emptyResponseFallback)
+				goto finalize
 			} else {
 				errorText := config.SafeErrorText(fmt.Errorf("model failed: %w", err))
 				return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
@@ -763,8 +782,24 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			config.F("content_chars", len(resp.Message.Content)),
 		)
 
-		// No tool calls — the model is done. Exit the loop.
+		// No tool calls — the model is done, unless it produced no visible
+		// response. In that case inject a static continue prompt once and run
+		// another iteration with the full tool catalog intact so tool-driven
+		// work can continue.
 		if len(resp.Message.ToolCalls) == 0 {
+			visibleContent := accumulatedContent.String()
+			if visibleContent == "" {
+				visibleContent = resp.Message.Content
+			}
+			if strings.TrimSpace(visibleContent) == "" && !emptyRetryDone {
+				emptyRetryDone = true
+				messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+				reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
+					config.F("thinking_chars", len(resp.Message.Thinking)),
+					config.F("status", "retry"),
+				)
+				continue
+			}
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
@@ -1216,103 +1251,13 @@ finalize:
 		finalThinking = lastResp.Message.Thinking
 	}
 	if strings.TrimSpace(finalContent) == "" {
-		finalContent = ""
-		retryMessages := append([]llm.ChatMessage{}, messages...)
-		retryMessages = append(retryMessages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, retryMessages, nil, false)
-		if compactErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request before empty-response retry", config.F("status", "degraded"), config.ErrorField(compactErr))
-			finalContent = contextCompactionFallback
-			if streamCallback != nil {
-				streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
-			}
-		} else if compactionStats.Compacted {
-			messages = preparedMessages
-			retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+		// The in-loop empty retry already gave the model one more turn with
+		// tools intact. If it is still empty here, fall back without another
+		// model call.
+		if len(generatedImages) > 0 {
+			useFallback(generatedImagePartialResponse)
+			finalContent = generatedImagePartialResponse
 		} else {
-			retryMessages = preparedMessages
-		}
-
-		if finalContent == "" {
-			accumulatedContent.Reset()
-			retryReq := req
-			retryReq.Messages = retryMessages
-			retryReq.Tools = nil
-			if request.Stateless && tokenbudget.EstimateRequest(retryReq.Messages, nil) > inputLimit {
-				return &Response{Kind: "over_budget", Model: a.model}, nil
-			}
-
-			reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
-				config.F("thinking_chars", len(finalThinking)),
-				config.F("status", "retry"),
-			)
-			modelIterations++
-			retryResp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
-			if err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return nil, ctxErr
-				}
-				if llm.IsContextLengthExceededError(err) && foregroundCompaction.hasDebt() {
-					preparedMessages, recoveryStats, compactErr := foregroundCompaction.prepare(ctx, retryMessages, nil, true)
-					if compactErr != nil {
-						if ctxErr := ctx.Err(); ctxErr != nil {
-							return nil, ctxErr
-						}
-					} else if recoveryStats.Compacted {
-						messages = preparedMessages
-						retryMessages = append(append([]llm.ChatMessage{}, messages...), llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-						retryReq.Messages = retryMessages
-						modelIterations++
-						retryResp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, retryReq, chatCallback, reqLog)
-					}
-				}
-			}
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return nil, err
-				}
-				reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
-					config.F("status", "degraded"),
-					config.ErrorField(err),
-				)
-				if llm.IsContextLengthExceededError(err) {
-					finalContent = contextCompactionFallback
-					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
-					}
-				} else if len(generatedImages) > 0 {
-					useFallback(generatedImagePartialResponse)
-					finalContent = generatedImagePartialResponse
-				} else if imageRetriesExhausted {
-					imageSizeFallbackUsed = true
-					finalContent = imageSizeFallback
-					if streamCallback != nil {
-						streamCallback(StreamChunk{Type: ChunkContent, Text: imageSizeFallback})
-					}
-				}
-			} else {
-				lastResp = retryResp
-				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, retryResp)
-				finalContent = accumulatedContent.String()
-				if strings.TrimSpace(finalContent) == "" {
-					finalContent = retryResp.Message.Content
-				}
-				if retryResp.Message.Thinking != "" && !strings.Contains(finalThinking, retryResp.Message.Thinking) {
-					finalThinking += retryResp.Message.Thinking
-				}
-				if strings.TrimSpace(finalContent) != "" {
-					reqLog.Debug("agent.response.empty_retry_recovered", "model recovered after empty response")
-				}
-			}
-		}
-
-		if strings.TrimSpace(finalContent) == "" {
 			finalContent = emptyResponseFallback
 			if streamCallback != nil {
 				streamCallback(StreamChunk{Type: ChunkContent, Text: finalContent})
