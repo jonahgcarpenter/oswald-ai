@@ -1,31 +1,73 @@
-# Agent - Foreground Turn Loop
+# agent/ — Foreground Turn Loop, Prompt, Images, Retries
 
-`internal/agent/` owns the iterative model loop: prompt assembly, tool execution, image handling,
-retries, and finalization. Stateless API turns share the path but persist nothing.
+Applies on top of the root `AGENTS.md` (operator-state and persisted-contract invariants).
 
-## Packages
+## Shape
 
-- `agent` (single package, one topic per file) — `Process()` loop (`agent.go`), request/response
-  contracts (`types.go`), prompt assembly (`context.go`), catalog merge and execution
-  (`tools.go`), model-visible vs persisted tool history (`tool_history.go`), foreground
-  compaction state (`compaction.go`), session image planning and retention
-  (`session_images.go`, `image_tool_results.go`, `image_retry.go`), `MEDIA` token resolution
-  (`media_tokens.go`), streaming chunks (`stream.go`), persistence contract
-  (`session_store.go`).
+`agent.go::Process()` is the public entry point; `types.go` holds the `Request`/`Response` contract
+and `OswaldToolEvent` timeline. A turn is: validate principal → load soul, file/session memory,
+images, and foreground debt → build the dynamic system prompt (soul + trusted
+operating-directives block) → merge the tool catalog → `AssemblePromptContext` → iterate model ↔
+tool calls → finalize, resolve MEDIA, persist. Stateless API turns share the whole path but skip
+persistence and return `over_budget` instead of compacting.
 
-## Rules
+The files split by responsibility: `context.go` (prompt assembly), `tools.go` (catalog merge,
+`executeTool`, governance text), `tool_history.go` (model-visible vs persisted redacted calls),
+`compaction.go` (foreground compaction state), `session_images.go` / `image_tool_results.go` /
+`image_retry.go` (image planning, newest-4 retention, downscaling retries), `media_tokens.go`
+(MEDIA resolution), `stream.go` (`StreamChunk`), `session_store.go` (persistence contract: resolve,
+bind, append, page).
 
-- Budget (estimator in `session/compaction/budget/`): 32,768 context, 256-token safety margin,
-  70% compaction trigger. Recent-tail reserve is 25% of input, clamped 2,000–8,000. Required
-  oversize context is retained and reported; stateless turns return `over_budget`, never truncate.
-- Tool authorization is per-iteration: discovery never authorizes another call in the same batch.
-  Execute serially and append a correlated result for every declared call, including blocked ones.
-  Caps: 50 handler executions, 30 tool-bearing responses; the final completion runs tools-disabled.
-- Generated images never auto-deliver. The model delivers one only by emitting its `MEDIA` token;
-  at most 4 logical images per request. Cancellation never publishes a completed turn.
-- Reasoning is never persisted in conversation or tool history.
+## Turn loop (`agent.go::Process`)
 
-## Testing
+Iterative, with a one-shot empty-output retry and a final tools-disabled completion:
 
-Use fake model clients with scripted tool-call sequences. Cover budget fit/over-budget, blocked-call
-correlation, retry exhaustion, MEDIA resolution/denial, and stateless non-persistence.
+```
+refresh catalog; set ToolChoice (first call only)
+for iteration:
+    foregroundCompaction.prepare()   // compact if over trigger
+    response = chatWithImageRetries() // up to 5 attempts, shrinking images
+    normalize tool call IDs; record usage
+    if response has no tool calls: break
+    append assistant message
+    for each call in order:
+        stream tool_call; BeforeExecution (governance)
+        executeTool (registry first, else MCP bridge)
+        append tool message + history batch; bound image results
+        break batch on HaltDecision
+    break loop on GlobalStopReason (degraded final answer)
+if governance exhausted: one final tool-less model call
+finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped if stateless)
+```
+
+## Invariants (every change is reviewed against these)
+
+- **Budget math lives in `session/compaction/budget/`.** Usable input is `min(window, prompt
+  limit) − 256`, default window 32,768; recent-tail reserve is 25% of input clamped to
+  2,000–8,000, holding at most the two newest turns; compaction triggers at 70%. Required oversize
+  context is retained and reported — the agent never silently truncates what the turn needs.
+- **Tool authorization is per-iteration.** Discovery can never authorize another call in the same
+  emitted batch. Every declared call executes serially and gets a correlated result appended,
+  including blocked ones — failures, empties, and repeats all run, with loop-guardrail warnings
+  advising instead of refusing. Caps are 50 handler executions and 30 tool-bearing responses.
+- **Generated images never auto-deliver.** The model delivers one only by emitting a
+  `MEDIA:/absolute/path` token in its final response (resolved against the managed cache first,
+  then CWD-confined raw paths); at most 4 logical images per request. Previews ride tool results;
+  follow-ups replay text only.
+- **Reasoning is never persisted** in conversation or tool history. Summaries and tool history are
+  untrusted lower-authority reference — quoted context, never deployment instruction.
+
+## Images and retries
+
+Attached/replied images arrive with `[Image attached at: <private cache path>]` annotations in the
+same user message as text and bytes; new turns persist the annotations so follow-ups keep the paths
+without replaying bytes. Only the newest 4 loaded images and 4 generated previews stay attached
+after each tool batch; compaction retains complete batches containing active inputs. Retry
+sequences shrink images (down to 0.75 scale, 1920px edge) across 5 attempts for recognized resource
+failures; Qwen parser failure retries the identical request once.
+
+## Tests
+
+Turn tests use fake model clients with scripted tool-call sequences. Assert budget fit/over-budget
+shapes, blocked-call correlation, retry exhaustion, MEDIA resolution vs denial, and stateless
+non-persistence — not prompt text snapshots.

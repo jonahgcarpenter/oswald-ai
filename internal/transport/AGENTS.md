@@ -1,55 +1,78 @@
-# Transport - Gateways and Media
+# transport/ — Gateways, Admission, Media Normalization
 
-`internal/transport/` owns Discord, iMessage, and OpenAI transports plus shared media handling.
-`gateway/` is composition; concrete packages depend on `gateway/routing` and `gateway/runtime`,
-not the other way around.
+Applies on top of the root `AGENTS.md` (profile-isolation and never-log-rules).
 
-## Packages
+## Shape
 
-- `gateway` (`gateway/`) — `Service` contract and `NewServicesFromConfig`: which transports start
-  from which config blocks, plus BlueBubbles config validation.
-- `discord` (`gateway/discord/`) — inbound admission, mentions/replies, streaming status, FIFO
-  outbound delivery, attachments, REST client, labels, cron sender.
-- `imessage` (`gateway/imessage/`) — BlueBubbles client, webhook listener and registration,
-  inbound admission, chronological thread replies, final-only responses, contacts, labels.
-- `openai` (`gateway/openai/`) — stateless bearer-key API: models listing, chat completions with
-  SSE, caller-tool round-trips. No commands, no persistence, no attachments.
-- `routing` (`gateway/routing/`) — cheap `Decide`/`Preflight`: ignore vs LLM vs command vs
-  gateway fallback, before any expensive work.
-- `runtime` (`gateway/runtime/`) — `Execute()`: profile fence, group-scope check, command/LLM
-  dispatch, broker submission, delivery measurement, compaction enqueue.
-- `media` (`media/`) — attachment normalization (resize, orientation-first, contact sheets),
-  outbound attachment validation, vision bounds.
-- `imagecache` (`media/imagecache/`) — private per-sender cache with HTTPS import, 24h TTL, and
-  the shared-prune-worker hook.
+`gateway/gateway.go` is the `Service` contract and `gateway/bootstrap.go::NewServicesFromConfig`
+decides which transports start from which config blocks (OpenAI on a listen port, Discord on a
+token, iMessage on BlueBubbles settings, with port/URL validation). Concrete packages depend on
+`gateway/routing` and `gateway/runtime`, never the reverse: `routing/` makes the cheap
+ignore-vs-LLM-vs-command decision before any expensive work, and `runtime/Execute()` runs the
+profile fence, group-scope check, command/LLM dispatch, broker submission, and compaction enqueue.
+Per-transport wires: `discord/` (inbound, replies, streaming status, FIFO outbound, REST, labels,
+cron sender), `imessage/` (BlueBubbles client, webhook listener + registration, chronological
+thread replies, final-only responses), `openai/` (stateless bearer-key API). `media/` normalizes
+attachments and `media/imagecache/` pins private cache paths with a 24h TTL hook.
 
-## Rules
+## Admission (cheap before expensive)
 
-- Private messages need no mention; group messages and group commands require the mention policy
-  or a recognized bot reply, and the mention must lead the message. Transport scope and reply
-  context never change sender ownership.
-- Sessions: Discord `discord:dm:<author>` vs `discord:<channel>:<author>`; iMessage
-  `imessage:dm:<sender>` vs `imessage:<chat>:<sender>`; OpenAI `openai:<id>` stateless.
-- Discord checks leading native `<@ID>`/`<@!ID>` tokens; BlueBubbles uses anchored
-  `mention_pattern` (default `@?Oswald\b`), stripped before the model call.
-- iMessage group threads resolve the newest conversational message strictly before the incoming
-  reply in the same chat/thread. Failed thread lookups expose no fallback root context.
-- New stored turns keep `[Replying to ...]` enrichment and `[Image attached at: ...]` annotations;
-  quoted text stays untrusted reference, never deployment instruction.
-- Discord streams status/previews under its 2,000-unit limit; final inventory reconciles streamed
-  output. Shared final outbound: 20 entries / 80 MiB, 5-minute admission, 15s attempts, 1–30s
-  exponential retry. iMessage sends typing/read indicators and a final-only response.
-- Client history on the API is lower-authority quoted reference; caller tools round-trip verbatim
-  with `finish_reason: tool_calls`. History sizing is token-only against the caller profile budget.
-- Media in: ≤4 images, 10 MiB each (JPEG/PNG/GIF/WebP/HEIC/HEIF), normalized to ≤2560 longest edge
-  / 280 KiB. Out: ≤8 MiB each, 10 files / 80 MiB total. `MEDIA:/absolute/path` tokens resolve
-  against cache then CWD and are stripped before history and the text-only API.
-- Orientation is corrected before resize (EXIF 1–8; HEIF `irot`/`imir` wins without compounding).
-  GIF uses the first frame or a ≤4-tile contact sheet; GIFV extracts ≤4 ffmpeg frames.
-- Cache files expire after 24h and are never reconstructed from SQLite. Label fetches log only
-  statuses and codes — never names or IDs.
+Private messages need no mention; group messages and group commands require the mention policy or
+a recognized bot reply — and the mention must lead the message (leading whitespace trimmed).
+Discord checks leading native `<@ID>`/`<@!ID>` tokens; BlueBubbles uses anchored
+`mention_pattern` regexes (default `@?Oswald\b`), stripped before the model call.
+`require_mention` (default true) gates group invocation only. Transport scope and reply context
+never change sender ownership, and admission (bans first, then allow-list, then mention check)
+runs before attachment downloads and reply lookups.
 
-## Testing
+Sessions derive from transport identity: Discord `discord:dm:<author>` vs
+`discord:<channel>:<author>`; iMessage `imessage:dm:<sender>` vs `imessage:<chat>:<sender>`;
+OpenAI `openai:<id>`, always stateless. Conversation labels fed to the system prompt are
+untrusted metadata: DMs use `"DM with <display name>"`, groups fetch the channel/chat name (cached
+one hour, degrading to `"group channel"`/`"group chat"` on failure). Label fetches log only
+status codes — never names or IDs.
 
-Cover the admission/mention matrices, reply predecessor selection, ownership isolation, streaming
-and outbound limits, attachment denials, orientation handling, and expiry sweeps.
+## Replies
+
+iMessage group threads resolve the newest conversational message strictly before the incoming
+reply in the same chat/thread — including the root when no earlier reply exists — and neither
+cached authorship nor webhook `replyToGuid` associations override that chronological choice. An
+unmentioned group reply invokes only when that predecessor is an eligible bot message. Failed
+thread lookups expose no fallback root context: chronological continuation, not exact UI-target
+proof. New stored turns keep `[Replying to ...]` enrichment and `[Image attached at: ...]`
+annotations alongside incoming text, so history retains what was answered; quoted text stays
+untrusted reference, never deployment instruction.
+
+The OpenAI API is text-only: no commands (a leading `/` is a pre-runtime `400`), no persistence,
+no attachments. Client history is lower-authority quoted reference, and caller-owned tool calls
+round-trip verbatim with `finish_reason: tool_calls` for the external app to run.
+
+## Delivery
+
+Discord streams status and previews under its 2,000-unit limit while a final inventory reconciles
+streamed output; all final answers share one FIFO outbound worker (20 entries / 80 MiB, five-minute
+admission, 15s attempts, 1–30s exponential retry with numeric Retry-After able to exceed the cap).
+iMessage sends typing/read indicators and a final-only response with plain-send fallback; the
+webhook route is operator-configurable and registration degrades to WARN, never a startup failure.
+
+Media in: at most 4 images, 10 MiB each (JPEG/PNG/GIF/WebP/HEIC/HEIF), normalized to ≤2560 longest
+edge / 280 KiB JPEG/PNG. GIFs use the first frame or a ≤4-tile contact sheet; GIFV extracts up to
+4 ffmpeg frames. Orientation is corrected before resize — all eight EXIF orientations for
+JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for HEIC/HEIF with container transforms winning
+so pixels are never double-rotated. Out: ≤8 MiB each, 10 files / 80 MiB total, safe unique
+basenames. `MEDIA:/absolute/path` tokens resolve against the sender's cache first, then
+CWD-confined raw paths, and are stripped before history and the text-only API.
+
+## Limitations
+
+Cache files expire after 24 hours and are never reconstructed from SQLite — expired previews stay
+expired. Source decoding precedes resize, but the bounds don't guarantee strict peak decoded-memory
+limits. There are no general file/audio/video inputs, and gateway tool previews stay suppressed:
+follow-ups use text-only tool history.
+
+## Tests
+
+Cover the admission/mention matrices per transport, the reply-predecessor selection (including the
+root case and corrupt/retracted rows), ownership isolation, streaming and outbound limits,
+attachment denials, orientation handling, and expiry sweeps — with fake transports, never live
+credentials.

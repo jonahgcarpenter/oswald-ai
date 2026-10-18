@@ -1,51 +1,93 @@
-# Platform - Config, State, Identity, Scheduling, Contracts
+# platform/ — Config, State Handles, Routing, Scheduling, Logging
 
-`internal/platform/` groups narrow infrastructure contracts. Each leaf owns its behavior; `platform`
-itself is only the grouping, never a facade.
+Applies on top of the root `AGENTS.md` (operator-state, persisted-contract, and never-log
+invariants). This directory groups narrow contracts; it is never a facade — behavior lives in the
+leaf packages.
 
-## Packages
+## Config (`config/`)
 
-- `config` (`config/`) — strict YAML loading, profile dotenv environments and interpolation,
-  document merging, retention policy, and the safe logging system (envelope, fields, error codes,
-  ordering, activity catalog, contract test).
-- `database` (`database/`) — exact approved-schema `state.db` handle: `OpenState` verification,
-  `schema.sql` baseline, single-connection ownership. No migrations.
-- `profiles` (`profiles/`) — immutable transport-to-profile routing table: identity normalization,
-  allow/ban admission, route resolution with default fallback.
-- `identity` (`identity/`) — `Principal`/`Resolver` contracts: `CanonicalUserID` profile binding,
-  gateway assurances. Never provisions accounts.
-- `approvals` (`approvals/`) — in-memory single-flight pending terminal approvals, five-minute
-  window, no disk.
-- `cron` (`cron/`) — per-profile schedules, atomic `jobs.json` store, 30s ticker, dispatcher with
-  origin-only delivery.
-- `requestctx` (`requestctx/`) — authenticated ownership and request-local metadata plus telemetry
-  field helpers.
-- `lease` (`lease/`) — durable heartbeat that renews a lease while blocking work runs.
-- `prune` (`prune/`) — creation-age specs and the single shared hourly cleanup worker that owner
-  hooks register with.
+Strict YAML with private per-profile dotenv environments. Interpolation is compose-style only —
+`${VAR}`, `${VAR:-default}`, `${VAR-default}`, `${VAR:?err}`, `$$` — and bare missing variables
+fail closed with a classified `config_*` diagnostic naming only the schema path, artifact, and
+variable (values and error text are never logged). Disabled platforms prune before interpolation
+so their credentials are never required, but unknown keys inside a disabled block are still
+rejected. Process env wins over dotenv and loading never mutates the process environment; named
+profiles inherit the default `.env` and override per key, and can only add providers, model, tools,
+MCP servers, and `api` — never shared listeners or routes.
 
-## Rules
+Files are bounded (256 KiB, no symlinks/aliases/duplicate/unknown keys, depth ≤32) and dotenv
+files must be private regular files. Profile names are bounded lowercase ASCII with `default`
+reserved. The supported surface is defined by what `oswald setup` writes; former
+application-setting environment variables are not a deployment interface.
 
-- Config files: 256 KiB cap, no symlinks/aliases/duplicate/unknown keys, depth ≤32. Interpolation
-  is compose-style only (`${VAR}`, `:-`/`-` defaults, `:?`/`?` errors, `$$`); bare missing variables
-  fail closed. Disabled platforms prune before interpolation but still reject unknown keys. Process
-  env wins over dotenv; loading never mutates the process environment. Profile names are bounded
-  lowercase ASCII; `default` reserved. `banned_users` always reject first.
-- Database: initialize and verify only. Fail closed on version/drift/foreign-key/unsafe-path
-  violations. Maintenance runs immediately then hourly (≤100 expired sessions and ≤100 timed-out
-  exchanges per transaction, 24h inactivity, 15-minute pending timeout, passive WAL checkpoint).
-- Cron: named jobs with fuzzy id/name resolution; `scheduled|paused|completed|running` states;
-  duration/`every`/5-field-cron/RFC3339/`in` schedules; injection/workdir/toolset validation;
-  `ClaimDue` advances before dispatch with exact-instant ledger dedupe and half-period catch-up
-  clamp (120s–2h, one-shot grace retire). Per-profile 30s ticker, 30m dispatch ceiling, origin-only
-  delivery (`[SILENT]` suppresses, nothing mirrors into history).
-- Logging: single-line JSON to stderr with the universal envelope, correlation-first details, fixed
-  events and literal keys, numeric counts, safe bounded labels. INFO is the compact lifecycle
-  stream; WARN is recoverable degradation; ERROR is startup/stopped-gateway/safety failures. The
-  AST contract test gates emission shape — it does not prove values are safe; review sources.
+## State handles (`database/`)
 
-## Testing
+`OpenState` initializes an empty profile `state.db` transactionally with one version-1
+`schema_version` row and verifies by comparing every schema object (generated ones included)
+against the `schema.sql` baseline with formatting-insensitive token normalization. Existing
+incompatible, drifted, or foreign-key-violating databases fail closed — there are no migrations,
+no account APIs, and no upgrade path. DSN pins foreign keys, secure delete, WAL with synchronous
+NORMAL, a 5s busy timeout, immediate transactions, and a 1,000-page checkpoint; one connection max.
+Maintenance runs immediately then hourly: at most 100 expired sessions and 100 timed-out pending
+exchanges per transaction, 24h inactivity, 15-minute pending timeout, passive WAL checkpoint.
 
-Cover interpolation success/failure codes, fresh/reopen/drift/rollback/concurrency, routing and
-admission, cron claim/dedupe/catch-up, approval windows, lease renewal, prune TTLs, and log
-emission counts, levels, and correlation.
+## Routing and identity (`profiles/`, `identity/`, `approvals/`)
+
+`profiles/` maps transport-authenticated identities to existing profiles (`bluebubbles`
+normalizes to internal `imessage`), falling back to the default profile when no route matches;
+explicit default routes need no multiplexing, named ones do. `banned_users` always reject first;
+empty `allowed_users` admits every routed identity — and admission runs before attachment or reply
+work. `identity/` defines the principal contract: `CanonicalUserID` carries the trusted profile
+name while `user_id` stays an untrusted display label, never ownership; the `cron` gateway's
+`scheduler` assurance marks profile-owned dispatch without passing transport routing.
+`approvals/` holds single-flight pending terminal approvals in memory only (five-minute window;
+expiry, restart, `/new`, and `/stop` all deny).
+
+## Scheduling (`cron/`)
+
+Per-profile jobs in `cron/jobs.json` with atomic rewrites (plus `executions.jsonl`, pruned to the
+newest 1000): `scheduled|paused|completed|running` states, fuzzy id-or-name resolution, origin
+capture, `repeat{times,completed}` auto-complete, and `ok|error|delivery_failed|blocked_config`
+outcomes. The grammar covers durations, `every` phrases, 5-field cron, RFC3339, and `in` one-shots.
+Validation rejects injection, out-of-CWD scripts and context, monitor xor, and user-owned
+`model/provider/base_url`. `ClaimDue` advances `next_run_at` before dispatch with exact-instant
+ledger dedupe (skipped duplicates stay silent), restore-once for orphaned slots, and a half-period
+catch-up clamp (120s–2h, one-shot grace retire); unparsable schedules record `blocked_config`
+instead of running. A per-profile 30s ticker with re-arm wake drives dispatch at a 30m ceiling
+into the origin chat only — `[SILENT]` suppresses, and nothing mirrors into history.
+
+## Shared contracts (`requestctx/`, `lease/`, `prune/`)
+
+`requestctx` carries authenticated ownership and request-local metadata (tool exposure, input
+images) without fabricating unavailable transport fields. `lease` renews a durable exact-token
+lease at a third of its TTL while blocking work runs, and renewal failure cancels the work.
+`prune` owns creation-time age (statx birthtime, mtime fallback) and declarative directory/TTL
+sweeps through the single per-profile cleanup worker that owner hooks (images, scratch, process,
+unknown `cache/` children) register with.
+
+## Logging (read this before touching any log call)
+
+Production stderr is single-line JSON with one universal envelope
+`ts, level, event, component, log_type, details`, details last with `msg` first, then correlation
+(`profile, user_id, gateway, request_id, operation/job, model`), then alphabetically sorted fields,
+`error_code` last. Success carries no `status` field; only error/rejected/retry/degraded are
+emitted. String labels ≤256 bytes, messages ≤1024, records ≤16 KiB, scalar lists ≤16 — oversize or
+unsupported values produce marshal-failure diagnostics, not truncated secrets. The field
+classification is allowlist-based: unknown or private-suffixed keys are omitted, and output
+filtering is not a secret detector, so source-value review stays mandatory.
+
+INFO is exactly ten lifecycle events (`app.started/stopped`, `gateway.connected`,
+`chat.requested/completed`, `command.completed`, `tool.completed/blocked`,
+`compaction.profile.started/complete`); everything else is DEBUG telemetry, WARN for recoverable
+degradation, ERROR for startup failures and stopped gateways. Correlate by `request_id`; never add
+requested/completed or chat/tool/diagnostic counts together — a missing completion may mean still
+running. `app.started` means composition finished, not listener readiness. Use
+`log.Server(component)` for infrastructure and `log.Agent(...)` for request work, and propagate
+`requestctx.LogFields` for correlation.
+
+## Tests
+
+Cover interpolation success/failure codes, fresh/reopen/drift/rollback/concurrency on state,
+routing and admission, cron claim/dedupe/catch-up, approval windows, lease renewal, prune TTLs —
+and log emission counts, levels, scalar types, and correlation. The logging AST guard checks shape,
+not values; the tests are the gate, source review is the proof.

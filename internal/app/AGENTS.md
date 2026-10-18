@@ -1,38 +1,42 @@
-# App - Composition, CLI, Commands
+# app/ — Composition Root, CLI Dispatch, Chat Commands
 
-`internal/app/` owns process wiring and the operator surface. `startup` is the sole composition
-root; `cli` is operator command dispatch; `commands` are chat-command adapters.
+Applies on top of the root `AGENTS.md` (main-only-exit and operator-state rules).
 
-## Packages
+## Shape
 
-- `startup` (`startup/`) — composition root: `Serve`/`Run`, profile assembly, gateway startup,
-  ordered LIFO shutdown.
-- `cli` (`cli/`) — top-level operator dispatch with exit-code mapping; injectable stdio.
-- `setup`, `start` (`cli/setup/`, `cli/start/`) — `oswald setup` seed-only provisioning;
-  `oswald start` foreground service wrapper.
-- `profiles` (`cli/profiles/`) — `oswald profile create/delete` for one private profile subtree.
-- `mcp` (`cli/mcp/`) — `oswald mcp auth <server>`: interactive OAuth authorization only.
-- `commands` (`commands/`) — `Definition/Request/Result/Handler` contract, `/name` parsing,
-  alias resolution, service dispatch.
-- `builtin` (`commands/builtin/`) — registers the five public handlers and renders `/help`.
-- `session` (`commands/session/`) — `/new`: close the open session, keep history searchable.
-- `stop` (`commands/stop/`) — out-of-band `/stop`: cancel active agent work in the conversation.
-- `approve` (`commands/approve/`) — out-of-band `/approve` + `/deny`: consume one pending
-  five-minute ask.
+`startup/serve.go::Serve` is the sole entry: load profiles → print the TTY-gated banner → install
+signal handling → `Run`, logging a classified failure on the way out. `startup/profiles.go`
+assembles everything per profile in sorted order (state store, maintenance, file/soul stores,
+builtin registry, model client, foreground/background compactors, profile MCP manager, agent,
+image cache, shared prune worker with its image/scratch/process/unknown-children hooks), then the
+shared foreground broker, profile commands, low-priority compression workers, and the configured
+gateways with profile-selected dependencies. Shutdown runs the same list in reverse — outbound,
+prune, maintenance, broker, compression, cron ticker, `process.StopAll`, MCP sessions, databases —
+with workers joined before stores close, and errors returned only after cleanup. Nothing in
+`main` or `cli` assembles stores, workers, or gateways; gateway start failures are asynchronous
+logs, and listeners can outlive `Run` until process exit.
 
-## Rules
+`cli/cli.go` dispatches `setup | start | profile | mcp | help` with exit codes 0/1/2 and injectable
+stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
+one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
+copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only
+interactive OAuth path. `commands/` holds the `Definition/Request/Result/Handler` contract and
+`/name` parsing; `builtin/` registers the five public handlers (`/help`, `/new`, `/stop`,
+`/approve`, `/deny`).
 
-- No stores, workers, or gateways are assembled in `main` or `cli`. Only `cmd/*:main` exits.
-- `setup` creates missing entries only and rolls back partial state on failure; it never
-  overwrites. `profile delete` refuses `default` and requires `y`/`yes`.
-- `/new` keeps transcripts, summaries, and locks; TTL expiry owns cleanup. It also denies pending
-  approvals, as do restart and `/stop`.
-- `/stop` preserves queued prompts; `/stop all` is rejected.
-- `/approve` replays the identical invocation through the workspace sandbox; expiry, restart,
-  `/new`, `/stop`, and the API auto-deny.
+## Behaviors worth knowing cold
+
+- `/new` ends the open session (`end_reason='new_session'`), bumps generation, and denies pending
+  approvals — history stays searchable under the old generation.
+- `/stop` cancels active agent work in the conversation and preserves queued prompts; `/stop all`
+  is rejected. Commands outlive transport cancellation.
+- `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
+  the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
+  anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.
 - Server binaries never import the `cli` tree.
 
-## Testing
+## Tests
 
-Startup tests inject clients/gateways, never start real listeners. Cover dispatch codes, seed-only
-setup, create/delete guards, command aliasing, and shutdown order.
+Inject clients and gateways rather than starting real listeners. Cover dispatch exit codes,
+seed-only setup, create/delete guards and rollback, command aliasing, approval consumption, and
+partial-failure shutdown order.
