@@ -73,7 +73,7 @@ Operator commands run from a terminal against your `.oswald/` root:
 
 ## Documentation
 
-Everything resides in `AGENTS.md`
+Everything resides in [`AGENTS.md`](AGENTS.md).
 
 ## License
 
