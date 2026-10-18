@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // Outcome classifies a successful tool execution by whether it produced useful

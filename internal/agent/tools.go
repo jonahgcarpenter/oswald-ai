@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // MCPProvider resolves request-scoped deferred MCP tools through the

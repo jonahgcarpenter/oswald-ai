@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/compaction/budget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
 func assembleTestPromptContext(policy, profile, prompt string, images []llm.InputImage, turns []memory.SessionTurn, tools []llm.Tool, limit int) PromptContext {

@@ -1,6 +1,6 @@
 # AGENTS.md — Oswald Developer Reference
 
-Source, the operator-approved `internal/database/schema.sql`, and tests define implemented behavior. Keep this reference current when changing architecture, authorization, persistence, provider contracts, or operational limits.
+Source, the operator-approved `internal/platform/database/schema.sql`, and tests define implemented behavior. Keep this reference current when changing architecture, authorization, persistence, provider contracts, or operational limits.
 
 ## Change Discipline
 
@@ -32,29 +32,29 @@ The release workflow runs tagged tests before publishing its container; it does 
 
 ## Architecture and Ownership
 
-- `cmd/oswald`: operator CLI binary; parses argv, calls `internal/cli.Run`, and owns process exit.
+- `cmd/oswald`: operator CLI binary; parses argv, calls `internal/app/cli.Run`, and owns process exit.
 - `cmd/oswald-server`: service binary; selects the root, delegates to `startup.Serve`, and owns process exit.
-- `internal/cli`: operator command dispatch and exit-code mapping. Each command group is a subdirectory (`internal/cli/setup`, `internal/cli/start`, `internal/cli/profiles`). The server binaries never import this tree.
-- `internal/startup`: sole composition root; profile agents, stores, providers, tools, workers, shared broker, gateways, ordered cleanup.
-- `internal/config`: strict YAML, private profile environments, interpolation, retention, safe structured logging.
-- `internal/profiles`: immutable trusted transport-to-profile routing; no account persistence or administration.
-- `internal/identity`: dependency-light authenticated principal/resolver contracts. `CanonicalUserID` now carries the trusted profile name; retain this field and the `profile` log key for correlation contracts (the `user_id` detail is an untrusted display label, never ownership). The `cron` gateway with `cron_scheduler` assurance identifies profile-owned scheduled dispatch; it never passes transport routing.
+- `internal/app/cli`: operator command dispatch and exit-code mapping. Each command group is a subdirectory (`internal/app/cli/setup`, `internal/app/cli/start`, `internal/app/cli/profiles`). The server binaries never import this tree.
+- `internal/app/startup`: sole composition root; profile agents, stores, providers, tools, workers, shared broker, gateways, ordered cleanup.
+- `internal/platform/config`: strict YAML, private profile environments, interpolation, retention, safe structured logging.
+- `internal/platform/profiles`: immutable trusted transport-to-profile routing; no account persistence or administration.
+- `internal/platform/identity`: dependency-light authenticated principal/resolver contracts. `CanonicalUserID` now carries the trusted profile name; retain this field and the `profile` log key for correlation contracts (the `user_id` detail is an untrusted display label, never ownership). The `cron` gateway with `cron_scheduler` assurance identifies profile-owned scheduled dispatch; it never passes transport routing.
 - `internal/agent`: iterative foreground loop; context, streaming, tools/history, image retries, request-local compaction in separate responsibility files.
 - `internal/broker`: FIFO conversation lanes, profile fences, cancellation, bounded admission, global foreground priority.
-- `internal/commands`: composition/adapters for `/help`, `/new`, `/stop`, `/approve`, `/deny`. `commands/approve` consumes single-flight pending terminal approvals (five-minute window; expiry/restart/`/new`/`/stop` deny).
-- `internal/database`: exact approved-schema initialization and SQLite handle ownership; no migrations or account APIs.
-- `internal/memory`: profile-local sessions, delivery/history/image metadata, compression receipts/campaigns, maintenance. `memory/files` owns immediate private file edits.
-- `internal/compaction`: synchronous model compactor and durable profile worker. `compaction/budget` owns token estimates, capacity, pressure, tail policy; it depends on LLM contracts, not vice versa.
-- `internal/gateway`: composition; concrete Discord/iMessage/OpenAI packages depend on `gateway/routing` and `gateway/runtime`, not their parent composition package.
+- `internal/app/commands`: composition/adapters for `/help`, `/new`, `/stop`, `/approve`, `/deny`. `commands/approve` consumes single-flight pending terminal approvals (five-minute window; expiry/restart/`/new`/`/stop` deny).
+- `internal/platform/database`: exact approved-schema initialization and SQLite handle ownership; no migrations or account APIs.
+- `internal/session/memory`: profile-local sessions, delivery/history/image metadata, compression receipts/campaigns, maintenance. `memory/files` owns immediate private file edits.
+- `internal/session/compaction`: synchronous model compactor and durable profile worker. `compaction/budget` owns token estimates, capacity, pressure, tail policy; it depends on LLM contracts, not vice versa.
+- `internal/transport/gateway`: composition; concrete Discord/iMessage/OpenAI packages depend on `gateway/routing` and `gateway/runtime`, not their parent composition package.
 - `internal/mcp`: lazy profile-configured bridge (`tool_search`/`tool_describe`/`tool_call`), schema projection, execution; no database/encryption configuration store. `oswald mcp auth` only authorizes; the service never starts interactive flows.
-- `internal/media`: shared normalization/attachments; `media/imagecache` owns private cached images and its expiry hook (24h creation age) on the shared prune worker.
-- `internal/soul`: read-only current profile policy with default-template fallback. Runtime never copies, migrates, edits, or deletes operator souls; only `oswald profile create` copies the root template into a new profile as its starting policy.
+- `internal/transport/media`: shared normalization/attachments; `media/imagecache` owns private cached images and its expiry hook (24h creation age) on the shared prune worker.
+- `internal/session/soul`: read-only current profile policy with default-template fallback. Runtime never copies, migrates, edits, or deletes operator souls; only `oswald profile create` copies the root template into a new profile as its starting policy.
 - `internal/tools`: builtin composition. Each group owns stable name, description, schema, handler/policy; `registry`, `exposure`, and `governance` remain independent. `tools/output` owns ANSI stripping and fixed-shape secret redaction for command output. Toolsets are code-owned bundles (`core`, `terminal`, `code_execution`, `cronjob`); gateways map to toolsets and the API intersects them with caller `named`/`allowed_tools` opt-in. Workspace `read_file` descriptions apply a per-request hosted-OCR override (`PDF (text layer)` -> `PDF (scanned or text)`) without mutating registry definitions.
-- `internal/providers/web/{brave,searxng}` and `providers/image_generate/comfy_ui`: backend implementations, never import tool packages.
-- `internal/process`: profile-scoped tracked background shell processes (`cache/processes/<id>/`, 0600/0700); completed retained 24h after creation, newest 64/profile, pruned by its hook on the shared prune worker; `process_manage` companion (list/poll/log/wait/kill/write/submit/close/handoff, prefix match, handoff cap 3); global `StopAll` kills non-persistent entries before store close.
-- `internal/cron`: per-profile scheduled jobs (`cron/jobs.json` + `executions.jsonl`, 0600/0700, atomic rewrites, legacy `repeat` bool migrated to catch-up, legacy empty deliver defaults to origin); named jobs with fuzzy id-or-name resolution, origin capture, `scheduled|paused|completed|running` states, `repeat{times,completed}` auto-complete, and `ok|error|delivery_failed|blocked_config` outcomes; schedule grammar (durations, `every` phrases, 5-field cron, RFC3339/`in` one-shots); validation (injection scan, script/context inside CWD, monitor xor, `no_agent` requires script, toolset allowlist, model/provider/base_url rejected as user-owned); `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe, restore-once for orphaned slots, and half-period catch-up clamp (120s–2h, one-shot grace retire); per-profile 30s sequential ticker with re-arm wake, joined before `StopAll`; dispatcher runs fresh `cron:<job>` sessions (`skip_memory`, scheduling toolset stripped, 30m ceiling) and delivers to the origin chat (`[SILENT]` suppresses, nothing mirrors into history).
-- `internal/approvals`: in-memory pending terminal approvals only (profile+conversation key, five-minute window, single-flight); no disk, database, or configuration.
-- `internal/shared/{requestctx,lease,prune}`: narrow contracts; `shared` is directory grouping, not a utility facade. `prune` owns creation-time age (Statx birthtime, mtime fallback), declarative directory/TTL sweeps (unknown `cache/` children: 24h creation; `scratch` keeps its idle/mtime hook by system-prompt contract), and the single per-profile cleanup worker that owner hooks register with.
+- `internal/providers/web/{brave,searxng}` and `providers/image_generate/comfy_ui`: backend implementations, never import tool packages. `internal/providers/llm` owns the model contract.
+- `internal/workspace/process`: profile-scoped tracked background shell processes (`cache/processes/<id>/`, 0600/0700); completed retained 24h after creation, newest 64/profile, pruned by its hook on the shared prune worker; `process_manage` companion (list/poll/log/wait/kill/write/submit/close/handoff, prefix match, handoff cap 3); global `StopAll` kills non-persistent entries before store close. Workspace tool handlers live in `internal/workspace`.
+- `internal/platform/cron`: per-profile scheduled jobs (`cron/jobs.json` + `executions.jsonl`, 0600/0700, atomic rewrites, legacy `repeat` bool migrated to catch-up, legacy empty deliver defaults to origin); named jobs with fuzzy id-or-name resolution, origin capture, `scheduled|paused|completed|running` states, `repeat{times,completed}` auto-complete, and `ok|error|delivery_failed|blocked_config` outcomes; schedule grammar (durations, `every` phrases, 5-field cron, RFC3339/`in` one-shots); validation (injection scan, script/context inside CWD, monitor xor, `no_agent` requires script, toolset allowlist, model/provider/base_url rejected as user-owned); `ClaimDue` advances `next_run_at` before dispatch with exact-instant ledger dedupe, restore-once for orphaned slots, and half-period catch-up clamp (120s–2h, one-shot grace retire); per-profile 30s sequential ticker with re-arm wake, joined before `StopAll`; dispatcher runs fresh `cron:<job>` sessions (`skip_memory`, scheduling toolset stripped, 30m ceiling) and delivers to the origin chat (`[SILENT]` suppresses, nothing mirrors into history).
+- `internal/platform/approvals`: in-memory pending terminal approvals only (profile+conversation key, five-minute window, single-flight); no disk, database, or configuration.
+- `internal/platform/{requestctx,lease,prune}`: narrow contracts; `platform` is directory grouping, not a utility facade. `prune` owns creation-time age (Statx birthtime, mtime fallback), declarative directory/TTL sweeps (unknown `cache/` children: 24h creation; `scratch` keeps its idle/mtime hook by system-prompt contract), and the single per-profile cleanup worker that owner hooks register with.
 
 Account/admin/bootstrap/link commands, moderation/ban hooks, principal refresh, account invalidation, API keys, migration machinery, legacy fact/formation stores, staging, derived-index workers, and transcript-search tooling are removed. No old database importer or automatic upgrade exists.
 
@@ -93,7 +93,7 @@ SQLite uses foreign keys, secure delete, WAL, synchronous NORMAL, a five-second 
 
 ## Startup and Shutdown
 
-`startup.Serve` loads configuration, prints the terminal-only bright-magenta UTF-8 banner, creates the logger, installs signal handling, and calls `startup.Run`; both `oswald start` and `oswald-server` use it. No stores/workers/gateways are assembled in `main` or `internal/cli`.
+`startup.Serve` loads configuration, prints the terminal-only bright-magenta UTF-8 banner, creates the logger, installs signal handling, and calls `startup.Run`; both `oswald start` and `oswald-server` use it. No stores/workers/gateways are assembled in `main` or `internal/app/cli`.
 
 Startup validates the immutable directory, then initializes profiles in sorted order: approved state store, maintenance, file/soul stores, builtin registry, model client, shared foreground/background compactor, lazy profile MCP manager/provider, agent, image cache store, and one shared prune worker per profile (images hook, scratch hook, process hook, unknown `cache/` children hook). It then assembles the shared foreground broker, profile commands, low-priority compression workers, and configured gateways with profile-selected runtime dependencies.
 

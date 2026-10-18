@@ -1,5 +1,5 @@
 // Command oswald is the single Oswald AI binary: a service runner plus
-// operator commands. It delegates all logic to internal/cli and only owns
+// operator commands. It delegates all logic to internal/app/cli and only owns
 // process exit.
 package main
 
@@ -7,7 +7,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/cli"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli"
 )
 
 func main() {

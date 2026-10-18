@@ -2,7 +2,7 @@
 // model through bounded, database-backed search and read shapes.
 package session_search
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
+import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 
 // Name is the model-facing past-conversation recall tool name.
 const Name = "session_search"

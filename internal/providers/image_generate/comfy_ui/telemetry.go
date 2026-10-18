@@ -6,8 +6,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 func generationStageLogger(ctx context.Context, log *config.Logger, strength *float64) func(string, time.Time, error) {

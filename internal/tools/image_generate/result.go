@@ -3,8 +3,8 @@ package image_generate
 import (
 	"fmt"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // ResultText describes the cached output and request-local model preview.

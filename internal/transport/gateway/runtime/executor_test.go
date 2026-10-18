@@ -1,0 +1,651 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+)
+
+func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+
+	ignored := Execute(Request{IsGroup: true, Text: "hello"}, deps, &fakeResponder{})
+	if ignored.Action != routing.ActionIgnore || ignored.Reason != "group_message_without_invocation" {
+		t.Fatalf("unexpected ignore outcome: %+v", ignored)
+	}
+
+	fallbackResponder := &fakeResponder{}
+	fallback := Execute(Request{Text: " "}, deps, fallbackResponder)
+	if fallback.Action != routing.ActionGatewayFallback || fallbackResponder.fallback != "What do you want idiot." {
+		t.Fatalf("unexpected fallback outcome=%+v responder=%+v", fallback, fallbackResponder)
+	}
+
+	cmdResponder := &fakeResponder{}
+	cmd := Execute(Request{Principal: testPrincipal("user"), Text: "/ping"}, deps, cmdResponder)
+	if cmd.Action != routing.ActionCommand || cmdResponder.command.Text != "pong:user:/ping" {
+		t.Fatalf("unexpected command outcome=%+v responder=%+v", cmd, cmdResponder)
+	}
+	groupCmdResponder := &fakeResponder{}
+	groupPrincipal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "external-user", Assurance: identity.AssuranceDiscordGateway}
+	groupCmd := Execute(Request{Principal: groupPrincipal, ChatID: "group", IsGroup: true, IsMention: true, Text: "/ping"}, deps, groupCmdResponder)
+	if groupCmd.Action != cmd.Action || groupCmdResponder.command.Text != cmdResponder.command.Text {
+		t.Fatalf("group command differs from direct: direct=%+v/%+v group=%+v/%+v", cmd, cmdResponder.command, groupCmd, groupCmdResponder.command)
+	}
+	unmentionedCmdResponder := &fakeResponder{}
+	unmentionedCmd := Execute(Request{Principal: testPrincipal("user"), IsGroup: true, Text: "/ping"}, deps, unmentionedCmdResponder)
+	if unmentionedCmd.Action != routing.ActionIgnore || unmentionedCmdResponder.command.Text != "" {
+		t.Fatalf("unmentioned group command was not ignored: outcome=%+v responder=%+v", unmentionedCmd, unmentionedCmdResponder)
+	}
+
+	unknownCmdResponder := &fakeResponder{}
+	unknownCmd := Execute(Request{Principal: testPrincipal("user"), Text: "/unknown arg"}, deps, unknownCmdResponder)
+	if unknownCmd.Action != routing.ActionCommand || unknownCmdResponder.command.Text != "Unknown command: /unknown" || unknownCmdResponder.started || unknownCmdResponder.agent != nil {
+		t.Fatalf("unexpected unknown command outcome=%+v responder=%+v", unknownCmd, unknownCmdResponder)
+	}
+
+	llmResponder := &fakeResponder{}
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsMention: true, Text: "hello"}, deps, llmResponder)
+	if outcome.Action != routing.ActionLLM || llmResponder.agent == nil || llmResponder.agent.Response != "agent response" {
+		t.Fatalf("unexpected llm outcome=%+v responder=%+v", outcome, llmResponder)
+	}
+	if !llmResponder.started || !llmResponder.cleaned {
+		t.Fatalf("expected processing cleanup, responder=%+v", llmResponder)
+	}
+}
+
+func TestExecuteForwardsStatelessHistoryWithoutCompaction(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &statelessRuntimeProcessor{requests: make(chan agent.Request, 1)}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	history := []llm.ChatMessage{{Role: "assistant", Content: "previous answer"}}
+	principal := testPrincipal("user")
+	principal.Gateway = "openai"
+	principal.ExternalID = identity.LocalOpenAIIdentifier
+	principal.Assurance = identity.AssuranceLocalLoopback
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "next question", Stateless: true, ClientHistory: history}, Dependencies{Broker: b, Log: log, Compaction: compaction}, responder)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID != 0 || compaction.enqueueCalled || compaction.failureMarked {
+		t.Fatalf("stateless delivery outcome=%+v response=%+v compaction=%+v", outcome, responder.agent, compaction)
+	}
+	forwarded := <-processor.requests
+	if !forwarded.Stateless || len(forwarded.ClientHistory) != 1 || forwarded.ClientHistory[0].Content != "previous answer" || forwarded.Prompt != "next question" {
+		t.Fatalf("runtime lost stateless request fields: %+v", forwarded)
+	}
+}
+
+func TestExecuteOpenAIRejectsAgentAttachments(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(responseRuntimeProcessor{response: &agent.Response{Response: "answer", Attachments: []media.OutputAttachment{{Filename: "image.png", MIMEType: "image/png", Data: []byte("image")}}}}, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback}
+	responder := &fakeResponder{}
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "draw", Stateless: true}, Dependencies{Broker: b, Log: log}, responder)
+	if outcome.Err == nil || outcome.Reason != "unsupported_attachments" || responder.agent != nil || responder.agentErr == "" {
+		t.Fatalf("unexpected attachment delivery: outcome=%+v responder=%+v", outcome, responder)
+	}
+}
+
+func TestExecuteSilentlyIgnoresUnavailableProfiles(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	deps.ForProfile = func(string) (Dependencies, bool) { return Dependencies{}, false }
+
+	for _, text := range []string{"/ping", "hello", " "} {
+		t.Run(text, func(t *testing.T) {
+			responder := &fakeResponder{}
+			admitted := false
+			outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: text, OnAllowed: func() { admitted = true }}, deps, responder)
+			if outcome.Action != routing.ActionIgnore || outcome.Reason != "profile_unavailable" || outcome.Err != nil || admitted ||
+				responder.started || responder.fallback != "" || responder.command.Text != "" || responder.agent != nil || responder.agentErr != "" {
+				t.Fatalf("unexpected banned outcome=%+v responder=%+v admitted=%t", outcome, responder, admitted)
+			}
+		})
+	}
+}
+
+func TestExecuteOnAllowedRunsForCommandsAndFallbacks(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	called := 0
+	responder := &fakeResponder{}
+	outcome := Execute(Request{Principal: testPrincipal("user"), Text: "/ping", OnAllowed: func() { called++ }}, deps, responder)
+	if outcome.Action != routing.ActionCommand || called != 1 || responder.command.Text != "pong:user:/ping" {
+		t.Fatalf("unexpected command outcome=%+v responder=%+v admitted=%d", outcome, responder, called)
+	}
+	responder = &fakeResponder{}
+	outcome = Execute(Request{Principal: testPrincipal("user"), Text: " ", OnAllowed: func() { called++ }}, deps, responder)
+	if outcome.Action != routing.ActionGatewayFallback || called != 2 || responder.fallback == "" {
+		t.Fatalf("unexpected fallback outcome=%+v responder=%+v allowed=%d", outcome, responder, called)
+	}
+}
+
+func TestExecuteUsesTrustedProfileOwnerForCommands(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	responder := &fakeResponder{}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("configured-profile"), Text: "/ping"}, deps, responder)
+	if responder.command.Text != "pong:configured-profile:/ping" {
+		t.Fatal("command changed trusted profile ownership")
+	}
+}
+
+func TestExecuteValidatesCommandAttachmentBeforeDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "export", Attachments: []commands.Attachment{{
+				Filename: "../private.json", MIMEType: "application/json", Data: []byte("private-content"),
+			}}}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder := &fakeResponder{}
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: log}, responder)
+	if outcome.Action != routing.ActionCommand || len(responder.command.Attachments) != 0 {
+		t.Fatalf("invalid attachment reached responder: outcome=%+v result=%+v", outcome, responder.command)
+	}
+	if !strings.Contains(responder.command.Text, "filename must be a base name") {
+		t.Fatalf("unexpected validation response %q", responder.command.Text)
+	}
+}
+
+func TestExecuteRejectsDuplicateCommandAttachmentNames(t *testing.T) {
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Attachments: []commands.Attachment{
+				{Filename: "same.json", MIMEType: "application/json", Data: []byte("one")},
+				{Filename: "same.json", MIMEType: "application/json", Data: []byte("two")},
+			}}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder := &fakeResponder{}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: config.NewLogger(config.LevelError)}, responder)
+	if len(responder.command.Attachments) != 0 || !strings.Contains(responder.command.Text, "duplicate filename") {
+		t.Fatalf("duplicate attachments reached responder: %+v", responder.command)
+	}
+}
+
+func TestExecuteAttachmentLogsExcludeContent(t *testing.T) {
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() { os.Stderr = oldStderr }()
+	log := config.NewLogger(config.LevelDebug)
+	const privateContent = "attachment-private-marker"
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "export"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Attachments: []commands.Attachment{{Filename: "alice-private-export.json", MIMEType: "application/json", Data: []byte(privateContent)}}}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	Execute(Request{RequestID: "req", Principal: testPrincipal("user"), Text: "/export"}, Dependencies{Commands: commandService, Log: log}, &fakeResponder{})
+	_ = writer.Close()
+	output, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), privateContent) || strings.Contains(string(output), "alice-private-export.json") || !strings.Contains(string(output), "attachment_bytes") || !strings.Contains(string(output), "attachment_count") {
+		t.Fatalf("unsafe or incomplete attachment log: %s", output)
+	}
+}
+
+func TestExecuteReportsCommandDeliveryFailure(t *testing.T) {
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "erase", UserExclusive: true},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "completed"}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder := &fakeResponder{}
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if responder.command.Text != "completed" {
+		t.Fatal("command response was not delivered")
+	}
+	responder.sendErr = errors.New("offline")
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/erase"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, responder)
+	if !errors.Is(outcome.Err, responder.sendErr) {
+		t.Fatal("command delivery failure was discarded")
+	}
+}
+
+func TestExecuteEnqueuesCompactionForPersistedTurnAfterDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	deps.Compaction = compaction
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), ChatID: "chat", SessionKey: "discord:dm:123", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || responder.agent == nil || responder.agent.SourceTurnID <= 0 {
+		t.Fatalf("outcome=%+v response=%+v", outcome, responder.agent)
+	}
+	if !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" ||
+		compaction.source.RequestID != "req" || compaction.source.SessionID != "discord:dm:123" ||
+		compaction.source.TurnID != responder.agent.SourceTurnID || compaction.source.SessionGeneration != responder.agent.SessionGeneration ||
+		compaction.source.Model != responder.agent.Model {
+		t.Fatalf("compaction bookkeeping after delivery: %+v", compaction)
+	}
+}
+
+func TestExecuteEnqueuesCompactionOnlyAfterSuccessfulDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := responseRuntimeProcessor{response: &agent.Response{Model: "model", Response: "answer", SourceTurnID: 77, SessionGeneration: 3}}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	responder := &fakeResponder{}
+	compaction := &fakeCompactionEnqueuer{responder: responder}
+	deps := Dependencies{Broker: b, Log: log, Compaction: compaction}
+	outcome := Execute(Request{RequestID: "req", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, responder)
+	if outcome.Err != nil || !compaction.enqueueCalled || compaction.failureMarked || !compaction.responseDelivered || compaction.userID != "user" || compaction.source.TurnID != 77 || compaction.source.SessionGeneration != 3 {
+		t.Fatalf("compaction enqueue=%+v", compaction)
+	}
+
+	failedResponder := &fakeResponder{sendErr: errors.New("offline")}
+	failed := &fakeCompactionEnqueuer{responder: failedResponder}
+	deps.Compaction = failed
+	outcome = Execute(Request{RequestID: "req-failed", Principal: testPrincipal("user"), SessionKey: "session", IsDirect: true, Text: "hello"}, deps, failedResponder)
+	if !errors.Is(outcome.Err, failedResponder.sendErr) || failed.enqueueCalled || !failed.failureMarked || !failed.failureAfterSend || failed.userID != "user" || failed.source.TurnID != 77 {
+		t.Fatalf("failed delivery outcome=%+v bookkeeping=%+v", outcome, failed)
+	}
+}
+
+func TestExecuteRejectsInvalidPrincipalBeforeOwnedOperations(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	responder := &fakeResponder{}
+
+	outcome := Execute(Request{RequestID: "req", Text: "/ping"}, deps, responder)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected invalid principal outcome=%+v responder=%+v", outcome, responder)
+	}
+}
+
+func TestExecuteRejectsUnauthenticatedPrincipalBeforeOwnedOperations(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	deps, shutdown := testDependencies(t, log)
+	defer shutdown()
+	responder := &fakeResponder{}
+	principal := testPrincipal("user")
+	principal.Assurance = identity.AssuranceSelfAsserted
+
+	outcome := Execute(Request{RequestID: "req", Principal: principal, Text: "/ping"}, deps, responder)
+	if outcome.Reason != "invalid_principal" || responder.agentErr == "" || responder.command.Text != "" {
+		t.Fatalf("unexpected unauthenticated principal outcome=%+v responder=%+v", outcome, responder)
+	}
+}
+
+func TestExecuteSerializesCommandBehindAgentRequest(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &blockingRuntimeProcessor{started: make(chan struct{}), release: make(chan struct{})}
+	b := broker.NewBroker(processor, 2, log)
+	b.Start()
+	defer b.Shutdown()
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := Dependencies{Broker: b, Commands: commandService, Log: log}
+	principal := testPrincipal("user")
+	llmDone := make(chan Outcome, 1)
+	go func() {
+		llmDone <- Execute(Request{RequestID: "llm", Principal: principal, SessionKey: "session", IsMention: true, Text: "hello"}, deps, &fakeResponder{})
+	}()
+	<-processor.started
+	commandResponder := &fakeResponder{}
+	commandDone := make(chan Outcome, 1)
+	go func() {
+		commandDone <- Execute(Request{RequestID: "command", Principal: principal, SessionKey: "session", Text: "/ping"}, deps, commandResponder)
+	}()
+	select {
+	case <-commandDone:
+		t.Fatal("command overtook active same-session agent request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(processor.release)
+	if outcome := <-llmDone; outcome.Err != nil {
+		t.Fatalf("agent outcome: %+v", outcome)
+	}
+	if outcome := <-commandDone; outcome.Err != nil || commandResponder.command.Text != "pong:user:/ping" {
+		t.Fatalf("command outcome=%+v responder=%+v", outcome, commandResponder)
+	}
+}
+
+func TestExecuteRunsOutOfBandStopAheadOfActiveLaneRequest(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	processor := &cancelAwareRuntimeProcessor{started: make(chan struct{})}
+	b := broker.NewBroker(processor, 1, log)
+	b.Start()
+	defer b.Shutdown()
+	stopHandler := outOfBandStopHandler{broker: b}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: stopHandler})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := Dependencies{Broker: b, Commands: service, Log: log}
+	principal := testPrincipal("user")
+	agentResponder := &fakeResponder{}
+	agentDone := make(chan Outcome, 1)
+	go func() {
+		agentDone <- Execute(Request{RequestID: "agent", Principal: principal, SessionKey: "session", Text: "hello"}, deps, agentResponder)
+	}()
+	<-processor.started
+	stopResponder := &fakeResponder{}
+	stopOutcome := Execute(Request{RequestID: "stop", Principal: principal, SessionKey: "session", Text: "/stop"}, deps, stopResponder)
+	if stopOutcome.Err != nil || stopResponder.command.Text != "Stopped." {
+		t.Fatalf("stop outcome=%+v response=%+v", stopOutcome, stopResponder.command)
+	}
+	select {
+	case outcome := <-agentDone:
+		if !errors.Is(outcome.Err, broker.ErrAgentWorkCanceled) || !agentResponder.canceled {
+			t.Fatalf("agent outcome=%+v responder=%+v", outcome, agentResponder)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active request was not canceled")
+	}
+}
+
+func TestExecuteHoldsResolvedProfileFencesThroughDelivery(t *testing.T) {
+	log := config.NewLogger(config.LevelError)
+	b := broker.NewBroker(nil, 4, log)
+	b.Start()
+	defer b.Shutdown()
+	target := testPrincipal("target")
+	actor := testPrincipal("actor")
+	activeStarted := make(chan struct{})
+	releaseActive := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), target, "active", func() error {
+			close(activeStarted)
+			<-releaseActive
+			return nil
+		})
+	}()
+	<-activeStarted
+
+	commandStarted := make(chan struct{})
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "synthetic", UserExclusive: true},
+		ResolveFenceTargetsFunc: func(_ context.Context, req commands.Request) ([]string, error) {
+			return []string{req.Args[0]}, nil
+		},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			close(commandStarted)
+			return commands.Result{Text: "completed"}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterTargetStarted := make(chan struct{})
+	responder := &fenceCheckingResponder{
+		fakeResponder: &fakeResponder{}, broker: b, target: target,
+		laterTargetStarted: laterTargetStarted,
+	}
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- Execute(Request{Principal: actor, SessionKey: "synthetic-session", Text: "/synthetic target"}, Dependencies{Broker: b, Commands: service, Log: log}, responder)
+	}()
+	select {
+	case <-commandStarted:
+		t.Fatal("target command overlapped active target work")
+	case <-time.After(50 * time.Millisecond):
+	}
+	otherStarted := make(chan struct{})
+	go func() {
+		_ = b.RunInLane(context.Background(), testPrincipal("other"), "other", func() error { close(otherStarted); return nil })
+	}()
+	select {
+	case <-otherStarted:
+	case <-time.After(time.Second):
+		t.Fatal("target fence blocked unrelated user work")
+	}
+	close(releaseActive)
+	select {
+	case outcome := <-done:
+		if outcome.Err != nil {
+			t.Fatal(outcome.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("target command did not complete")
+	}
+	if !responder.heldAtSend {
+		t.Fatal("profile fence released before delivery")
+	}
+	select {
+	case <-laterTargetStarted:
+	case <-time.After(time.Second):
+		t.Fatal("target work did not resume after invalidation")
+	}
+}
+
+type fakeResponder struct {
+	started  bool
+	cleaned  bool
+	fallback string
+	command  commands.Result
+	agent    *agent.Response
+	agentErr string
+	sendErr  error
+	canceled bool
+}
+
+type fenceCheckingResponder struct {
+	*fakeResponder
+	broker             *broker.Broker
+	target             identity.Principal
+	laterTargetStarted chan struct{}
+	heldAtSend         bool
+}
+
+func (r *fenceCheckingResponder) SendCommandResponse(result commands.Result) error {
+	r.command = result
+	go func() {
+		_ = r.broker.RunInLane(context.Background(), r.target, "later", func() error {
+			close(r.laterTargetStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-r.laterTargetStarted:
+	case <-time.After(30 * time.Millisecond):
+		r.heldAtSend = true
+	}
+	return r.sendErr
+}
+
+func (r *fakeResponder) StartProcessing() (func(), error) {
+	r.started = true
+	return func() { r.cleaned = true }, nil
+}
+
+func (r *fakeResponder) SendFallback(text string) error {
+	r.fallback = text
+	return nil
+}
+
+func (r *fakeResponder) SendCommandResponse(result commands.Result) error {
+	r.command = result
+	return r.sendErr
+}
+
+func (r *fakeResponder) SendAgentResponse(response *agent.Response) error {
+	r.agent = response
+	return r.sendErr
+}
+
+func (r *fakeResponder) SendAgentError(text string) error {
+	r.agentErr = text
+	return nil
+}
+
+func (r *fakeResponder) CancelAgentResponse() error {
+	r.canceled = true
+	return nil
+}
+
+type pingHandler struct{}
+
+func (pingHandler) Definition() commands.Definition {
+	return commands.Definition{Name: "ping"}
+}
+
+func (pingHandler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	return commands.Result{Text: "pong:" + req.Principal.CanonicalUserID + ":" + req.Raw}, nil
+}
+
+type fakeCompactionEnqueuer struct {
+	responder         *fakeResponder
+	enqueueCalled     bool
+	failureMarked     bool
+	failureAfterSend  bool
+	responseDelivered bool
+	userID            string
+	source            memory.DeliverySource
+}
+
+func (f *fakeCompactionEnqueuer) Enqueue(_ context.Context, userID string, source memory.DeliverySource) error {
+	f.enqueueCalled = true
+	f.responseDelivered = f.responder.agent != nil && f.responder.sendErr == nil
+	f.userID = userID
+	f.source = source
+	return nil
+}
+
+func (f *fakeCompactionEnqueuer) MarkDeliveryFailed(_ context.Context, userID string, turnID int64) error {
+	f.failureMarked = true
+	f.failureAfterSend = f.responder.agent != nil && f.responder.sendErr != nil
+	f.responseDelivered = false
+	f.userID = userID
+	f.source.TurnID = turnID
+	return nil
+}
+
+type responseRuntimeProcessor struct{ response *agent.Response }
+
+type statelessRuntimeProcessor struct{ requests chan agent.Request }
+
+func (p *statelessRuntimeProcessor) Process(_ context.Context, req agent.Request) (*agent.Response, error) {
+	p.requests <- req
+	return &agent.Response{Response: "answer"}, nil
+}
+
+func (p responseRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
+	return p.response, nil
+}
+
+func testPrincipal(userID string) identity.Principal {
+	return identity.Principal{CanonicalUserID: userID, Gateway: "imessage", ExternalID: "external-" + userID, Assurance: identity.AssuranceBlueBubblesWebhook}
+}
+
+type runtimeFakeChatter struct{}
+
+func (runtimeFakeChatter) Chat(context.Context, llm.ChatRequest, func(llm.ChatMessage)) (*llm.ChatResponse, error) {
+	return &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "agent response"}}, nil
+}
+
+type blockingRuntimeProcessor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type cancelAwareRuntimeProcessor struct {
+	started chan struct{}
+}
+
+type outOfBandStopHandler struct{ broker *broker.Broker }
+
+func (outOfBandStopHandler) Definition() commands.Definition {
+	return commands.Definition{Name: "stop", OutOfBand: true}
+}
+
+func (h outOfBandStopHandler) Execute(_ context.Context, req commands.Request) (commands.Result, error) {
+	h.broker.CancelActiveAgentWork(req.Principal.CanonicalUserID, req.SessionKey)
+	return commands.Result{Text: "Stopped."}, nil
+}
+
+func (p *cancelAwareRuntimeProcessor) Process(ctx context.Context, _ agent.Request) (*agent.Response, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *blockingRuntimeProcessor) Process(context.Context, agent.Request) (*agent.Response, error) {
+	close(p.started)
+	<-p.release
+	return &agent.Response{Response: "agent response"}, nil
+}
+
+func testDependencies(t *testing.T, log *config.Logger) (Dependencies, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	soulPath := filepath.Join(dir, "soul.md")
+	if err := os.WriteFile(soulPath, []byte("You are Oswald."), 0o600); err != nil {
+		t.Fatalf("write soul fixture: %v", err)
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	soulStore := soul.NewProfileStore(dir, "user", soulPath)
+	store, err := memory.NewProfileStore(context.Background(), dir, "user", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ai := agent.NewAgent(runtimeFakeChatter{}, registry.New(log), "test-model", "test-provider", soulStore, store, budget.ContextBudget{PromptLimit: 100000}, governance.GlobalPolicy{MaxExecutions: 12, MaxToolIterations: 8}, log)
+	b := broker.NewBroker(ai, 1, log)
+	b.Start()
+	commandService, err := commands.NewServiceWithCommands(commands.Command{Handler: pingHandler{}})
+	if err != nil {
+		t.Fatalf("new command service: %v", err)
+	}
+	return Dependencies{Broker: b, Commands: commandService, Log: log}, func() {
+		b.Shutdown()
+		store.Close() // nolint:errcheck
+	}
+}
