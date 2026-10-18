@@ -1,0 +1,54 @@
+name: Issue template check
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate issue body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const labels = (context.payload.issue.labels || []).map(l => l.name);
+            const isBug = labels.includes('bug');
+            const required = isBug
+              ? ['## Claim', '## Evidence', '## Area', '## Verification', '## Secrets check']
+              : ['## Problem', '## Proposed shape', '## Scope'];
+            const stripComments = s => s.replace(/<!--[\s\S]*?-->/g, '').trim();
+            const missing = [];
+            for (const h of required) {
+              const section = (body.split(h)[1] || '').split(/^## /m)[0] || '';
+              if (stripComments(section) === '') missing.push(h);
+            }
+            if (isBug && !/[a-z_]+\/[a-z_0-9]+\.go:\d+/i.test(stripComments(body))) {
+              missing.push('exact file:line in Evidence');
+            }
+            if (missing.length > 0) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                labels: ['needs-more-info'],
+              });
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: context.payload.issue.number,
+                body: `Thanks for filing. This looks incomplete — missing or empty: ${missing.map(m => `\`${m}\``).join(', ')}.\n\nPlease update the body using the template at \`.github/ISSUE_TEMPLATE/\`; an issue without Evidence (repro + exact line) goes back for questions before any fix.`,
+              });
+            } else {
+              try {
+                await github.rest.issues.removeLabel({
+                  ...context.repo,
+                  issue_number: context.payload.issue.number,
+                  name: 'needs-more-info',
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+            }

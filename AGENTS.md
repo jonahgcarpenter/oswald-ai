@@ -37,6 +37,10 @@ fixing it; change-detector or source-reading tests.
 `/new` keeps history by design, delivery gating is intentional. A fix that cannot point to the line
 where the behavior manifests has an unverified premise.
 
+**Filing issues:** use `.github/ISSUE_TEMPLATE/bug_report.md` or `feature_request.md`
+as the body shape. No Evidence section (repro + exact line), no fix — the issue goes
+back for questions first.
+
 **Security:** endpoints, catalogs, commands, and credentials are trusted operator configuration, not
 a hardened boundary. Never log prompts, answers, reasoning, tool payloads, URLs, transport
 identities, session keys, images, credentials, dotenv contents, or raw errors. Scope values are
