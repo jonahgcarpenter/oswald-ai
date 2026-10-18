@@ -45,17 +45,35 @@ Recognized replies to Oswald can continue the conversation without another menti
 Can you elaborate on that?
 ```
 
-## Commands
+## Chat Commands
 
-Commands are gateway-level slash commands. They are handled before requests reach the model.
+Chat commands are gateway-level slash commands. They are handled before requests reach the model.
 
 In Discord servers and iMessage groups, slash commands must start with a mention of Oswald.
 
-| Command | Usage             | Description                                                                                            |
-| ------- | ----------------- | ------------------------------------------------------------------------------------------------------ |
-| `/help` | `/help [command]` | List available commands or show usage for one command.                                                 |
-| `/new`  | `/new`            | Start a fresh session with the latest memory files; past conversations remain searchable until expiry. |
-| `/stop` | `/stop`           | Stop the currently running response in this conversation without removing queued prompts.              |
+| Command    | Usage             | Description                                                                                            |
+| ---------- | ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `/help`    | `/help [command]` | List available commands or show usage for one command.                                                 |
+| `/new`     | `/new`            | Start a fresh session with the latest memory files; past conversations remain searchable until expiry. |
+| `/stop`    | `/stop`           | Stop the currently running response in this conversation without removing queued prompts.              |
+| `/approve` | `/approve`        | Approve the pending terminal command awaiting review.                                                  |
+| `/deny`    | `/deny`           | Deny the pending terminal command awaiting review.                                                     |
+
+## CLI Commands
+
+Operator commands run from a terminal against your `.oswald/` root:
+
+| Command                        | Description                                                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------- |
+| `oswald setup`                 | Seed missing `config.yaml`/`.env`/`SOUL.md` entries for first install; never overwrites. |
+| `oswald start`                 | Run the Oswald service in the foreground.                                                |
+| `oswald profile create <name>` | Provision a new named profile subtree.                                                   |
+| `oswald profile delete <name>` | Remove a named profile subtree (refuses `default`, requires confirmation).               |
+| `oswald mcp auth <server>`     | Interactively authorize an MCP server (browser or device flow).                          |
+
+## Documentation
+
+Everything resides in `AGENTS.md`
 
 ## License
 
