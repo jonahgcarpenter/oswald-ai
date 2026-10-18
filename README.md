@@ -45,6 +45,25 @@ Recognized direct replies to Oswald can continue the conversation without anothe
 Can you elaborate on that?
 ```
 
+### API
+
+Oswald also serves an OpenAI-compatible API on loopback by default (`127.0.0.1:8000`,
+configurable via `api_host`/`api_port`), authenticated per profile with the bearer key in
+`OPENAI_API_KEY`:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "oswald", "messages": [{"role": "user", "content": "Hello Oswald"}]}'
+```
+
+Conversations over the API are stateless — nothing is stored — and responses are text-only:
+no attachments and no slash commands.
+
+To use Oswald as a Home Assistant voice assistant, see
+[has-oswald-conversation](https://github.com/jonahgcarpenter/has-oswald-conversation)
+
 ## Chat Commands
 
 Chat commands are gateway-level slash commands. They are handled before requests reach the model.
