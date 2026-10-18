@@ -31,7 +31,7 @@ In server channels or group chats, start your message with a mention of Oswald:
 @Oswald What is the capital of France?
 ```
 
-You can also reply to a message and mention Oswald to include that message as context:
+You can also reply to any message and mention Oswald to include that message as context:
 
 ```text
 [Replying to Jonah: "The capital of the US is New York"]
