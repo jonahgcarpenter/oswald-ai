@@ -4,14 +4,14 @@
 `tool_describe`, and `tool_call`; deferred tools are named `mcp__<server>__<remote>` and execute
 only through `tool_call`.
 
-## Layout
+## Packages
 
-- `manager.go`, `provider.go` — lazy per-profile sessions, catalog builds, bridge surface.
-- `naming.go`, `schema.go`, `result.go` — qualified names (≤64 bytes), top-level-object
-  projection, result flattening.
-- `profile_configuration.go`, `validate.go`, `http_transport.go` — exactly one of `url`
-  (HTTP) or `command` (stdio) per server; static headers; hardening.
-- `oauth*.go` — discovery, browser/device flows, token store and refresh.
+- `mcp` (single package, one topic per file) — lazy per-profile sessions and catalog builds
+  (`manager.go`, `provider.go` bridge surface); qualified-name parsing with legacy dotted names
+  for history attribution only (`naming.go`); top-level-object schema projection (`schema.go`);
+  result flattening within rune bounds (`result.go`); server configuration and transport rules
+  (`profile_configuration.go`, `validate.go`, `http_transport.go`); OAuth discovery, browser and
+  device flows, token store with cross-process refresh fencing (`oauth*.go`).
 
 ## Rules
 
@@ -28,13 +28,13 @@ only through `tool_call`.
 - OAuth owns the `Authorization` header; a static one alongside is rejected. OAuth is refused for
   SSE/stdio. `oswald mcp auth <server>` (browser loopback or RFC 8628 device flow) is the only
   interactive path; the service refreshes lazily and fails closed into re-login.
-- Tokens and metadata persist as 0600 files under `<profile>/mcp-tokens/` (0700). Names are
-  2–40 lowercase ASCII starting with a letter; `soul` reserved. At most 32 servers/headers/env
-  entries. Restart reloads configuration; inherited servers become independent profile-owned
-  connections. Endpoints, catalogs, commands, and credentials are trusted operator configuration,
-  not an SSRF/RCE boundary.
+- Tokens persist as 0600 files under `<profile>/mcp-tokens/` (0700). Server names are 2–40
+  lowercase ASCII starting with a letter; `soul` reserved. At most 32 servers/headers/env entries.
+  Restart reloads configuration; inherited servers become independent profile-owned connections.
+  Endpoints, catalogs, commands, and credentials are trusted operator configuration, not an
+  SSRF/RCE boundary.
 
 ## Testing
 
-Cover bridge shapes and limits, projection acceptance/rejection, include/exclude filtering,
-OAuth discovery/refresh/rotation with local handlers, and shutdown fencing of late publication.
+Cover bridge shapes and limits, projection acceptance/rejection, include/exclude filtering, OAuth
+discovery/refresh/rotation with local handlers, and shutdown fencing of late publication.

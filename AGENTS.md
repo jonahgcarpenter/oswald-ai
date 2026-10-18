@@ -26,30 +26,27 @@ Two invariants shape almost every design decision and are the lens for reviewing
 
 ## Contribution rubric
 
-**Wanted:** real bug fixes with a repro on the current base and the exact file/line; small cohesive
-changes grouped by responsibility; behaviour-contract tests; E2E with fake model clients, local HTTP
-handlers, and explicit clocks for resolution, config, security, and I/O changes.
+**Wanted:** real bug fixes with a repro on the current base and the exact line; small cohesive
+changes grouped by responsibility; behaviour-contract tests.
 
 **Rejected even when well-built:** generic utility packages and unnecessary service/interface layers;
 compatibility APIs solely for obsolete fixtures; shims that hide a failed verification instead of
-fixing it; new core tool surface when terminal/file/skill already does the job; change-detector or
-source-reading tests.
+fixing it; change-detector or source-reading tests.
 
-**Before you call it a bug,** verify the claim and the intent: check source and tests first, and
-confirm which behavior is deliberate (profiles are islands on purpose, `/new` keeps history by
-design, delivery gating is intentional). A fix that cannot point to the line where the behavior
-manifests has an unverified premise.
+**Before you call it a bug,** check source and tests first: profiles are islands on purpose,
+`/new` keeps history by design, delivery gating is intentional. A fix that cannot point to the line
+where the behavior manifests has an unverified premise.
 
 **Security:** endpoints, catalogs, commands, and credentials are trusted operator configuration, not
 a hardened boundary. Never log prompts, answers, reasoning, tool payloads, URLs, transport
-identities, session keys, images, credentials, dotenv contents, or raw errors. Scope values and
-secret material are never logged. Failing closed beats guessing.
+identities, session keys, images, credentials, dotenv contents, or raw errors. Scope values are
+never logged.
 
 ## Development Environment
 
 This is a Go application, not a JavaScript/frontend project. Module declares Go 1.25.7. SQLite and
-image codecs need CGO and a C/C++ toolchain; use the `sqlite_fts5` build tag. Discord GIFV
-extraction needs `ffmpeg` and `ffprobe`.
+image codecs need CGO and a C/C++ toolchain; use the `sqlite_fts5` build tag on every command or
+SQLite symbols fail. Discord GIFV extraction needs `ffmpeg` and `ffprobe`.
 
 ```bash
 go build -tags sqlite_fts5 ./...
@@ -59,9 +56,13 @@ go vet -tags sqlite_fts5 ./...
 git diff --check
 ```
 
-`GOTOOLCHAIN=go1.25.7` overrides a different installed toolchain. Use focused tests while editing
-and the full suite for cross-package changes. Startup tests inject clients/gateways rather than
-starting real listeners. The release workflow runs tagged tests before publishing its container; it
+Single package or test: `go test -tags sqlite_fts5 ./internal/broker/ -run TestName`. `air` at the
+repo root rebuilds both binaries with the tag into `./tmp/` for the dev loop. `GOTOOLCHAIN=go1.25.7`
+overrides a different installed toolchain.
+
+Tests use synthetic principals, temporary approved-schema databases/files, fake model
+clients/transports, local HTTP handlers, explicit clocks, and joined goroutines. They must not need
+secrets or live services. The release workflow runs tagged tests before publishing its container; it
 does not enforce every race/vet/formatting check on PRs.
 
 ## Project Structure
@@ -99,8 +100,6 @@ Moving a symbol means fixing its docs in the same change.
 
 ## Rules that apply everywhere
 
-- **Smallest correct cohesive change.** Group files by responsibility, not arbitrary size. No generic
-  `util` packages, no extra interface layers.
 - **Go style:** `gofmt`, standard-library/third-party/internal import groups, exported API doc
   comments, context-first cancelable APIs, wrapped causes (`%w`), typed errors, explicit
   failure/state transitions.
@@ -113,8 +112,6 @@ Moving a symbol means fixing its docs in the same change.
 - **Branches:** short kebab-case summary only (e.g. `imessage-stop-typing`).
 - **Commits:** `<type>: <change>` subject (e.g. `fix: stop typing indicator after each send`); one to
   two line body naming the area plus what changed.
-- **Tests:** synthetic principals, temp databases/files, fake transports, explicit clocks, joined
-  goroutines. No secrets, no live services.
 - **Logging:** fixed developer-owned events/messages, literal reviewed field keys, numeric
   counts/units. `profile` is the canonical correlation key; `user_id` is an untrusted display label,
   never ownership. See `internal/platform/AGENTS.md` for the envelope and event catalog.
