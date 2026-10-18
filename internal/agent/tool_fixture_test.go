@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 )

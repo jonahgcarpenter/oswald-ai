@@ -1,6 +1,6 @@
 // Command oswald-server runs the Oswald AI service. It owns configuration
 // selection and process exit; configuration loading, the banner, signals, and
-// runtime composition live in internal/startup.
+// runtime composition live in internal/app/startup.
 package main
 
 import (
@@ -10,8 +10,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/startup"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/startup"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 func main() {

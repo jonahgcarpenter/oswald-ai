@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 func TestHandlerRequiresPrincipalAndValidatesArguments(t *testing.T) {

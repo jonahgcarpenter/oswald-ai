@@ -1,6 +1,6 @@
 package image_generate
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
+import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 
 // Name is the model-facing image generation tool name.
 const Name = "image_generate"

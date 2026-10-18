@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 func workspaceForTest(root, profile string) *workspace.Workspace {

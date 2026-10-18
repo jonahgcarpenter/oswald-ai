@@ -1,6 +1,6 @@
 package web_search
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
+import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 
 // Name is the model-facing web search tool name.
 const Name = "web_search"

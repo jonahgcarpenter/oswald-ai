@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 type configurationSource interface {

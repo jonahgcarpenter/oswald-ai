@@ -3,8 +3,8 @@ package vision_analyze
 import (
 	"fmt"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func resultText(question string, geometry *llm.ImageGeometry, firstFrame bool) string {

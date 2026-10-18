@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/cron"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/process"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
@@ -23,7 +23,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.

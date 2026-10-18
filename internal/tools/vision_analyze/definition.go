@@ -1,7 +1,7 @@
 // Package vision_analyze loads bounded image inputs for the active conversation.
 package vision_analyze
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
+import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 
 // Name is the model-facing vision tool name.
 const Name = "vision_analyze"

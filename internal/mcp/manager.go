@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )

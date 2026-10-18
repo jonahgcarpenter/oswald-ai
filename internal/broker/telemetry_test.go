@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 type telemetryProcessor struct {

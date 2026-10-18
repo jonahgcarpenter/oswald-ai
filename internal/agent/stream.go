@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"

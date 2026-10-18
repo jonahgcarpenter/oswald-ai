@@ -1,10 +1,10 @@
 package agent
 
 import (
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 // ModelMetrics holds performance data from a single LLM call.

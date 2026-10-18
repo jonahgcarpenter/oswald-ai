@@ -21,8 +21,8 @@ import (
 
 	_ "golang.org/x/image/webp"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 const maxControlResponseBytes = 1 << 20

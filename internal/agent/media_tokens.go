@@ -15,8 +15,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	_ "golang.org/x/image/webp"
 	"golang.org/x/sys/unix"
 )

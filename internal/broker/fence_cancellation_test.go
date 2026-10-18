@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 )
 
 // runOperationForUsers evaluates Done only after enqueue succeeds. This context

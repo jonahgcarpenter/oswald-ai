@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 

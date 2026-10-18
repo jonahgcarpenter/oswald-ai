@@ -1,6 +1,6 @@
 package memory
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/llm"
+import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 
 // Name is the model-facing private memory tool name.
 const Name = "memory"

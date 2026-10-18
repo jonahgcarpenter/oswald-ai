@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // FallbackSearcher uses fallback only when primary fails or returns no usable results.

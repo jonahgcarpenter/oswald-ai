@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 // SessionStore is the agent's profile-scoped conversation persistence contract.

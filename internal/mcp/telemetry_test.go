@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 func TestCatalogTelemetryAggregatesUnsupportedEntriesAndUsesCurrentCaller(t *testing.T) {

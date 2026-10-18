@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
 func TestSubmitRejectsWhenQueueFull(t *testing.T) {

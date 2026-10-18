@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func TestResultTextIncludesPathAndApplicablePreviewNotes(t *testing.T) {

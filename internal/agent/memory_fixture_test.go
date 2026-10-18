@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/shared/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 // Each synthetic owner has a separate approved profile database. The fixture

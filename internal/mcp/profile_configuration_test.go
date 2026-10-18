@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 func TestProfileMCPIsolationAndImmutableConfiguration(t *testing.T) {

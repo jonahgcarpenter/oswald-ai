@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"

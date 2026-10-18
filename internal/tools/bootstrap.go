@@ -3,18 +3,18 @@ package tools
 import (
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/memory/files"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
-	"github.com/jonahgcarpenter/oswald-ai/internal/tools/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // BuiltinDefinitions returns every Go-owned builtin tool definition in

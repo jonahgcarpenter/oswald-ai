@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
