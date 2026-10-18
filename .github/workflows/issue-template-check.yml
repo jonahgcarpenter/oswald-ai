@@ -17,6 +17,22 @@ jobs:
           script: |
             const body = context.payload.issue.body || '';
             const labels = (context.payload.issue.labels || []).map(l => l.name);
+            // Infer the type from the body shape so labels land correctly no
+            // matter how the issue was filed (web UI applies template
+            // frontmatter; gh CLI needs --label passed explicitly).
+            const hasBugShape = body.includes('## Claim') && body.includes('## Evidence');
+            const hasFeatureShape = body.includes('## Problem') && body.includes('## Proposed shape');
+            if (!labels.includes('bug') && !labels.includes('enhancement')) {
+              const inferred = hasBugShape ? 'bug' : (hasFeatureShape ? 'enhancement' : null);
+              if (inferred) {
+                await github.rest.issues.addLabels({
+                  ...context.repo,
+                  issue_number: context.payload.issue.number,
+                  labels: [inferred],
+                });
+                labels.push(inferred);
+              }
+            }
             const isBug = labels.includes('bug');
             const required = isBug
               ? ['## Claim', '## Evidence', '## Area', '## Verification', '## Secrets check']

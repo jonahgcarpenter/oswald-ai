@@ -5,7 +5,8 @@ labels: bug
 ---
 
 <!-- Fill each section. An issue without Evidence (repro + exact line) will
-     go back for questions before any fix is attempted. -->
+     go back for questions before any fix is attempted.
+     File with: gh issue create --template bug_report.md --label bug --body-file <file> --title "..." -->
 
 ## Claim
 
