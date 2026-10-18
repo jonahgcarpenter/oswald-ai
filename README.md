@@ -38,10 +38,10 @@ You can also reply to a message and mention Oswald to include that message as co
 @Oswald Is this true?
 ```
 
-Recognized replies to Oswald can continue the conversation without another mention:
+Recognized direct replies to Oswald can continue the conversation without another mention:
 
 ```text
-[Reply to Oswald's message]
+[Replying to Oswald: "The Cincinnati Bengals are easily the best team in the NFL"]
 Can you elaborate on that?
 ```
 
