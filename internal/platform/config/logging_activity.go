@@ -7,7 +7,6 @@ var activityLogEvents = map[string]bool{
 	"app.started": true, "app.stopped": true, "gateway.connected": true,
 	"chat.requested": true, "chat.completed": true, "command.completed": true,
 	"tool.completed": true, "tool.blocked": true,
-	"compaction.profile.started": true, "compaction.profile.complete": true,
 }
 
 // activityLogFields allowlists the details keys retained on INFO activity

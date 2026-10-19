@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
 func assembleTestPromptContext(policy, profile, prompt string, images []llm.InputImage, turns []memory.SessionTurn, tools []llm.Tool, limit int) PromptContext {
-	return AssemblePromptContext(policy, profile, prompt, images, memory.SessionSummary{}, 0, turns, tools, limit)
+	return AssemblePromptContext(policy, profile, prompt, images, "", 0, turns, tools, limit)
 }
 
 func TestAssemblePromptContextPreservesRolesAndOrder(t *testing.T) {
@@ -159,7 +159,7 @@ func TestAssemblePromptContextToolsAffectSelectionBudget(t *testing.T) {
 
 func TestAssemblePromptContextIncludesFileMemoryInSystemMessage(t *testing.T) {
 	files := renderFileMemory("User prefers short answers.", "Project codename is Atlas.")
-	got := AssemblePromptContext("policy", files, "What is the codename?", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	got := AssemblePromptContext("policy", files, "What is the codename?", nil, "", 0, nil, nil, 100000)
 	if roles(got.Messages) != "system,user" || got.Messages[0].Content != "policy\n\n"+files || !strings.Contains(files, "MEMORY (your personal notes)") || !strings.Contains(files, "USER PROFILE (who the user is)") {
 		t.Fatalf("file memory context missing or incorrectly placed: %+v", got.Messages)
 	}
@@ -183,7 +183,7 @@ func TestRenderFileMemoryExactBlocksAndCharacterCounts(t *testing.T) {
 }
 
 func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
-	summary := memory.SessionSummary{ID: 7, CoveredFromTurnID: 1, CoveredThroughTurnID: 10, Narrative: "Atlas was selected.", OpenTasks: []string{"Ship Atlas"}}
+	summary := "# Summary\nAtlas was selected.\n\n## Open tasks\n- Ship Atlas"
 	turns := []memory.SessionTurn{{ID: 12, UserText: "new user", AssistantText: "new assistant"}, {ID: 11, UserText: "older user", AssistantText: "older assistant"}}
 	got := AssemblePromptContext("policy", "profile", "current", nil, summary, 1, turns, nil, 100000)
 	if !got.SummaryIncluded || got.SummaryChars == 0 || got.MinimumTailCount != 1 || got.SelectedTurnCount != 2 {
@@ -201,7 +201,7 @@ func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
 }
 
 func TestAssemblePromptContextReservesSummaryAndMinimumTail(t *testing.T) {
-	summary := memory.SessionSummary{ID: 3, CoveredFromTurnID: 1, CoveredThroughTurnID: 20, Narrative: strings.Repeat("summary ", 30)}
+	summary := strings.Repeat("summary ", 30)
 	turns := make([]memory.SessionTurn, 0, 10)
 	for i := 0; i < 8; i++ {
 		turns = append(turns, memory.SessionTurn{ID: int64(30 - i), UserText: "recent", AssistantText: "answer"})
@@ -219,8 +219,8 @@ func TestAssemblePromptContextReservesSummaryAndMinimumTail(t *testing.T) {
 
 func TestAssemblePromptContextNeverLetsSummaryDisplaceMinimumTail(t *testing.T) {
 	turns := []memory.SessionTurn{{ID: 2, UserText: "recent user", AssistantText: "recent assistant"}, {ID: 1, UserText: "older user", AssistantText: "older assistant"}}
-	withoutSummary := AssemblePromptContext("policy", "profile", "current", nil, memory.SessionSummary{}, 2, turns, nil, 100000)
-	hugeSummary := memory.SessionSummary{ID: 1, CoveredFromTurnID: 1, CoveredThroughTurnID: 20, Narrative: strings.Repeat("large summary ", 200)}
+	withoutSummary := AssemblePromptContext("policy", "profile", "current", nil, "", 2, turns, nil, 100000)
+	hugeSummary := strings.Repeat("large summary ", 200)
 	got := AssemblePromptContext("policy", "profile", "current", nil, hugeSummary, 2, turns, nil, withoutSummary.EstimatedAfter)
 	if got.SummaryIncluded || got.MinimumTailCount != 2 || got.SelectedTurnCount != 2 {
 		t.Fatalf("summary displaced required tail: %+v", got)
@@ -255,7 +255,7 @@ func TestRuntimeInfoBlockOmitsStartForStatelessAndBlanks(t *testing.T) {
 func TestAssemblePromptContextOrdersRuntimeBlockAfterUserProfile(t *testing.T) {
 	files := renderFileMemory("Alice profile body", "")
 	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")
-	got := AssemblePromptContext("soul", files+"\n\n"+block, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	got := AssemblePromptContext("soul", files+"\n\n"+block, "current", nil, "", 0, nil, nil, 100000)
 	content := got.Messages[0].Content
 	profileAt := strings.Index(content, "USER PROFILE (who the user is)")
 	runtimeAt := strings.Index(content, "Conversation started:")
@@ -315,7 +315,7 @@ func TestEnvironmentInfoBlockRendersSandbox(t *testing.T) {
 	block := runtimeInfoBlock(false, time.Date(2026, time.September, 26, 8, 0, 0, 0, time.UTC), time.Date(2026, time.October, 4, 8, 0, 0, 0, time.UTC), time.FixedZone("CDT", -5*3600), "qwen", "custom", "discord")
 	env := environmentInfoBlock(dir)
 	session := sessionContextBlock("discord", `"DM with fragsap"`, "fragsap")
-	assembled := AssemblePromptContext("soul", files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	assembled := AssemblePromptContext("soul", files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, "", 0, nil, nil, 100000)
 	content := assembled.Messages[0].Content
 	envAt := strings.Index(content, "# Oswald runtime environment")
 	sessionAt := strings.Index(content, "## Current Session Context")
@@ -350,7 +350,7 @@ func TestOperatingDirectivesBlockOrderedAboveSessionContext(t *testing.T) {
 	directives := operatingDirectivesBlock()
 	session := sessionContextBlock("discord", `"DM with fragsap"`, "fragsap")
 	policy := "soul\n\n" + directives
-	assembled := AssemblePromptContext(policy, files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, memory.SessionSummary{}, 0, nil, nil, 100000)
+	assembled := AssemblePromptContext(policy, files+"\n\n"+block+"\n\n"+env+"\n\n"+session, "current", nil, "", 0, nil, nil, 100000)
 	content := assembled.Messages[0].Content
 	soulAt := strings.Index(content, "soul")
 	directivesAt := strings.Index(content, "# Finishing the job")

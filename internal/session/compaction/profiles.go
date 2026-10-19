@@ -2,319 +2,40 @@ package compaction
 
 import (
 	"context"
-	"database/sql"
-	"errors"
-	"strings"
-	"sync"
-	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/lease"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
-// LowPriorityGate grants cancelable model capacity only while foreground work is idle.
-type LowPriorityGate interface {
-	TryAcquireLowPriority(context.Context) (context.Context, func(), bool)
-}
-
-// ProfileService owns one profile's post-delivery compression worker. Retry
-// credits and checkpoints survive restart in the profile's state_meta records.
+// ProfileService marks delivery outcomes so reads gate on delivered rows only.
+// Markdown compaction runs inline in the agent lane, so no background worker,
+// lease, campaign, or low-priority gate remains.
 type ProfileService struct {
-	store     *memory.ProfileStore
-	compactor *LLMCompactor
-	gate      LowPriorityGate
-	limit     int
-	log       *config.Logger
-	wake      chan struct{}
-	cancel    context.CancelFunc
-	done      chan struct{}
-	cursor    string
+	store *memory.ProfileStore
 }
 
-// NewProfileService constructs a worker without opening another database handle.
-func NewProfileService(store *memory.ProfileStore, compactor *LLMCompactor, gate LowPriorityGate, input budget.ContextBudget, log *config.Logger) *ProfileService {
-	return &ProfileService{store: store, compactor: compactor, gate: gate, limit: input.UsableInputLimit(), log: log, wake: make(chan struct{}, 1), done: make(chan struct{})}
+// NewProfileService constructs a delivery marker sharing the profile store.
+func NewProfileService(store *memory.ProfileStore) *ProfileService {
+	return &ProfileService{store: store}
 }
 
-// Start gives the worker an independent lifetime; Stop joins it before DB close.
-func (s *ProfileService) Start() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
-	go func() {
-		defer close(s.done)
-		timer := time.NewTicker(30 * time.Second)
-		defer timer.Stop()
-		s.cycle(ctx)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-s.wake:
-				s.cycle(ctx)
-			case <-timer.C:
-				s.cycle(ctx)
-			}
-		}
-	}()
-}
+// Start is a no-op retained for lifecycle symmetry; Stop joins nothing.
+func (s *ProfileService) Start() {}
 
-// Stop cancels active provider work and joins bounded bookkeeping.
-func (s *ProfileService) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-		<-s.done
-	}
-}
+// Stop joins nothing; the store closes separately.
+func (s *ProfileService) Stop() {}
 
-// Enqueue acknowledges delivery before waking compression planning.
+// Enqueue acknowledges delivery after a successful gateway send.
 func (s *ProfileService) Enqueue(ctx context.Context, owner string, source memory.DeliverySource) error {
-	if err := s.store.MarkSessionTurnDelivered(ctx, owner, source.TurnID); err != nil {
-		return err
+	if s == nil || s.store == nil {
+		return nil
 	}
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
-	return nil
+	return s.store.MarkSessionTurnDelivered(ctx, owner, source.TurnID)
 }
 
-// MarkDeliveryFailed keeps the exchange out of context and compression.
+// MarkDeliveryFailed keeps the exchange out of context and compaction.
 func (s *ProfileService) MarkDeliveryFailed(ctx context.Context, owner string, turn int64) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
 	return s.store.MarkSessionTurnDeliveryFailed(ctx, owner, turn)
-}
-
-func (s *ProfileService) cycle(ctx context.Context) {
-	scopes, err := s.store.CompressionScopesAfter(ctx, s.cursor)
-	if err != nil {
-		if ctx.Err() == nil {
-			s.log.Server("compaction").Warn("compaction.profile.scan_failed", "failed to scan profile compression", config.ErrorField(err))
-		}
-		return
-	}
-	if len(scopes) == 100 {
-		s.cursor = scopes[len(scopes)-1].SessionID
-	} else {
-		s.cursor = ""
-	}
-	for _, scope := range scopes {
-		if ctx.Err() != nil {
-			return
-		}
-		s.runScope(ctx, scope)
-	}
-}
-
-// recordCompactionUsage ledgers one completed summary model call under the
-// compression task. Recording failures are logged and never fail compaction.
-func (s *ProfileService) recordCompactionUsage(ctx context.Context, scope memory.ActiveSessionScope, resp *llm.ChatResponse) {
-	if s == nil || s.store == nil || resp == nil {
-		return
-	}
-	model := strings.TrimSpace(resp.Model)
-	baseURL := ""
-	if s.compactor != nil {
-		if model == "" {
-			model = strings.TrimSpace(s.compactor.model)
-		}
-		baseURL = strings.TrimSpace(s.compactor.billingBaseURL)
-	}
-	if model == "" {
-		return
-	}
-	record := memory.ModelUsageRecord{
-		SessionID: scope.SessionID, UserID: scope.UserID, Generation: scope.Generation,
-		Model: model, BillingBaseURL: baseURL, Task: "compression",
-		ApiCalls:         1,
-		PromptTokens:     max(0, resp.PromptTokens),
-		CompletionTokens: max(0, resp.CompletionTokens),
-	}
-	if err := s.store.RecordModelUsage(ctx, record); err != nil {
-		s.log.Server("compaction").Debug("compaction.profile.usage_failed", "failed to record compression model usage", config.ErrorField(err))
-	}
-}
-
-func (s *ProfileService) runScope(ctx context.Context, scope memory.ActiveSessionScope) {
-	previous, err := s.store.LatestSessionSummary(ctx, scope.UserID, scope.SessionID, scope.Generation)
-	if err != nil {
-		return
-	}
-	turns, pressure, err := s.store.CompressionCandidates(ctx, scope, previous.CoveredThroughTurnID)
-	if err != nil || len(turns) == 0 {
-		return
-	}
-	contract := memory.CompressionContract(s.compactor.model, SummaryGeneratorVersion, s.limit)
-	target, err := s.store.CompressionCampaignTarget(ctx, scope, contract)
-	if err != nil {
-		return
-	}
-	if target == 0 && (pressure.Limit <= 0 || float64(pressure.Tokens)/float64(pressure.Limit) < 0.7) {
-		return
-	}
-	if target > 0 {
-		count := 0
-		for count < len(turns) && turns[count].ID <= target {
-			count++
-		}
-		turns = turns[:count]
-		if len(turns) == 0 {
-			return
-		}
-	}
-	first := turns[0]
-	retryThrough, err := s.store.CompressionRetryThrough(ctx, scope, first.ID, contract)
-	if err != nil {
-		return
-	}
-	if retryThrough > 0 {
-		count := 0
-		for count < len(turns) && turns[count].ID <= retryThrough {
-			count++
-		}
-		if count == 0 || turns[count-1].ID != retryThrough {
-			return
-		}
-		turns = turns[:count]
-	}
-	var prior *memory.SessionSummary
-	if previous.ID > 0 {
-		prior = &previous
-	}
-	for len(turns) > 0 {
-		messages, err := compactionMessages(prior, turns, "")
-		if err != nil {
-			return
-		}
-		if budget.EstimateRequest(messages, []llm.Tool{s.compactor.tool}) <= s.limit {
-			break
-		}
-		// An existing range is immutable. Never create a new receipt to bypass
-		// its provider credits or discard an artifact awaiting publication.
-		if retryThrough > 0 {
-			return
-		}
-		turns = turns[:len(turns)-1]
-	}
-	if len(turns) == 0 {
-		work, err := s.store.ClaimCompression(ctx, scope, []memory.SessionTurn{first}, contract)
-		if err == nil {
-			if err := s.store.ReleaseCompression(ctx, work, false, true); err != nil {
-				s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to retire uncompactable exchange", config.ErrorField(err))
-				return
-			}
-			s.log.Server("compaction").Debug("compaction.profile.uncompactable", "complete exchange exceeds compression capacity", config.F("profile", scope.UserID), config.F("turn_count", 1), config.F("status", "rejected"))
-		}
-		return
-	}
-	workCtx, release, ok := s.gate.TryAcquireLowPriority(ctx)
-	if !ok {
-		return
-	}
-	defer release()
-	work, err := s.store.ClaimCompression(workCtx, scope, turns, contract)
-	if err != nil {
-		return
-	}
-	started := time.Now()
-	submitted := false
-	artifactSaved := work.Artifact != nil
-	artifactReused := artifactSaved
-	savedArtifact, correctiveCode := work.Artifact, work.CorrectiveCode
-	outcome := "completed"
-	dead, refund := false, false
-	meta := requestctx.Metadata{OperationID: config.NewRequestID(), Workload: "compaction"}
-	workCtx = requestctx.WithMetadata(workCtx, meta)
-	// Background work has canonical ownership but no invented transport identity.
-	workCtx = requestctx.WithPrincipal(workCtx, identity.Principal{CanonicalUserID: scope.UserID})
-	s.log.Server("compaction").Info("compaction.profile.started", "started profile compression attempt",
-		config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID), config.F("turn_count", len(turns)))
-	var mutex sync.Mutex
-	err = lease.Run(workCtx, 5*time.Minute, func(ctx context.Context) error {
-		mutex.Lock()
-		defer mutex.Unlock()
-		renewed, err := s.store.RenewCompression(ctx, work)
-		if err == nil {
-			work = renewed
-		}
-		return err
-	}, func(ctx context.Context) error {
-		if savedArtifact != nil {
-			mutex.Lock()
-			defer mutex.Unlock()
-			return s.store.PublishProfileSummary(ctx, work, turns, *savedArtifact)
-		}
-		mutex.Lock()
-		err := s.store.ReserveCompressionSubmission(ctx, work)
-		mutex.Unlock()
-		if err != nil {
-			return err
-		}
-		submitted = true
-		artifact, usage, err := s.compactor.Compact(ctx, prior, turns, correctiveCode)
-		if usage != nil {
-			s.recordCompactionUsage(ctx, scope, usage)
-		}
-		if err != nil {
-			if errors.Is(err, errInvalidCompactionOutput) && ctx.Err() == nil {
-				mutex.Lock()
-				recordErr := s.store.RecordCompressionCorrection(ctx, work, compactionErrorCode(err))
-				mutex.Unlock()
-				if recordErr != nil {
-					s.log.Server("compaction").Warn("compaction.profile.correction_failed", "failed to persist compression correction", config.ErrorField(recordErr))
-				}
-			}
-			return err
-		}
-		mutex.Lock()
-		defer mutex.Unlock()
-		if err := s.store.SaveCompressionArtifact(ctx, work, artifact); err != nil {
-			return err
-		}
-		artifactSaved = true
-		return s.store.PublishProfileSummary(ctx, work, turns, artifact)
-	})
-	if err != nil {
-		outcome = "failed"
-		if workCtx.Err() != nil {
-			outcome = "canceled"
-			refund = submitted && !artifactSaved
-		} else if errors.Is(err, errPermanentProvider) || errors.Is(err, memory.ErrModelSubmissionBudgetExhausted) {
-			dead = true
-			outcome = "skipped"
-		}
-	}
-	// Cleanup must outlive foreground preemption, but is strictly bounded and
-	// fenced by the last renewed token. It cannot release a reclaimed lease.
-	cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	cleanupErr := s.store.ReleaseCompression(cleanup, work, refund, dead)
-	cancel()
-	if cleanupErr != nil && !errors.Is(cleanupErr, memory.ErrStaleSessionCompactionJobLease) && !errors.Is(cleanupErr, sql.ErrNoRows) {
-		s.log.Server("compaction").Warn("compaction.profile.release_failed", "failed to release profile compression", config.ErrorField(cleanupErr))
-	}
-	// Success is implicit: only a non-completed outcome is emitted.
-	complete := []config.Field{
-		config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID),
-		config.F("turn_count", len(turns)), config.F("is_submitted", submitted),
-		config.F("duration_ms", time.Since(started).Milliseconds()), config.ErrorField(err),
-	}
-	if artifactReused {
-		complete = append(complete, config.F("is_artifact_reused", artifactReused))
-	}
-	if outcome != "completed" {
-		complete = append(complete, config.F("outcome", outcome))
-	}
-	s.log.Server("compaction").Info("compaction.profile.complete", "completed profile compression attempt", complete...)
-	if err != nil && workCtx.Err() == nil && !errors.Is(err, context.Canceled) {
-		s.log.Server("compaction").Warn("compaction.failed", "profile compression did not complete", config.F("profile", scope.UserID), config.F("operation_id", meta.OperationID), config.F("status", "degraded"), config.ErrorField(err))
-	}
-	if err == nil {
-		select {
-		case s.wake <- struct{}{}:
-		default:
-		}
-	}
 }

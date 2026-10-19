@@ -17,7 +17,7 @@ func (r *profileStarter) NewSessionContext(_ context.Context, owner, key string)
 }
 func TestProfileCommandsContainNoAdministrationOrMCP(t *testing.T) {
 	starter := &profileStarter{}
-	service, err := NewProfileService(starter, nil, "")
+	service, err := NewProfileService(starter, nil, "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

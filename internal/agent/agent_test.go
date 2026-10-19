@@ -18,14 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/database"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
@@ -34,6 +32,8 @@ import (
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	filememory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 )
 
 func TestProcessRejectsUnauthenticatedPrincipal(t *testing.T) {
@@ -1036,6 +1036,7 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.SetMarkdownSummarizer(&fakeMarkdownSummarizer{markdown: "# Summary\nThe first two turns established Atlas.\n\n## Open tasks\n- Continue"})
 	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-1", time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -1045,17 +1046,14 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.publishSummary(context.Background(), "user-1", "session-1", profile.Generation, 2, memory.SummaryArtifact{Narrative: "The first two turns established Atlas.", OpenTasks: []string{"Continue"}, GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := processAgent(agent, "req-summary", "imessage", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if len(messages) != 19 || !strings.Contains(messages[1].Content, "session_history_summary") || !strings.Contains(messages[1].Content, "first two turns") {
+	if len(messages) != 23 || !strings.Contains(messages[1].Content, "session_history_summary") || !strings.Contains(messages[1].Content, "first two turns") {
 		t.Fatalf("summary context missing or malformed: %+v", messages)
 	}
-	if messages[2].Content != "turn 3 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
+	if messages[2].Content != "turn 1 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
 		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
 	}
 }
@@ -1457,9 +1455,7 @@ func TestProcessLegacyDotQualifiedHistoryDoesNotAdvertise(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.publishSummary(context.Background(), "user-1", "session-mcp", profile.Generation, 2, memory.SummaryArtifact{Narrative: "Earlier context.", GenerationModel: "test-model", GeneratorVersion: "test-v1"}); err != nil {
-		t.Fatal(err)
-	}
+	agent.SetMarkdownSummarizer(&fakeMarkdownSummarizer{markdown: "# Summary\nEarlier context."})
 	if _, err := processAgent(agent, "req-mcp", "imessage", "session-mcp", "user-1", "User", "again", nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1696,6 +1692,27 @@ type fakeChatter struct {
 type fakeChatOutcome struct {
 	response *llm.ChatResponse
 	err      error
+}
+
+type fakeMarkdownSummarizer struct {
+	markdown string
+	calls    int
+}
+
+func (f *fakeMarkdownSummarizer) Summarize(_ context.Context, _ []memory.SessionTurn) (string, *llm.ChatResponse, error) {
+	f.calls++
+	if f.markdown == "" {
+		return "", nil, errors.New("no markdown")
+	}
+	return f.markdown, &llm.ChatResponse{Model: "test-model"}, nil
+}
+
+func (f *fakeMarkdownSummarizer) Get(_, _ string, _ int) string { return f.markdown }
+
+func (f *fakeMarkdownSummarizer) Set(_, _ string, _ int, markdown string) {
+	if f != nil && markdown != "" {
+		f.markdown = markdown
+	}
 }
 
 func (f *fakeChatter) Chat(_ context.Context, req llm.ChatRequest, cb func(llm.ChatMessage)) (*llm.ChatResponse, error) {

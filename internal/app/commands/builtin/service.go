@@ -3,15 +3,26 @@ package builtin
 import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	approvecommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/approve"
+	compactcommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/compact"
 	sessioncommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/session"
 	stopcommands "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/stop"
 )
 
 // NewProfileService registers only the profile runtime's public commands.
 // approvalRoot binds /approve execution to one profile working directory.
-func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canceler, approvalRoot string) (*commands.Service, error) {
+func NewProfileService(store sessioncommands.Starter, canceler stopcommands.Canceler, approvalRoot string, compacter compactcommands.Summarizer, compactStore compactcommands.Store) (*commands.Service, error) {
 	help := &helpHandler{}
-	service, err := commands.NewServiceWithCommands(commands.Command{Handler: help}, commands.Command{Handler: sessioncommands.New(store)}, commands.Command{Handler: stopcommands.New(canceler)}, commands.Command{Handler: approvecommands.NewApprove(approvalRoot)}, commands.Command{Handler: approvecommands.NewDeny()})
+	cmds := []commands.Command{
+		{Handler: help},
+		{Handler: sessioncommands.New(store)},
+		{Handler: stopcommands.New(canceler)},
+		{Handler: approvecommands.NewApprove(approvalRoot)},
+		{Handler: approvecommands.NewDeny()},
+	}
+	if compacter != nil && compactStore != nil {
+		cmds = append(cmds, commands.Command{Handler: compactcommands.New(compactStore, compacter)})
+	}
+	service, err := commands.NewServiceWithCommands(cmds...)
 	if err != nil {
 		return nil, err
 	}

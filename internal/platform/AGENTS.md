@@ -76,9 +76,8 @@ unsupported values produce marshal-failure diagnostics, not truncated secrets. T
 classification is allowlist-based: unknown or private-suffixed keys are omitted, and output
 filtering is not a secret detector, so source-value review stays mandatory.
 
-INFO is exactly ten lifecycle events (`app.started/stopped`, `gateway.connected`,
-`chat.requested/completed`, `command.completed`, `tool.completed/blocked`,
-`compaction.profile.started/complete`); everything else is DEBUG telemetry, WARN for recoverable
+INFO is exactly eight lifecycle events (`app.started/stopped`, `gateway.connected`,
+`chat.requested/completed`, `command.completed`, `tool.completed/blocked`); everything else is DEBUG telemetry, WARN for recoverable
 degradation, ERROR for startup failures and stopped gateways. Correlate by `request_id`; never add
 requested/completed or chat/tool/diagnostic counts together — a missing completion may mean still
 running. `app.started` means composition finished, not listener readiness. Use

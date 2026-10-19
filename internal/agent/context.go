@@ -10,10 +10,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
@@ -288,14 +289,14 @@ type PromptContext struct {
 	RequiredOverBudget bool
 }
 
-// AssemblePromptContext reserves a bounded historical summary and a
+// AssemblePromptContext reserves a bounded markdown summary and a
 // caller-selected newest verbatim tail before additional history.
 func AssemblePromptContext(
 	deploymentPolicy string,
 	contextBlock string,
 	currentPrompt string,
 	currentImages []llm.InputImage,
-	summary memory.SessionSummary,
+	summaryMarkdown string,
 	minimumTail int,
 	recentTurns []memory.SessionTurn,
 	tools []llm.Tool,
@@ -318,7 +319,7 @@ func AssemblePromptContext(
 		InputLimit:       inputLimit,
 		RequiredEstimate: tokenbudget.EstimateRequest(required, tools),
 	}
-	summaryBlock := memory.RenderSessionSummary(summary)
+	summaryBlock := compaction.RenderMarkdownSummary(summaryMarkdown)
 	allMessages := messagesWithSummaryAndTurns(required, summaryBlock, recentTurns)
 	result.EstimatedBefore = tokenbudget.EstimateRequest(allMessages, tools)
 	result.RequiredOverBudget = result.RequiredEstimate > inputLimit

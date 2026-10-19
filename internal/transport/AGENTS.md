@@ -9,7 +9,7 @@ decides which transports start from which config blocks (OpenAI on a listen port
 token, iMessage on BlueBubbles settings, with port/URL validation). Concrete packages depend on
 `gateway/routing` and `gateway/runtime`, never the reverse: `routing/` makes the cheap
 ignore-vs-LLM-vs-command decision before any expensive work, and `runtime/Execute()` runs the
-profile fence, group-scope check, command/LLM dispatch, broker submission, and compaction enqueue.
+profile fence, group-scope check, command/LLM dispatch, broker submission, and delivery marking.
 Per-transport wires: `discord/` (inbound, replies, streaming status, FIFO outbound, REST, labels,
 cron sender), `imessage/` (BlueBubbles client, webhook listener + registration, chronological
 thread replies, final-only responses), `openai/` (stateless bearer-key API). `media/` normalizes
