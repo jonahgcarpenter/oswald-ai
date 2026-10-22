@@ -673,7 +673,7 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 
 func TestGeneratedImageContextSurvivesCompaction(t *testing.T) {
 	turns := []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}
-	got := AssemblePromptContext("policy", "", "edit it", nil, "# Summary\nGenerated an image.", 0, turns, nil, 100000)
+	got := AssemblePromptContext("policy", "", "edit it", nil, "# Summary\nGenerated an image.", 1, turns, nil, 100000)
 	if !got.SummaryIncluded || got.SelectedTurnCount != 1 {
 		t.Fatalf("markdown compaction dropped history: %+v", got)
 	}

@@ -11,18 +11,18 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func TestExecuteHandlesIgnoreFallbackCommandAndLLM(t *testing.T) {
@@ -527,6 +527,96 @@ func (r *fakeResponder) SendAgentError(text string) error {
 
 func (r *fakeResponder) CancelAgentResponse() error {
 	r.canceled = true
+	return nil
+}
+
+func TestExecuteCompactStreamsAckWhenSupported(t *testing.T) {
+	recorder := &compactStreamAckRecorder{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "compact"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "Compacted 3 turns into a markdown summary. It applies to the next reply."}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "external-user", Assurance: identity.AssuranceDiscordGateway}
+	outcome := Execute(Request{Principal: principal, SessionKey: "session", Text: "/compact"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, recorder)
+	if outcome.Action != routing.ActionCommand {
+		t.Fatalf("unexpected outcome: %+v", outcome)
+	}
+	if len(recorder.statuses) != 1 || recorder.statuses[0] != "Compacting context..." {
+		t.Fatalf("compact status ack wrong: %+v", recorder.statuses)
+	}
+	if len(recorder.texts) != 1 || !strings.Contains(recorder.texts[0], "Compacted 3 turns") {
+		t.Fatalf("compact final wrong: %+v", recorder.texts)
+	}
+}
+
+type compactStreamAckRecorder struct {
+	fakeResponder
+	statuses []string
+	texts    []string
+}
+
+func (r *compactStreamAckRecorder) Stream(chunk agent.StreamChunk) {
+	if chunk.Type == agent.ChunkStatus {
+		r.statuses = append(r.statuses, chunk.Text)
+	}
+}
+
+func (r *compactStreamAckRecorder) SendCommandResponse(result commands.Result) error {
+	r.texts = append(r.texts, result.Text)
+	r.command = result
+	return nil
+}
+
+func TestExecuteCompactSendsAckBeforeFinal(t *testing.T) {
+	recorder := &compactAckRecorder{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "compact"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "Compacted 3 turns into a markdown summary. It applies to the next reply."}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome := Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/compact"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, recorder)
+	if outcome.Action != routing.ActionCommand {
+		t.Fatalf("unexpected outcome: %+v", outcome)
+	}
+	if len(recorder.texts) != 2 || recorder.texts[0] != "Compacting context..." || !strings.Contains(recorder.texts[1], "Compacted 3 turns") {
+		t.Fatalf("compact ack sequence wrong: %+v", recorder.texts)
+	}
+}
+
+func TestExecuteNonCompactSkipsAck(t *testing.T) {
+	recorder := &compactAckRecorder{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: commands.HandlerFunc{
+		DefinitionValue: commands.Definition{Name: "ping"},
+		ExecuteFunc: func(context.Context, commands.Request) (commands.Result, error) {
+			return commands.Result{Text: "pong"}, nil
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	Execute(Request{Principal: testPrincipal("user"), SessionKey: "session", Text: "/ping"}, Dependencies{Commands: service, Log: config.NewLogger(config.LevelError)}, recorder)
+	if len(recorder.texts) != 1 || recorder.texts[0] != "pong" {
+		t.Fatalf("non-compact should send once: %+v", recorder.texts)
+	}
+}
+
+type compactAckRecorder struct {
+	fakeResponder
+	texts []string
+}
+
+func (r *compactAckRecorder) SendCommandResponse(result commands.Result) error {
+	r.texts = append(r.texts, result.Text)
+	r.command = result
 	return nil
 }
 

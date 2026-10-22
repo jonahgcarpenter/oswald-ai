@@ -5,13 +5,13 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
@@ -108,6 +108,13 @@ type Responder interface {
 // CancellationResponder performs optional transport-specific cleanup for a stopped request.
 type CancellationResponder interface {
 	CancelAgentResponse() error
+}
+
+// CommandStatusStreamer is an optional responder capability for non-terminal
+// command progress. Unlike SendCommandResponse, Stream does not complete the
+// lifecycle message, so a later SendCommandResponse still delivers.
+type CommandStatusStreamer interface {
+	Stream(agent.StreamChunk)
 }
 
 // Outcome describes how a normalized request was handled.

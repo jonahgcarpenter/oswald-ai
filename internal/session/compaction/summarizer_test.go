@@ -68,7 +68,10 @@ func TestRenderMarkdownSummaryWrapsUntrusted(t *testing.T) {
 		t.Fatal("empty markdown rendered")
 	}
 	got := RenderMarkdownSummary("# Hi")
-	if !strings.Contains(got, "session_history_summary") || !strings.Contains(got, "# Hi") {
+	if !strings.Contains(got, "compacted_session_history") || !strings.Contains(got, "# Hi") {
 		t.Fatalf("render=%q", got)
+	}
+	if strings.Contains(got, "Generated historical reference only") {
+		t.Fatalf("static header was not removed: %q", got)
 	}
 }

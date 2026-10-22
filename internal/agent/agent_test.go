@@ -1050,10 +1050,10 @@ func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := primaryRequests(chat.requests)[0].Messages
-	if len(messages) != 23 || !strings.Contains(messages[1].Content, "session_history_summary") || !strings.Contains(messages[1].Content, "first two turns") {
+	if len(messages) != 7 || !strings.Contains(messages[1].Content, "compacted_session_history") || !strings.Contains(messages[1].Content, "first two turns") {
 		t.Fatalf("summary context missing or malformed: %+v", messages)
 	}
-	if messages[2].Content != "turn 1 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
+	if messages[2].Content != "turn 9 user" || messages[len(messages)-2].Content != "turn 10 assistant" || messages[len(messages)-1].Content != "continue" {
 		t.Fatalf("recent verbatim tail is wrong: %+v", messages)
 	}
 }

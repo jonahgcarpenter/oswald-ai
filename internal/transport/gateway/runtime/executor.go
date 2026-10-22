@@ -6,12 +6,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 )
 
 // Execute applies shared routing policy, command handling, and broker submission.
@@ -291,6 +292,13 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			if !definition.OutOfBand {
 				fenceTargets, resolveErr = deps.Commands.ResolveFenceTargets(commandCtx, commandReq)
 			}
+			if commandName == "compact" && req.Principal.Gateway != "openai" {
+				if streamer, ok := compactAckStreamer(responder); ok {
+					streamer.Stream(agent.StreamChunk{Type: agent.ChunkStatus, Text: "Compacting context..."})
+				} else if ackErr := responder.SendCommandResponse(commands.Result{Text: "Compacting context..."}); ackErr != nil {
+					log.Debug("gateway.command.ack_failed", "failed to send compact acknowledgement", config.F("request_id", req.RequestID), config.F("profile", userID), config.ErrorField(ackErr))
+				}
+			}
 			executeCommand := func() error {
 				queueWaitMS = time.Since(startedAt).Milliseconds()
 				if resolveErr != nil {
@@ -525,4 +533,17 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		}
 	}
 	return Outcome{Action: decision.Action, Reason: decision.Reason, Err: err}
+}
+
+// compactAckStreamer unwraps measuredResponder to detect non-terminal status
+// support on the underlying transport. Discord streams ChunkStatus into the
+// lifecycle message so the later SendCommandResponse edits it in place;
+// transports without Stream keep the two-message SendCommandResponse fallback.
+func compactAckStreamer(responder Responder) (CommandStatusStreamer, bool) {
+	if measured, ok := responder.(*measuredResponder); ok {
+		streamer, ok := measured.Responder.(CommandStatusStreamer)
+		return streamer, ok
+	}
+	streamer, ok := responder.(CommandStatusStreamer)
+	return streamer, ok
 }

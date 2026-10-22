@@ -290,7 +290,9 @@ type PromptContext struct {
 }
 
 // AssemblePromptContext reserves a bounded markdown summary and a
-// caller-selected newest verbatim tail before additional history.
+// caller-selected newest verbatim tail. When a summary is present the
+// compacted turns stay out of context: only the tail is kept, older turns
+// are omitted even while budget remains.
 func AssemblePromptContext(
 	deploymentPolicy string,
 	contextBlock string,
@@ -354,7 +356,10 @@ func AssemblePromptContext(
 	result.SummaryIncluded = selectedSummary != ""
 	result.SummaryChars = len([]rune(selectedSummary))
 
-	if !result.RequiredOverBudget {
+	// Once a session has been compacted, the summary replaces older history.
+	// Backfilling them while budget remains would undo the compaction, so only
+	// the verbatim tail is kept alongside the summary.
+	if !result.RequiredOverBudget && summaryBlock == "" {
 		for _, turn := range recentTurns[len(selectedNewestFirst):] {
 			candidate := append(selectedNewestFirst, turn)
 			if tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {

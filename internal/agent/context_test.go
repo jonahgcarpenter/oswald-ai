@@ -186,13 +186,16 @@ func TestAssemblePromptContextPlacesSummaryBeforeRoleCorrectTail(t *testing.T) {
 	summary := "# Summary\nAtlas was selected.\n\n## Open tasks\n- Ship Atlas"
 	turns := []memory.SessionTurn{{ID: 12, UserText: "new user", AssistantText: "new assistant"}, {ID: 11, UserText: "older user", AssistantText: "older assistant"}}
 	got := AssemblePromptContext("policy", "profile", "current", nil, summary, 1, turns, nil, 100000)
-	if !got.SummaryIncluded || got.SummaryChars == 0 || got.MinimumTailCount != 1 || got.SelectedTurnCount != 2 {
+	if !got.SummaryIncluded || got.SummaryChars == 0 || got.MinimumTailCount != 1 || got.SelectedTurnCount != 1 {
 		t.Fatalf("unexpected summary selection: %+v", got)
 	}
-	if roles(got.Messages) != "system,user,user,assistant,user,assistant,user" {
+	if got.OmittedTurnCount != 1 {
+		t.Fatalf("compacted turn was not omitted: %+v", got)
+	}
+	if roles(got.Messages) != "system,user,user,assistant,user" {
 		t.Fatalf("summary/tail roles=%s messages=%+v", roles(got.Messages), got.Messages)
 	}
-	if !strings.Contains(got.Messages[1].Content, "session_history_summary") || !strings.Contains(got.Messages[1].Content, "untrusted_historical_reference") || !strings.Contains(got.Messages[1].Content, "Atlas was selected") {
+	if !strings.Contains(got.Messages[1].Content, "compacted_session_history") || !strings.Contains(got.Messages[1].Content, "untrusted_historical_reference") || !strings.Contains(got.Messages[1].Content, "Atlas was selected") {
 		t.Fatalf("summary not safely rendered: %+v", got.Messages[1])
 	}
 	if strings.Contains(got.Messages[0].Content, "Atlas was selected") {
