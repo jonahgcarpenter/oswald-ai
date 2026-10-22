@@ -38,6 +38,7 @@ func NewHandlers(deps Deps) map[string]registry.Handler {
 		GetImagesName: getImagesHandler(deps),
 		VisionName:    visionHandler(deps),
 		ConsoleName:   consoleHandler(deps),
+		DialogName:    dialogHandler(deps),
 	}
 }
 
@@ -123,6 +124,9 @@ func navigateHandler(deps Deps) registry.Handler {
 		payload := map[string]interface{}{
 			"url": data.URL, "title": data.Title, "snapshot": data.Snapshot, "element_count": data.ElementCount,
 		}
+		if len(data.PendingDialogs) > 0 {
+			payload["pending_dialogs"] = data.PendingDialogs
+		}
 		if data.BotWarning {
 			payload["bot_detection_warning"] = "Page title '" + data.Title + "' suggests bot detection. The site may have blocked this request. " +
 				"Options: 1) Try adding delays between actions, 2) Access different pages first, " +
@@ -186,7 +190,7 @@ func snapshotHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0, 0)
 			return governance.Result{}, err
 		}
-		content, err := boundSnapshot(SnapshotName, data.Snapshot, data.ElementCount, data.Path)
+		content, err := boundSnapshot(SnapshotName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
 		if err != nil {
 			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
 			return governance.Result{}, err
@@ -236,7 +240,7 @@ func clickHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0, 0)
 			return governance.Result{}, err
 		}
-		content, err := boundSnapshot(ClickName, data.Snapshot, data.ElementCount, data.Path)
+		content, err := boundSnapshot(ClickName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
 		if err != nil {
 			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
 			return governance.Result{}, err
@@ -292,7 +296,7 @@ func typeHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0, 0)
 			return governance.Result{}, err
 		}
-		content, err := boundSnapshot(TypeName, data.Snapshot, data.ElementCount, data.Path)
+		content, err := boundSnapshot(TypeName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
 		if err != nil {
 			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
 			return governance.Result{}, err
@@ -342,7 +346,7 @@ func scrollHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0, 0)
 			return governance.Result{}, err
 		}
-		content, err := boundSnapshot(ScrollName, data.Snapshot, data.ElementCount, data.Path)
+		content, err := boundSnapshot(ScrollName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
 		if err != nil {
 			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
 			return governance.Result{}, err
@@ -389,6 +393,9 @@ func backHandler(deps Deps) registry.Handler {
 		}
 		payload := map[string]interface{}{
 			"url": data.URL, "title": data.Title, "snapshot": data.Snapshot, "element_count": data.ElementCount,
+		}
+		if len(data.PendingDialogs) > 0 {
+			payload["pending_dialogs"] = data.PendingDialogs
 		}
 		if data.Partial {
 			payload["partial"] = true
@@ -448,7 +455,7 @@ func pressHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0, 0)
 			return governance.Result{}, err
 		}
-		content, err := boundSnapshot(PressName, data.Snapshot, data.ElementCount, data.Path)
+		content, err := boundSnapshot(PressName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
 		if err != nil {
 			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
 			return governance.Result{}, err
@@ -593,6 +600,73 @@ func visionHandler(deps Deps) registry.Handler {
 		content += media.ImageGeometryNote(geometry)
 		completed("ok", "ok", len(shot.PNG))
 		return governance.Result{Content: content, Outcome: governance.OutcomeProductive, Images: []llm.InputImage{normalized.Image}}, nil
+	}
+}
+
+func dialogHandler(deps Deps) registry.Handler {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		started := time.Now()
+		meta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.dialog", meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, elementCount, snapshotChars int) {
+			agentLog.Debug("agent.tool.browser.dialog.complete", "browser dialog completed",
+				config.F("tool_name", DialogName), config.F("status", status), config.F("outcome", outcome),
+				config.F("element_count", elementCount), config.F("snapshot_chars", snapshotChars),
+				config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
+		if err := ctx.Err(); err != nil {
+			completed("error", "error", 0, 0)
+			return governance.Result{}, err
+		}
+		if err := rejectUnknownArgs(args, "action", "prompt_text", "dialog_id"); err != nil {
+			completed("rejected", "rejected", 0, 0)
+			return governance.Result{}, err
+		}
+		action, ok := stringArg(args, "action")
+		if !ok || (strings.TrimSpace(action) != "accept" && strings.TrimSpace(action) != "dismiss") {
+			completed("rejected", "rejected", 0, 0)
+			return governance.Result{}, errors.New("action must be accept or dismiss")
+		}
+		var promptText, dialogID string
+		if raw, exists := args["prompt_text"]; exists {
+			text, ok := raw.(string)
+			if !ok {
+				completed("rejected", "rejected", 0, 0)
+				return governance.Result{}, errors.New("prompt_text must be a string")
+			}
+			promptText = text
+		}
+		if raw, exists := args["dialog_id"]; exists {
+			id, ok := raw.(string)
+			if !ok {
+				completed("rejected", "rejected", 0, 0)
+				return governance.Result{}, errors.New("dialog_id must be a string")
+			}
+			dialogID = id
+		}
+		profile, err := profileFromContext(ctx)
+		if err != nil {
+			completed("rejected", "rejected", 0, 0)
+			return governance.Result{}, err
+		}
+		agentLog.Debug("agent.tool.browser.dialog.start", "starting browser dialog", config.F("tool_name", DialogName))
+		data, err := deps.Backend.RespondToDialog(ctx, profile, strings.TrimSpace(action), promptText, strings.TrimSpace(dialogID))
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				completed("error", "error", 0, 0)
+				return governance.Result{}, fmt.Errorf("browser dialog canceled: %w", ctxErr)
+			}
+			completed("error", "error", 0, 0)
+			return governance.Result{}, err
+		}
+		content, err := boundSnapshot(DialogName, data.Snapshot, data.ElementCount, data.Path, data.PendingDialogs)
+		if err != nil {
+			completed("error", "error", data.ElementCount, len([]rune(data.Snapshot)))
+			return governance.Result{}, err
+		}
+		completed("ok", "ok", data.ElementCount, len([]rune(data.Snapshot)))
+		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 	}
 }
 

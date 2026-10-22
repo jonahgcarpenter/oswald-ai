@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -19,6 +20,8 @@ type pageTransport interface {
 	Evaluate(ctx context.Context, expression string) (string, error)
 	Screenshot(ctx context.Context) ([]byte, error)
 	GoBack(ctx context.Context) (finalURL, title string, err error)
+	PendingDialog() (PendingDialog, bool)
+	RespondDialog(ctx context.Context, accept bool, promptText string) error
 	Blank(ctx context.Context) error
 	Close() error
 }
@@ -31,6 +34,10 @@ type cdpPage struct {
 	wsURL  string
 	debug  string
 	closed bool
+
+	mu          sync.Mutex
+	pending     *PendingDialog
+	dialogCount int
 }
 
 // openPage dials endpointURL's first page target and enables console/exception
@@ -159,7 +166,61 @@ func (p *cdpPage) handleEvent(method string, params json.RawMessage) {
 		} else if p.onLog != nil {
 			p.onLog(evt.Entry.Level, evt.Entry.Text, source)
 		}
+	case "Page.javascriptDialogOpening":
+		var evt struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		}
+		if err := json.Unmarshal(params, &evt); err != nil {
+			return
+		}
+		p.mu.Lock()
+		p.dialogCount++
+		p.pending = &PendingDialog{
+			ID:      fmt.Sprintf("%d", p.dialogCount),
+			Type:    evt.Type,
+			Message: evt.Message,
+		}
+		p.mu.Unlock()
+	case "Page.javascriptDialogClosed":
+		p.mu.Lock()
+		p.pending = nil
+		p.mu.Unlock()
 	}
+}
+
+// PendingDialog reports the dialog currently blocking the page, if any.
+// Dialog events arrive on the read loop; access is synchronized.
+func (p *cdpPage) PendingDialog() (PendingDialog, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pending == nil {
+		return PendingDialog{}, false
+	}
+	return *p.pending, true
+}
+
+// RespondDialog accepts or dismisses the blocking dialog. The pending slot
+// clears on success; a queued follow-up dialog re-sets it via its own
+// opening event.
+func (p *cdpPage) RespondDialog(ctx context.Context, accept bool, promptText string) error {
+	p.mu.Lock()
+	if p.pending == nil {
+		p.mu.Unlock()
+		return fmt.Errorf("no dialog is currently open")
+	}
+	p.mu.Unlock()
+	params := map[string]interface{}{"accept": accept}
+	if promptText != "" {
+		params["promptText"] = promptText
+	}
+	if _, err := p.conn.Call(ctx, "Page.handleJavaScriptDialog", params); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.pending = nil
+	p.mu.Unlock()
+	return nil
 }
 
 // evaluateRaw runs expression and returns the raw CDP value payload.

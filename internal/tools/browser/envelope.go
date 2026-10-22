@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
 )
 
 // maxToolResponseBytes bounds every browser model envelope.
@@ -31,8 +33,9 @@ func wrapEnvelope(source string, data interface{}) (string, error) {
 }
 
 // boundSnapshot truncates a snapshot string at line boundaries to fit the
-// envelope, preserving navigation and marking truncation.
-func boundSnapshot(source string, snapshot string, elementCount int, path string) (string, error) {
+// envelope, preserving navigation and marking truncation. Pending dialogs
+// ride along as a structured field so the model can answer them.
+func boundSnapshot(source string, snapshot string, elementCount int, path string, dialogs []providerbrowser.PendingDialog) (string, error) {
 	data := func(snap string, truncated bool) map[string]interface{} {
 		d := map[string]interface{}{"snapshot": snap, "element_count": elementCount}
 		if truncated {
@@ -40,6 +43,9 @@ func boundSnapshot(source string, snapshot string, elementCount int, path string
 		}
 		if path != "" {
 			d["path"] = path
+		}
+		if len(dialogs) > 0 {
+			d["pending_dialogs"] = dialogs
 		}
 		return d
 	}

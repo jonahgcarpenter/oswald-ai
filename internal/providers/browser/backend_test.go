@@ -20,6 +20,8 @@ type fakePage struct {
 	png          []byte
 	partialNav   bool
 	failElements bool
+	dialogOpen   bool
+	dialogMsg    string
 }
 
 func (f *fakePage) Navigate(_ context.Context, url string) (string, string, error) {
@@ -73,6 +75,21 @@ func (f *fakePage) Screenshot(_ context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("no screenshot")
 	}
 	return f.png, nil
+}
+
+func (f *fakePage) PendingDialog() (PendingDialog, bool) {
+	if !f.dialogOpen {
+		return PendingDialog{}, false
+	}
+	return PendingDialog{ID: "1", Type: "alert", Message: f.dialogMsg}, true
+}
+
+func (f *fakePage) RespondDialog(_ context.Context, _ bool, _ string) error {
+	if !f.dialogOpen {
+		return fmt.Errorf("no dialog is currently open")
+	}
+	f.dialogOpen = false
+	return nil
 }
 
 func (f *fakePage) GoBack(_ context.Context) (string, string, error) {
@@ -312,6 +329,40 @@ func TestSuspectRecycleAndSweep(t *testing.T) {
 	b.mu.Unlock()
 	if got := b.Sweep(time.Now()); got < 1 {
 		t.Fatalf("sweep reaped %d", got)
+	}
+}
+
+func TestDialogRequiresOpenDialog(t *testing.T) {
+	page := &fakePage{title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG()}
+	b := testBackend(map[string]*fakePage{"alice": page})
+	ctx := context.Background()
+	if _, err := b.Navigate(ctx, "alice", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.RespondToDialog(ctx, "alice", "accept", "", ""); err == nil {
+		t.Fatal("dialog response without open dialog succeeded")
+	}
+	page.dialogOpen = true
+	page.dialogMsg = "Confirm checkout?"
+	snap, err := b.Snapshot(ctx, "alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.PendingDialogs) != 1 || snap.PendingDialogs[0].Message != "Confirm checkout?" {
+		t.Fatalf("pending dialogs = %+v", snap.PendingDialogs)
+	}
+	if _, err := b.RespondToDialog(ctx, "alice", "accept", "", "9"); err == nil {
+		t.Fatal("dialog response with wrong id succeeded")
+	}
+	if _, err := b.RespondToDialog(ctx, "alice", "maybe", "", ""); err == nil {
+		t.Fatal("dialog response with bad action succeeded")
+	}
+	after, err := b.RespondToDialog(ctx, "alice", "accept", "", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.PendingDialogs) != 0 {
+		t.Fatalf("dialog still pending: %+v", after.PendingDialogs)
 	}
 }
 

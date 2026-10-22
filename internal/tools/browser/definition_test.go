@@ -8,8 +8,8 @@ import (
 
 func TestDefinitionsMatchContract(t *testing.T) {
 	defs := Definitions()
-	if len(defs) != 10 {
-		t.Fatalf("definitions = %d, want 10", len(defs))
+	if len(defs) != 11 {
+		t.Fatalf("definitions = %d, want 11", len(defs))
 	}
 	byName := map[string]bool{}
 	for _, def := range defs {
@@ -42,6 +42,13 @@ func TestDefinitionsMatchContract(t *testing.T) {
 	vision := VisionDefinition()
 	if len(vision.Parameters.Required) != 1 || vision.Parameters.Required[0] != "question" {
 		t.Fatalf("vision required = %v", vision.Parameters.Required)
+	}
+	dialog := DialogDefinition()
+	if len(dialog.Parameters.Required) != 1 || dialog.Parameters.Required[0] != "action" {
+		t.Fatalf("dialog required = %v", dialog.Parameters.Required)
+	}
+	if !contains(dialog.Parameters.Properties["action"].Enum, "accept") || !contains(dialog.Parameters.Properties["action"].Enum, "dismiss") {
+		t.Fatalf("dialog enum = %+v", dialog.Parameters.Properties["action"])
 	}
 	if !strings.Contains(NavigateDefinition().Description, "Must be called before other browser tools") {
 		t.Fatal("navigate description drifted")

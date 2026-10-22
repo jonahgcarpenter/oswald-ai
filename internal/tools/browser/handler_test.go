@@ -59,6 +59,9 @@ func (f *fakeBackend) Images(_ context.Context, _ string) (providerbrowser.Image
 func (f *fakeBackend) Screenshot(_ context.Context, _ string, _ bool) (providerbrowser.ScreenshotData, error) {
 	return f.shot, f.err
 }
+func (f *fakeBackend) RespondToDialog(_ context.Context, _, _, _, _ string) (providerbrowser.SnapshotData, error) {
+	return f.snapshot, f.err
+}
 
 func testContext() context.Context {
 	ctx := context.Background()
@@ -185,6 +188,37 @@ func TestNavigateBotDetectionWarning(t *testing.T) {
 	}
 	if strings.Contains(result.Content, "bot_detection_warning") {
 		t.Fatalf("unexpected bot warning: %q", result.Content)
+	}
+}
+
+func TestDialogHandlerResolvesAndRefreshes(t *testing.T) {
+	snap := providerbrowser.SnapshotData{Snapshot: "[@e1] link", ElementCount: 1}
+	backend := &fakeBackend{snapshot: snap}
+	handlers := NewHandlers(testDeps(t, backend))
+	result, err := handlers[DialogName](testContext(), map[string]interface{}{"action": "accept"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "<untrusted_tool_result") {
+		t.Fatalf("dialog content missing wrapper: %q", result.Content)
+	}
+	if _, err := handlers[DialogName](testContext(), map[string]interface{}{"action": "maybe"}); err == nil {
+		t.Fatal("bad dialog action succeeded")
+	}
+	if _, err := handlers[DialogName](testContext(), map[string]interface{}{}); err == nil {
+		t.Fatal("missing dialog action succeeded")
+	}
+	pending := &fakeBackend{snapshot: providerbrowser.SnapshotData{
+		Snapshot: "[@e1] link", ElementCount: 1,
+		PendingDialogs: []providerbrowser.PendingDialog{{ID: "1", Type: "alert", Message: "Are you sure?"}},
+	}}
+	handlers = NewHandlers(testDeps(t, pending))
+	result, err = handlers[DialogName](testContext(), map[string]interface{}{"action": "dismiss"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"pending_dialogs"`) || !strings.Contains(result.Content, "Are you sure?") {
+		t.Fatalf("pending dialogs missing from result: %q", result.Content)
 	}
 }
 

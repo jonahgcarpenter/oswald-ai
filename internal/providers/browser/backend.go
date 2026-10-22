@@ -408,12 +408,13 @@ func (b *LocalBackend) Navigate(ctx context.Context, profile, rawURL string) (Na
 	sess.failCount = 0
 	sess.mu.Unlock()
 	return NavigateData{
-		URL:          RedactSecrets(finalURL),
-		Title:        RedactSecrets(title),
-		Snapshot:     snapshot,
-		ElementCount: len(elements),
-		BotWarning:   botTitleRE.MatchString(title),
-		Partial:      partial,
+		URL:            RedactSecrets(finalURL),
+		Title:          RedactSecrets(title),
+		Snapshot:       snapshot,
+		ElementCount:   len(elements),
+		PendingDialogs: pendingList(pt),
+		BotWarning:     botTitleRE.MatchString(title),
+		Partial:        partial,
 	}, nil
 }
 
@@ -438,16 +439,16 @@ func (b *LocalBackend) Snapshot(ctx context.Context, profile string, full bool) 
 	}
 	b.touch(sess)
 	if len([]rune(rendered)) <= b.opts.SnapshotThreshold {
-		return SnapshotData{Snapshot: rendered, ElementCount: len(elements)}, nil
+		return SnapshotData{Snapshot: rendered, ElementCount: len(elements), PendingDialogs: pendingList(pt)}, nil
 	}
 	truncated := truncateLines(rendered, b.opts.SnapshotThreshold)
 	path, spillErr := spillSnapshot(b.profileRoot, rendered)
 	if spillErr != nil {
-		return SnapshotData{Snapshot: truncated, ElementCount: len(elements), Truncated: true}, nil
+		return SnapshotData{Snapshot: truncated, ElementCount: len(elements), PendingDialogs: pendingList(pt), Truncated: true}, nil
 	}
 	nextLine := strings.Count(truncated, "\n") + 1
 	truncated += fmt.Sprintf("\n[... full snapshot: read_file path=%q offset=%d limit=200]", path, nextLine)
-	return SnapshotData{Snapshot: truncated, ElementCount: len(elements), Truncated: true, Path: path}, nil
+	return SnapshotData{Snapshot: truncated, ElementCount: len(elements), PendingDialogs: pendingList(pt), Truncated: true, Path: path}, nil
 }
 
 // Click activates an element by ref.
@@ -587,7 +588,52 @@ func (b *LocalBackend) Back(ctx context.Context, profile string) (NavigateData, 
 	sess.currentURL = finalURL
 	sess.lastActive = time.Now()
 	sess.mu.Unlock()
-	return NavigateData{URL: RedactSecrets(finalURL), Title: RedactSecrets(title), Snapshot: snapshot, ElementCount: len(elements), Partial: partial}, nil
+	return NavigateData{URL: RedactSecrets(finalURL), Title: RedactSecrets(title), Snapshot: snapshot, ElementCount: len(elements), PendingDialogs: pendingList(pt), Partial: partial}, nil
+}
+
+// pendingList reads the transport's blocking dialog, if any. Dialog message
+// text is page content, so it passes through secret redaction.
+func pendingList(pt pageTransport) []PendingDialog {
+	if pt == nil {
+		return nil
+	}
+	dialog, ok := pt.PendingDialog()
+	if !ok {
+		return nil
+	}
+	dialog.Message = RedactSecrets(dialog.Message)
+	return []PendingDialog{dialog}
+}
+
+// RespondToDialog accepts or dismisses the native dialog blocking the page,
+// then refreshes the snapshot.
+func (b *LocalBackend) RespondToDialog(ctx context.Context, profile, action, promptText, dialogID string) (SnapshotData, error) {
+	if action != "accept" && action != "dismiss" {
+		return SnapshotData{}, fmt.Errorf("action must be accept or dismiss")
+	}
+	sess, err := b.existing(profile)
+	if err != nil {
+		return SnapshotData{}, err
+	}
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
+		return SnapshotData{}, err
+	}
+	sess.mu.Lock()
+	pt := sess.transport
+	sess.mu.Unlock()
+	if pending, ok := pt.PendingDialog(); ok && dialogID != "" && dialogID != pending.ID {
+		return SnapshotData{}, fmt.Errorf("dialog_id %q not found", dialogID)
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, b.opts.CommandTimeout)
+	defer cancel()
+	if err := pt.RespondDialog(timeoutCtx, action == "accept", promptText); err != nil {
+		if timeoutCtx.Err() != nil {
+			b.markSuspect(sess)
+		}
+		return SnapshotData{}, fmt.Errorf("browser dialog failed: %w", err)
+	}
+	b.touch(sess)
+	return b.Snapshot(ctx, profile, false)
 }
 
 // Press dispatches a keyboard key.

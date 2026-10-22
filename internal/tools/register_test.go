@@ -454,8 +454,8 @@ func TestImageGenerateFingerprintScope(t *testing.T) {
 
 func TestRegisterBrowserProviderMatrix(t *testing.T) {
 	browserNames := toolbrowser.Names()
-	if len(browserNames) != 10 {
-		t.Fatalf("browser tools = %d, want 10", len(browserNames))
+	if len(browserNames) != 11 {
+		t.Fatalf("browser tools = %d, want 11", len(browserNames))
 	}
 	tests := []struct {
 		name      string

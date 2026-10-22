@@ -9,13 +9,21 @@ type Element struct {
 	Name string `json:"name"`
 }
 
+// PendingDialog is one native JavaScript dialog blocking the page.
+type PendingDialog struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Message string `json:"message,omitempty"`
+}
+
 // NavigateData is the model-visible result of opening a page.
 type NavigateData struct {
-	URL          string `json:"url"`
-	Title        string `json:"title"`
-	Snapshot     string `json:"snapshot"`
-	ElementCount int    `json:"element_count"`
-	BotWarning   bool   `json:"bot_warning,omitempty"`
+	URL            string          `json:"url"`
+	Title          string          `json:"title"`
+	Snapshot       string          `json:"snapshot"`
+	ElementCount   int             `json:"element_count"`
+	PendingDialogs []PendingDialog `json:"pending_dialogs,omitempty"`
+	BotWarning     bool            `json:"bot_warning,omitempty"`
 	// Partial reports a page that never reached readiness within the
 	// navigation timeout; the snapshot covers whatever had loaded.
 	Partial bool `json:"partial,omitempty"`
@@ -23,10 +31,11 @@ type NavigateData struct {
 
 // SnapshotData is the model-visible result of reading the current page.
 type SnapshotData struct {
-	Snapshot     string `json:"snapshot"`
-	ElementCount int    `json:"element_count"`
-	Truncated    bool   `json:"truncated,omitempty"`
-	Path         string `json:"path,omitempty"`
+	Snapshot       string          `json:"snapshot"`
+	ElementCount   int             `json:"element_count"`
+	PendingDialogs []PendingDialog `json:"pending_dialogs,omitempty"`
+	Truncated      bool            `json:"truncated,omitempty"`
+	Path           string          `json:"path,omitempty"`
 }
 
 // ConsoleMessage is one console log entry.
@@ -89,4 +98,5 @@ type Backend interface {
 	Eval(ctx context.Context, profile, expression string) (EvalData, error)
 	Images(ctx context.Context, profile string) (ImagesData, error)
 	Screenshot(ctx context.Context, profile string, annotate bool) (ScreenshotData, error)
+	RespondToDialog(ctx context.Context, profile, action, promptText, dialogID string) (SnapshotData, error)
 }

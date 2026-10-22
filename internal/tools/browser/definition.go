@@ -18,11 +18,12 @@ const (
 	GetImagesName = "browser_get_images"
 	VisionName    = "browser_vision"
 	ConsoleName   = "browser_console"
+	DialogName    = "browser_dialog"
 )
 
 // Names returns the browser tool names in registration order.
 func Names() []string {
-	return []string{NavigateName, SnapshotName, ClickName, TypeName, ScrollName, BackName, PressName, GetImagesName, VisionName, ConsoleName}
+	return []string{NavigateName, SnapshotName, ClickName, TypeName, ScrollName, BackName, PressName, GetImagesName, VisionName, ConsoleName, DialogName}
 }
 
 // Definitions returns the model-facing browser contracts in registration order.
@@ -30,7 +31,7 @@ func Definitions() []llm.ToolDefinition {
 	return []llm.ToolDefinition{
 		NavigateDefinition(), SnapshotDefinition(), ClickDefinition(), TypeDefinition(),
 		ScrollDefinition(), BackDefinition(), PressDefinition(), GetImagesDefinition(),
-		VisionDefinition(), ConsoleDefinition(),
+		VisionDefinition(), ConsoleDefinition(), DialogDefinition(),
 	}
 }
 
@@ -188,6 +189,24 @@ func ConsoleDefinition() llm.ToolDefinition {
 				"expression": {Type: "string", Description: "JavaScript expression to evaluate in the page context. Runs in the browser like DevTools console — full access to DOM, window, document. Return values are serialized to JSON. Example: 'document.title' or 'document.querySelectorAll(\"a\").length'"},
 			},
 			Required:             []string{},
+			AdditionalProperties: boolPointer(false),
+		},
+	}
+}
+
+// DialogDefinition responds to a blocking native dialog.
+func DialogDefinition() llm.ToolDefinition {
+	return llm.ToolDefinition{
+		Name:        DialogName,
+		Description: "Respond to a native JavaScript dialog (alert / confirm / prompt / beforeunload) that is currently blocking the page. Workflow: call browser_snapshot first — if a dialog is open, it appears in the pending_dialogs field with id, type, and message. Then call this tool with action='accept' or action='dismiss'. Prompt dialogs: pass prompt_text to supply the response string. Ignored for other dialog types. Multiple dialogs: if more than one dialog is queued, pass dialog_id from the snapshot to disambiguate. Requires browser_navigate to be called first.",
+		Parameters: llm.ToolParameters{
+			Type: "object",
+			Properties: map[string]llm.ToolParameterProperty{
+				"action":      {Type: "string", Description: "'accept' clicks OK / returns the prompt text. 'dismiss' clicks Cancel / returns null from prompt(). For beforeunload dialogs: 'accept' allows the navigation, 'dismiss' keeps the page.", Enum: []string{"accept", "dismiss"}},
+				"prompt_text": {Type: "string", Description: "Response string for a prompt() dialog. Ignored for other dialog types. Defaults to empty string."},
+				"dialog_id":   {Type: "string", Description: "Specific dialog to respond to, from browser_snapshot pending_dialogs[].id. Required only when multiple dialogs are queued."},
+			},
+			Required:             []string{"action"},
 			AdditionalProperties: boolPointer(false),
 		},
 	}

@@ -207,6 +207,7 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		toolbrowser.PressName:     toolPolicy(normalizeBrowserRefArgs),
 		toolbrowser.GetImagesName: toolPolicy(normalizeBrowserEmptyArgs),
 		toolbrowser.ConsoleName:   toolPolicy(normalizeBrowserConsoleArgs),
+		toolbrowser.DialogName:    toolPolicy(normalizeBrowserDialogArgs),
 		toolbrowser.VisionName: {
 			NormalizeArgs: normalizeBrowserVisionArgs,
 			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
@@ -280,6 +281,21 @@ func normalizeBrowserConsoleArgs(args map[string]interface{}) interface{} {
 	if expression, ok := args["expression"].(string); ok {
 		sum := sha256.Sum256([]byte(expression))
 		normalized["expression_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeBrowserDialogArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["action"].(string); ok {
+		normalized["action"] = strings.Join(strings.Fields(value), " ")
+	}
+	if text, ok := args["prompt_text"].(string); ok {
+		sum := sha256.Sum256([]byte(text))
+		normalized["prompt_text_hash"] = hex.EncodeToString(sum[:])
+	}
+	if value, ok := args["dialog_id"].(string); ok {
+		normalized["dialog_id"] = strings.Join(strings.Fields(value), " ")
 	}
 	return normalized
 }

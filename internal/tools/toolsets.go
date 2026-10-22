@@ -29,6 +29,7 @@ var coreTools = []string{
 	"browser_get_images",
 	"browser_vision",
 	"browser_console",
+	"browser_dialog",
 	"read_file",
 	"write_file",
 	"patch",
