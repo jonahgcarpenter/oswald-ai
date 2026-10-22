@@ -49,6 +49,12 @@ func TestDefinitionsMatchContract(t *testing.T) {
 	if !strings.Contains(SnapshotDefinition().Description, "full=false (default)") {
 		t.Fatal("snapshot description drifted")
 	}
+	if !strings.Contains(SnapshotDefinition().Description, "read_file") {
+		t.Fatal("snapshot description must name the read_file paging path")
+	}
+	if !strings.Contains(VisionDefinition().Description, "MEDIA:<screenshot_path>") {
+		t.Fatal("vision description must document MEDIA sharing")
+	}
 }
 
 func contains(values []string, want string) bool {

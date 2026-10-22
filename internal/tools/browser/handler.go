@@ -124,7 +124,9 @@ func navigateHandler(deps Deps) registry.Handler {
 			"url": data.URL, "title": data.Title, "snapshot": data.Snapshot, "element_count": data.ElementCount,
 		}
 		if data.BotWarning {
-			payload["bot_warning"] = true
+			payload["bot_detection_warning"] = "Page title '" + data.Title + "' suggests bot detection. The site may have blocked this request. " +
+				"Options: 1) Try adding delays between actions, 2) Access different pages first, " +
+				"3) Some sites have very aggressive bot detection that may be unavoidable."
 		}
 		if data.Partial {
 			payload["partial"] = true

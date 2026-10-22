@@ -54,7 +54,7 @@ func NavigateDefinition() llm.ToolDefinition {
 func SnapshotDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        SnapshotName,
-		Description: "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Snapshots over 15000 chars are truncated or summarized; when that happens the complete snapshot is saved to a file and the output includes its path so you can page through the rest. Requires browser_navigate first. Note: browser_navigate already returns a compact snapshot — use this to refresh after interactions that change the page, or with full=true for complete content.",
+		Description: "Get a text-based snapshot of the current page's accessibility tree. Returns interactive elements with ref IDs (like @e1, @e2) for browser_click and browser_type. full=false (default): compact view with interactive elements. full=true: complete page content. Snapshots over 15000 chars are truncated or summarized; when that happens the complete snapshot is saved to a file and the output includes its path so you can page through the rest with read_file. Requires browser_navigate first. Note: browser_navigate already returns a compact snapshot — use this to refresh after interactions that change the page, or with full=true for complete content.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{
@@ -163,7 +163,7 @@ func GetImagesDefinition() llm.ToolDefinition {
 func VisionDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        VisionName,
-		Description: "Take a screenshot of the current page so you can inspect it visually. Use this when you need to understand what the page looks like - especially for CAPTCHAs, visual verification challenges, complex layouts, or cases where the text snapshot misses important visual information. When the active model has native vision, the screenshot is attached to your context directly and you inspect it on the next turn; otherwise the harness falls back to an auxiliary vision model and returns a text analysis. Includes a screenshot_path that you can share with the user. Requires browser_navigate to be called first.",
+		Description: "Take a screenshot of the current page so you can inspect it visually. Use this when you need to understand what the page looks like - especially for CAPTCHAs, visual verification challenges, complex layouts, or cases where the text snapshot misses important visual information. When the active model has native vision, the screenshot is attached to your context directly and you inspect it on the next turn. Includes a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{

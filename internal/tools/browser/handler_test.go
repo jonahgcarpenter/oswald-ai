@@ -164,6 +164,30 @@ func testPNG() []byte {
 	return buf.Bytes()
 }
 
+func TestNavigateBotDetectionWarning(t *testing.T) {
+	backend := &fakeBackend{navigate: providerbrowser.NavigateData{URL: "https://example.com", Title: "Just a moment - captcha", Snapshot: "[@e1] link", ElementCount: 1, BotWarning: true}}
+	handlers := NewHandlers(testDeps(t, backend))
+	result, err := handlers[NavigateName](testContext(), map[string]interface{}{"url": "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, `"bot_detection_warning"`) {
+		t.Fatalf("bot warning missing: %q", result.Content)
+	}
+	if strings.Contains(result.Content, `"bot_warning"`) {
+		t.Fatalf("legacy bot_warning key present: %q", result.Content)
+	}
+	plain := &fakeBackend{navigate: providerbrowser.NavigateData{URL: "https://example.com", Title: "Example", Snapshot: "[@e1] link", ElementCount: 1}}
+	handlers = NewHandlers(testDeps(t, plain))
+	result, err = handlers[NavigateName](testContext(), map[string]interface{}{"url": "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Content, "bot_detection_warning") {
+		t.Fatalf("unexpected bot warning: %q", result.Content)
+	}
+}
+
 func TestPartialNavigateMarksDegraded(t *testing.T) {
 	backend := &fakeBackend{navigate: providerbrowser.NavigateData{URL: "https://example.com/slow", Title: "Slow", Snapshot: "[@e1] link", ElementCount: 1, Partial: true}}
 	handlers := NewHandlers(testDeps(t, backend))
