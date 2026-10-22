@@ -424,6 +424,17 @@ func withoutToolHistory(turn memory.SessionTurn) memory.SessionTurn {
 	return turn
 }
 
+// turnIDs returns the assistant turn IDs for compaction bookkeeping.
+func turnIDs(turns []memory.SessionTurn) []int64 {
+	ids := make([]int64, 0, len(turns))
+	for _, turn := range turns {
+		if turn.ID > 0 {
+			ids = append(ids, turn.ID)
+		}
+	}
+	return ids
+}
+
 func preservedRecentTailCount(recentTurns []memory.SessionTurn, inputLimit int) int {
 	budget := tokenbudget.RecentTailLimit(inputLimit)
 	total := 0

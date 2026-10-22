@@ -33,8 +33,9 @@ interactive OAuth path. `commands/` holds the `Definition/Request/Result/Handler
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.
-- `/compact` forces markdown summarization of the full session in-lane; the result applies
-  to the next reply. Auto compaction fires at 70% input pressure the same way.
+- `/compact` forces markdown summarization of all but the newest 3 turns in-lane, flags
+  them `compacted=1`, and caches the summary; the result applies to the next reply
+  (no-op at ≤3 turns). Auto compaction fires at 70% input pressure the same way.
 - Server binaries never import the `cli` tree.
 
 ## Tests

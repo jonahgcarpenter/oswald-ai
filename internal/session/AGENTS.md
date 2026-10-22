@@ -18,7 +18,9 @@ final assistant message, owning one contiguous `[userMsgID..turnID]` range. `Mar
 flips the range active; `MarkDeliveryFailed` leaves it inactive and excluded. Reads, compression,
 and search all gate on delivered rows only — pending delivery is a barrier everywhere, which is
 why late success must invalidate any summary or receipt that may have omitted the repaired turn,
-while late failure can never undo success.
+while late failure can never undo success. Compaction additionally flags summarized ranges
+`compacted=1` (`MarkSessionTurnsCompacted`); context reads exclude flagged rows while search
+keeps finding them.
 
 `/new` is bookkeeping, not deletion: it ends the open session and bumps the generation high-water
 mark in `conversation_generations`. Transcripts, summaries, locks, and receipts stay stored and
@@ -56,11 +58,14 @@ load. Cache files expire after 24h and are never reconstructed from SQLite.
 ## Compaction (`compaction/summarizer.go`, `budget/`)
 
 70% of the usable input triggers one blocking markdown call inside the lane head:
-`SYSTEM=compaction prompt`, `USER=full session JSON dump`, zero tools, plain markdown
-out. The markdown is cached in memory per session generation (no DDL, no size cap;
-restart recomputes from the transcript). Prompt assembly is
-`system + markdown-user + newest verbatim tail + current`. `/compact` forces the same
-call. `ProfileService` only marks delivery (`Enqueue`/`MarkDeliveryFailed`); no worker,
+`SYSTEM=compaction prompt`, `USER=session JSON dump of all but the newest 3 turns`,
+zero tools, plain markdown out. On success the summarized message ranges are flagged
+`messages.compacted=1` (newest 3 stay verbatim) and the markdown is cached in memory
+per session generation (no DDL, no size cap; restart recomputes from the transcript).
+Context reads exclude `compacted=1` rows, so prompt assembly is
+`system + markdown-user + non-compacted turns (newest-first tail) + current`.
+`/compact` forces the same call (no-op at ≤3 turns); the provider-overflow retry shares
+it. `ProfileService` only marks delivery (`Enqueue`/`MarkDeliveryFailed`); no worker,
 lease, campaign, or low-priority gate remains. Old `oswald:v1:summary/compression`
 rows are ignored, never migrated or deleted.
 

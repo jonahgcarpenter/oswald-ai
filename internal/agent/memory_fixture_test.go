@@ -66,6 +66,9 @@ func (s *agentMemoryFixture) RecordModelUsage(ctx context.Context, record memory
 func (s *agentMemoryFixture) MarkSessionTurnDelivered(ctx context.Context, owner string, id int64) error {
 	return s.stores[owner].MarkSessionTurnDelivered(ctx, owner, id)
 }
+func (s *agentMemoryFixture) MarkSessionTurnsCompacted(ctx context.Context, owner, key string, g int, turnIDs []int64) error {
+	return s.stores[owner].MarkSessionTurnsCompacted(ctx, owner, fixtureSession(key), g, turnIDs)
+}
 func (s *agentMemoryFixture) NewSessionContext(ctx context.Context, owner, key string) error {
 	return s.stores[owner].NewSessionContext(ctx, owner, fixtureSession(key))
 }

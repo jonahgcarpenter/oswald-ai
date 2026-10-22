@@ -8,6 +8,19 @@ const (
 // CompactionTriggerPercent is the input-pressure threshold for foreground and durable compaction.
 const CompactionTriggerPercent = 70
 
+// ExcludedTail is the number of newest turns withheld from compaction input.
+// They stay verbatim in context; only older turns are summarized and flagged.
+const ExcludedTail = 3
+
+// Candidates returns the turns eligible for summarization from newest-first
+// input: all but the newest ExcludedTail. Short histories yield nil.
+func Candidates[T any](turns []T) []T {
+	if len(turns) <= ExcludedTail {
+		return nil
+	}
+	return turns[ExcludedTail:]
+}
+
 // RecentTailLimit reserves 25 percent of input for recent exchanges, bounded to
 // 2,000 through 8,000 tokens without exceeding the available input.
 func RecentTailLimit(inputLimit int) int {

@@ -443,22 +443,32 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// next message in the same conversation queues behind it.
 	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 &&
 		promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent {
-		if streamCallback != nil {
-			streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
-		}
-		markdown, usage, compactErr := a.summarizer.Summarize(ctx, recentTurns)
-		if compactErr != nil {
-			reqLog.Warn("agent.context.compaction_failed", "failed to compact session context",
-				config.F("status", "degraded"), config.ErrorField(compactErr))
+		candidates := tokenbudget.Candidates(recentTurns)
+		if len(candidates) == 0 {
+			reqLog.Debug("agent.context.compaction_skipped", "skipped session compaction: only newest turns present")
 		} else {
-			a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
-			a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
-			cachedMarkdown = markdown
-			promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
-			reqLog.Debug("agent.context.compacted", "compacted session context to markdown",
-				config.F("estimated_before", promptContext.EstimatedBefore),
-				config.F("estimated_after", promptContext.EstimatedAfter),
-				config.F("prompt_budget", inputLimit))
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
+			}
+			markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates)
+			if compactErr != nil {
+				reqLog.Warn("agent.context.compaction_failed", "failed to compact session context",
+					config.F("status", "degraded"), config.ErrorField(compactErr))
+			} else {
+				a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
+				if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, turnIDs(candidates)); markErr != nil {
+					reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
+						config.F("status", "degraded"), config.ErrorField(markErr))
+				}
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+				cachedMarkdown = markdown
+				promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+				reqLog.Debug("agent.context.compacted", "compacted session context to markdown",
+					config.F("estimated_before", promptContext.EstimatedBefore),
+					config.F("estimated_after", promptContext.EstimatedAfter),
+					config.F("prompt_budget", inputLimit),
+					config.F("compacted_turn_count", len(candidates)))
+			}
 		}
 	}
 	messages := promptContext.Messages
@@ -638,22 +648,28 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				return nil, ctxErr
 			}
 			if llm.IsContextLengthExceededError(err) && !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 {
-				if streamCallback != nil {
-					streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
-				}
-				if markdown, usage, compactErr := a.summarizer.Summarize(ctx, recentTurns); compactErr == nil {
-					a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
-					a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
-					rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
-					messages = rebuilt.Messages
-					if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
-						messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+				if candidates := tokenbudget.Candidates(recentTurns); len(candidates) > 0 {
+					if streamCallback != nil {
+						streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
 					}
-					req.Messages = messages
-					reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
-						config.F("iteration", iteration), config.F("status", "retry"))
-					modelIterations++
-					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
+					if markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates); compactErr == nil {
+						a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
+						if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, turnIDs(candidates)); markErr != nil {
+							reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
+								config.F("status", "degraded"), config.ErrorField(markErr))
+						}
+						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+						rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
+						messages = rebuilt.Messages
+						if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
+							messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+						}
+						req.Messages = messages
+						reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
+							config.F("iteration", iteration), config.F("status", "retry"))
+						modelIterations++
+						resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
+					}
 				}
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {

@@ -1033,6 +1033,64 @@ func TestProcessIncludesRoleCorrectSessionContextWithoutAutomaticRecallLookup(t 
 	}
 }
 
+func TestAutoCompactionExcludesNewestThreeAndFlagsRest(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+	agent.budget = budget.ContextBudget{PromptLimit: 3000}
+	sum := &fakeMarkdownSummarizer{markdown: "# Summary\nEarlier turns."}
+	agent.SetMarkdownSummarizer(sum)
+	profile, err := store.ResolveSessionContext(context.Background(), "user-1", "session-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 6; i++ {
+		if err := store.AppendSessionTurnForGeneration(context.Background(), "session-1", "user-1", profile.Generation, fmt.Sprintf("turn %d user", i), fmt.Sprintf("turn %d assistant", i), nil, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
+	if err != nil || len(before) != 6 {
+		t.Fatalf("setup turns=%d err=%v", len(before), err)
+	}
+	if _, err := processAgent(agent, "req-compact", "imessage", "session-1", "user-1", "Display", "continue", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if sum.calls != 1 {
+		t.Fatalf("compaction did not trigger: calls=%d", sum.calls)
+	}
+	if len(sum.gotIDs) != 3 {
+		t.Fatalf("summarized %d turns, want oldest 3: %v", len(sum.gotIDs), sum.gotIDs)
+	}
+	// Newest-first input: summarized IDs must be the three oldest.
+	for i, id := range sum.gotIDs {
+		if id != before[budget.ExcludedTail+i].ID {
+			t.Fatalf("summarized IDs %v, want oldest three of %v", sum.gotIDs, before)
+		}
+	}
+	after, err := store.RecentCompletedExchangesAfter(context.Background(), "user-1", "session-1", profile.Generation, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 3 newest setup turns plus the just-completed turn remain; the 3 oldest are compacted away.
+	if len(after) != 4 {
+		t.Fatalf("context turns=%d, want 4: %+v", len(after), after)
+	}
+	for _, turn := range after {
+		for _, id := range sum.gotIDs {
+			if turn.ID == id {
+				t.Fatalf("compacted turn %d still in context", id)
+			}
+		}
+	}
+	messages := primaryRequests(chat.requests)[0].Messages
+	if !messagesContain(messages, "compacted_session_history") || !messagesContain(messages, "turn 6 user") {
+		t.Fatalf("summary/tail missing from prompt: %+v", messages)
+	}
+	if messagesContain(messages, "turn 1 user") {
+		t.Fatalf("compacted turn leaked into prompt: %+v", messages)
+	}
+}
+
 func TestProcessUsesCommittedSummaryWithRecentVerbatimTail(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "continued"}}}}
 	agent, store := newTestAgent(t, chat, nil, nil)
@@ -1697,10 +1755,15 @@ type fakeChatOutcome struct {
 type fakeMarkdownSummarizer struct {
 	markdown string
 	calls    int
+	gotIDs   []int64
 }
 
-func (f *fakeMarkdownSummarizer) Summarize(_ context.Context, _ []memory.SessionTurn) (string, *llm.ChatResponse, error) {
+func (f *fakeMarkdownSummarizer) Summarize(_ context.Context, turns []memory.SessionTurn) (string, *llm.ChatResponse, error) {
 	f.calls++
+	f.gotIDs = f.gotIDs[:0]
+	for _, turn := range turns {
+		f.gotIDs = append(f.gotIDs, turn.ID)
+	}
 	if f.markdown == "" {
 		return "", nil, errors.New("no markdown")
 	}

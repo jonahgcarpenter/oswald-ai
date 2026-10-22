@@ -19,4 +19,5 @@ type SessionStore interface {
 	AppendPendingSessionTurn(context.Context, memory.SessionTurnWrite) (memory.StoredSessionTurn, error)
 	RecordModelUsage(context.Context, memory.ModelUsageRecord) error
 	MarkSessionTurnDelivered(context.Context, string, int64) error
+	MarkSessionTurnsCompacted(context.Context, string, string, int, []int64) error
 }

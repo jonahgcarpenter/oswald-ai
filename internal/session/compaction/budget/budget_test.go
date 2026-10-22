@@ -7,6 +7,19 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 )
 
+func TestCandidatesExcludesNewestThree(t *testing.T) {
+	if got := Candidates([]int{1, 2, 3}); got != nil {
+		t.Fatalf("3 turns yielded %v", got)
+	}
+	if got := Candidates[int](nil); got != nil {
+		t.Fatalf("nil yielded %v", got)
+	}
+	got := Candidates([]int{1, 2, 3, 4, 5})
+	if len(got) != 2 || got[0] != 4 || got[1] != 5 {
+		t.Fatalf("candidates=%v, want [4 5] (older preserved, input newest-first)", got)
+	}
+}
+
 func TestRecentTailLimit(t *testing.T) {
 	for _, tt := range []struct{ input, want int }{
 		{0, 0}, {1000, 1000}, {4000, 2000}, {8000, 2000},

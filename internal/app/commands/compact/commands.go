@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
@@ -14,6 +15,7 @@ import (
 type Store interface {
 	ResolveSessionContext(context.Context, string, string, time.Duration) (memory.SessionContext, error)
 	RecentCompletedExchangesAfter(context.Context, string, string, int, int64, int) ([]memory.SessionTurn, error)
+	MarkSessionTurnsCompacted(context.Context, string, string, int, []int64) error
 }
 
 // Summarizer compacts turns to markdown and stores the ephemeral result.
@@ -55,16 +57,31 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 	if err != nil {
 		return commands.Result{}, err
 	}
-	if len(turns) == 0 {
+	candidates := tokenbudget.Candidates(turns)
+	if len(candidates) == 0 {
 		return commands.Result{Text: "Nothing to compact yet.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "no_history"}}, nil
 	}
-	markdown, _, err := h.summarizer.Summarize(ctx, turns)
+	markdown, _, err := h.summarizer.Summarize(ctx, candidates)
 	if err != nil {
 		return commands.Result{}, err
 	}
 	h.summarizer.Set(req.Principal.CanonicalUserID, req.SessionKey, session.Generation, markdown)
+	if err := h.store.MarkSessionTurnsCompacted(ctx, req.Principal.CanonicalUserID, req.SessionKey, session.Generation, compactedTurnIDs(candidates)); err != nil {
+		return commands.Result{}, err
+	}
 	return commands.Result{
-		Text:    fmt.Sprintf("Compacted %d turns into a markdown summary. It applies to the next reply.", len(turns)),
-		Outcome: commands.Outcome{Status: "ok", Operation: "session.compact", IsChanged: true, AffectedCount: len(turns)},
+		Text:    fmt.Sprintf("Compacted %d turns into a markdown summary. It applies to the next reply.", len(candidates)),
+		Outcome: commands.Outcome{Status: "ok", Operation: "session.compact", IsChanged: true, AffectedCount: len(candidates)},
 	}, nil
+}
+
+// compactedTurnIDs returns the assistant turn IDs for compaction bookkeeping.
+func compactedTurnIDs(turns []memory.SessionTurn) []int64 {
+	ids := make([]int64, 0, len(turns))
+	for _, turn := range turns {
+		if turn.ID > 0 {
+			ids = append(ids, turn.ID)
+		}
+	}
+	return ids
 }

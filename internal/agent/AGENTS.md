@@ -45,10 +45,10 @@ finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped i
 
 - **Budget math lives in `session/compaction/budget/`.** Usable input is `min(window, prompt
   limit) − 256`, default window 32,768; recent-tail reserve is 25% of input clamped to
-  2,000–8,000, holding at most the two newest turns; markdown compaction triggers at 70%.
+  2,000–8,000, holding at most the two newest turns; markdown compaction summarizes all but the newest 3 turns at 70% and flags them `compacted=1` so later reads omit them.
   Required oversize context is retained and reported — the agent never silently truncates
-  what the turn needs. The compaction call itself (`SYSTEM` prompt + full session JSON as
-  `USER`, zero tools) returns plain markdown with no size cap.
+  what the turn needs. The compaction call itself (`SYSTEM` prompt + session JSON of all
+  but the newest 3 turns as `USER`, zero tools) returns plain markdown with no size cap.
 - **Tool authorization is per-iteration.** Discovery can never authorize another call in the same
   emitted batch. Every declared call executes serially and gets a correlated result appended,
   including blocked ones — failures, empties, and repeats all run, with loop-guardrail warnings
