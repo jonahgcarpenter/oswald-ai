@@ -129,6 +129,7 @@ Moving a symbol means fixing its docs in the same change.
 | `internal/broker/` | `internal/broker/AGENTS.md` | lanes, fences, admission, cancellation, foreground priority |
 | `internal/session/` | `internal/session/AGENTS.md` | delivery gating, history, `state_meta`, `/new`, soul binding, compaction |
 | `internal/tools/` | `internal/tools/AGENTS.md` | registry, governance, toolsets, builtin inventory, history bounds |
+| `internal/vault/` | `internal/vault/AGENTS.md` | encrypted profile credential store, vault autofill scripts |
 | `internal/workspace/` | `internal/workspace/AGENTS.md` | file/shell tools, pre-execution chain, reviewer, approvals, processes |
 | `internal/transport/` | `internal/transport/AGENTS.md` | admission, mentions, replies, streaming, outbound, media normalization |
 | `internal/providers/` | `internal/providers/AGENTS.md` | LLM contract, web backends, image generation graphs |

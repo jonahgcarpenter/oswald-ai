@@ -99,4 +99,5 @@ type Backend interface {
 	Images(ctx context.Context, profile string) (ImagesData, error)
 	Screenshot(ctx context.Context, profile string, annotate bool) (ScreenshotData, error)
 	RespondToDialog(ctx context.Context, profile, action, promptText, dialogID string) (SnapshotData, error)
+	VaultEval(ctx context.Context, profile, expression string) (string, error)
 }

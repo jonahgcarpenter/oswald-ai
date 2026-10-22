@@ -457,6 +457,9 @@ func TestRegisterBrowserProviderMatrix(t *testing.T) {
 	if len(browserNames) != 11 {
 		t.Fatalf("browser tools = %d, want 11", len(browserNames))
 	}
+	if got := len(toolbrowser.VaultNames()); got != 4 {
+		t.Fatalf("vault tools = %d, want 4", got)
+	}
 	tests := []struct {
 		name      string
 		cfg       *config.Config
@@ -473,7 +476,7 @@ func TestRegisterBrowserProviderMatrix(t *testing.T) {
 			cfg.BrowserEndpointURL = test.cfg.BrowserEndpointURL
 			cfg.BrowserLaunchCommand = test.cfg.BrowserLaunchCommand
 			reg := newTestRegistry(t, cfg)
-			for _, toolName := range browserNames {
+			for _, toolName := range append(append([]string{}, browserNames...), toolbrowser.VaultNames()...) {
 				_, shown := visibleTestTool(reg, toolName)
 				if shown != test.wantShown || reg.HasHandler(toolName) != test.wantShown {
 					t.Fatalf("%s shown=%t handler=%t", toolName, shown, reg.HasHandler(toolName))
@@ -487,6 +490,10 @@ func TestRegisterBrowserProviderMatrix(t *testing.T) {
 				}
 			}
 			if test.wantShown {
+				vaultPolicy, ok := reg.Policy(toolbrowser.VaultFillName)
+				if !ok || vaultPolicy.History.Mode != governance.HistoryMetadata || vaultPolicy.History.SearchResult || vaultPolicy.NormalizeArgs == nil {
+					t.Fatalf("browser_vault_fill policy = %+v", vaultPolicy.History)
+				}
 				visionPolicy, ok := reg.Policy(toolbrowser.VisionName)
 				if !ok || visionPolicy.History.Mode != governance.HistoryFull || visionPolicy.History.SearchResult {
 					t.Fatalf("browser_vision history policy = %+v", visionPolicy.History)

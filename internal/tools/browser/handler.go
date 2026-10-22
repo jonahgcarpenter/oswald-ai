@@ -16,18 +16,20 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 )
 
 // Deps wires one profile's browser backend to model handlers.
 type Deps struct {
 	Backend providerbrowser.Backend
 	Cache   *imagecache.Cache
+	Vault   *vault.Store
 	Log     *config.Logger
 }
 
-// NewHandlers returns the ten browser handlers keyed by tool name.
+// NewHandlers returns the browser handlers keyed by tool name.
 func NewHandlers(deps Deps) map[string]registry.Handler {
-	return map[string]registry.Handler{
+	handlers := map[string]registry.Handler{
 		NavigateName:  navigateHandler(deps),
 		SnapshotName:  snapshotHandler(deps),
 		ClickName:     clickHandler(deps),
@@ -40,6 +42,10 @@ func NewHandlers(deps Deps) map[string]registry.Handler {
 		ConsoleName:   consoleHandler(deps),
 		DialogName:    dialogHandler(deps),
 	}
+	for name, handler := range NewVaultHandlers(deps) {
+		handlers[name] = handler
+	}
+	return handlers
 }
 
 func profileFromContext(ctx context.Context) (string, error) {

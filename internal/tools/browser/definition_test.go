@@ -11,6 +11,9 @@ func TestDefinitionsMatchContract(t *testing.T) {
 	if len(defs) != 11 {
 		t.Fatalf("definitions = %d, want 11", len(defs))
 	}
+	if got := len(VaultDefinitions()); got != 4 {
+		t.Fatalf("vault definitions = %d, want 4", got)
+	}
 	byName := map[string]bool{}
 	for _, def := range defs {
 		byName[def.Name] = true

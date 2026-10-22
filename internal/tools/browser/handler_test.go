@@ -14,16 +14,18 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 )
 
 type fakeBackend struct {
-	navigate providerbrowser.NavigateData
-	snapshot providerbrowser.SnapshotData
-	console  providerbrowser.ConsoleData
-	eval     providerbrowser.EvalData
-	images   providerbrowser.ImagesData
-	shot     providerbrowser.ScreenshotData
-	err      error
+	navigate  providerbrowser.NavigateData
+	snapshot  providerbrowser.SnapshotData
+	console   providerbrowser.ConsoleData
+	eval      providerbrowser.EvalData
+	images    providerbrowser.ImagesData
+	shot      providerbrowser.ScreenshotData
+	vaultEval func(expr string) (string, error)
+	err       error
 }
 
 func (f *fakeBackend) Navigate(_ context.Context, _, _ string) (providerbrowser.NavigateData, error) {
@@ -62,6 +64,15 @@ func (f *fakeBackend) Screenshot(_ context.Context, _ string, _ bool) (providerb
 func (f *fakeBackend) RespondToDialog(_ context.Context, _, _, _, _ string) (providerbrowser.SnapshotData, error) {
 	return f.snapshot, f.err
 }
+func (f *fakeBackend) VaultEval(_ context.Context, _, expr string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if f.vaultEval != nil {
+		return f.vaultEval(expr)
+	}
+	return `"https://example.com"`, nil
+}
 
 func testContext() context.Context {
 	ctx := context.Background()
@@ -71,7 +82,7 @@ func testContext() context.Context {
 
 func testDeps(t *testing.T, backend providerbrowser.Backend) Deps {
 	t.Helper()
-	return Deps{Backend: backend, Cache: imagecache.New(t.TempDir()), Log: config.NewLogger(config.LevelError)}
+	return Deps{Backend: backend, Cache: imagecache.New(t.TempDir()), Vault: vault.NewStore(t.TempDir()), Log: config.NewLogger(config.LevelError)}
 }
 
 func TestNavigateHandlerEnvelope(t *testing.T) {

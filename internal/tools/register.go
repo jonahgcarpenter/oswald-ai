@@ -27,6 +27,7 @@ import (
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
@@ -163,13 +164,14 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 	}
 }
 
-// registerBrowserTools wires the local headless browser_* tools. The tools
-// stay reserved but disabled unless the operator configured an endpoint or
-// launch command; Chromium itself is dialed lazily on first navigation.
+// registerBrowserTools wires the local headless browser_* and
+// browser_vault_* tools. The tools stay reserved but disabled unless the
+// operator configured an endpoint or launch command; Chromium itself is
+// dialed lazily on first navigation. The vault rides with the browser.
 // Startup sweeps orphaned session dirs (a fresh process owns no live
 // session); shutdown and the hourly prune tick own the rest.
 func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *imagecache.Cache, log *config.Logger) error {
-	names := toolbrowser.Names()
+	names := append(toolbrowser.Names(), toolbrowser.VaultNames()...)
 	configured := strings.TrimSpace(cfg.BrowserEndpointURL) != "" || strings.TrimSpace(cfg.BrowserLaunchCommand) != ""
 	if !configured {
 		for _, name := range names {
@@ -196,7 +198,7 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		RestrictEvaluate:  cfg.BrowserRestrictEvaluate,
 	}.Effective()
 	backend := providerbrowser.NewLocalBackend(opts, cfg.ProfileRoot)
-	handlers := toolbrowser.NewHandlers(toolbrowser.Deps{Backend: backend, Cache: cache, Log: log})
+	handlers := toolbrowser.NewHandlers(toolbrowser.Deps{Backend: backend, Cache: cache, Vault: vault.NewStore(cfg.ProfileRoot), Log: log})
 	policies := map[string]governance.ToolPolicy{
 		toolbrowser.NavigateName:  toolPolicy(normalizeBrowserNavigateArgs),
 		toolbrowser.SnapshotName:  toolPolicy(normalizeBrowserSnapshotArgs),
@@ -208,6 +210,22 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		toolbrowser.GetImagesName: toolPolicy(normalizeBrowserEmptyArgs),
 		toolbrowser.ConsoleName:   toolPolicy(normalizeBrowserConsoleArgs),
 		toolbrowser.DialogName:    toolPolicy(normalizeBrowserDialogArgs),
+		toolbrowser.VaultListName: {
+			NormalizeArgs: normalizeBrowserEmptyArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
+		toolbrowser.VaultFillName: {
+			NormalizeArgs: normalizeVaultHandleArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
+		toolbrowser.VaultSaveLoginName: {
+			NormalizeArgs: normalizeVaultSaveArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
+		toolbrowser.VaultEnterCodeName: {
+			NormalizeArgs: normalizeVaultHandleArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false},
+		},
 		toolbrowser.VisionName: {
 			NormalizeArgs: normalizeBrowserVisionArgs,
 			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
@@ -281,6 +299,22 @@ func normalizeBrowserConsoleArgs(args map[string]interface{}) interface{} {
 	if expression, ok := args["expression"].(string); ok {
 		sum := sha256.Sum256([]byte(expression))
 		normalized["expression_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeVaultHandleArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["handle"].(string); ok {
+		normalized["handle"] = strings.Join(strings.Fields(value), " ")
+	}
+	return normalized
+}
+
+func normalizeVaultSaveArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["label"].(string); ok {
+		normalized["label"] = strings.Join(strings.Fields(value), " ")
 	}
 	return normalized
 }

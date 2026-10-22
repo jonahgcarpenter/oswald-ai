@@ -707,6 +707,24 @@ func (b *LocalBackend) Console(ctx context.Context, profile string, clear bool) 
 
 // Eval evaluates a JS expression with pre/post page-URL guards.
 func (b *LocalBackend) Eval(ctx context.Context, profile, expression string) (EvalData, error) {
+	return b.evalLocked(ctx, profile, expression, true)
+}
+
+// VaultEval evaluates trusted vault-built page scripts. It bypasses the
+// restrict_evaluate denylist (classification and fill scripts legitimately
+// touch inputs) but keeps every other guard: session ownership, live
+// page-URL checks, timeouts, and the post-eval navigation recheck. The
+// scripts are constructed server-side; only the secret payload they carry
+// is sensitive, and it is never logged.
+func (b *LocalBackend) VaultEval(ctx context.Context, profile, expression string) (string, error) {
+	data, err := b.evalLocked(ctx, profile, expression, false)
+	if err != nil {
+		return "", err
+	}
+	return data.Result, nil
+}
+
+func (b *LocalBackend) evalLocked(ctx context.Context, profile, expression string, enforceDenylist bool) (EvalData, error) {
 	trimmed := strings.TrimSpace(expression)
 	if trimmed == "" || len(trimmed) > 8000 || !utf8.ValidString(trimmed) {
 		return EvalData{}, fmt.Errorf("expression must contain 1 to 8000 valid characters")
@@ -714,7 +732,7 @@ func (b *LocalBackend) Eval(ctx context.Context, profile, expression string) (Ev
 	if blockedEvalLiteral(trimmed, b.opts.AllowPrivateURLs) {
 		return EvalData{}, fmt.Errorf("expression targets a blocked URL")
 	}
-	if b.opts.RestrictEvaluate {
+	if enforceDenylist && b.opts.RestrictEvaluate {
 		if reason := sensitiveEvalReason(trimmed); reason != "" {
 			return EvalData{}, fmt.Errorf("expression uses a sensitive browser primitive (%s) blocked by restrict_evaluate; use browser_snapshot or browser_console without expression for normal inspection", reason)
 		}

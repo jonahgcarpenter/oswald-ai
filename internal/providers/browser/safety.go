@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 )
 
 // maxURLBytes bounds navigated URLs.
@@ -148,7 +150,9 @@ func RedactSecrets(s string) string {
 	} {
 		out = re.ReplaceAllString(out, "[REDACTED]")
 	}
-	return out
+	// Vault-resolved secrets are exact values, not shapes: scrub them so a
+	// page echo cannot leak a filled password back to the model.
+	return vault.ScrubRegistered(out)
 }
 
 // ValidateNavigateURL parses and enforces the navigation safety pipeline on
