@@ -273,7 +273,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// Parked approval asks surface while the tool call blocks: keep a
 	// gateway-provided asker (real message on transports without live
 	// progress), else fall back to a streaming status chunk.
-	ctx = ensureEscalationNotify(ctx, streamCallback)
+	ctx = ensureEscalationNotify(ctx, streamCallback, gateway)
 	toolGovernor := governance.New(a.toolPolicy)
 
 	// Read the canonical user's operator-managed soul fresh on every request.

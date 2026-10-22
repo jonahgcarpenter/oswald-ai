@@ -384,30 +384,44 @@ func ids(turns []memory.SessionTurn) string {
 
 func TestEnsureEscalationNotifyDefaultsToStream(t *testing.T) {
 	var got []StreamChunk
-	ctx := ensureEscalationNotify(context.Background(), func(chunk StreamChunk) { got = append(got, chunk) })
+	ctx := ensureEscalationNotify(context.Background(), func(chunk StreamChunk) { got = append(got, chunk) }, "imessage")
 	notify := workspace.EscalationNotifyFromContext(ctx)
 	if notify == nil {
 		t.Fatal("no notifier installed")
 	}
-	notify(workspace.EscalationStatusText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh"))
-	if len(got) != 1 || got[0].Type != ChunkStatus || !strings.Contains(got[0].Text, "/approve") || !strings.Contains(got[0].Text, "payload.b64") {
-		t.Fatalf("status chunk wrong: %+v", got)
+	notify(workspace.EscalationNotice{Reason: "decode-pipe to shell", Command: "cat cache/scratch/payload.b64 | base64 -d | sh"})
+	if len(got) != 1 || got[0].Type != ChunkNotice || !strings.Contains(got[0].Text, "/approve") || !strings.Contains(got[0].Text, "payload.b64") || strings.Contains(got[0].Text, "```") {
+		t.Fatalf("plain status chunk wrong: %+v", got)
+	}
+}
+
+func TestEnsureEscalationNotifyDiscordFencesCommand(t *testing.T) {
+	var got []StreamChunk
+	ctx := ensureEscalationNotify(context.Background(), func(chunk StreamChunk) { got = append(got, chunk) }, "discord")
+	workspace.EscalationNotifyFromContext(ctx)(workspace.EscalationNotice{Reason: "decode-pipe to shell", Command: "cat cache/scratch/payload.b64 | base64 -d | sh"})
+	if len(got) != 1 || got[0].Type != ChunkNotice || !strings.Contains(got[0].Text, "```bash\ncat cache/scratch/payload.b64 | base64 -d | sh\n```") {
+		t.Fatalf("discord status chunk wrong: %+v", got)
+	}
+	got = nil
+	workspace.EscalationNotifyFromContext(ctx)(workspace.EscalationNotice{Reason: "x", Expired: true})
+	if len(got) != 1 || !strings.Contains(got[0].Text, "expired") {
+		t.Fatalf("discord expiry chunk wrong: %+v", got)
 	}
 }
 
 func TestEnsureEscalationNotifyKeepsGatewayAsker(t *testing.T) {
 	var streamed []StreamChunk
 	called := false
-	ctx := workspace.WithEscalationNotify(context.Background(), func(string) { called = true })
-	out := ensureEscalationNotify(ctx, func(chunk StreamChunk) { streamed = append(streamed, chunk) })
-	workspace.EscalationNotifyFromContext(out)("ask text")
+	ctx := workspace.WithEscalationNotify(context.Background(), func(workspace.EscalationNotice) { called = true })
+	out := ensureEscalationNotify(ctx, func(chunk StreamChunk) { streamed = append(streamed, chunk) }, "discord")
+	workspace.EscalationNotifyFromContext(out)(workspace.EscalationNotice{Reason: "r", Command: "c"})
 	if !called || len(streamed) != 0 {
 		t.Fatalf("gateway asker not preserved: called=%t streamed=%+v", called, streamed)
 	}
 }
 
 func TestEnsureEscalationNotifyNilCallbackSetsNothing(t *testing.T) {
-	if fn := workspace.EscalationNotifyFromContext(ensureEscalationNotify(context.Background(), nil)); fn != nil {
+	if fn := workspace.EscalationNotifyFromContext(ensureEscalationNotify(context.Background(), nil, "discord")); fn != nil {
 		t.Fatal("notifier installed without a stream callback")
 	}
 }

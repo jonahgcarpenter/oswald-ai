@@ -1289,7 +1289,7 @@ func TestIMessageApprovalAskSendsThreadedReply(t *testing.T) {
 	if notify == nil {
 		t.Fatal("no approval asker wired for imessage")
 	}
-	notify(workspace.EscalationStatusText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh"))
+	notify(workspace.EscalationNotice{Reason: "decode-pipe to shell", Command: "cat cache/scratch/payload.b64 | base64 -d | sh"})
 	if !bb.waitForSentCount(1) {
 		t.Fatalf("approval ask was not sent, got %+v", bb.sentMessages())
 	}

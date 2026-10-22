@@ -484,9 +484,9 @@ func TestTerminalDangerousExpiryDenies(t *testing.T) {
 	ws := NewWorkspace(root, "alice")
 	term := NewTerminalHandler(ws, process.NewManager(root))
 	ctx := WithReviewer(testContext("req-review-expiry"), StubReviewer{Verdict: VerdictEscalate})
-	notified := make(chan string, 2)
-	ctx = WithEscalationNotify(ctx, func(text string) {
-		notified <- text
+	notified := make(chan EscalationNotice, 2)
+	ctx = WithEscalationNotify(ctx, func(n EscalationNotice) {
+		notified <- n
 	})
 	res, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)})
 	if err != nil {
@@ -498,19 +498,40 @@ func TestTerminalDangerousExpiryDenies(t *testing.T) {
 	select {
 	case n := <-notified:
 		// First notice is the ask; the second must be the expiry follow-up.
-		if !strings.Contains(n, "/approve") {
-			t.Fatalf("first notice is not the ask: %q", n)
+		if n.Expired || n.Command != "sudo id" {
+			t.Fatalf("first notice is not the ask: %+v", n)
 		}
 		select {
 		case n := <-notified:
-			if !strings.Contains(n, "expired") || !strings.Contains(n, "denied") {
-				t.Fatalf("expiry follow-up wrong: %q", n)
+			if !n.Expired {
+				t.Fatalf("expiry follow-up missing flag: %+v", n)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("no expiry follow-up sent")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no escalation notification sent")
+	}
+}
+
+func TestEscalationDiscordTextFencesCommand(t *testing.T) {
+	got := EscalationStatusDiscordText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh")
+	if !strings.Contains(got, "**Security review") || !strings.Contains(got, "```bash\ncat cache/scratch/payload.b64 | base64 -d | sh\n```") || !strings.Contains(got, "`/approve`") || !strings.Contains(got, "`/deny`") {
+		t.Fatalf("discord ask wrong:\n%s", got)
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Fatalf("ask has runaway blank lines:\n%s", got)
+	}
+	got = EscalationStatusDiscordText("x", "echo `hi`")
+	if strings.Contains(got, "`hi`") || !strings.Contains(got, "'hi'") {
+		t.Fatalf("backticks not neutralized:\n%s", got)
+	}
+	long := strings.Repeat("y", 2000)
+	if runes := []rune(EscalationStatusDiscordText("x", long)); len(runes) > 1700 {
+		t.Fatalf("ask not bounded: %d runes", len(runes))
+	}
+	if got := EscalationExpiredDiscordText("decode-pipe to shell"); !strings.Contains(got, "expired") || !strings.Contains(got, "denied") {
+		t.Fatalf("discord expiry wrong: %q", got)
 	}
 }
 
@@ -545,9 +566,9 @@ func TestTerminalDangerousEscalationNotifiesWhileBlocked(t *testing.T) {
 	ws := NewWorkspace(root, "alice")
 	term := NewTerminalHandler(ws, process.NewManager(root))
 	ctx := WithReviewer(testContext("req-review-notify"), StubReviewer{Verdict: VerdictEscalate})
-	notified := make(chan string, 2)
-	ctx = WithEscalationNotify(ctx, func(text string) {
-		notified <- text
+	notified := make(chan EscalationNotice, 2)
+	ctx = WithEscalationNotify(ctx, func(n EscalationNotice) {
+		notified <- n
 	})
 	done := make(chan struct{}, 1)
 	go func() {
@@ -556,8 +577,8 @@ func TestTerminalDangerousEscalationNotifiesWhileBlocked(t *testing.T) {
 	}()
 	select {
 	case n := <-notified:
-		if !strings.Contains(n, "sudo id") || !strings.Contains(n, "/approve") {
-			t.Fatalf("notification = %q", n)
+		if n.Expired || n.Command != "sudo id" || n.Reason == "" {
+			t.Fatalf("notification = %+v", n)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no escalation notification while blocked")

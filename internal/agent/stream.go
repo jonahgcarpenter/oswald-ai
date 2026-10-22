@@ -4,10 +4,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // StreamChunkType identifies the kind of content in a StreamChunk.
@@ -22,6 +22,11 @@ const (
 
 	// ChunkStatus carries status messages injected by the agent (e.g. "[Calling: web_search]").
 	ChunkStatus StreamChunkType = "status"
+
+	// ChunkNotice carries a persistent standalone message (e.g. a parked
+	// approval ask). Unlike ChunkStatus previews, gateways must never edit
+	// or delete it when the turn moves on.
+	ChunkNotice StreamChunkType = "notice"
 
 	// ChunkToolCall carries structured tool invocation data for frontend timelines.
 	ChunkToolCall StreamChunkType = "tool_call"

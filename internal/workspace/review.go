@@ -8,10 +8,10 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // ReviewerSystemPrompt is the operator-approved security reviewer contract.
@@ -61,11 +61,19 @@ func ReviewerFromContext(ctx context.Context) Reviewer {
 	return reviewer
 }
 
+// EscalationNotice describes a parked-ask update. Expired marks the
+// follow-up sent when the request lapses with no decision; otherwise
+// Command carries the pending command.
+type EscalationNotice struct {
+	Reason  string
+	Command string
+	Expired bool
+}
+
 // EscalationNotifier displays a parked-ask update while the tool call
-// blocks: the initial ask, and a follow-up if it expires undecided. The
-// agent loop wires it to a status chunk; transports without live progress
-// wire a real message send.
-type EscalationNotifier func(text string)
+// blocks. Installers render per transport: streaming transports show a
+// status chunk, transports without live progress send a real message.
+type EscalationNotifier func(notice EscalationNotice)
 
 type escalationNotifierKey struct{}
 
@@ -80,8 +88,9 @@ func EscalationNotifyFromContext(ctx context.Context) EscalationNotifier {
 	return fn
 }
 
-// EscalationStatusText renders the parked ask as a short user-facing message.
-// The full command rides along truncated so lifecycle previews stay bounded.
+// EscalationStatusText renders the parked ask as a plain multiline message
+// for transports that show raw text. The full command rides along truncated
+// so previews stay bounded.
 func EscalationStatusText(reason, command string) string {
 	command = strings.TrimSpace(command)
 	if runes := []rune(command); len(runes) > 1200 {
@@ -89,6 +98,22 @@ func EscalationStatusText(reason, command string) string {
 	}
 	return "Security review needs your decision (" + strings.TrimSpace(reason) + "). Full command:\n" + command +
 		"\n\nReply /approve to run it exactly as shown, or /deny to refuse it. This request expires in 5 minutes."
+}
+
+// EscalationStatusDiscordText renders the parked ask as multiline Discord
+// markdown with the command in a bash fence.
+func EscalationStatusDiscordText(reason, command string) string {
+	command = strings.TrimSpace(command)
+	if runes := []rune(command); len(runes) > 1200 {
+		command = string(runes[:1200]) + "\u2026"
+	}
+	command = strings.ReplaceAll(command, "`", "'")
+	return "**Security review \u2014 decision needed** (" + strings.TrimSpace(reason) + "). Full command:\n```bash\n" + command + "\n```\nReply `/approve` to run it exactly as shown, or `/deny` to refuse it. Expires in 5 minutes."
+}
+
+// EscalationExpiredDiscordText renders the expiry follow-up as Discord markdown.
+func EscalationExpiredDiscordText(reason string) string {
+	return "**Security review expired** \u2014 no decision; the command was denied (" + strings.TrimSpace(reason) + "). Ask the agent to retry it if still needed."
 }
 
 // EscalationExpiredText renders the expiry follow-up: sent only when the
@@ -192,7 +217,7 @@ func reviewDangerous(ctx context.Context, ws *Workspace, pm *process.Manager, pr
 			return governance.Result{}, errors.New("approval already pending in this conversation; reply /approve or /deny")
 		}
 		if notify := EscalationNotifyFromContext(ctx); notify != nil {
-			notify(EscalationStatusText(reason, command))
+			notify(EscalationNotice{Reason: reason, Command: command})
 		}
 		deadline := time.Now().Add(approvals.ApprovalWindow)
 		select {
@@ -203,7 +228,7 @@ func reviewDangerous(ctx context.Context, ws *Workspace, pm *process.Manager, pr
 			return governance.Result{Content: deniedText(reason, false), Outcome: governance.OutcomeProductive}, nil
 		case <-time.After(time.Until(deadline)):
 			if notify := EscalationNotifyFromContext(ctx); notify != nil {
-				notify(EscalationExpiredText(reason))
+				notify(EscalationNotice{Reason: reason, Expired: true})
 			}
 			return governance.Result{Content: deniedText(reason, true), Outcome: governance.OutcomeProductive}, nil
 		case <-ctx.Done():

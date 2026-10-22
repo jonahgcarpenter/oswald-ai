@@ -514,16 +514,28 @@ func uniqueToolNames(values []string) []string {
 }
 
 // ensureEscalationNotify keeps a gateway-provided approval asker when one is
-// already installed; otherwise it installs a streaming status chunk for
-// transports that render live progress.
-func ensureEscalationNotify(ctx context.Context, streamCallback func(StreamChunk)) context.Context {
+// already installed; otherwise it installs a pinned standalone notice for
+// transports that render live progress. Discord gets fenced markdown, other
+// transports the plain multiline ask.
+func ensureEscalationNotify(ctx context.Context, streamCallback func(StreamChunk), gateway string) context.Context {
 	if ctx == nil {
 		return ctx
 	}
 	if workspace.EscalationNotifyFromContext(ctx) != nil || streamCallback == nil {
 		return ctx
 	}
-	return workspace.WithEscalationNotify(ctx, func(text string) {
-		streamCallback(StreamChunk{Type: ChunkStatus, Text: text})
+	discord := strings.EqualFold(strings.TrimSpace(gateway), "discord")
+	return workspace.WithEscalationNotify(ctx, func(notice workspace.EscalationNotice) {
+		text := workspace.EscalationStatusText(notice.Reason, notice.Command)
+		if discord {
+			text = workspace.EscalationStatusDiscordText(notice.Reason, notice.Command)
+		}
+		if notice.Expired {
+			text = workspace.EscalationExpiredText(notice.Reason)
+			if discord {
+				text = workspace.EscalationExpiredDiscordText(notice.Reason)
+			}
+		}
+		streamCallback(StreamChunk{Type: ChunkNotice, Text: text})
 	})
 }

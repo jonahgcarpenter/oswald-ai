@@ -58,7 +58,7 @@ expiry, `/new`, `/stop`, and restart finalize as denied; unattended transports f
 parking). The waiter replays the identical invocation (`ExecuteApproved`: lifecycle, self-repo,
 sandbox, and the unrecoverable/fetch/config re-checks — skipping only the reviewer step) and the
 real output returns as the tool result; denial returns a productive denial tool result so the agent
-continues in the same loop. The ask surfaces while blocked via the escalation notifier (status chunk on streaming transports, standalone reply where there is no live progress); expiry sends a second notice, while /approve and /deny stay silent and let the agent's next reply carry the outcome.
+continues in the same loop. The ask surfaces while blocked as a persistent message outside the turn's lifecycle edits — fenced Discord markdown on streaming transports, a threaded plain-text reply where there is no live stream (iMessage); expiry sends the same kind of follow-up, while /approve and /deny stay silent and let the agent's next reply carry the outcome.
 
 ## Processes and cron
 

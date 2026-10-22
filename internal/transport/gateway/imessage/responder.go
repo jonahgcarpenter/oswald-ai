@@ -120,7 +120,11 @@ func (r *runtimeResponder) sendAndRemember(text string) error {
 // while the tool call blocks. It fires once per park (single-flight) from a
 // lane worker; delivery is best-effort and never unblocks the waiter.
 func (g *Gateway) approvalAskNotifier(r *runtimeResponder, requestID string) workspace.EscalationNotifier {
-	return func(text string) {
+	return func(notice workspace.EscalationNotice) {
+		text := workspace.EscalationStatusText(notice.Reason, notice.Command)
+		if notice.Expired {
+			text = workspace.EscalationExpiredText(notice.Reason)
+		}
 		if err := r.sendAndRemember(text); err != nil {
 			g.log().With(config.F("request_id", requestID)).Debug("gateway.approval_ask.failed", "failed to send approval ask", config.ErrorField(err))
 		}

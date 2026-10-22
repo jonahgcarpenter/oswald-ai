@@ -14,8 +14,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 const (
@@ -164,6 +164,9 @@ type discordStreamState struct {
 
 func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 	switch chunk.Type {
+	case agent.ChunkNotice:
+		s.pin(chunk.Text)
+		return
 	case agent.ChunkStatus:
 		if s.answerStarted || strings.TrimSpace(chunk.Text) == "" {
 			return
@@ -175,7 +178,9 @@ func (s *discordStreamState) consume(chunk agent.StreamChunk) {
 		s.thinkingDirty = false
 		s.thinkingTrimmed = false
 		s.frozenTrimmed = false
-		s.show(truncateDiscordText(sanitizeDiscordDisplayText(chunk.Text, false), discordToolStatusRenderLimit))
+		// Newlines survive here so rich asks (fenced code blocks) render
+		// multiline. Existing single-line statuses are unaffected.
+		s.show(truncateDiscordText(sanitizeDiscordDisplayText(chunk.Text, true), discordToolStatusRenderLimit))
 	case agent.ChunkThinking:
 		if s.answerStarted {
 			return
@@ -282,6 +287,23 @@ func (s *discordStreamState) showThinking() {
 	}
 	s.show(formatThinkingParagraph(paragraph, s.thinkingTrimmed, true, discordThinkingRenderLimit))
 	s.thinkingDirty = false
+}
+
+// pin sends a standalone message outside lifecycle tracking so later edits,
+// finishes, and aborts never alter or remove it. Parked approval asks use this
+// so the request stays in chat after the turn moves on.
+func (s *discordStreamState) pin(content string) {
+	content = truncateDiscordText(sanitizeDiscordDisplayText(content, true), discordToolStatusRenderLimit)
+	if content == "" {
+		return
+	}
+	id, err := s.send(content)
+	if err != nil {
+		s.previewDisabled = true
+		s.stream.responder.gateway.log().Debug("gateway.stream.preview_failed", "discord lifecycle preview degraded", config.F("request_id", s.stream.responder.requestID), config.F("status", "degraded"), config.ErrorField(err))
+		return
+	}
+	s.remember(id, content)
 }
 
 func (s *discordStreamState) showTool() {
