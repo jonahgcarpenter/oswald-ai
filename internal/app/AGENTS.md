@@ -7,11 +7,11 @@ Applies on top of the root `AGENTS.md` (main-only-exit and operator-state rules)
 `startup/serve.go::Serve` is the sole entry: load profiles → print the TTY-gated banner → install
 signal handling → `Run`, logging a classified failure on the way out. `startup/profiles.go`
 assembles everything per profile in sorted order (state store, maintenance, file/soul stores,
-builtin registry, model client, foreground/background compactors, profile MCP manager, agent,
+builtin registry, model client, markdown summarizer, profile MCP manager, agent,
 image cache, shared prune worker with its image/scratch/process/unknown-children hooks), then the
-shared foreground broker, profile commands, low-priority compression workers, and the configured
-gateways with profile-selected dependencies. Shutdown runs the same list in reverse — outbound,
-prune, maintenance, broker, compression, cron ticker, `process.StopAll`, MCP sessions, databases —
+shared foreground broker, profile commands (including `/compact`), delivery markers, and the
+configured gateways with profile-selected dependencies. Shutdown runs the same list in reverse —
+outbound, prune, maintenance, broker, cron ticker, `process.StopAll`, MCP sessions, databases —
 with workers joined before stores close, and errors returned only after cleanup. Nothing in
 `main` or `cli` assembles stores, workers, or gateways; gateway start failures are asynchronous
 logs, and listeners can outlive `Run` until process exit.
@@ -21,8 +21,8 @@ stdio. `setup` seeds missing entries only and rolls back partial state; `profile
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only
 interactive OAuth path. `commands/` holds the `Definition/Request/Result/Handler` contract and
-`/name` parsing; `builtin/` registers the five public handlers (`/help`, `/new`, `/stop`,
-`/approve`, `/deny`).
+`/name` parsing; `builtin/` registers the six public handlers (`/help`, `/new`, `/stop`,
+`/approve`, `/deny`, `/compact`).
 
 ## Behaviors worth knowing cold
 
@@ -33,6 +33,9 @@ interactive OAuth path. `commands/` holds the `Definition/Request/Result/Handler
 - `/approve` replays the identical terminal invocation through lifecycle, self-repo, sandbox, and
   the unrecoverable/fetch/config re-checks (destructive detection skipped by user override);
   anything else — expiry past five minutes, restart, `/new`, `/stop`, the API — denies.
+- `/compact` forces markdown summarization of all but the newest 3 turns in-lane, flags
+  them `compacted=1`, and caches the summary; the result applies to the next reply
+  (no-op at ≤3 turns). Auto compaction fires at 70% input pressure the same way.
 - Server binaries never import the `cli` tree.
 
 ## Tests

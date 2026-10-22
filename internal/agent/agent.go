@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -12,14 +11,12 @@ import (
 	"strings"
 	"time"
 
-	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -27,6 +24,8 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -39,6 +38,14 @@ const (
 	generatedImagePartialResponse = "The model could not finish the request. The generated images were cached but not delivered; any completed actions have not been undone. Ask again to continue editing."
 	sessionPromptPressurePrefix   = "session-prompt-pressure-v1"
 )
+
+// MarkdownSummarizer compacts a full session into markdown in one
+// background chat call with zero tools. The in-memory cache needs no DDL.
+type MarkdownSummarizer interface {
+	Summarize(context.Context, []memory.SessionTurn) (string, *llm.ChatResponse, error)
+	Get(string, string, int) string
+	Set(string, string, int, string)
+}
 
 // Agent handles LLM orchestration: a single agentic loop where the model
 // calls tools from the registry and generates the final response.
@@ -57,7 +64,7 @@ type Agent struct {
 	fileMemory     *files.Store
 	imageCache     *imagecache.Cache
 	toolPolicy     governance.GlobalPolicy
-	compactor      ForegroundCompactor
+	summarizer     MarkdownSummarizer
 	workspaceRoot  string
 	log            *config.Logger
 }
@@ -76,10 +83,10 @@ func (a *Agent) SetFileMemory(store *files.Store) {
 	}
 }
 
-// SetForegroundCompactor installs the request-local compactor before the agent starts serving work.
-func (a *Agent) SetForegroundCompactor(compactor ForegroundCompactor) {
+// SetMarkdownSummarizer installs the markdown compactor before the agent starts serving work.
+func (a *Agent) SetMarkdownSummarizer(summarizer MarkdownSummarizer) {
 	if a != nil {
-		a.compactor = compactor
+		a.summarizer = summarizer
 	}
 }
 
@@ -394,15 +401,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
 	var recentTurns []memory.SessionTurn
-	var sessionSummary memory.SessionSummary
 	if a.userMemory != nil && !request.Stateless && sessionGeneration > 0 {
 		var err error
-		sessionSummary, err = a.userMemory.LatestSessionSummary(ctx, senderID, sessionKey, sessionGeneration)
-		if err != nil && err != sql.ErrNoRows {
-			reqLog.Warn("agent.session_summary.load_failed", "failed to load session summary", config.F("status", "degraded"), config.ErrorField(err))
-			sessionSummary = memory.SessionSummary{}
-		}
-		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, sessionSummary.CoveredThroughTurnID, sessionHistoryCandidateLimit)
+		recentTurns, err = a.userMemory.RecentCompletedExchangesAfter(ctx, senderID, sessionKey, sessionGeneration, 0, sessionHistoryCandidateLimit)
 		if err != nil {
 			reqLog.Warn("agent.session_memory.context.failed", "failed to build session-memory context", config.F("status", "degraded"), config.ErrorField(err))
 			recentTurns = nil
@@ -410,15 +411,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Debug("agent.session_memory.context.loaded", "loaded session-memory context",
 				config.F("candidate_turn_count", len(recentTurns)),
 			)
-		}
-	}
-	var foregroundDebt []memory.SessionTurn
-	if !request.Stateless && a.compactor != nil && a.userMemory != nil && sessionGeneration > 0 {
-		boundary := sessionSummary.CoveredThroughTurnID
-		var debtErr error
-		foregroundDebt, debtErr = loadForegroundDeliveredDebt(ctx, a.userMemory, senderID, sessionKey, sessionGeneration, boundary)
-		if debtErr != nil {
-			return nil, fmt.Errorf("load foreground compaction debt: %w", debtErr)
 		}
 	}
 
@@ -441,23 +433,50 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
 	userMemoryContent := sessionMemoryUserContent(userPrompt, contextImages[:len(userImages)])
-	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, sessionSummary, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	_ = userMemoryContent
+	cachedMarkdown := ""
+	if a.summarizer != nil && !request.Stateless && sessionGeneration > 0 {
+		cachedMarkdown = a.summarizer.Get(senderID, sessionKey, sessionGeneration)
+	}
+	promptContext := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+	// 70% trigger: blocking markdown compaction inside the lane head so the
+	// next message in the same conversation queues behind it.
+	if !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 &&
+		promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent {
+		candidates := tokenbudget.Candidates(recentTurns)
+		if len(candidates) == 0 {
+			reqLog.Debug("agent.context.compaction_skipped", "skipped session compaction: only newest turns present")
+		} else {
+			if streamCallback != nil {
+				streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
+			}
+			markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates)
+			if compactErr != nil {
+				reqLog.Warn("agent.context.compaction_failed", "failed to compact session context",
+					config.F("status", "degraded"), config.ErrorField(compactErr))
+			} else {
+				a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
+				if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, turnIDs(candidates)); markErr != nil {
+					reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
+						config.F("status", "degraded"), config.ErrorField(markErr))
+				}
+				a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+				cachedMarkdown = markdown
+				promptContext = AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, cachedMarkdown, minimumTail, recentTurns, initialCatalog.Tools, inputLimit)
+				reqLog.Debug("agent.context.compacted", "compacted session context to markdown",
+					config.F("estimated_before", promptContext.EstimatedBefore),
+					config.F("estimated_after", promptContext.EstimatedAfter),
+					config.F("prompt_budget", inputLimit),
+					config.F("compacted_turn_count", len(candidates)))
+			}
+		}
+	}
 	messages := promptContext.Messages
 	if request.Stateless {
 		if historyContext != "" {
 			messages = append(messages[:len(messages)-1], llm.ChatMessage{Role: "user", Content: historyContext}, messages[len(messages)-1])
 		}
 	}
-	var previousSummary *memory.SessionSummary
-	if sessionSummary.ID > 0 {
-		previousSummary = &sessionSummary
-	}
-	compactor := a.compactor
-	if request.Stateless {
-		compactor = nil
-	}
-	foregroundCompaction := newForegroundCompactionState(compactor, inputLimit, dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, previousSummary, foregroundDebt, streamCallback)
-	foregroundCompaction.log = reqLog
 	if request.Stateless {
 		promptContext.RequiredEstimate = tokenbudget.EstimateRequest(messages, initialCatalog.Tools)
 		promptContext.EstimatedBefore = promptContext.RequiredEstimate
@@ -612,32 +631,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				}
 			}
 		}
-		initialPressure := iteration == 1 && promptContext.EstimatedBefore*100 >= inputLimit*tokenbudget.CompactionTriggerPercent
-		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, req.Tools, initialPressure)
-		if compactErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request context",
-				config.F("iteration", iteration), config.F("status", "degraded"), config.ErrorField(compactErr))
-			useFallback(contextCompactionFallback)
-			goto finalize
-		}
-		messages = preparedMessages
-		if compactionStats.Compacted && emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
-			// Compaction rebuilds from the original current prompt and drops
-			// the injected empty-response continue prompt. Restore it.
-			messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-		}
 		req.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(req.Messages, req.Tools) > inputLimit {
 			return &Response{Kind: "over_budget", Model: a.model}, nil
-		}
-		if compactionStats.Compacted {
-			reqLog.Debug("agent.context.compacted", "compacted active request context",
-				config.F("iteration", iteration), config.F("compacted_unit_count", compactionStats.DebtCount),
-				config.F("estimated_before", compactionStats.EstimatedBefore), config.F("estimated_after", compactionStats.EstimatedAfter),
-				config.F("prompt_budget", inputLimit))
 		}
 		reqLog.Debug("agent.model.call", "calling model",
 			config.F("iteration", iteration),
@@ -651,23 +647,29 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
-			if llm.IsContextLengthExceededError(err) && foregroundCompaction.hasDebt() {
-				var recoveryStats foregroundCompactionStats
-				messages, recoveryStats, compactErr = foregroundCompaction.prepare(ctx, messages, req.Tools, true)
-				if compactErr != nil {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
+			if llm.IsContextLengthExceededError(err) && !request.Stateless && a.summarizer != nil && sessionGeneration > 0 && len(recentTurns) > 0 {
+				if candidates := tokenbudget.Candidates(recentTurns); len(candidates) > 0 {
+					if streamCallback != nil {
+						streamCallback(StreamChunk{Type: ChunkStatus, Text: "Compacting context..."})
 					}
-				}
-				if compactErr == nil && recoveryStats.Compacted {
-					if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
-						messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+					if markdown, usage, compactErr := a.summarizer.Summarize(ctx, candidates); compactErr == nil {
+						a.summarizer.Set(senderID, sessionKey, sessionGeneration, markdown)
+						if markErr := a.userMemory.MarkSessionTurnsCompacted(ctx, senderID, sessionKey, sessionGeneration, turnIDs(candidates)); markErr != nil {
+							reqLog.Warn("agent.context.compaction_mark_failed", "failed to mark compacted turns",
+								config.F("status", "degraded"), config.ErrorField(markErr))
+						}
+						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
+						rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
+						messages = rebuilt.Messages
+						if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
+							messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+						}
+						req.Messages = messages
+						reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
+							config.F("iteration", iteration), config.F("status", "retry"))
+						modelIterations++
+						resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 					}
-					req.Messages = messages
-					reqLog.Warn("agent.context.provider_overflow_recovery", "retrying model call after provider context overflow",
-						config.F("iteration", iteration), config.F("compacted_unit_count", recoveryStats.DebtCount), config.F("status", "retry"))
-					modelIterations++
-					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, req, chatCallback, reqLog)
 				}
 			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -843,7 +845,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		// NOTE: Most models only emit one tool call at a time, but we handle
 		// multiple to be safe.
 		historyBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
-		foregroundBatch := memory.ToolHistoryBatch{AssistantContent: resp.Message.Content}
 		for _, tc := range resp.Message.ToolCalls {
 			toolName := tc.Function.Name
 			toolCallID := tc.ID
@@ -1118,8 +1119,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if historyPolicy.Mode != governance.HistoryNone {
 				historyBatch.Calls = append(historyBatch.Calls, persistedToolCall(tc, historyPolicy, decision, result, execErr, toolContent, time.Now().UTC()))
 			}
-			// Active checkpoints need exact model-visible evidence, not durable-history redaction.
-			foregroundBatch.Calls = append(foregroundBatch.Calls, foregroundToolCall(tc, decision, result, execErr, toolContent, time.Now().UTC()))
 			stats := toolGovernor.Stats(toolName)
 			loggedToolName := toolName
 			if !advertised {
@@ -1144,11 +1143,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		if len(historyBatch.Calls) > 0 {
 			toolHistory.Batches = append(toolHistory.Batches, historyBatch)
 		}
-		if !request.Stateless {
-			foregroundCompaction.addToolBatch(foregroundBatch, userPrompt)
-		}
 		messages = boundImageToolResults(messages)
-		foregroundCompaction.imageToolRounds = retainedImageToolRounds(messages)
 		if reason := toolGovernor.GlobalStopReason(); reason != "" {
 			toolGovernanceStopReason = reason
 			reqLog.Debug("agent.tool_budget.exhausted", "tool governance budget exhausted",
@@ -1164,45 +1159,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		accumulatedContent.Reset()
 		finalReq := req
 		finalReq.Tools = nil
-		preparedMessages, compactionStats, compactErr := foregroundCompaction.prepare(ctx, messages, nil, false)
-		if compactErr != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			reqLog.Warn("agent.context.compaction_failed", "failed to compact active request before final model call", config.F("status", "degraded"), config.ErrorField(compactErr))
-			useFallback(contextCompactionFallback)
-			goto finalize
-		}
-		messages = preparedMessages
 		finalReq.Messages = messages
 		if request.Stateless && tokenbudget.EstimateRequest(finalReq.Messages, nil) > inputLimit {
 			return &Response{Kind: "over_budget", Model: a.model}, nil
-		}
-		if compactionStats.Compacted {
-			reqLog.Debug("agent.context.compacted", "compacted active request context before final model call",
-				config.F("compacted_unit_count", compactionStats.DebtCount), config.F("estimated_before", compactionStats.EstimatedBefore),
-				config.F("estimated_after", compactionStats.EstimatedAfter), config.F("prompt_budget", inputLimit))
 		}
 
 		modelIterations++
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
 		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			if llm.IsContextLengthExceededError(err) && foregroundCompaction.hasDebt() {
-				preparedMessages, recoveryStats, compactErr := foregroundCompaction.prepare(ctx, messages, nil, true)
-				if compactErr != nil {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
-				} else if recoveryStats.Compacted {
-					messages = preparedMessages
-					finalReq.Messages = messages
-					modelIterations++
-					resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
-				}
-			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}

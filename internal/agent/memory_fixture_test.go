@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 )
 
 // Each synthetic owner has a separate approved profile database. The fixture
@@ -49,14 +49,8 @@ func (s *agentMemoryFixture) SessionImages(ctx context.Context, owner, key strin
 func (s *agentMemoryFixture) ReserveImageVersion(ctx context.Context, owner, key string, g int, id string, v int) (int, error) {
 	return s.stores[owner].ReserveImageVersion(ctx, owner, fixtureSession(key), g, id, v)
 }
-func (s *agentMemoryFixture) LatestSessionSummary(ctx context.Context, owner, key string, g int) (memory.SessionSummary, error) {
-	return s.stores[owner].LatestSessionSummary(ctx, owner, fixtureSession(key), g)
-}
 func (s *agentMemoryFixture) RecentCompletedExchangesAfter(ctx context.Context, owner, key string, g int, after int64, limit int) ([]memory.SessionTurn, error) {
 	return s.stores[owner].RecentCompletedExchangesAfter(ctx, owner, fixtureSession(key), g, after, limit)
-}
-func (s *agentMemoryFixture) PageDeliveredSessionTurnsAfter(ctx context.Context, owner, key string, g int, after int64, limit int) ([]memory.SessionTurn, error) {
-	return s.stores[owner].PageDeliveredSessionTurnsAfter(ctx, owner, fixtureSession(key), g, after, limit)
 }
 func (s *agentMemoryFixture) AppendPendingSessionTurn(ctx context.Context, write memory.SessionTurnWrite) (memory.StoredSessionTurn, error) {
 	write.SessionID = fixtureSession(write.SessionID)
@@ -71,6 +65,9 @@ func (s *agentMemoryFixture) RecordModelUsage(ctx context.Context, record memory
 }
 func (s *agentMemoryFixture) MarkSessionTurnDelivered(ctx context.Context, owner string, id int64) error {
 	return s.stores[owner].MarkSessionTurnDelivered(ctx, owner, id)
+}
+func (s *agentMemoryFixture) MarkSessionTurnsCompacted(ctx context.Context, owner, key string, g int, turnIDs []int64) error {
+	return s.stores[owner].MarkSessionTurnsCompacted(ctx, owner, fixtureSession(key), g, turnIDs)
 }
 func (s *agentMemoryFixture) NewSessionContext(ctx context.Context, owner, key string) error {
 	return s.stores[owner].NewSessionContext(ctx, owner, fixtureSession(key))
@@ -120,28 +117,4 @@ func (s *agentMemoryFixture) AppendSessionTurnForGeneration(ctx context.Context,
 		return err
 	}
 	return s.MarkSessionTurnDelivered(ctx, owner, turn.ID)
-}
-
-func (s *agentMemoryFixture) publishSummary(ctx context.Context, owner, key string, g, count int, artifact memory.SummaryArtifact) error {
-	store := s.stores[owner]
-	scope := memory.ActiveSessionScope{UserID: owner, SessionID: fixtureSession(key), Generation: g}
-	turns, _, err := store.CompressionCandidates(ctx, scope, 0)
-	if err != nil {
-		return err
-	}
-	if len(turns) < count {
-		return errors.New("insufficient synthetic summary sources")
-	}
-	turns = turns[:count]
-	claim, err := store.ClaimCompression(ctx, scope, turns, memory.CompressionContract("test-model", "test-v1", 100000))
-	if err != nil {
-		return err
-	}
-	if err := store.ReserveCompressionSubmission(ctx, claim); err != nil {
-		return err
-	}
-	if err := store.SaveCompressionArtifact(ctx, claim, artifact); err != nil {
-		return err
-	}
-	return store.PublishProfileSummary(ctx, claim, turns, artifact)
 }

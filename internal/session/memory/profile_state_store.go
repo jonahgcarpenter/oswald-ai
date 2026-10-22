@@ -863,6 +863,47 @@ func (s *ProfileStore) PageDeliveredSessionTurnsAfter(ctx context.Context, owner
 	return s.deliveredProfileTurns(ctx, owner, key, generation, after, limit, false)
 }
 
+// MarkSessionTurnsCompacted flags delivered exchanges as compacted so later
+// context reads omit them. The newest turns are expected to be withheld by the
+// caller; only the given assistant turn IDs in the active generation are
+// touched. Missing turns (expired or other generations) are skipped.
+func (s *ProfileStore) MarkSessionTurnsCompacted(ctx context.Context, owner, key string, generation int, turnIDs []int64) error {
+	if len(turnIDs) == 0 {
+		return nil
+	}
+	tx, err := s.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	id, err := s.activeSession(ctx, tx, owner, key, generation)
+	if err != nil {
+		return err
+	}
+	seen := make(map[int64]struct{}, len(turnIDs))
+	for _, turnID := range turnIDs {
+		if turnID <= 0 {
+			continue
+		}
+		if _, dup := seen[turnID]; dup {
+			continue
+		}
+		seen[turnID] = struct{}{}
+		var userMsgID int64
+		err := tx.QueryRowContext(ctx, `SELECT json_extract(value,'$.user_message_id') FROM state_meta WHERE key=?`, exchangeKey(id, turnID)).Scan(&userMsgID)
+		if err != nil {
+			continue
+		}
+		if userMsgID <= 0 || userMsgID > turnID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE messages SET compacted=1 WHERE session_id=? AND id>=? AND id<=?`, id, userMsgID, turnID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *ProfileStore) deliveredProfileTurns(ctx context.Context, owner, key string, generation int, after int64, limit int, descending bool) ([]SessionTurn, error) {
 	if after < 0 {
 		return nil, errors.New("invalid profile history boundary")
@@ -885,8 +926,8 @@ func (s *ProfileStore) deliveredProfileTurns(ctx context.Context, owner, key str
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT a.id,u.content,a.content,v.value FROM messages a
  JOIN state_meta v ON v.key=('oswald:v1:turn:'||a.session_id||':'||a.id)
- JOIN messages u ON u.id=json_extract(v.value,'$.user_message_id') AND u.session_id=a.session_id AND u.role='user' AND u.active=1
- WHERE a.session_id=? AND a.role='assistant' AND a.active=1 AND a.id>?
+ JOIN messages u ON u.id=json_extract(v.value,'$.user_message_id') AND u.session_id=a.session_id AND u.role='user' AND u.active=1 AND u.compacted=0
+ WHERE a.session_id=? AND a.role='assistant' AND a.active=1 AND a.compacted=0 AND a.id>?
  AND json_extract(v.value,'$.delivery')='delivered' ORDER BY a.id `+order+` LIMIT ?`, id, after, limit)
 	if err != nil {
 		return nil, err

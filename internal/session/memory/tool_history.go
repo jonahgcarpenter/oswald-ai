@@ -204,6 +204,20 @@ func successfulToolHistoryNames(history ToolHistory) []string {
 	return uniqueStrings(names)
 }
 
+func uniqueStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 func truncateRunes(value string, max int) string {
 	if max <= 0 || utf8.RuneCountInString(value) <= max {
 		return value

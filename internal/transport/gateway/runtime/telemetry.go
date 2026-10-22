@@ -37,6 +37,7 @@ func (r *measuredResponder) SendCommandResponse(result commands.Result) error {
 func (r *measuredResponder) SendAgentResponse(response *agent.Response) error {
 	return r.measure(func() error { return r.Responder.SendAgentResponse(response) })
 }
+
 func (r *measuredResponder) CancelAgentResponse() error {
 	if c, ok := r.Responder.(CancellationResponder); ok {
 		return c.CancelAgentResponse()

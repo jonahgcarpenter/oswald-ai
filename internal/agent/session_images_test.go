@@ -13,14 +13,14 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 )
 
 func generatedResultID(messages []llm.ChatMessage, callID string) string {
@@ -137,15 +137,13 @@ func TestCurrentImagePathsStayInUserMessage(t *testing.T) {
 }
 
 func TestAttachedImagePathsSurviveCompaction(t *testing.T) {
-	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Earlier context."}}
 	image := requestctx.InputImage{ID: "current-1", Path: "/private/current.png", MIMEType: "image/png", Data: "payload"}
 	prompt := promptWithAttachedImages("Describe this", []requestctx.InputImage{image})
-	state := newForegroundCompactionState(compactor, 100, "policy", "", prompt, []llm.InputImage{{MimeType: image.MIMEType, Data: image.Data}}, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
-	rebuilt, stats, err := state.prepare(context.Background(), []llm.ChatMessage{state.current}, nil, true)
-	if err != nil || !stats.Compacted {
-		t.Fatalf("compacted=%v err=%v", stats.Compacted, err)
+	got := AssemblePromptContext("policy", "", prompt, []llm.InputImage{{MimeType: image.MIMEType, Data: image.Data}}, "# Summary\nEarlier context.", 0, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil, 100000)
+	if !got.SummaryIncluded {
+		t.Fatal("markdown summary missing")
 	}
-	last := rebuilt[len(rebuilt)-1]
+	last := got.Messages[len(got.Messages)-1]
 	if last.Content != prompt || len(last.Images) != 1 || last.Images[0].Data != image.Data {
 		t.Fatal("compaction separated or lost the current attachment")
 	}
@@ -674,24 +672,13 @@ func TestGeneratedImagesFeedSuccessiveTextOnlyEdits(t *testing.T) {
 }
 
 func TestGeneratedImageContextSurvivesCompaction(t *testing.T) {
-	compactor := &fakeForegroundCompactor{artifact: memory.SummaryArtifact{Narrative: "Generated an image."}}
-	state := newForegroundCompactionState(compactor, 100, "policy", "", "edit it", nil, nil, []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}, nil)
-	image := requestctx.InputImage{ID: "opaque-id", Path: "/private/image.png", MIMEType: "image/png", Data: "image-payload", Source: "generated"}
-	message := llm.ChatMessage{Role: "tool", ToolName: imagegenerate.Name, ToolCallID: "generated", Content: imagegenerate.ResultText(image.Path, nil, false), Images: []llm.InputImage{{MimeType: image.MIMEType, Data: image.Data, Source: "generated"}}}
-	assistant := llm.ChatMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "generated", Function: llm.ToolFunction{Name: imagegenerate.Name, Arguments: map[string]interface{}{"prompt": "picture"}}}}}
-	messages := []llm.ChatMessage{assistant, message}
-	state.imageToolRounds = retainedImageToolRounds(messages)
-	rebuilt, stats, err := state.prepare(context.Background(), messages, nil, true)
-	if err != nil || !stats.Compacted {
-		t.Fatalf("compacted=%v err=%v", stats.Compacted, err)
+	turns := []memory.SessionTurn{{ID: 1, UserText: "old", AssistantText: "answer"}}
+	got := AssemblePromptContext("policy", "", "edit it", nil, "# Summary\nGenerated an image.", 1, turns, nil, 100000)
+	if !got.SummaryIncluded || got.SelectedTurnCount != 1 {
+		t.Fatalf("markdown compaction dropped history: %+v", got)
 	}
-	last := rebuilt[len(rebuilt)-1]
-	if len(last.Images) != 1 || last.Images[0].Data != image.Data || !strings.Contains(last.Content, image.Path) || strings.Contains(last.Content, image.ID) || last.Role != "tool" || last.ToolCallID != "generated" || rebuilt[len(rebuilt)-2].ToolCalls[0].ID != "generated" {
-		t.Fatal("compaction lost active image")
-	}
-	encoded, _ := json.Marshal(compactor.calls)
-	if strings.Contains(string(encoded), image.Data) {
-		t.Fatal("image bytes entered compaction debt")
+	if roles(got.Messages) != "system,user,user,assistant,user" {
+		t.Fatalf("unexpected roles: %s", roles(got.Messages))
 	}
 }
 

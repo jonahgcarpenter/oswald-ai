@@ -8,27 +8,27 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	commandbuiltin "github.com/jonahgcarpenter/oswald-ai/internal/app/commands/builtin"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 type profileProcessor struct{ agents map[string]*agent.Agent }
@@ -130,9 +130,8 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	log := rootLog.Server("app")
 	processor := &profileProcessor{agents: map[string]*agent.Agent{}}
 	stores := map[string]*memory.ProfileStore{}
-	compactors := map[string]*compaction.LLMCompactor{}
+	summarizers := map[string]*compaction.Summarizer{}
 	var pruneWorkers []*prune.Worker
-	var compressionWorkers []*compaction.ProfileService
 	var cronTickers []*cron.Ticker
 	cronStores := make(map[string]*cron.Store)
 	cronRunners := make(map[string]*cron.Runner)
@@ -155,9 +154,6 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}
 		if requestBroker != nil {
 			requestBroker.Shutdown()
-		}
-		for _, worker := range compressionWorkers {
-			worker.Stop()
 		}
 		for _, ticker := range cronTickers {
 			ticker.Stop()
@@ -207,12 +203,11 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
 		}
 		client := seams.newClient(profile, rootLog)
-		compactor, err := compaction.NewLLMCompactor(client, profile.LLMGatewayModel, rootLog)
+		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
-			return &Error{Event: "app.session_compactor.init_failed", Message: "failed to initialize profile compactor", Cause: err}
+			return &Error{Event: "app.session_summarizer.init_failed", Message: "failed to initialize profile summarizer", Cause: err}
 		}
-		compactor.SetBillingBaseURL(profile.LLMGatewayURL)
-		compactors[name] = compactor
+		summarizers[name] = summarizer
 		manager, err := mcp.NewProfileManager(name, profile.ProfileRoot, profile.MCPServers, rootLog)
 		if err != nil {
 			return &Error{Event: "app.mcp.init_failed", Message: "failed to initialize profile MCP configuration", Cause: err}
@@ -222,7 +217,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetBillingBaseURL(profile.LLMGatewayURL)
 		engine.SetFileMemory(fileStore)
 		engine.SetImageCache(cache)
-		engine.SetForegroundCompactor(compactor)
+		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
 		processor.agents[name] = engine
 		cleanup := &prune.Worker{}
@@ -257,13 +252,11 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	profileDeps := map[string]gatewayruntime.Dependencies{}
 	for name, store := range stores {
 		profile, _ := directory.Config(name)
-		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot)
+		worker := compaction.NewProfileService(store)
+		commands, err := commandbuiltin.NewProfileService(store, requestBroker, profile.ProfileRoot, summarizers[name], store)
 		if err != nil {
 			return &Error{Event: "app.commands.init_failed", Message: "failed to initialize profile commands", Cause: err}
 		}
-		worker := compaction.NewProfileService(store, compactors[name], requestBroker, budget.NewContextBudget(profile.ModelContextWindow), rootLog)
-		worker.Start()
-		compressionWorkers = append(compressionWorkers, worker)
 		profileDeps[name] = gatewayruntime.Dependencies{Broker: requestBroker, Commands: commands, Log: rootLog, Compaction: worker}
 	}
 	deps := gatewayruntime.Dependencies{Broker: requestBroker, Log: rootLog, ForProfile: func(name string) (gatewayruntime.Dependencies, bool) {

@@ -1,4 +1,4 @@
-# session/ — Delivery-Gated Memory, Soul Binding, Durable Compaction
+# session/ — Delivery-Gated Memory, Soul Binding, Markdown Compaction
 
 Applies on top of the root `AGENTS.md` (operator-state and persisted-contract invariants).
 
@@ -8,7 +8,7 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 pending/delivered/failed delivery gating, history paging, the model-usage ledger, image-version
 high-water, and maintenance sweeps. `memory/files/store.go` owns the disk `USER.md`/`MEMORY.md`
 pair; `soul/store.go` binds read-only policy; `compaction/` (plus `compaction/budget/`) summarizes
-delivered turns durably behind the broker's foreground gate. Package names stay `memory` /
+delivered turns to markdown in the agent lane. Package names stay `memory` /
 `compaction` / `soul` / `budget` / `files`; `session` is only the grouping.
 
 ## Delivery gating (the core idea)
@@ -18,7 +18,9 @@ final assistant message, owning one contiguous `[userMsgID..turnID]` range. `Mar
 flips the range active; `MarkDeliveryFailed` leaves it inactive and excluded. Reads, compression,
 and search all gate on delivered rows only — pending delivery is a barrier everywhere, which is
 why late success must invalidate any summary or receipt that may have omitted the repaired turn,
-while late failure can never undo success.
+while late failure can never undo success. Compaction additionally flags summarized ranges
+`compacted=1` (`MarkSessionTurnsCompacted`); context reads exclude flagged rows while search
+keeps finding them.
 
 `/new` is bookkeeping, not deletion: it ends the open session and bumps the generation high-water
 mark in `conversation_generations`. Transcripts, summaries, locks, and receipts stay stored and
@@ -53,24 +55,19 @@ transaction exists — that absence is deliberate, and external editors must fol
 Images: at most 4 refs per exchange, 8 per session, and only delivered active-generation refs
 load. Cache files expire after 24h and are never reconstructed from SQLite.
 
-## Compaction (`compaction/compactor.go`, `profiles.go`, `budget/`)
+## Compaction (`compaction/summarizer.go`, `budget/`)
 
-Two layers. Foreground compaction checkpoints only validated complete tool rounds inside the turn,
-using model-visible arguments and results, omitting reasoning and attachment bytes, and retaining
-old context on failure. The durable `ProfileService` runs after delivery and every 30s behind the
-foreground-priority gate, pinning a delivered high-water campaign target across partial
-checkpoints; retry ranges stay fixed if newer turns arrive.
-
-The model call is silent streaming, temperature 0, no parallel calls, exactly one required
-`session_summary_save`: narrative ≤8,000 runes; 5 arrays × 50 items × 1,000 runes; structured
-aggregate ≤16,000 runes; encoded artifact ≤40 KiB. Chunks hold at most 64 complete delivered
-exchanges and fit the actual model input budget.
-
-Locks are five-minute renewable exact tokens. Save requires a submission to exist and the
-`candidates` field to be empty; publication atomically validates the exact live lease, the
-complete delivered range with no pending exchange inside it, and unchanged source text. Saved
-artifacts survive restart without another credit; preemption refunds only before artifact save.
-Oversized complete exchanges get dead receipts, and summaries never delete covered transcript.
+70% of the usable input triggers one blocking markdown call inside the lane head:
+`SYSTEM=compaction prompt`, `USER=session JSON dump of all but the newest 3 turns`,
+zero tools, plain markdown out. On success the summarized message ranges are flagged
+`messages.compacted=1` (newest 3 stay verbatim) and the markdown is cached in memory
+per session generation (no DDL, no size cap; restart recomputes from the transcript).
+Context reads exclude `compacted=1` rows, so prompt assembly is
+`system + markdown-user + non-compacted turns (newest-first tail) + current`.
+`/compact` forces the same call (no-op at ≤3 turns); the provider-overflow retry shares
+it. `ProfileService` only marks delivery (`Enqueue`/`MarkDeliveryFailed`); no worker,
+lease, campaign, or low-priority gate remains. Old `oswald:v1:summary/compression`
+rows are ignored, never migrated or deleted.
 
 ## Tests
 

@@ -14,11 +14,11 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 )
 
 type profileFakeModel struct {
@@ -87,13 +87,13 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 				return nil
 			}
 			definitions := selected.Commands.Definitions()
-			if len(definitions) != 5 {
+			if len(definitions) != 6 {
 				done <- errors.New("unexpected profile commands")
 				cancel()
 				return nil
 			}
 			for _, definition := range definitions {
-				if definition.Name != "help" && definition.Name != "new" && definition.Name != "stop" && definition.Name != "approve" && definition.Name != "deny" {
+				if definition.Name != "help" && definition.Name != "new" && definition.Name != "stop" && definition.Name != "approve" && definition.Name != "deny" && definition.Name != "compact" {
 					done <- errors.New("obsolete command registered")
 					cancel()
 					return nil
@@ -175,7 +175,7 @@ func TestProfileStartupPartialFailureClosesAcquiredStores(t *testing.T) {
 		return nil, errors.New("must not start gateways")
 	}})
 	var failure *Error
-	if !errors.As(err, &failure) || failure.Event != "app.session_compactor.init_failed" || gatewayCalled {
+	if !errors.As(err, &failure) || failure.Event != "app.session_summarizer.init_failed" || gatewayCalled {
 		t.Fatal("partial initialization failure was not fenced", err)
 	}
 	if strings.Count(output.String(), `"event":"app.stopped"`) != 1 {

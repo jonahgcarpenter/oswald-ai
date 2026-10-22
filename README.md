@@ -79,6 +79,7 @@ In Discord servers and iMessage groups, slash commands must start with a mention
 | `/stop`    | `/stop`           | Stop the currently running response in this conversation without removing queued prompts.              |
 | `/approve` | `/approve`        | Approve the pending terminal command awaiting review.                                                  |
 | `/deny`    | `/deny`           | Deny the pending terminal command awaiting review.                                                     |
+| `/compact` | `/compact`        | Summarize this session to markdown; applies to the next reply (auto-fires at 70% context).            |
 
 ## CLI Commands
 

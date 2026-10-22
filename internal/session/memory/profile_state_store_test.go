@@ -40,6 +40,54 @@ func appendProfileExchange(t *testing.T, s *ProfileStore, generation int, text s
 	return turn
 }
 
+func TestCompactedTurnsLeaveSessionContext(t *testing.T) {
+	s, _ := newProfileStateFixture(t)
+	ctx := context.Background()
+	key := "discord:dm:123"
+	session, err := s.ResolveSessionContext(ctx, "alice", key, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, text := range []string{"one", "two", "three", "four", "five"} {
+		turn := appendProfileExchange(t, s, session.Generation, text)
+		if err := s.MarkSessionTurnDelivered(ctx, "alice", turn.ID); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, turn.ID)
+	}
+	turns, err := s.RecentCompletedExchangesAfter(ctx, "alice", key, session.Generation, 0, 100)
+	if err != nil || len(turns) != 5 {
+		t.Fatalf("turns=%d err=%v", len(turns), err)
+	}
+	if err := s.MarkSessionTurnsCompacted(ctx, "alice", key, session.Generation, ids[:2]); err != nil {
+		t.Fatal(err)
+	}
+	turns, err = s.RecentCompletedExchangesAfter(ctx, "alice", key, session.Generation, 0, 100)
+	if err != nil || len(turns) != 3 {
+		t.Fatalf("compacted turns in context: turns=%d err=%v", len(turns), err)
+	}
+	for _, turn := range turns {
+		if turn.ID == ids[0] || turn.ID == ids[1] {
+			t.Fatalf("compacted turn %d returned", turn.ID)
+		}
+	}
+	if turns[0].UserText != "five" || turns[2].UserText != "three" {
+		t.Fatalf("newest-first order broken: %+v", turns)
+	}
+	paged, err := s.PageDeliveredSessionTurnsAfter(ctx, "alice", key, session.Generation, 0, 100)
+	if err != nil || len(paged) != 3 || paged[0].UserText != "three" {
+		t.Fatalf("ascending page wrong: %+v err=%v", paged, err)
+	}
+	var flagged int
+	if err := s.db.SQL().QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE profile_name='alice' AND session_key=?) AND compacted=1`, key).Scan(&flagged); err != nil || flagged == 0 {
+		t.Fatalf("no rows flagged compacted: n=%d err=%v", flagged, err)
+	}
+	if err := s.MarkSessionTurnsCompacted(ctx, "alice", key, session.Generation, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProfileExchangeDeliveryAndReopen(t *testing.T) {
 	s, root := newProfileStateFixture(t)
 	ctx := context.Background()

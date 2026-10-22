@@ -10,10 +10,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
+	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
@@ -288,14 +289,16 @@ type PromptContext struct {
 	RequiredOverBudget bool
 }
 
-// AssemblePromptContext reserves a bounded historical summary and a
-// caller-selected newest verbatim tail before additional history.
+// AssemblePromptContext reserves a bounded markdown summary and a
+// caller-selected newest verbatim tail. When a summary is present the
+// compacted turns stay out of context: only the tail is kept, older turns
+// are omitted even while budget remains.
 func AssemblePromptContext(
 	deploymentPolicy string,
 	contextBlock string,
 	currentPrompt string,
 	currentImages []llm.InputImage,
-	summary memory.SessionSummary,
+	summaryMarkdown string,
 	minimumTail int,
 	recentTurns []memory.SessionTurn,
 	tools []llm.Tool,
@@ -318,7 +321,7 @@ func AssemblePromptContext(
 		InputLimit:       inputLimit,
 		RequiredEstimate: tokenbudget.EstimateRequest(required, tools),
 	}
-	summaryBlock := memory.RenderSessionSummary(summary)
+	summaryBlock := compaction.RenderMarkdownSummary(summaryMarkdown)
 	allMessages := messagesWithSummaryAndTurns(required, summaryBlock, recentTurns)
 	result.EstimatedBefore = tokenbudget.EstimateRequest(allMessages, tools)
 	result.RequiredOverBudget = result.RequiredEstimate > inputLimit
@@ -353,7 +356,10 @@ func AssemblePromptContext(
 	result.SummaryIncluded = selectedSummary != ""
 	result.SummaryChars = len([]rune(selectedSummary))
 
-	if !result.RequiredOverBudget {
+	// Once a session has been compacted, the summary replaces older history.
+	// Backfilling them while budget remains would undo the compaction, so only
+	// the verbatim tail is kept alongside the summary.
+	if !result.RequiredOverBudget && summaryBlock == "" {
 		for _, turn := range recentTurns[len(selectedNewestFirst):] {
 			candidate := append(selectedNewestFirst, turn)
 			if tokenbudget.EstimateRequest(messagesWithSummaryAndTurns(required, selectedSummary, candidate), tools) > inputLimit {
@@ -416,6 +422,17 @@ func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memo
 func withoutToolHistory(turn memory.SessionTurn) memory.SessionTurn {
 	turn.ToolHistory = memory.EmptyToolHistory()
 	return turn
+}
+
+// turnIDs returns the assistant turn IDs for compaction bookkeeping.
+func turnIDs(turns []memory.SessionTurn) []int64 {
+	ids := make([]int64, 0, len(turns))
+	for _, turn := range turns {
+		if turn.ID > 0 {
+			ids = append(ids, turn.ID)
+		}
+	}
+	return ids
 }
 
 func preservedRecentTailCount(recentTurns []memory.SessionTurn, inputLimit int) int {
