@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // clientHistoryContext keeps caller-owned conversation text as quoted, lower-authority
@@ -509,4 +511,19 @@ func uniqueToolNames(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// ensureEscalationNotify keeps a gateway-provided approval asker when one is
+// already installed; otherwise it installs a streaming status chunk for
+// transports that render live progress.
+func ensureEscalationNotify(ctx context.Context, streamCallback func(StreamChunk)) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if workspace.EscalationNotifyFromContext(ctx) != nil || streamCallback == nil {
+		return ctx
+	}
+	return workspace.WithEscalationNotify(ctx, func(text string) {
+		streamCallback(StreamChunk{Type: ChunkStatus, Text: text})
+	})
 }

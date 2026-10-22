@@ -57,3 +57,74 @@ func TestDenySession(t *testing.T) {
 		t.Fatal("denied ask still consumable")
 	}
 }
+
+func TestNotifySignalsWaiter(t *testing.T) {
+	Reset()
+	defer Reset()
+	decide := make(chan Decision, 1)
+	if !Request(Pending{Profile: "alice", SessionKey: "s4", Command: "echo x", Decide: decide}) {
+		t.Fatal("request refused")
+	}
+	got, ok, expired := Take("alice", "s4")
+	if !ok || expired {
+		t.Fatalf("take = ok=%t expired=%t", ok, expired)
+	}
+	if !Notify(got, DecisionApproved) {
+		t.Fatal("notify refused")
+	}
+	select {
+	case d := <-decide:
+		if d != DecisionApproved {
+			t.Fatalf("decision = %q", d)
+		}
+	default:
+		t.Fatal("waiter channel empty")
+	}
+	if Notify(Pending{}, DecisionDenied) {
+		t.Fatal("notify without channel succeeded")
+	}
+}
+
+func TestDenySessionUnblocksWaiter(t *testing.T) {
+	Reset()
+	defer Reset()
+	decide := make(chan Decision, 1)
+	if !Request(Pending{Profile: "alice", SessionKey: "s5", Command: "echo x", Decide: decide}) {
+		t.Fatal("request refused")
+	}
+	if !DenySession("alice", "s5") {
+		t.Fatal("deny missed ask")
+	}
+	select {
+	case d := <-decide:
+		if d != DecisionDenied {
+			t.Fatalf("decision = %q", d)
+		}
+	default:
+		t.Fatal("waiter was not unblocked")
+	}
+}
+
+func TestExpiredTakeUnblocksWaiter(t *testing.T) {
+	Reset()
+	defer Reset()
+	old := ApprovalWindow
+	ApprovalWindow = 30 * time.Millisecond
+	defer func() { ApprovalWindow = old }()
+	decide := make(chan Decision, 1)
+	if !Request(Pending{Profile: "alice", SessionKey: "s6", Command: "echo x", Decide: decide}) {
+		t.Fatal("request refused")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if _, ok, expired := Take("alice", "s6"); ok || !expired {
+		t.Fatalf("expired take = ok=%t expired=%t", ok, expired)
+	}
+	select {
+	case d := <-decide:
+		if d != DecisionDenied {
+			t.Fatalf("decision = %q", d)
+		}
+	default:
+		t.Fatal("expired waiter was not unblocked")
+	}
+}

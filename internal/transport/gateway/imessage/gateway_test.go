@@ -18,20 +18,21 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 func TestIMessageProcessDirectMessageSendsReply(t *testing.T) {
@@ -1266,4 +1267,55 @@ func imessageProfileDirectory(t *testing.T, root string, log *config.Logger) *pr
 		t.Fatal(err)
 	}
 	return directory
+}
+
+func TestIMessageApprovalAskSendsThreadedReply(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	g, b, _ := newIMessageTestGateway(t, bb.server.URL)
+	defer b.Shutdown()
+	defer bb.server.Close()
+
+	r := &runtimeResponder{
+		gateway:             g,
+		requestID:           "req-ask",
+		chatGUID:            "chat-direct",
+		selectedMessageGUID: "msg-9",
+		sessionKey:          "imessage:dm:+15551234567",
+		senderID:            "+15551234567",
+		typingGate:          newTypingGate(),
+		typingAllowed:       make(chan struct{}),
+	}
+	notify := g.approvalAskNotifier(r, "req-ask")
+	if notify == nil {
+		t.Fatal("no approval asker wired for imessage")
+	}
+	notify(workspace.EscalationStatusText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh"))
+	if !bb.waitForSentCount(1) {
+		t.Fatalf("approval ask was not sent, got %+v", bb.sentMessages())
+	}
+	sent := bb.sentMessages()
+	if len(sent) != 1 || !strings.Contains(sent[0].Message, "/approve") || !strings.Contains(sent[0].Message, "payload.b64") {
+		t.Fatalf("approval ask malformed: %+v", sent)
+	}
+	if sent[0].SelectedMessageGUID != "msg-9" {
+		t.Fatalf("ask lost reply threading: %+v", sent[0])
+	}
+}
+
+func TestIMessageSilentCommandResponseSendsNothing(t *testing.T) {
+	bb := newFakeBlueBubbles(t)
+	defer bb.server.Close()
+	gate := newTypingGate()
+	gate.finish()
+	g := &Gateway{BlueBubblesURL: bb.server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
+	r := &runtimeResponder{gateway: g, requestID: "silent-test", chatGUID: "chat-direct", sessionKey: "session", senderID: "sender", typingGate: gate}
+	if err := r.SendCommandResponse(commands.Result{Text: "  "}); err != nil {
+		t.Fatalf("silent command response failed: %v", err)
+	}
+	if n := len(bb.sentMessages()); n != 0 {
+		t.Fatalf("silent command sent %d messages: %+v", n, bb.sentMessages())
+	}
+	if n := len(bb.orderedMethodPaths()); n != 0 {
+		t.Fatalf("silent command hit BlueBubbles: %+v", bb.orderedMethodPaths())
+	}
 }

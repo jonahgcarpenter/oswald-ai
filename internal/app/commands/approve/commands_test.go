@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 )
 
@@ -20,19 +20,31 @@ func testRequest(root, session, raw string) commands.Request {
 	}
 }
 
-func TestApproveExecutesPending(t *testing.T) {
+func TestApproveSignalsWaiter(t *testing.T) {
 	approvals.Reset()
 	defer approvals.Reset()
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if !approvals.Request(approvals.Pending{Profile: "alice", SessionKey: "s1", Command: "echo approved-hi", Workdir: root, Scratch: filepath.Join(root, "cache", "scratch"), Timeout: 30}) {
+	decide := make(chan approvals.Decision, 1)
+	if !approvals.Request(approvals.Pending{Profile: "alice", SessionKey: "s1", Command: "echo approved-hi", Workdir: root, Scratch: filepath.Join(root, "cache", "scratch"), Timeout: 30, Decide: decide}) {
 		t.Fatal("request refused")
 	}
 	result, err := NewApprove(root).Execute(context.Background(), testRequest(root, "s1", "/approve"))
-	if err != nil || !strings.Contains(result.Text, "approved-hi") {
-		t.Fatalf("approve = %+v %v", result, err)
+	if err != nil || result.Text != "" || !result.Outcome.IsChanged {
+		t.Fatalf("approve should stay silent = %+v %v", result, err)
+	}
+	select {
+	case d := <-decide:
+		if d != approvals.DecisionApproved {
+			t.Fatalf("decision = %q", d)
+		}
+	default:
+		t.Fatal("waiter was not signaled")
+	}
+	if strings.Contains(result.Text, "approved-hi") {
+		t.Fatalf("handler executed instead of signaling: %q", result.Text)
 	}
 }
 
@@ -40,10 +52,19 @@ func TestDenyConsumesPending(t *testing.T) {
 	approvals.Reset()
 	defer approvals.Reset()
 	root := t.TempDir()
-	approvals.Request(approvals.Pending{Profile: "alice", SessionKey: "s2", Command: "rm -rf /", Workdir: root, Timeout: 30})
+	decide := make(chan approvals.Decision, 1)
+	approvals.Request(approvals.Pending{Profile: "alice", SessionKey: "s2", Command: "rm -rf /", Workdir: root, Timeout: 30, Decide: decide})
 	result, err := NewDeny().Execute(context.Background(), testRequest(root, "s2", "/deny"))
-	if err != nil || !strings.Contains(result.Text, "Denied") {
-		t.Fatalf("deny = %+v %v", result, err)
+	if err != nil || result.Text != "" || !result.Outcome.IsChanged {
+		t.Fatalf("deny should stay silent = %+v %v", result, err)
+	}
+	select {
+	case d := <-decide:
+		if d != approvals.DecisionDenied {
+			t.Fatalf("decision = %q", d)
+		}
+	default:
+		t.Fatal("waiter was not signaled")
 	}
 	again, err := NewDeny().Execute(context.Background(), testRequest(root, "s2", "/deny"))
 	if err != nil || !strings.Contains(again.Text, "No command is waiting") {

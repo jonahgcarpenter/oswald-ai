@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 func assembleTestPromptContext(policy, profile, prompt string, images []llm.InputImage, turns []memory.SessionTurn, tools []llm.Tool, limit int) PromptContext {
@@ -378,4 +380,34 @@ func ids(turns []memory.SessionTurn) string {
 		values[i] = string(rune('0' + turn.ID))
 	}
 	return strings.Join(values, ",")
+}
+
+func TestEnsureEscalationNotifyDefaultsToStream(t *testing.T) {
+	var got []StreamChunk
+	ctx := ensureEscalationNotify(context.Background(), func(chunk StreamChunk) { got = append(got, chunk) })
+	notify := workspace.EscalationNotifyFromContext(ctx)
+	if notify == nil {
+		t.Fatal("no notifier installed")
+	}
+	notify(workspace.EscalationStatusText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh"))
+	if len(got) != 1 || got[0].Type != ChunkStatus || !strings.Contains(got[0].Text, "/approve") || !strings.Contains(got[0].Text, "payload.b64") {
+		t.Fatalf("status chunk wrong: %+v", got)
+	}
+}
+
+func TestEnsureEscalationNotifyKeepsGatewayAsker(t *testing.T) {
+	var streamed []StreamChunk
+	called := false
+	ctx := workspace.WithEscalationNotify(context.Background(), func(string) { called = true })
+	out := ensureEscalationNotify(ctx, func(chunk StreamChunk) { streamed = append(streamed, chunk) })
+	workspace.EscalationNotifyFromContext(out)("ask text")
+	if !called || len(streamed) != 0 {
+		t.Fatalf("gateway asker not preserved: called=%t streamed=%+v", called, streamed)
+	}
+}
+
+func TestEnsureEscalationNotifyNilCallbackSetsNothing(t *testing.T) {
+	if fn := workspace.EscalationNotifyFromContext(ensureEscalationNotify(context.Background(), nil)); fn != nil {
+		t.Fatal("notifier installed without a stream callback")
+	}
 }

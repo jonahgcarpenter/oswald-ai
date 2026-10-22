@@ -61,6 +61,42 @@ func ReviewerFromContext(ctx context.Context) Reviewer {
 	return reviewer
 }
 
+// EscalationNotifier displays a parked-ask update while the tool call
+// blocks: the initial ask, and a follow-up if it expires undecided. The
+// agent loop wires it to a status chunk; transports without live progress
+// wire a real message send.
+type EscalationNotifier func(text string)
+
+type escalationNotifierKey struct{}
+
+// WithEscalationNotify attaches the parked-ask reporter to the request.
+func WithEscalationNotify(ctx context.Context, fn EscalationNotifier) context.Context {
+	return context.WithValue(ctx, escalationNotifierKey{}, fn)
+}
+
+// EscalationNotifyFromContext returns the parked-ask reporter, if any.
+func EscalationNotifyFromContext(ctx context.Context) EscalationNotifier {
+	fn, _ := ctx.Value(escalationNotifierKey{}).(EscalationNotifier)
+	return fn
+}
+
+// EscalationStatusText renders the parked ask as a short user-facing message.
+// The full command rides along truncated so lifecycle previews stay bounded.
+func EscalationStatusText(reason, command string) string {
+	command = strings.TrimSpace(command)
+	if runes := []rune(command); len(runes) > 1200 {
+		command = string(runes[:1200]) + "\u2026"
+	}
+	return "Security review needs your decision (" + strings.TrimSpace(reason) + "). Full command:\n" + command +
+		"\n\nReply /approve to run it exactly as shown, or /deny to refuse it. This request expires in 5 minutes."
+}
+
+// EscalationExpiredText renders the expiry follow-up: sent only when the
+// request lapses with no decision, so the user learns it was denied.
+func EscalationExpiredText(reason string) string {
+	return "Security review request expired with no decision; the command was denied (" + strings.TrimSpace(reason) + "). Ask the agent to retry it if still needed."
+}
+
 // LLMReviewer runs the review as a background model call with no tools.
 type LLMReviewer struct {
 	Chat  llm.Chatter
@@ -137,7 +173,7 @@ func reviewDangerous(ctx context.Context, ws *Workspace, pm *process.Manager, pr
 	case VerdictDeny:
 		return governance.Result{}, errors.New("blocked: dangerous command (" + reason + ") denied by security review")
 	default:
-		if strings.EqualFold(strings.TrimSpace(principal.Gateway), "openai") {
+		if !isInteractiveGateway(principal.Gateway) {
 			return governance.Result{}, errors.New("blocked: dangerous command (" + reason + ") requires interactive approval, unavailable on this transport")
 		}
 		meta := requestctx.MetadataFromContext(ctx)
@@ -145,24 +181,57 @@ func reviewDangerous(ctx context.Context, ws *Workspace, pm *process.Manager, pr
 		if session == "" {
 			session = strings.TrimSpace(meta.RequestID)
 		}
+		decide := make(chan approvals.Decision, 1)
 		pending := approvals.Pending{
 			RequestID: requestID(ctx), Profile: principal.CanonicalUserID, SessionKey: session,
 			Command: command, Workdir: workdir, Scratch: scratch,
 			Timeout: timeout, Background: background, Persist: persist,
+			Decide: decide,
 		}
 		if !approvals.Request(pending) {
 			return governance.Result{}, errors.New("approval already pending in this conversation; reply /approve or /deny")
 		}
-		return governance.Result{Content: escalationText(reason, command), Outcome: governance.OutcomeProductive}, nil
+		if notify := EscalationNotifyFromContext(ctx); notify != nil {
+			notify(EscalationStatusText(reason, command))
+		}
+		deadline := time.Now().Add(approvals.ApprovalWindow)
+		select {
+		case decision := <-decide:
+			if decision == approvals.DecisionApproved {
+				return ExecuteApproved(ctx, ws, pm, pending)
+			}
+			return governance.Result{Content: deniedText(reason, false), Outcome: governance.OutcomeProductive}, nil
+		case <-time.After(time.Until(deadline)):
+			if notify := EscalationNotifyFromContext(ctx); notify != nil {
+				notify(EscalationExpiredText(reason))
+			}
+			return governance.Result{Content: deniedText(reason, true), Outcome: governance.OutcomeProductive}, nil
+		case <-ctx.Done():
+			return governance.Result{}, ctx.Err()
+		}
 	}
 }
 
-// escalationText instructs the model to relay the approval ask verbatim,
-// carrying the full command for proper user review.
-func escalationText(reason, command string) string {
-	return "Command held for review (" + reason + "): the security reviewer could not clear this command.\n\nFull command under review:\n" + command +
-		"\n\nReply to the user with exactly the following approval request, without changes or additions:\n---\nSecurity review needs your decision. Full command:\n" + command +
-		"\n\nReply /approve to run it exactly as shown, or /deny to refuse it. This request expires in 5 minutes; expiry denies it.\n---"
+// deniedText reports a refused command as a productive tool result so the
+// agent continues in the same loop instead of ending the turn on an error.
+func deniedText(reason string, expired bool) string {
+	cause := "The user denied this command"
+	if expired {
+		cause = "The approval request expired without a decision; treat it as denied"
+	}
+	return cause + " (" + strings.TrimSpace(reason) + "). Do not run it; continue with an alternative or ask the user."
+}
+
+// isInteractiveGateway reports whether a transport has a user who can answer
+// /approve. Unattended transports fail closed instead of blocking a turn that
+// nobody will ever resolve.
+func isInteractiveGateway(gateway string) bool {
+	switch strings.ToLower(strings.TrimSpace(gateway)) {
+	case "discord", "imessage":
+		return true
+	default:
+		return false
+	}
 }
 
 func tempPtr(v float64) *float64 { return &v }

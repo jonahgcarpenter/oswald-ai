@@ -447,6 +447,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Ctx:                     req.Context,
 		Images:                  decision.Images,
 		StreamFunc:              req.StreamFunc,
+		EscalationNotify:        req.EscalationNotify,
 		ResponseChan:            make(chan broker.Result, 1),
 	}
 	submitErr := deps.Broker.Submit(brokerReq)
