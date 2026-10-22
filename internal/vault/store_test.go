@@ -54,6 +54,51 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStoreAddressAndPayment(t *testing.T) {
+	s := NewStore(t.TempDir())
+	addr, err := s.AddAddress("Home", map[string]string{
+		"address_line1": "1 Main St", "city": "Springfield", "postal_code": "12345",
+		"country": "US", "nickname": "ignored",
+	}, "https://shop.example/checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.Kind != KindAddress || addr.Origin != "https://shop.example" {
+		t.Fatalf("address = %+v", addr)
+	}
+	if _, err := s.AddAddress("Bad", map[string]string{"city": "x"}, "https://example.com"); err == nil {
+		t.Fatal("address missing required fields accepted")
+	}
+	card, err := s.AddPayment("Visa", map[string]string{
+		"card_number": "4111111111111111", "exp_month": "12", "exp_year": "2030",
+		"cvc": "123", "notes": "ignored",
+	}, "https://shop.example/pay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := s.ResolveFields(card.ID)
+	if err != nil || fields["cvc"] != "123" || fields["notes"] != "" {
+		t.Fatalf("payment fields = %+v %v", fields, err)
+	}
+	if _, err := s.ResolveFields(addr.ID); err != nil {
+		t.Fatalf("address resolve = %v", err)
+	}
+	login, err := s.AddLogin("Example", "email", "a@b.c", "pw", "", "https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResolveFields(login.ID); err == nil {
+		t.Fatal("login resolved as checkout fields")
+	}
+	if _, _, err := s.ResolvePassword(addr.ID); err == nil {
+		t.Fatal("address resolved as password")
+	}
+	items, err := s.List()
+	if err != nil || len(items) != 3 {
+		t.Fatalf("list = %+v %v", items, err)
+	}
+}
+
 func TestStoreRejectsBadInput(t *testing.T) {
 	s := NewStore(t.TempDir())
 	for _, tc := range []struct {

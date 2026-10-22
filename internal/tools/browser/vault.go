@@ -57,11 +57,11 @@ func VaultListDefinition() llm.ToolDefinition {
 	}
 }
 
-// VaultFillDefinition fills the current page's password from a handle.
+// VaultFillDefinition fills the current page from a vault handle.
 func VaultFillDefinition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name:        VaultFillName,
-		Description: "Fill the CURRENT browser page's password field from a vault handle (see browser_vault_list). The password is resolved locally and injected into the page; it never enters the conversation. Refused unless the page origin exactly matches the item's bound origin. Type the identifier yourself with browser_type first, then submit. Requires browser_navigate first.",
+		Description: "Fill the CURRENT browser page from a vault handle (see browser_vault_list): the password for a login, or address fields for an address item. Card items are never filled. Secrets are resolved locally and injected into the page; they never enter the conversation. Refused unless the page origin exactly matches the item's bound origin. For logins, type the identifier yourself with browser_type first, then submit. Requires browser_navigate first.",
 		Parameters: llm.ToolParameters{
 			Type: "object",
 			Properties: map[string]llm.ToolParameterProperty{
@@ -234,9 +234,9 @@ func vaultFillHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0)
 			return governance.Result{}, fmt.Errorf("no vault item with handle %q; use browser_vault_list", strings.TrimSpace(handle))
 		}
-		if meta.Kind != vault.KindLogin {
+		if meta.Kind != vault.KindLogin && meta.Kind != vault.KindAddress && meta.Kind != vault.KindPayment {
 			completed("error", "error", 0)
-			return governance.Result{}, fmt.Errorf("vault item %q is not a login", meta.ID)
+			return governance.Result{}, fmt.Errorf("vault item %q has an unknown kind", meta.ID)
 		}
 		pageOrigin, err := vaultPageOrigin(deps, ctx, profile)
 		if err != nil {
@@ -246,45 +246,100 @@ func vaultFillHandler(deps Deps) registry.Handler {
 			completed("error", "error", 0)
 			return governance.Result{}, fmt.Errorf("refused: current page origin (%s) does not match the vault item's bound origin (%s)", pageOrigin, meta.Origin)
 		}
-		nonce := vaultNonce()
-		inspect, err := deps.Backend.VaultEval(ctx, profile, vault.BuildInspectionJS(nonce))
-		if err != nil {
-			return fail(fmt.Errorf("could not inspect page inputs: %v", err))
-		}
-		passwordIdx, _, ok := vault.ClassifyLoginControls(vault.ParseLoginControls(inspect))
-		if !ok {
+		switch meta.Kind {
+		case vault.KindPayment:
 			completed("error", "error", 0)
-			return governance.Result{}, errors.New("no login form fields were found on the current page")
+			return governance.Result{}, errors.New("payment card fill is disabled: card entry needs an interactive confirmation this session cannot provide, so nothing was written; enter the card manually")
+		case vault.KindAddress:
+			return vaultFillAddress(deps, ctx, profile, pageOrigin, meta, completed, fail)
+		default:
+			return vaultFillLogin(deps, ctx, profile, pageOrigin, meta, completed, fail)
 		}
-		password, _, err := deps.Vault.ResolvePassword(meta.ID)
-		if err != nil {
-			return fail(err)
-		}
-		vault.RegisterSecretValues(password)
-		fill, err := deps.Backend.VaultEval(ctx, profile, vault.BuildFillJS(passwordIdx, meta.Origin, password, nonce))
-		password = ""
-		if err != nil {
-			return fail(fmt.Errorf("page fill failed: %v", err))
-		}
-		report := vault.ParseFillReport(fill)
-		if report.Refused == "origin_changed" {
-			completed("error", "error", 0)
-			return governance.Result{}, fmt.Errorf("refused: the page navigated away from the bound origin (%s); nothing was written", meta.Origin)
-		}
-		if report.Filled == 0 {
-			completed("error", "error", 0)
-			return governance.Result{}, errors.New("no fillable password field matched the saved login on this page")
-		}
-		content, err := wrapEnvelope(VaultFillName, map[string]interface{}{
-			"filled_fields": 1, "kind": meta.Kind, "origin": pageOrigin,
-			"next": "Type the identifier into the username field with browser_type if the form has one, then submit. If the site then asks for a verification code, call browser_vault_enter_code with this handle.",
-		})
-		if err != nil {
-			return fail(err)
-		}
-		completed("ok", "ok", 1)
-		return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 	}
+}
+
+func vaultFillLogin(deps Deps, ctx context.Context, profile, pageOrigin string, meta *vault.VaultItemMeta, completed func(string, string, int), fail func(error) (governance.Result, error)) (governance.Result, error) {
+	nonce := vaultNonce()
+	inspect, err := deps.Backend.VaultEval(ctx, profile, vault.BuildInspectionJS(nonce))
+	if err != nil {
+		return fail(fmt.Errorf("could not inspect page inputs: %v", err))
+	}
+	passwordIdx, _, ok := vault.ClassifyLoginControls(vault.ParseLoginControls(inspect))
+	if !ok {
+		completed("error", "error", 0)
+		return governance.Result{}, errors.New("no login form fields were found on the current page")
+	}
+	password, _, err := deps.Vault.ResolvePassword(meta.ID)
+	if err != nil {
+		return fail(err)
+	}
+	vault.RegisterSecretValues(password)
+	fill, err := deps.Backend.VaultEval(ctx, profile, vault.BuildFillJS(passwordIdx, meta.Origin, password, nonce))
+	password = ""
+	if err != nil {
+		return fail(fmt.Errorf("page fill failed: %v", err))
+	}
+	report := vault.ParseFillReport(fill)
+	if report.Refused == "origin_changed" {
+		completed("error", "error", 0)
+		return governance.Result{}, fmt.Errorf("refused: the page navigated away from the bound origin (%s); nothing was written", meta.Origin)
+	}
+	if report.Filled == 0 {
+		completed("error", "error", 0)
+		return governance.Result{}, errors.New("no fillable password field matched the saved login on this page")
+	}
+	content, err := wrapEnvelope(VaultFillName, map[string]interface{}{
+		"filled_fields": 1, "kind": meta.Kind, "origin": pageOrigin,
+		"next": "Type the identifier into the username field with browser_type if the form has one, then submit. If the site then asks for a verification code, call browser_vault_enter_code with this handle.",
+	})
+	if err != nil {
+		return fail(err)
+	}
+	completed("ok", "ok", 1)
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+}
+
+func vaultFillAddress(deps Deps, ctx context.Context, profile, pageOrigin string, meta *vault.VaultItemMeta, completed func(string, string, int), fail func(error) (governance.Result, error)) (governance.Result, error) {
+	fields, err := deps.Vault.ResolveFields(meta.ID)
+	if err != nil {
+		return fail(err)
+	}
+	nonce := vaultNonce()
+	inspect, err := deps.Backend.VaultEval(ctx, profile, vault.BuildInspectionJS(nonce))
+	if err != nil {
+		return fail(fmt.Errorf("could not inspect page inputs: %v", err))
+	}
+	slots := vault.ClassifyAddressControls(vault.ParseLoginControls(inspect))
+	filled := []string{}
+	for slot, field := range slots {
+		value := fields[field]
+		if value == "" {
+			continue
+		}
+		raw, err := deps.Backend.VaultEval(ctx, profile, vault.BuildFillJS(slot, meta.Origin, value, vaultNonce()))
+		if err != nil {
+			return fail(fmt.Errorf("address fill failed: %v", err))
+		}
+		if report := vault.ParseFillReport(raw); report.Refused == "origin_changed" {
+			completed("error", "error", 0)
+			return governance.Result{}, fmt.Errorf("refused: the page navigated away from the bound origin (%s); nothing further was written", meta.Origin)
+		} else if report.Filled > 0 {
+			filled = append(filled, vault.AddressFields[field])
+		}
+	}
+	fields = nil
+	if len(filled) == 0 {
+		completed("error", "error", 0)
+		return governance.Result{}, errors.New("no fillable address field matched the saved item on this page")
+	}
+	content, err := wrapEnvelope(VaultFillName, map[string]interface{}{
+		"filled_fields": len(filled), "kind": meta.Kind, "origin": pageOrigin, "fields": filled,
+	})
+	if err != nil {
+		return fail(err)
+	}
+	completed("ok", "ok", len(filled))
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
 }
 
 func vaultSaveLoginHandler(deps Deps) registry.Handler {

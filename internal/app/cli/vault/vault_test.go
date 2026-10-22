@@ -59,6 +59,34 @@ func TestVaultAddRequiresOriginAndSecrets(t *testing.T) {
 	}
 }
 
+func TestVaultAddAddressKind(t *testing.T) {
+	root := t.TempDir()
+	stdin := strings.NewReader("")
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), root, []string{
+		"add", "--kind", "address", "--origin", "https://shop.example",
+		"--field", "address_line1=1 Main St", "--field", "city=Springfield",
+		"--field", "postal_code=12345", "--field", "country=US",
+	}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("address add exit %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "saved address") {
+		t.Fatalf("address add output = %q", stdout.String())
+	}
+	var listOut bytes.Buffer
+	if code := Run(context.Background(), root, []string{"list"}, nil, &listOut, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("list exit %d", code)
+	}
+	if !strings.Contains(listOut.String(), "https://shop.example") {
+		t.Fatalf("list = %q", listOut.String())
+	}
+	var badErr bytes.Buffer
+	if code := Run(context.Background(), root, []string{"add", "--kind", "card"}, nil, &bytes.Buffer{}, &badErr); code != 2 {
+		t.Fatalf("bad kind exit %d", code)
+	}
+}
+
 func TestVaultNamedProfile(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "profiles", "work"), 0700); err != nil {

@@ -39,6 +39,23 @@ func TestClassifyOTPControls(t *testing.T) {
 	}
 }
 
+func TestClassifyAddressControls(t *testing.T) {
+	controls := []LoginControl{
+		{Index: 0, Tag: "input", Autocomplete: "address-line1", Visible: true},
+		{Index: 1, Tag: "input", Autocomplete: "postal-code", Visible: true},
+		{Index: 2, Tag: "input", Name: "city", Visible: true},
+		{Index: 3, Tag: "input", Name: "q", Visible: true},
+		{Index: 4, Tag: "input", Autocomplete: "address-line1", Visible: true},
+	}
+	slots := ClassifyAddressControls(controls)
+	if slots[0] != "address_line1" || slots[1] != "postal_code" || slots[2] != "city" {
+		t.Fatalf("address slots = %v", slots)
+	}
+	if _, dup := slots[4]; dup {
+		t.Fatalf("duplicate autocomplete claimed twice: %v", slots)
+	}
+}
+
 func TestFillJSAssertsOriginAndFills(t *testing.T) {
 	js := BuildFillJS(1, "https://example.com", `p"a\\ss`, "abc123")
 	if !strings.Contains(js, `"https://example.com"`) {

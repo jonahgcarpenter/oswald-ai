@@ -92,6 +92,60 @@ func ClassifyOTPControls(controls []LoginControl) []int {
 	return out
 }
 
+// ClassifyAddressControls maps input indexes to canonical address field
+// names, preferring WHATWG autocomplete tokens and falling back to
+// name/id/placeholder heuristics.
+func ClassifyAddressControls(controls []LoginControl) map[int]string {
+	tokens := map[string]string{}
+	for field, token := range AddressFields {
+		tokens[token] = field
+	}
+	nameHints := map[string]string{
+		"address": "address_line1", "address1": "address_line1", "street": "address_line1",
+		"address2": "address_line2", "apt": "address_line2", "suite": "address_line2",
+		"city": "city", "town": "city",
+		"state": "state", "province": "state", "region": "state",
+		"zip": "postal_code", "postal": "postal_code",
+		"country": "country",
+	}
+	out := map[int]string{}
+	claimed := map[string]bool{}
+	claim := func(index int, field string) {
+		if field == "" || claimed[field] {
+			return
+		}
+		if _, dup := out[index]; dup {
+			return
+		}
+		out[index] = field
+		claimed[field] = true
+	}
+	for _, c := range controls {
+		if !c.Visible {
+			continue
+		}
+		if field, ok := tokens[strings.ToLower(strings.TrimSpace(c.Autocomplete))]; ok {
+			claim(c.Index, field)
+		}
+	}
+	for _, c := range controls {
+		if !c.Visible {
+			continue
+		}
+		haystack := strings.ToLower(strings.Join([]string{c.Name, c.ID, c.Placeholder}, " "))
+		bestHint, bestField := "", ""
+		for hint, field := range nameHints {
+			if strings.Contains(haystack, hint) && len(hint) > len(bestHint) {
+				bestHint, bestField = hint, field
+			}
+		}
+		if bestField != "" {
+			claim(c.Index, bestField)
+		}
+	}
+	return out
+}
+
 // BuildFillJS writes value into the stamped slot and returns a JSON fill
 // report. The origin assertion runs first: a page that navigated away
 // from the bound origin refuses with origin_changed and writes nothing.

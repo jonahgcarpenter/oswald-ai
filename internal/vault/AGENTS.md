@@ -5,8 +5,10 @@ Applies on top of the root `AGENTS.md` (operator-state and never-log rules).
 ## Shape
 
 `store.go` is an AES-256-GCM file store under `<profileRoot>/vault/`
-(`vault.key` + `vault.json.enc`, both `0600`, flock-serialized). Only login
-items exist today; address and payment payloads are refused at add time.
+(`vault.key` + `vault.json.enc`, both `0600`, flock-serialized). Login and
+address items are fillable; payment items can be stored and listed but
+never filled (card entry needs an interactive confirmation no session
+provides, so filling refuses fail-closed).
 `filljs.go` builds the page scripts (nonce-stamped inspection, origin-bound
 fill) and classifies controls in Go. `redact.go` is the process-wide secret
 registry: resolved values are registered before they touch a page and later

@@ -27,10 +27,13 @@ import (
 	"time"
 )
 
-// Item kinds. Only login is fillable today; address and payment payloads
-// are refused at add time until their fill paths land.
+// Item kinds. Login and address items are fillable; payment items can be
+// stored but never filled (card entry needs an interactive confirmation
+// that no session currently provides, so filling refuses fail-closed).
 const (
-	KindLogin = "login"
+	KindLogin   = "login"
+	KindAddress = "address"
+	KindPayment = "payment"
 )
 
 // Login identifier types. The identifier is metadata, not a secret: the
@@ -51,6 +54,25 @@ func (e *VaultError) Error() string { return e.msg }
 
 func vaultErr(format string, args ...interface{}) *VaultError {
 	return &VaultError{msg: fmt.Sprintf(format, args...)}
+}
+
+// Canonical secret-payload fields per non-login kind. Each maps to the
+// WHATWG autocomplete token the fill targets.
+var AddressFields = map[string]string{
+	"address_line1": "address-line1", "address_line2": "address-line2",
+	"city": "address-level2", "state": "address-level1",
+	"postal_code": "postal-code", "country": "country-name",
+}
+
+var PaymentFields = map[string]string{
+	"card_number": "cc-number", "cardholder_name": "cc-name",
+	"exp_month": "cc-exp-month", "exp_year": "cc-exp-year",
+	"cvc": "cc-csc", "billing_postal_code": "postal-code",
+}
+
+var requiredFields = map[string][]string{
+	KindAddress: {"address_line1", "city", "postal_code", "country"},
+	KindPayment: {"card_number", "exp_month", "exp_year", "cvc"},
 }
 
 // VaultItemMeta is the metadata-only view of an item. It never contains
@@ -368,6 +390,109 @@ func (s *Store) ResolvePassword(id string) (password, otpSeed string, err error)
 		return "", "", err
 	}
 	return password, otpSeed, nil
+}
+
+// AddAddress stores an address bound to one origin. Field names are the
+// canonical AddressFields keys; unknown or blank values are dropped.
+func (s *Store) AddAddress(label string, fields map[string]string, origin string) (VaultItemMeta, error) {
+	return s.addCheckout(KindAddress, label, fields, origin)
+}
+
+// AddPayment stores a payment card bound to one origin. Cards can be
+// listed but never filled; filling refuses fail-closed.
+func (s *Store) AddPayment(label string, fields map[string]string, origin string) (VaultItemMeta, error) {
+	return s.addCheckout(KindPayment, label, fields, origin)
+}
+
+func (s *Store) addCheckout(kind, label string, fields map[string]string, origin string) (VaultItemMeta, error) {
+	allowed := AddressFields
+	if kind == KindPayment {
+		allowed = PaymentFields
+	}
+	if strings.TrimSpace(label) == "" {
+		return VaultItemMeta{}, vaultErr("label is required")
+	}
+	secret := map[string]string{}
+	for k, v := range fields {
+		if _, ok := allowed[k]; !ok {
+			continue
+		}
+		if v = strings.TrimSpace(v); v == "" || len(v) > maxSecretLen {
+			continue
+		}
+		secret[k] = v
+	}
+	var missing []string
+	for _, f := range requiredFields[kind] {
+		if secret[f] == "" {
+			missing = append(missing, f)
+		}
+	}
+	if len(missing) > 0 {
+		return VaultItemMeta{}, vaultErr("%s items require %s", kind, strings.Join(missing, ", "))
+	}
+	normOrigin, err := NormalizeOrigin(origin)
+	if err != nil {
+		return VaultItemMeta{}, err
+	}
+	id := make([]byte, 6)
+	if _, err := rand.Read(id); err != nil {
+		return VaultItemMeta{}, err
+	}
+	rec := record{
+		ID: "vault_" + hex.EncodeToString(id), Kind: kind,
+		Label: strings.TrimSpace(label), Origin: normOrigin,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339), Secret: secret,
+	}
+	var out VaultItemMeta
+	if err := s.locked(func() error {
+		items, err := s.readAll()
+		if err != nil {
+			return err
+		}
+		items = append(items, rec)
+		if err := s.writeAll(items); err != nil {
+			return err
+		}
+		out = metaOf(rec)
+		return nil
+	}); err != nil {
+		return VaultItemMeta{}, err
+	}
+	return out, nil
+}
+
+// ResolveFields returns the sealed payload of an address or payment item
+// for server-side use only. Login items resolve through ResolvePassword.
+func (s *Store) ResolveFields(id string) (map[string]string, error) {
+	var out map[string]string
+	if err := s.locked(func() error {
+		items, err := s.readAll()
+		if err != nil {
+			return err
+		}
+		for _, rec := range items {
+			if rec.ID == id {
+				if rec.Kind == KindLogin {
+					return vaultErr("vault item %q is a login; resolve it as one", id)
+				}
+				out = dictCopy(rec.Secret)
+				return nil
+			}
+		}
+		return vaultErr("no vault item with handle %q", id)
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func dictCopy(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // Remove deletes one item, reporting whether it existed.

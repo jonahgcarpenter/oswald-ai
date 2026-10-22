@@ -65,7 +65,8 @@ func Run(_ context.Context, root string, args []string, stdin io.Reader, stdout,
 
 func vaultUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage: oswald vault [--profile NAME] <add|list|rm> [options]")
-	fmt.Fprintln(w, "  add --origin URL [--label NAME] [--identifier-type email|phone|username] [--otp SEED]")
+	fmt.Fprintln(w, "  add --origin URL [--label NAME] [--kind login|address|payment]")
+	fmt.Fprintln(w, "      [--identifier-type email|phone|username] [--otp SEED] [--field key=value ...]")
 	fmt.Fprintln(w, "  list")
 	fmt.Fprintln(w, "  rm <handle>")
 }
@@ -96,10 +97,13 @@ func add(storeRoot string, vs *store.Store, args []string, stdin io.Reader, stdo
 	_ = storeRoot
 	fs := flag.NewFlagSet("vault add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	origin := fs.String("origin", "", "exact site origin the login is bound to (e.g. https://example.com)")
+	origin := fs.String("origin", "", "exact site origin the item is bound to (e.g. https://example.com)")
 	label := fs.String("label", "", "short site name (default: the origin host)")
+	kind := fs.String("kind", "login", "item kind: login, address, or payment")
 	idType := fs.String("identifier-type", "email", "login identifier type: email, phone, or username")
 	otp := fs.String("otp", "", "optional authenticator seed or otpauth://totp URI for 2FA codes")
+	fields := fieldFlags{}
+	fs.Var(fields, "field", "address/payment field as key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -107,10 +111,36 @@ func add(storeRoot string, vs *store.Store, args []string, stdin io.Reader, stdo
 		fmt.Fprintln(stderr, "oswald: vault add requires --origin")
 		return exitUsage
 	}
-	switch *idType {
+	switch *kind {
+	case "login":
+		return addLogin(vs, *origin, *label, *idType, *otp, stdin, stdout, stderr)
+	case "address", "payment":
+		return addCheckout(vs, *kind, *origin, *label, fields, stdin, stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "oswald: unknown vault kind %q\n", *kind)
+		return exitUsage
+	}
+}
+
+// fieldFlags collects repeatable --field key=value options.
+type fieldFlags map[string]string
+
+func (f fieldFlags) String() string { return fmt.Sprintf("%v", map[string]string(f)) }
+
+func (f fieldFlags) Set(raw string) error {
+	name, value, ok := strings.Cut(raw, "=")
+	if !ok || strings.TrimSpace(name) == "" {
+		return errors.New("field must look like key=value")
+	}
+	f[strings.TrimSpace(name)] = strings.TrimSpace(value)
+	return nil
+}
+
+func addLogin(vs *store.Store, origin, label, idType, otp string, stdin io.Reader, stdout, stderr io.Writer) int {
+	switch idType {
 	case "email", "phone", "username":
 	default:
-		fmt.Fprintf(stderr, "oswald: unknown identifier type %q\n", *idType)
+		fmt.Fprintf(stderr, "oswald: unknown identifier type %q\n", idType)
 		return exitUsage
 	}
 	fmt.Fprintln(stdout, "Identifier (email/username, shown while typing):")
@@ -126,18 +156,83 @@ func add(storeRoot string, vs *store.Store, args []string, stdin io.Reader, stdo
 		fmt.Fprintln(stderr, "oswald: password is required")
 		return exitError
 	}
-	name := strings.TrimSpace(*label)
+	name := strings.TrimSpace(label)
 	if name == "" {
-		name = strings.TrimSpace(*origin)
+		name = strings.TrimSpace(origin)
 	}
-	meta, err := vs.AddLogin(name, *idType, strings.TrimSpace(identifier), password, strings.TrimSpace(*otp), strings.TrimSpace(*origin))
+	meta, err := vs.AddLogin(name, idType, strings.TrimSpace(identifier), password, strings.TrimSpace(otp), strings.TrimSpace(origin))
 	password = ""
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
 	}
-	fmt.Fprintf(stdout, "saved login %s for %s (handle %s)\n", meta.Label, meta.Origin, meta.ID)
+	fmt.Fprintf(stdout, "saved %s %s for %s (handle %s)\n", meta.Kind, meta.Label, meta.Origin, meta.ID)
 	return exitOK
+}
+
+func addCheckout(vs *store.Store, kind, origin, label string, fields fieldFlags, stdin io.Reader, stdout, stderr io.Writer) int {
+	allowed := store.AddressFields
+	if kind == store.KindPayment {
+		allowed = store.PaymentFields
+		fmt.Fprintln(stdout, "Note: payment cards are stored for listing only; the browser never fills them.")
+	}
+	collected := map[string]string{}
+	for k, v := range fields {
+		if _, ok := allowed[k]; ok && v != "" {
+			collected[k] = v
+		}
+	}
+	input := bufio.NewReader(stdin)
+	for _, key := range requiredKeys(kind) {
+		if collected[key] != "" {
+			continue
+		}
+		fmt.Fprintf(stdout, "%s:\n", key)
+		var (
+			value string
+			err   error
+		)
+		if kind == store.KindPayment {
+			value, err = readSecret(stdin, input, stdout)
+		} else {
+			value, err = readLine(input)
+		}
+		if err != nil || strings.TrimSpace(value) == "" {
+			fmt.Fprintf(stderr, "oswald: %s is required\n", key)
+			return exitError
+		}
+		collected[key] = strings.TrimSpace(value)
+	}
+	name := strings.TrimSpace(label)
+	if name == "" {
+		name = strings.TrimSpace(origin)
+	}
+	var (
+		meta store.VaultItemMeta
+		err  error
+	)
+	if kind == store.KindPayment {
+		meta, err = vs.AddPayment(name, collected, strings.TrimSpace(origin))
+	} else {
+		meta, err = vs.AddAddress(name, collected, strings.TrimSpace(origin))
+	}
+	for k := range collected {
+		collected[k] = ""
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "oswald: %v\n", err)
+		return exitError
+	}
+	fmt.Fprintf(stdout, "saved %s %s for %s (handle %s)\n", meta.Kind, meta.Label, meta.Origin, meta.ID)
+	return exitOK
+}
+
+// requiredKeys returns required field names in stable order.
+func requiredKeys(kind string) []string {
+	if kind == store.KindPayment {
+		return []string{"card_number", "exp_month", "exp_year", "cvc"}
+	}
+	return []string{"address_line1", "city", "postal_code", "country"}
 }
 
 func list(vs *store.Store, stdout, stderr io.Writer) int {
