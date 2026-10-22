@@ -37,7 +37,25 @@ type Config struct {
 	SearxngURL               string
 	ComfyUIURL               string
 	ComfyUIGenerationTimeout time.Duration
-	LogLevel                 Level
+	// Browser backend configuration for the local headless browser_* tools.
+	// Empty launch command and endpoint URL disable the tools. Bounds must
+	// never be logged; only counts and durations are model-visible.
+	BrowserLaunchCommand     string
+	BrowserEndpointURL       string
+	BrowserCommandTimeout    time.Duration
+	BrowserSnapshotThreshold int
+	BrowserInactivityTimeout time.Duration
+	BrowserRecordSessions    bool
+	BrowserAllowPrivateURLs  bool
+	// BrowserAllowInsecureURLs opts into plaintext http page loads. Default
+	// false (https only). Other schemes stay blocked regardless.
+	BrowserAllowInsecureURLs bool
+	// BrowserRestrictEvaluate opts into the sensitive-primitive eval
+	// denylist (cookie/storage reads, network emission, form-value
+	// extraction). Default false: the denylist gates on primitive names
+	// and also blocks legitimate DOM extraction.
+	BrowserRestrictEvaluate bool
+	LogLevel                Level
 }
 
 // RetentionPolicy supplies code-owned worker bounds.

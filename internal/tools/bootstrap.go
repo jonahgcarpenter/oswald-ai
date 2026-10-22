@@ -5,15 +5,16 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
+	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -21,7 +22,7 @@ import (
 // registration order.
 func BuiltinDefinitions() []llm.ToolDefinition {
 	defs := []llm.ToolDefinition{toolmemory.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition()}
-	return append(defs, workspace.Definitions()...)
+	return append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...), workspace.Definitions()...)
 }
 
 // NewRegistryFromConfig creates a Registry with Go definitions and configured

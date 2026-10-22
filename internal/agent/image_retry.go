@@ -6,9 +6,8 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
-	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 const (
@@ -41,7 +40,7 @@ func (a *Agent) chatWithImageRetries(ctx context.Context, req llm.ChatRequest, c
 					return nil, err, false
 				}
 				messages[i].Images = resized
-				if messages[i].Role == "tool" && (messages[i].ToolName == visionanalyze.Name || messages[i].ToolName == imagegenerate.Name) && len(resized) == 1 {
+				if messages[i].Role == "tool" && (isImageInputTool(messages[i].ToolName) || messages[i].ToolName == imagegenerate.Name) && len(resized) == 1 {
 					messages[i].Content = media.RefreshImageGeometryNote(originalMessages[i].Content, originalMessages[i].Images[0].Geometry, resized[0].Geometry)
 				}
 			}

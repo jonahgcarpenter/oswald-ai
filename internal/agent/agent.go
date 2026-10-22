@@ -18,6 +18,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
+	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -377,7 +378,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 		}
 		ctx = requestctx.WithInputImages(ctx, contextImages)
 	}
-	if gateway != "openai" && len(contextImages) > 0 && (a.registry.HasHandler(imagegenerate.Name) || a.registry.HasHandler(visionanalyze.Name)) {
+	if gateway != "openai" && len(contextImages) > 0 && (a.registry.HasHandler(imagegenerate.Name) || a.registry.HasHandler(visionanalyze.Name) || a.registry.HasHandler(toolbrowser.VisionName)) {
 		if a.imageCache == nil {
 			return nil, fmt.Errorf("image cache is unavailable")
 		}
@@ -910,7 +911,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 					result, execErr = a.executeTool(requestctx.WithMetadata(ctx, toolMeta), request.Principal, toolName, tc.Function.Arguments, toolExposure)
 				}
 				if execErr == nil && len(result.Images) > 0 {
-					if toolName != visionanalyze.Name || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
+					if !isImageInputTool(toolName) || len(result.Images) != 1 || len(result.Attachments) != 0 || result.Outcome != governance.OutcomeProductive {
 						execErr = fmt.Errorf("tool returned unsupported model images")
 					}
 				}

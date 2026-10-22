@@ -225,6 +225,16 @@ tools:
   image_generate:
     url: ""
     generation_timeout: 2m
+  browser:
+    launch_command: ""
+    endpoint_url: ""
+    command_timeout: 30s
+    snapshot_threshold: 15000
+    inactivity_timeout: 2m
+    record_sessions: false
+    allow_private_urls: false
+    allow_insecure_urls: false
+    restrict_evaluate: false
 # MCP connections are isolated by profile and opened lazily; restart to reload.
 # Each server sets exactly one of url (HTTP) or command (stdio).
 mcp_servers:
