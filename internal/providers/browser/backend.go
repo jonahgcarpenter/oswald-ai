@@ -431,6 +431,10 @@ func (b *LocalBackend) Snapshot(ctx context.Context, profile string, full bool) 
 	timeoutCtx, cancel := context.WithTimeout(ctx, b.opts.CommandTimeout)
 	defer cancel()
 	elements, rendered := b.snapshotLocked(timeoutCtx, sess, pt, full)
+	if rendered == "(snapshot unavailable)" {
+		b.markSuspect(sess)
+		return SnapshotData{}, fmt.Errorf("browser snapshot failed; call browser_navigate again")
+	}
 	b.touch(sess)
 	if len([]rune(rendered)) <= b.opts.SnapshotThreshold {
 		return SnapshotData{Snapshot: rendered, ElementCount: len(elements)}, nil
@@ -778,6 +782,9 @@ func (b *LocalBackend) refreshElements(ctx context.Context, sess *browserSession
 	defer cancel()
 	raw, err := pt.Evaluate(timeoutCtx, snapshotListJS)
 	if err != nil {
+		if timeoutCtx.Err() != nil {
+			b.markSuspect(sess)
+		}
 		return nil, "(snapshot unavailable)"
 	}
 	elements := parseElements(raw)
@@ -790,6 +797,9 @@ func (b *LocalBackend) refreshElements(ctx context.Context, sess *browserSession
 func (b *LocalBackend) snapshotLocked(ctx context.Context, sess *browserSession, pt pageTransport, full bool) ([]Element, string) {
 	raw, err := pt.Evaluate(ctx, snapshotListJS)
 	if err != nil {
+		if ctx.Err() != nil {
+			b.markSuspect(sess)
+		}
 		return nil, "(snapshot unavailable)"
 	}
 	elements := parseElements(raw)

@@ -21,6 +21,41 @@ type launchedBrowser struct {
 	url string
 }
 
+// sandboxBypassArgs are required when Chromium's own sandbox cannot work:
+// root, containers, or hosts denying unprivileged user namespaces.
+var sandboxBypassArgs = []string{"--no-sandbox", "--disable-dev-shm-usage"}
+
+// needsSandboxBypass reports whether Chromium needs its sandbox disabled to
+// start reliably. It performs no network I/O.
+func needsSandboxBypass() bool {
+	if os.Geteuid() == 0 {
+		return true
+	}
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	if data, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil {
+		return strings.TrimSpace(string(data)) == "1"
+	}
+	return false
+}
+
+// withSandboxBypass appends the bypass flags unless the operator already set
+// --no-sandbox explicitly. Operator flags are never overridden.
+func withSandboxBypass(extra []string) []string {
+	for _, arg := range extra {
+		if arg == "--no-sandbox" {
+			return extra
+		}
+	}
+	if !needsSandboxBypass() {
+		return extra
+	}
+	return append(append([]string{}, extra...), sandboxBypassArgs...)
+}
+
 // findChromium resolves the browser binary: explicit launch command first,
 // then PATH lookup. Missing installs surface install guidance, never a
 // retry-download loop.
@@ -70,7 +105,7 @@ func launchChromium(ctx context.Context, binary string, extraArgs []string, prof
 		fmt.Sprintf("--user-data-dir=%s", dir),
 		"about:blank",
 	}
-	args = append(args, extraArgs...)
+	args = append(args, withSandboxBypass(extraArgs)...)
 	cmd := exec.Command(binary, args...)
 	cmd.Env = scrubBrowserEnv()
 	cmd.Stdout = nil
@@ -96,7 +131,7 @@ func waitForEndpoint(ctx context.Context, endpoint string, cmd *exec.Cmd) error 
 			return err
 		}
 		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
-			return fmt.Errorf("browser exited during startup")
+			return fmt.Errorf("browser exited during startup (missing system libraries? install the Chromium headless-shell dependencies)")
 		}
 		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		targets, err := listTargets(reqCtx, endpoint)

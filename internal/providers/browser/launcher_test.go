@@ -8,6 +8,39 @@ import (
 	"time"
 )
 
+func TestWithSandboxBypass(t *testing.T) {
+	// An explicit operator flag is never duplicated.
+	explicit := withSandboxBypass([]string{"--headless=new", "--no-sandbox"})
+	for _, arg := range explicit {
+		if arg == "--disable-dev-shm-usage" {
+			t.Fatal("operator --no-sandbox gained bypass flags")
+		}
+	}
+	got := withSandboxBypass([]string{"--headless=new"})
+	hasBypass := false
+	for _, arg := range got {
+		if arg == "--no-sandbox" {
+			hasBypass = true
+		}
+	}
+	if hasBypass != needsSandboxBypass() {
+		t.Fatalf("bypass = %v, need = %v", hasBypass, needsSandboxBypass())
+	}
+	if !hasBypass {
+		if len(got) != 1 || got[0] != "--headless=new" {
+			t.Fatalf("flags mutated without bypass: %q", got)
+		}
+	} else if len(got) != 3 {
+		t.Fatalf("bypass flags = %q", got)
+	}
+	// Caller slices are never mutated in place.
+	extra := []string{"--headless=new"}
+	_ = withSandboxBypass(extra)
+	if len(extra) != 1 {
+		t.Fatalf("input slice mutated: %q", extra)
+	}
+}
+
 func TestSessionDirLivesUnderCache(t *testing.T) {
 	root := t.TempDir()
 	dir, err := sessionDir(root)

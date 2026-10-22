@@ -10,13 +10,14 @@ import (
 )
 
 type fakePage struct {
-	url        string
-	title      string
-	elements   string
-	text       string
-	images     string
-	png        []byte
-	partialNav bool
+	url          string
+	title        string
+	elements     string
+	text         string
+	images       string
+	png          []byte
+	partialNav   bool
+	failElements bool
 }
 
 func (f *fakePage) Navigate(_ context.Context, url string) (string, string, error) {
@@ -28,6 +29,9 @@ func (f *fakePage) Navigate(_ context.Context, url string) (string, string, erro
 }
 
 func (f *fakePage) Evaluate(_ context.Context, expr string) (string, error) {
+	if f.failElements && strings.Contains(expr, "JSON.stringify(els.map") {
+		return "", fmt.Errorf("wedged renderer")
+	}
 	switch {
 	case strings.Contains(expr, "querySelectorAll('a,button") && strings.Contains(expr, "JSON.stringify(els.map"):
 		return f.elements, nil
@@ -170,6 +174,32 @@ func TestPartialNavigateDegradesInsteadOfFailing(t *testing.T) {
 	snap, err := b.Snapshot(ctx, "alice", false)
 	if err != nil || snap.ElementCount != 1 {
 		t.Fatalf("snapshot after partial = %+v %v", snap, err)
+	}
+}
+
+func TestSnapshotFailureMarksSuspect(t *testing.T) {
+	pages := map[string]*fakePage{
+		"alice": {title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG(), failElements: true},
+	}
+	b := testBackend(pages)
+	ctx := context.Background()
+	// Navigate degrades to an unavailable snapshot but still opens the page.
+	nav, err := b.Navigate(ctx, "alice", "https://example.com")
+	if err != nil {
+		t.Fatalf("navigate with wedged renderer failed: %v", err)
+	}
+	if nav.Snapshot != "(snapshot unavailable)" {
+		t.Fatalf("navigate snapshot = %q", nav.Snapshot)
+	}
+	// An explicit snapshot fails loudly and poisons the session.
+	if _, err := b.Snapshot(ctx, "alice", false); err == nil {
+		t.Fatal("snapshot with wedged renderer succeeded")
+	}
+	// The next use recycles the poisoned session instead of serving it.
+	if _, err := b.Snapshot(ctx, "alice", false); err == nil {
+		t.Fatal("snapshot on suspect session succeeded")
+	} else if !strings.Contains(err.Error(), "browser_navigate") {
+		t.Fatalf("suspect error = %v", err)
 	}
 }
 
