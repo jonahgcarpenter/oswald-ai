@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 // processIncomingMessage normalizes an inbound iMessage and routes it to the broker.
@@ -184,6 +184,11 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		typingGate:          newTypingGate(),
 		typingAllowed:       make(chan struct{}),
 	}
+	// iMessage has no live stream: a parked approval ask goes out as a real
+	// message so the user learns a decision is needed while the tool call
+	// blocks. Streaming transports leave this unset and render the agent's
+	// status chunk instead.
+	askNotify := g.approvalAskNotifier(responder, requestID)
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
 		RequestID:  requestID,
@@ -202,6 +207,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		IsMention:         mentionsBot,
 		IsReplyToBot:      currentIsReplyToBot,
 		Text:              textWithoutMention,
+		EscalationNotify:  askNotify,
 		PublicUserText:    publicUserText,
 		PlatformMessageID: msg.GUID,
 		ChatDisplayName:   chatDisplayName,

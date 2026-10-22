@@ -15,12 +15,12 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 )
 
 const testAPIKey = "test-secret-key-1234567890abcdef"
@@ -307,6 +307,22 @@ func TestStreamWithoutReasoningDoesNotInventIt(t *testing.T) {
 	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
 	if w.Code != 200 || !w.Flushed || strings.Contains(w.Body.String(), "reasoning_content") || strings.Contains(w.Body.String(), "private") || !strings.Contains(w.Body.String(), `"content":"partial "`) || !strings.Contains(w.Body.String(), "Final answer") {
 		t.Fatalf("unexpected stream without reasoning: code=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestStreamIgnoresPinnedNotices(t *testing.T) {
+	g := testGateway(t)
+	g.execute = func(req gatewayruntime.Request, _ gatewayruntime.Dependencies, responder gatewayruntime.Responder) gatewayruntime.Outcome {
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkNotice, Text: "Security review needs your decision"})
+		req.StreamFunc(agent.StreamChunk{Type: agent.ChunkContent, Text: "answer "})
+		if err := responder.SendAgentResponse(&agent.Response{Response: "answer done"}); err != nil {
+			t.Error(err)
+		}
+		return gatewayruntime.Outcome{}
+	}
+	w := request(g, "POST", "/v1/chat/completions", `{"model":"oswald","stream":true,"messages":[{"role":"user","content":"hi"}]}`, "Bearer "+testAPIKey)
+	if w.Code != 200 || strings.Contains(w.Body.String(), "needs your decision") {
+		t.Fatalf("pinned notice leaked into API stream: code=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

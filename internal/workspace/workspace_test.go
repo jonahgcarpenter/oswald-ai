@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 func testContext(requestID string) context.Context {
@@ -377,7 +378,58 @@ func TestTerminalDangerousDenyBlocks(t *testing.T) {
 	}
 }
 
-func TestTerminalDangerousEscalateParksFullCommand(t *testing.T) {
+func TestTerminalDangerousEscalateBlocksUntilApproved(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "wiped")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-escalate"), StubReviewer{Verdict: VerdictEscalate})
+	type toolResult struct {
+		content string
+		err     error
+	}
+	results := make(chan toolResult, 1)
+	go func() {
+		res, err := term(ctx, map[string]interface{}{"command": "chmod -R 777 " + target, "timeout": float64(30)})
+		results <- toolResult{content: res.Content, err: err}
+	}()
+	// The tool call must not return while the ask is pending.
+	select {
+	case r := <-results:
+		t.Fatalf("escalated call returned early: %+v", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if !approvals.Has("alice", "req-review-escalate") {
+		t.Fatal("no pending ask while blocked")
+	}
+	// Simulate /approve: take and signal, then the waiter executes.
+	stored, ok, expired := approvals.Take("alice", "req-review-escalate")
+	if !ok || expired {
+		t.Fatalf("pending = %+v ok=%t expired=%t", stored, ok, expired)
+	}
+	approvals.Notify(stored, approvals.DecisionApproved)
+	select {
+	case r := <-results:
+		if r.err != nil || !strings.Contains(r.content, "exit_code: 0") {
+			t.Fatalf("approved result = %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("approved waiter never returned")
+	}
+	if approvals.Has("alice", "req-review-escalate") {
+		t.Fatal("pending ask survived approval")
+	}
+}
+
+func TestTerminalDangerousDeniedReturnsToolResult(t *testing.T) {
 	approvals.Reset()
 	defer approvals.Reset()
 	root := t.TempDir()
@@ -386,18 +438,156 @@ func TestTerminalDangerousEscalateParksFullCommand(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	term := NewTerminalHandler(ws, process.NewManager(root))
-	ctx := WithReviewer(testContext("req-review-escalate"), StubReviewer{Verdict: VerdictEscalate})
-	full := "sudo rm -rf /tmp/review-target --no-preserve-root"
-	res, err := term(ctx, map[string]interface{}{"command": full, "timeout": float64(30)})
-	if err != nil {
-		t.Fatalf("escalate errored: %v", err)
+	ctx := WithReviewer(testContext("req-review-deny-result"), StubReviewer{Verdict: VerdictEscalate})
+	type toolResult struct {
+		content string
+		err     error
 	}
-	if !strings.Contains(res.Content, full) || !strings.Contains(res.Content, "/approve") || !strings.Contains(res.Content, "/deny") {
-		t.Fatalf("escalation missing full command or directives: %q", res.Content)
+	results := make(chan toolResult, 1)
+	go func() {
+		res, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)})
+		results <- toolResult{content: res.Content, err: err}
+	}()
+	select {
+	case r := <-results:
+		t.Fatalf("escalated call returned early: %+v", r)
+	case <-time.After(200 * time.Millisecond):
 	}
-	stored, ok, expired := approvals.Take("alice", "req-review-escalate")
-	if !ok || expired || stored.Command != full {
+	stored, ok, expired := approvals.Take("alice", "req-review-deny-result")
+	if !ok || expired {
 		t.Fatalf("pending = %+v ok=%t expired=%t", stored, ok, expired)
+	}
+	approvals.Notify(stored, approvals.DecisionDenied)
+	select {
+	case r := <-results:
+		if r.err != nil {
+			t.Fatalf("denial errored: %+v", r)
+		}
+		if !strings.Contains(r.content, "denied") {
+			t.Fatalf("denial missing: %q", r.content)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("denied waiter never returned")
+	}
+}
+
+func TestTerminalDangerousExpiryDenies(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	old := approvals.ApprovalWindow
+	approvals.ApprovalWindow = 50 * time.Millisecond
+	defer func() { approvals.ApprovalWindow = old }()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-expiry"), StubReviewer{Verdict: VerdictEscalate})
+	notified := make(chan EscalationNotice, 2)
+	ctx = WithEscalationNotify(ctx, func(n EscalationNotice) {
+		notified <- n
+	})
+	res, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)})
+	if err != nil {
+		t.Fatalf("expiry errored: %v", err)
+	}
+	if !strings.Contains(res.Content, "denied") && !strings.Contains(res.Content, "expired") {
+		t.Fatalf("expiry result wrong: %q", res.Content)
+	}
+	select {
+	case n := <-notified:
+		// First notice is the ask; the second must be the expiry follow-up.
+		if n.Expired || n.Command != "sudo id" {
+			t.Fatalf("first notice is not the ask: %+v", n)
+		}
+		select {
+		case n := <-notified:
+			if !n.Expired {
+				t.Fatalf("expiry follow-up missing flag: %+v", n)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("no expiry follow-up sent")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no escalation notification sent")
+	}
+}
+
+func TestEscalationDiscordTextFencesCommand(t *testing.T) {
+	got := EscalationStatusDiscordText("decode-pipe to shell", "cat cache/scratch/payload.b64 | base64 -d | sh")
+	if !strings.Contains(got, "**Security review") || !strings.Contains(got, "```bash\ncat cache/scratch/payload.b64 | base64 -d | sh\n```") || !strings.Contains(got, "`/approve`") || !strings.Contains(got, "`/deny`") {
+		t.Fatalf("discord ask wrong:\n%s", got)
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Fatalf("ask has runaway blank lines:\n%s", got)
+	}
+	got = EscalationStatusDiscordText("x", "echo `hi`")
+	if strings.Contains(got, "`hi`") || !strings.Contains(got, "'hi'") {
+		t.Fatalf("backticks not neutralized:\n%s", got)
+	}
+	long := strings.Repeat("y", 2000)
+	if runes := []rune(EscalationStatusDiscordText("x", long)); len(runes) > 1700 {
+		t.Fatalf("ask not bounded: %d runes", len(runes))
+	}
+	if got := EscalationExpiredDiscordText("decode-pipe to shell"); !strings.Contains(got, "expired") || !strings.Contains(got, "denied") {
+		t.Fatalf("discord expiry wrong: %q", got)
+	}
+}
+
+func TestTerminalDangerousUnattendedDeniesImmediately(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := context.Background()
+	ctx = requestctx.WithPrincipal(ctx, identity.Principal{CanonicalUserID: "alice", Gateway: "cron", ExternalID: "cron:alice", Assurance: identity.AssuranceCronScheduler})
+	ctx = requestctx.WithMetadata(ctx, requestctx.Metadata{RequestID: "req-review-cron"})
+	ctx = WithReviewer(ctx, StubReviewer{Verdict: VerdictEscalate})
+	if _, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "unavailable on this transport") {
+		t.Fatalf("cron escalate = %v", err)
+	}
+	if approvals.Has("alice", "req-review-cron") {
+		t.Fatal("unattended transport parked an ask")
+	}
+}
+
+func TestTerminalDangerousEscalationNotifiesWhileBlocked(t *testing.T) {
+	approvals.Reset()
+	defer approvals.Reset()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(root, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(root))
+	ctx := WithReviewer(testContext("req-review-notify"), StubReviewer{Verdict: VerdictEscalate})
+	notified := make(chan EscalationNotice, 2)
+	ctx = WithEscalationNotify(ctx, func(n EscalationNotice) {
+		notified <- n
+	})
+	done := make(chan struct{}, 1)
+	go func() {
+		_, _ = term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)})
+		done <- struct{}{}
+	}()
+	select {
+	case n := <-notified:
+		if n.Expired || n.Command != "sudo id" || n.Reason == "" {
+			t.Fatalf("notification = %+v", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no escalation notification while blocked")
+	}
+	approvals.DenySession("alice", "req-review-notify")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter leaked after DenySession")
 	}
 }
 
@@ -411,11 +601,33 @@ func TestTerminalDangerousSingleFlight(t *testing.T) {
 	ws := NewWorkspace(root, "alice")
 	term := NewTerminalHandler(ws, process.NewManager(root))
 	ctx := WithReviewer(testContext("req-review-flight"), StubReviewer{Verdict: VerdictEscalate})
-	if _, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)}); err != nil {
-		t.Fatalf("first escalate: %v", err)
+	type toolResult struct {
+		content string
+		err     error
+	}
+	first := make(chan toolResult, 1)
+	go func() {
+		res, err := term(ctx, map[string]interface{}{"command": "sudo id", "timeout": float64(30)})
+		first <- toolResult{content: res.Content, err: err}
+	}()
+	select {
+	case r := <-first:
+		t.Fatalf("first escalate returned early: %+v", r)
+	case <-time.After(200 * time.Millisecond):
 	}
 	if _, err := term(ctx, map[string]interface{}{"command": "sudo whoami", "timeout": float64(30)}); err == nil || !strings.Contains(err.Error(), "already pending") {
 		t.Fatalf("second escalate = %v", err)
+	}
+	if !approvals.DenySession("alice", "req-review-flight") {
+		t.Fatal("DenySession found nothing")
+	}
+	select {
+	case r := <-first:
+		if r.err != nil || !strings.Contains(r.content, "denied") {
+			t.Fatalf("denied result = %+v", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("denied waiter never returned")
 	}
 }
 

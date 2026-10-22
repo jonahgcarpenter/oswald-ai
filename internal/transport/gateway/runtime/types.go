@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 // Dependencies are the shared services needed to execute a normalized gateway request.
@@ -92,6 +93,11 @@ type Request struct {
 	Reply       *routing.ReplyContext
 
 	StreamFunc func(agent.StreamChunk)
+	// EscalationNotify reports a parked approval ask while the tool call
+	// blocks. Streaming transports leave this unset and render the agent's
+	// status chunk instead; transports without live progress send a real
+	// message through this hook.
+	EscalationNotify workspace.EscalationNotifier
 	// OnAllowed runs after profile authentication, before fallback, command, or model work.
 	OnAllowed func()
 }

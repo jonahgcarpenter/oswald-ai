@@ -6,12 +6,9 @@ package approve
 
 import (
 	"context"
-	"unicode/utf8"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 )
 
 // Deps carries the profile root used to rebuild the sandboxed executor.
@@ -42,12 +39,11 @@ func (h approveHandler) Execute(ctx context.Context, req commands.Request) (comm
 		}
 		return commands.Result{Text: "No command is waiting for approval in this conversation.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "approval.decide"}}, nil
 	}
-	ws := workspace.NewWorkspace(h.root, req.Principal.CanonicalUserID)
-	result, err := workspace.ExecuteApproved(ctx, ws, process.Shared(h.root), pending)
-	if err != nil {
-		return commands.Result{Text: "Approved, but execution was refused.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "approval_guard_refused", Operation: "approval.execute", IsChanged: true, AffectedCount: 1}}, nil
-	}
-	return commands.Result{Text: "Approved and executed:\n" + truncateRunes(result.Content, 4000), Outcome: commands.Outcome{Status: "ok", Operation: "approval.execute", IsChanged: true, AffectedCount: 1}}, nil
+	// The waiting tool call executes the command itself and returns the real
+	// output as the agent's next reply; this command stays silent. Expiry
+	// still notifies through the waiter's own follow-up.
+	approvals.Notify(pending, approvals.DecisionApproved)
+	return commands.Result{Text: "", Outcome: commands.Outcome{Status: "ok", Operation: "approval.decide", IsChanged: true, AffectedCount: 1}}, nil
 }
 
 type denyHandler struct{}
@@ -66,19 +62,13 @@ func (denyHandler) Execute(_ context.Context, req commands.Request) (commands.Re
 	if !req.Principal.Authenticated() {
 		return commands.Result{Text: "Denying a command requires an authenticated identity.", Outcome: commands.Outcome{Status: "rejected", ReasonCode: "authentication_required"}}, nil
 	}
-	_, ok, expired := approvals.Take(req.Principal.CanonicalUserID, req.SessionKey)
+	pending, ok, expired := approvals.Take(req.Principal.CanonicalUserID, req.SessionKey)
 	if !ok {
 		if expired {
 			return commands.Result{Text: "The approval request already expired; it was denied.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "approval_expired", Operation: "approval.decide"}}, nil
 		}
 		return commands.Result{Text: "No command is waiting for approval in this conversation.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "approval.decide"}}, nil
 	}
-	return commands.Result{Text: "Denied. The command will not run.", Outcome: commands.Outcome{Status: "ok", Operation: "approval.decide", IsChanged: true, AffectedCount: 1}}, nil
-}
-
-func truncateRunes(s string, max int) string {
-	if utf8.RuneCountInString(s) <= max {
-		return s
-	}
-	return string([]rune(s)[:max]) + "\n[truncated]"
+	approvals.Notify(pending, approvals.DecisionDenied)
+	return commands.Result{Text: "", Outcome: commands.Outcome{Status: "ok", Operation: "approval.decide", IsChanged: true, AffectedCount: 1}}, nil
 }

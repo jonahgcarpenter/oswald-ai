@@ -52,10 +52,13 @@ redirects, hidden unicode, direct store or secret reads — routes to the backgr
 (fixed verbatim prompt, temperature 0, no tools, 30s bound, command wrapped as untrusted
 `<command>` input, strict one-word parse; errors and unparseables escalate).
 
-`APPROVE` executes, `DENY` blocks, `ESCALATE` parks a single-flight pending ask (`/approve` /
-`/deny`, five-minute window, API auto-denies). `/approve` replays the identical invocation through
-lifecycle, self-repo, sandbox, and the unrecoverable/fetch/config re-checks — skipping only the
-reviewer step.
+`APPROVE` executes inline, `DENY` blocks, `ESCALATE` parks a single-flight pending ask and blocks
+the tool call on its decision channel until `/approve` / `/deny` signals it (five-minute window;
+expiry, `/new`, `/stop`, and restart finalize as denied; unattended transports fail closed without
+parking). The waiter replays the identical invocation (`ExecuteApproved`: lifecycle, self-repo,
+sandbox, and the unrecoverable/fetch/config re-checks — skipping only the reviewer step) and the
+real output returns as the tool result; denial returns a productive denial tool result so the agent
+continues in the same loop. The ask surfaces while blocked as a persistent message outside the turn's lifecycle edits — fenced Discord markdown on streaming transports, a threaded plain-text reply where there is no live stream (iMessage); expiry sends the same kind of follow-up, while /approve and /deny stay silent and let the agent's next reply carry the outcome.
 
 ## Processes and cron
 

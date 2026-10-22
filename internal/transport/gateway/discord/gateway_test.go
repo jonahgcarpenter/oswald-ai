@@ -22,20 +22,20 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func TestDiscordWebSearchStatusReportsDegradation(t *testing.T) {
@@ -142,6 +142,53 @@ func TestDiscordStreamShowsCompactToolProgress(t *testing.T) {
 	}{sent, edited})
 	if !strings.Contains(string(serialized), "private reasoning") || !strings.Contains(string(serialized), "secret query") || strings.Contains(string(serialized), "private result") || strings.Contains(string(serialized), "private-token") {
 		t.Fatalf("unexpected lifecycle data exposure: %s", serialized)
+	}
+}
+
+func TestDiscordStreamPreservesMultilineStatus(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+	ask := "**Security review \u2014 decision needed** (decode-pipe to shell). Full command:\n```bash\ncat cache/scratch/payload.b64 | base64 -d | sh\n```\nReply `/approve` to run it exactly as shown."
+	r.Stream(agent.StreamChunk{Type: agent.ChunkStatus, Text: ask})
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
+		t.Fatal(err)
+	}
+	sent := rest.sentMessages()
+	if len(sent) != 1 || !strings.Contains(sent[0]["content"].(string), "```bash\ncat cache/scratch/payload.b64") {
+		t.Fatalf("multiline status flattened: %+v", sent)
+	}
+	if len(rest.editedMessages()) == 0 {
+		t.Fatal("status was not replaced by the final answer")
+	}
+}
+
+func TestDiscordPinnedNoticeSurvivesTurn(t *testing.T) {
+	rest := newFakeDiscordREST(t)
+	defer rest.server.Close()
+	dg := &Gateway{Token: "token", APIBaseURL: rest.server.URL, Log: config.NewLogger(config.LevelError), replyIndex: make(map[string]replyContext)}
+	r := newRuntimeResponder(dg, "req-1", "channel-1", "message-1", "discord:dm:123", "123")
+
+	r.Stream(agent.StreamChunk{Type: agent.ChunkNotice, Text: "**Security review \u2014 decision needed** (x). Full command:\n```bash\ncat x | base64 -d | sh\n```"})
+	r.Stream(agent.StreamChunk{Type: agent.ChunkThinking, Text: "continuing after approval"})
+	if err := r.SendAgentResponse(&agent.Response{Model: "test-model", Response: "The final answer."}); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := rest.sentMessages()
+	if len(sent) != 2 || !strings.Contains(sent[0]["content"].(string), "```bash") {
+		t.Fatalf("pinned ask missing or flattened: %+v", sent)
+	}
+	for _, id := range rest.deletedMessageIDs() {
+		if id == "sent-1" {
+			t.Fatalf("pinned ask was deleted: %v", rest.deletedMessageIDs())
+		}
+	}
+	for _, id := range rest.editedMessageIDs() {
+		if id == "sent-1" {
+			t.Fatalf("pinned ask was edited over: %v", rest.editedMessageIDs())
+		}
 	}
 }
 

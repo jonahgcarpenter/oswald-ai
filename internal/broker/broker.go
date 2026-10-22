@@ -12,8 +12,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
 const requestQueueSize = 10
@@ -78,10 +79,13 @@ type Request struct {
 	ServiceTier string
 	// Ctx carries transport cancellation to the worker. Nil keeps the
 	// previous lifecycle-only behavior.
-	Ctx          context.Context
-	Images       []llm.InputImage
-	StreamFunc   func(agent.StreamChunk)
-	ResponseChan chan Result
+	Ctx        context.Context
+	Images     []llm.InputImage
+	StreamFunc func(agent.StreamChunk)
+	// EscalationNotify reports a parked approval ask while the tool call
+	// blocks. It is installed in the request context when set.
+	EscalationNotify workspace.EscalationNotifier
+	ResponseChan     chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -281,6 +285,9 @@ func (b *Broker) Submit(req *Request) error {
 	}
 	requestCtx = requestctx.WithMetadata(requestCtx, meta)
 	requestCtx = requestctx.WithPrincipal(requestCtx, req.Principal)
+	if req.EscalationNotify != nil {
+		requestCtx = workspace.WithEscalationNotify(requestCtx, req.EscalationNotify)
+	}
 	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
 	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}
 	// Transport cancellation (for example an HTTP client disconnect) cancels

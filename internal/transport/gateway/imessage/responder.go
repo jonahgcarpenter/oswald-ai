@@ -3,6 +3,8 @@ package imessage
 import (
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -36,6 +38,9 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	defer r.stopProcessingIndicators()
 	if err := result.ValidateAttachments(); err != nil {
 		return err
+	}
+	if strings.TrimSpace(result.Text) == "" && len(result.Attachments) == 0 {
+		return nil
 	}
 	attachments := result.Attachments
 	if len(attachments) == 0 {
@@ -109,4 +114,19 @@ func (r *runtimeResponder) sendAndRemember(text string) error {
 	r.gateway.log().Debug("gateway.response.sent", "sent imessage response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("response_chars", len(text)))
 	r.gateway.rememberBotMessage(messageGUID, r.sessionKey, r.chatGUID, r.senderID, text)
 	return nil
+}
+
+// approvalAskNotifier reports a parked approval ask as a standalone reply
+// while the tool call blocks. It fires once per park (single-flight) from a
+// lane worker; delivery is best-effort and never unblocks the waiter.
+func (g *Gateway) approvalAskNotifier(r *runtimeResponder, requestID string) workspace.EscalationNotifier {
+	return func(notice workspace.EscalationNotice) {
+		text := workspace.EscalationStatusText(notice.Reason, notice.Command)
+		if notice.Expired {
+			text = workspace.EscalationExpiredText(notice.Reason)
+		}
+		if err := r.sendAndRemember(text); err != nil {
+			g.log().With(config.F("request_id", requestID)).Debug("gateway.approval_ask.failed", "failed to send approval ask", config.ErrorField(err))
+		}
+	}
 }
