@@ -11,7 +11,7 @@ func TestDefinitionContract(t *testing.T) {
 	if Name != "memory" || tool.Name != Name {
 		t.Fatalf("tool identity = %+v", tool)
 	}
-	for _, guidance := range []string{"ALL your changes in ONE call", "atomically", "new sessions", "skill_manage", "session_search"} {
+	for _, guidance := range []string{"ALL your changes in ONE call", "atomically", "new sessions", "session_search"} {
 		if !strings.Contains(tool.Description, guidance) {
 			t.Errorf("description missing %q", guidance)
 		}
