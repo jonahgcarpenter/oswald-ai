@@ -178,6 +178,39 @@ func testPNG() []byte {
 	return buf.Bytes()
 }
 
+func TestResultsAreFlatWithSuccessFirst(t *testing.T) {
+	backend := &fakeBackend{
+		navigate: providerbrowser.NavigateData{URL: "https://example.com", Title: "Example", Snapshot: "[@e1] link", ElementCount: 1},
+		eval:     providerbrowser.EvalData{Result: "1"},
+	}
+	handlers := NewHandlers(testDeps(t, backend))
+	navigate, err := handlers[NavigateName](testContext(), map[string]interface{}{"url": "https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(navigate.Content, `"success": true,`) {
+		t.Fatalf("navigate missing leading success: %q", navigate.Content)
+	}
+	for _, key := range []string{`"url":`, `"title":`, `"snapshot":`, `"element_count":`} {
+		if !strings.Contains(navigate.Content, key) {
+			t.Fatalf("navigate missing top-level %s: %q", key, navigate.Content)
+		}
+	}
+	if strings.Contains(navigate.Content, `"data":`) {
+		t.Fatalf("nested data wrapper survived: %q", navigate.Content)
+	}
+	eval, err := handlers[ConsoleName](testContext(), map[string]interface{}{"expression": "document.title"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(eval.Content, `"success": true,`) || !strings.Contains(eval.Content, `"result":`) {
+		t.Fatalf("eval result not flat: %q", eval.Content)
+	}
+	if strings.Contains(eval.Content, `"data":`) {
+		t.Fatalf("nested data wrapper survived eval: %q", eval.Content)
+	}
+}
+
 func TestNavigateBotDetectionWarning(t *testing.T) {
 	backend := &fakeBackend{navigate: providerbrowser.NavigateData{URL: "https://example.com", Title: "Just a moment - captcha", Snapshot: "[@e1] link", ElementCount: 1, BotWarning: true}}
 	handlers := NewHandlers(testDeps(t, backend))
