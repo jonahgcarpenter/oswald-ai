@@ -4,18 +4,26 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 )
 
 const maxToolResultImages = 4
 
+// isImageInputTool reports tools whose results carry request-local model
+// image inputs: vision loads and browser screenshots. Generated images ride
+// attachments instead and stay separate.
+func isImageInputTool(name string) bool {
+	return name == visionanalyze.Name || name == toolbrowser.VisionName
+}
+
 func boundImageToolResults(messages []llm.ChatMessage) []llm.ChatMessage {
 	result := append([]llm.ChatMessage(nil), messages...)
-	remaining := map[string]int{visionanalyze.Name: maxToolResultImages, imagegenerate.Name: maxToolResultImages}
+	remaining := map[string]int{visionanalyze.Name: maxToolResultImages, toolbrowser.VisionName: maxToolResultImages, imagegenerate.Name: maxToolResultImages}
 	for i := len(result) - 1; i >= 0; i-- {
 		message := &result[i]
-		if message.Role != "tool" || (message.ToolName != visionanalyze.Name && message.ToolName != imagegenerate.Name) || len(message.Images) == 0 {
+		if message.Role != "tool" || (!isImageInputTool(message.ToolName) && message.ToolName != imagegenerate.Name) || len(message.Images) == 0 {
 			continue
 		}
 		if remaining[message.ToolName] > 0 {
@@ -41,7 +49,7 @@ func retainedImageToolRounds(messages []llm.ChatMessage) []llm.ChatMessage {
 		hasImage := false
 		for end < len(messages) && messages[end].Role == "tool" {
 			message := messages[end]
-			hasImage = hasImage || ((message.ToolName == visionanalyze.Name || message.ToolName == imagegenerate.Name) && len(message.Images) > 0)
+			hasImage = hasImage || ((isImageInputTool(message.ToolName) || message.ToolName == imagegenerate.Name) && len(message.Images) > 0)
 			end++
 		}
 		if !hasImage || end-i-1 != len(assistant.ToolCalls) {
@@ -64,7 +72,7 @@ func retainedImageToolRounds(messages []llm.ChatMessage) []llm.ChatMessage {
 		assistant.ToolCalls = append([]llm.ToolCall(nil), assistant.ToolCalls...)
 		for j := range assistant.ToolCalls {
 			call := &assistant.ToolCalls[j]
-			if call.Function.Name == visionanalyze.Name || call.Function.Name == imagegenerate.Name {
+			if call.Function.Name == imagegenerate.Name || isImageInputTool(call.Function.Name) {
 				call.Function.Arguments = imageCheckpointArguments(call.Function.Arguments)
 				call.Function.RawArguments = ""
 			}

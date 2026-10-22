@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 )
@@ -48,7 +50,11 @@ type Registry struct {
 	handlers    map[string]Handler
 	policies    map[string]governance.ToolPolicy
 	disabled    map[string]bool
-	log         *config.Logger
+	// closers release profile-scoped resources (browser sessions) at
+	// shutdown; sweepers reap them on the hourly prune tick.
+	closers  []func()
+	sweepers []func(context.Context, time.Time) (prune.Counts, error)
+	log      *config.Logger
 }
 
 // New creates an empty Registry. Register definitions before their handlers.
@@ -103,6 +109,53 @@ func (r *Registry) RegisterHandler(name string, policy governance.ToolPolicy, ha
 	r.policies[name] = policy
 	r.log.Debug("tool.registry.handler_registered", "registered tool handler", config.F("tool_name", name))
 	return nil
+}
+
+// OnClose registers profile-scoped cleanup (browser sessions) run by Close
+// at shutdown, newest first.
+func (r *Registry) OnClose(fn func()) {
+	if fn == nil {
+		return
+	}
+	r.closers = append(r.closers, fn)
+}
+
+// Close releases profile-scoped resources. It never fails; closers must be
+// self-contained because stores may already be closing.
+func (r *Registry) Close() {
+	for i := len(r.closers) - 1; i >= 0; i-- {
+		r.closers[i]()
+	}
+	r.closers = nil
+}
+
+// OnSweep registers an hourly janitor (browser idle sessions) run by Sweep
+// on the profile prune tick.
+func (r *Registry) OnSweep(fn func(context.Context, time.Time) (prune.Counts, error)) {
+	if fn == nil {
+		return
+	}
+	r.sweepers = append(r.sweepers, fn)
+}
+
+// Sweep runs registered janitors, continuing past failures. A nil context
+// sweeps nothing.
+func (r *Registry) Sweep(ctx context.Context, now time.Time) (prune.Counts, error) {
+	var total prune.Counts
+	var firstErr error
+	for _, sweep := range r.sweepers {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		counts, err := sweep(ctx, now)
+		total.RemovedFiles += counts.RemovedFiles
+		total.RemovedDirs += counts.RemovedDirs
+		total.RemovedBytes += counts.RemovedBytes
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return total, firstErr
 }
 
 // LLMTools returns builtins as the []llm.Tool slice passed to ChatRequest.Tools.

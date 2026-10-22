@@ -1,21 +1,24 @@
 package tools
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
+	providerbrowser "github.com/jonahgcarpenter/oswald-ai/internal/providers/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/image_generate/comfy_ui"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/brave"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/web/searxng"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
+	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -23,7 +26,9 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // registerHandlers wires configured builtin handlers and policies into the registry.
@@ -122,6 +127,10 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		}
 	}
 
+	if err := registerBrowserTools(reg, cfg, cache, log); err != nil {
+		return err
+	}
+
 	pm := process.NewManager(cfg.ProfileRoot)
 	cronStore := cron.NewStore(cfg.ProfileRoot)
 	workspaceTools := []struct {
@@ -152,6 +161,135 @@ func toolPolicy(normalize governance.ArgumentNormalizer) governance.ToolPolicy {
 		NormalizeArgs: normalize,
 		History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true},
 	}
+}
+
+// registerBrowserTools wires the local headless browser_* tools. The tools
+// stay reserved but disabled unless the operator configured an endpoint or
+// launch command; Chromium itself is dialed lazily on first navigation.
+// Startup sweeps orphaned session dirs (a fresh process owns no live
+// session); shutdown and the hourly prune tick own the rest.
+func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *imagecache.Cache, log *config.Logger) error {
+	names := toolbrowser.Names()
+	configured := strings.TrimSpace(cfg.BrowserEndpointURL) != "" || strings.TrimSpace(cfg.BrowserLaunchCommand) != ""
+	if !configured {
+		for _, name := range names {
+			if err := reg.DisableBuiltin(name); err != nil {
+				return fmt.Errorf("failed to disable %s tool: %w", name, err)
+			}
+		}
+		log.Server("tool.bootstrap").Debug("tool.bootstrap.disabled", "disabled browser tools because no browser backend is configured", config.F("tool_count", len(names)))
+		return nil
+	}
+	reaped := providerbrowser.SweepStaleProfiles(cfg.ProfileRoot)
+	if reaped > 0 {
+		log.Server("tool.bootstrap").Debug("tool.bootstrap.browser_stale_reaped", "removed orphaned browser session dirs", config.F("reaped_dirs", reaped))
+	}
+	opts := providerbrowser.Options{
+		LaunchCommand:     cfg.BrowserLaunchCommand,
+		EndpointURL:       cfg.BrowserEndpointURL,
+		CommandTimeout:    cfg.BrowserCommandTimeout,
+		SnapshotThreshold: cfg.BrowserSnapshotThreshold,
+		InactivityTimeout: cfg.BrowserInactivityTimeout,
+		RecordSessions:    cfg.BrowserRecordSessions,
+		AllowPrivateURLs:  cfg.BrowserAllowPrivateURLs,
+		AllowInsecureURLs: cfg.BrowserAllowInsecureURLs,
+	}.Effective()
+	backend := providerbrowser.NewLocalBackend(opts, cfg.ProfileRoot)
+	handlers := toolbrowser.NewHandlers(toolbrowser.Deps{Backend: backend, Cache: cache, Log: log})
+	policies := map[string]governance.ToolPolicy{
+		toolbrowser.NavigateName:  toolPolicy(normalizeBrowserNavigateArgs),
+		toolbrowser.SnapshotName:  toolPolicy(normalizeBrowserSnapshotArgs),
+		toolbrowser.ClickName:     toolPolicy(normalizeBrowserRefArgs),
+		toolbrowser.TypeName:      toolPolicy(normalizeBrowserTypeArgs),
+		toolbrowser.ScrollName:    toolPolicy(normalizeBrowserScrollArgs),
+		toolbrowser.BackName:      toolPolicy(normalizeBrowserEmptyArgs),
+		toolbrowser.PressName:     toolPolicy(normalizeBrowserRefArgs),
+		toolbrowser.GetImagesName: toolPolicy(normalizeBrowserEmptyArgs),
+		toolbrowser.ConsoleName:   toolPolicy(normalizeBrowserConsoleArgs),
+		toolbrowser.VisionName: {
+			NormalizeArgs: normalizeBrowserVisionArgs,
+			History:       governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false},
+		},
+	}
+	for _, name := range names {
+		policy, ok := policies[name]
+		if !ok {
+			return fmt.Errorf("missing browser policy for %s", name)
+		}
+		handler, ok := handlers[name]
+		if !ok {
+			return fmt.Errorf("missing browser handler for %s", name)
+		}
+		if err := reg.RegisterHandler(name, policy, registry.Handler(handler)); err != nil {
+			return fmt.Errorf("register %s tool: %w", name, err)
+		}
+	}
+	log.Server("tool.bootstrap").Debug("tool.bootstrap.configured", "configured browser tools", config.F("tool_count", len(names)))
+	reg.OnClose(backend.CloseAll)
+	reg.OnSweep(func(ctx context.Context, now time.Time) (prune.Counts, error) {
+		return prune.Counts{RemovedDirs: backend.Sweep(now)}, nil
+	})
+	return nil
+}
+
+func normalizeBrowserNavigateArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{"url": normalizedString(args, "url", false)}
+}
+
+func normalizeBrowserSnapshotArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{"full": args["full"]}
+}
+
+func normalizeBrowserRefArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"ref", "key"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	return normalized
+}
+
+func normalizeBrowserTypeArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["ref"].(string); ok {
+		normalized["ref"] = strings.Join(strings.Fields(value), " ")
+	}
+	if text, ok := args["text"].(string); ok {
+		sum := sha256.Sum256([]byte(text))
+		normalized["text_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeBrowserScrollArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	if value, ok := args["direction"].(string); ok {
+		normalized["direction"] = strings.Join(strings.Fields(value), " ")
+	}
+	return normalized
+}
+
+func normalizeBrowserEmptyArgs(args map[string]interface{}) interface{} {
+	return map[string]interface{}{}
+}
+
+func normalizeBrowserConsoleArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{"clear": args["clear"]}
+	if expression, ok := args["expression"].(string); ok {
+		sum := sha256.Sum256([]byte(expression))
+		normalized["expression_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
+}
+
+func normalizeBrowserVisionArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{"annotate": args["annotate"]}
+	if question, ok := args["question"].(string); ok {
+		sum := sha256.Sum256([]byte(question))
+		normalized["question_hash"] = hex.EncodeToString(sum[:])
+	}
+	return normalized
 }
 
 func normalizeWebSearchArgs(args map[string]interface{}) interface{} {

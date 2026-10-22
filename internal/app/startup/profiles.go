@@ -136,6 +136,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 	cronStores := make(map[string]*cron.Store)
 	cronRunners := make(map[string]*cron.Runner)
 	var maintenanceStops []func()
+	var shutdownClosers []func()
 	var requestBroker *broker.Broker
 	var gateways []gateway.Service
 	var mcpManagers []*mcp.Manager
@@ -159,6 +160,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			ticker.Stop()
 		}
 		process.StopAll()
+		for _, closeFn := range shutdownClosers {
+			closeFn()
+		}
 		for _, manager := range mcpManagers {
 			if err := manager.Close(); err != nil {
 				log.Warn("app.mcp.close_failed", "failed to close profile MCP sessions", config.ErrorField(err))
@@ -202,6 +206,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		if err != nil {
 			return &Error{Event: "app.tools.init_failed", Message: "failed to initialize profile tools", Cause: err}
 		}
+		shutdownClosers = append(shutdownClosers, registry.Close)
 		client := seams.newClient(profile, rootLog)
 		summarizer, err := compaction.NewSummarizer(client, profile.LLMGatewayModel)
 		if err != nil {
@@ -224,8 +229,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
+		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
 		cleanup.Add(workspace.CacheChildrenHook(profile.ProfileRoot, rootLog, map[string]struct{}{
-			"scratch": {}, "images": {}, "processes": {},
+			"scratch": {}, "images": {}, "processes": {}, "browser-profiles": {},
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)

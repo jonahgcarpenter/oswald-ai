@@ -18,7 +18,6 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
-	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -393,7 +392,7 @@ func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memo
 		compatible := true
 		for _, batch := range prepared[i].ToolHistory.Batches {
 			for _, call := range batch.Calls {
-				imageTool := call.Name == imagegenerate.Name || call.Name == visionanalyze.Name
+				imageTool := call.Name == imagegenerate.Name || isImageInputTool(call.Name)
 				if (!available[call.Name] && !imageTool) || call.ArgumentsTruncated || (call.HistoryMode != "" && call.HistoryMode != string(governance.HistoryFull)) {
 					compatible = false
 				}
@@ -408,7 +407,7 @@ func prepareHistoricalTurns(turns []memory.SessionTurn, tools []llm.Tool) []memo
 		for _, batch := range prepared[i].ToolHistory.Batches {
 			kept := memory.ToolHistoryBatch{AssistantContent: batch.AssistantContent}
 			for _, call := range batch.Calls {
-				if (call.Name == imagegenerate.Name || call.Name == visionanalyze.Name) && !call.ArgumentsTruncated && call.HistoryMode == string(governance.HistoryFull) {
+				if (call.Name == imagegenerate.Name || isImageInputTool(call.Name)) && !call.ArgumentsTruncated && call.HistoryMode == string(governance.HistoryFull) {
 					kept.Calls = append(kept.Calls, call)
 				}
 			}

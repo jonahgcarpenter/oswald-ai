@@ -2,9 +2,13 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -174,5 +178,46 @@ func TestDisableBuiltinRejectsUnknownAndRegisteredTools(t *testing.T) {
 	registerTestTool(t, reg, "test.registered")
 	if err := reg.DisableBuiltin("test.registered"); err == nil {
 		t.Fatal("builtin was disabled after handler registration")
+	}
+}
+
+func TestRegistryCloseRunsLIFOAndClears(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	var order []string
+	reg.OnClose(nil)
+	reg.OnClose(func() { order = append(order, "first") })
+	reg.OnClose(func() { order = append(order, "second") })
+	reg.Close()
+	if len(order) != 2 || order[0] != "second" || order[1] != "first" {
+		t.Fatalf("close order = %v", order)
+	}
+	reg.Close()
+	if len(order) != 2 {
+		t.Fatal("close reran closers")
+	}
+}
+
+func TestRegistrySweepAggregatesAndContinues(t *testing.T) {
+	reg := New(config.NewLogger(config.LevelError))
+	counts, err := reg.Sweep(context.Background(), time.Now())
+	if err != nil || counts != (prune.Counts{}) {
+		t.Fatalf("empty sweep = %+v %v", counts, err)
+	}
+	reg.OnSweep(nil)
+	reg.OnSweep(func(context.Context, time.Time) (prune.Counts, error) {
+		return prune.Counts{RemovedDirs: 2}, nil
+	})
+	sweepErr := errors.New("sweep failed")
+	reg.OnSweep(func(context.Context, time.Time) (prune.Counts, error) {
+		return prune.Counts{RemovedFiles: 1}, sweepErr
+	})
+	counts, err = reg.Sweep(context.Background(), time.Now())
+	if err != sweepErr || counts.RemovedDirs != 2 || counts.RemovedFiles != 1 {
+		t.Fatalf("sweep = %+v %v", counts, err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := reg.Sweep(canceled, time.Now()); err == nil {
+		t.Fatal("canceled sweep succeeded")
 	}
 }

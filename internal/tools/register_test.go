@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -449,4 +450,98 @@ func TestImageGenerateFingerprintScope(t *testing.T) {
 	if fingerprint(map[string]interface{}{"prompt": "a blue car", "image_url": "current-2"}) == fingerprint(map[string]interface{}{"prompt": "a blue car", "image_url": "current-1"}) {
 		t.Fatal("different image sources share fingerprint")
 	}
+}
+
+func TestRegisterBrowserProviderMatrix(t *testing.T) {
+	browserNames := toolbrowser.Names()
+	if len(browserNames) != 10 {
+		t.Fatalf("browser tools = %d, want 10", len(browserNames))
+	}
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		wantShown bool
+	}{
+		{name: "neither", cfg: &config.Config{}, wantShown: false},
+		{name: "whitespace", cfg: &config.Config{BrowserEndpointURL: "  ", BrowserLaunchCommand: "\t"}, wantShown: false},
+		{name: "endpoint", cfg: &config.Config{BrowserEndpointURL: "http://127.0.0.1:9222"}, wantShown: true},
+		{name: "launch", cfg: &config.Config{BrowserLaunchCommand: "chromium"}, wantShown: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.BrowserEndpointURL = test.cfg.BrowserEndpointURL
+			cfg.BrowserLaunchCommand = test.cfg.BrowserLaunchCommand
+			reg := newTestRegistry(t, cfg)
+			for _, toolName := range browserNames {
+				_, shown := visibleTestTool(reg, toolName)
+				if shown != test.wantShown || reg.HasHandler(toolName) != test.wantShown {
+					t.Fatalf("%s shown=%t handler=%t", toolName, shown, reg.HasHandler(toolName))
+				}
+				reserved := false
+				for _, name := range reg.Names() {
+					reserved = reserved || name == toolName
+				}
+				if !reserved {
+					t.Fatalf("%s name was not reserved", toolName)
+				}
+			}
+			if test.wantShown {
+				visionPolicy, ok := reg.Policy(toolbrowser.VisionName)
+				if !ok || visionPolicy.History.Mode != governance.HistoryFull || visionPolicy.History.SearchResult {
+					t.Fatalf("browser_vision history policy = %+v", visionPolicy.History)
+				}
+				navigatePolicy, ok := reg.Policy(toolbrowser.NavigateName)
+				if !ok || !navigatePolicy.History.SearchResult || navigatePolicy.NormalizeArgs == nil {
+					t.Fatalf("browser_navigate policy = %+v", navigatePolicy)
+				}
+			}
+		})
+	}
+}
+
+func TestBrowserFingerprintsHashPayloadText(t *testing.T) {
+	cfg := testConfig()
+	cfg.BrowserEndpointURL = "http://127.0.0.1:9222"
+	reg := newTestRegistry(t, cfg)
+	typePolicy, ok := reg.Policy(toolbrowser.TypeName)
+	if !ok || typePolicy.NormalizeArgs == nil {
+		t.Fatal("missing browser_type normalize policy")
+	}
+	base, err := governance.Fingerprint(toolbrowser.TypeName, map[string]interface{}{"ref": "@e3", "text": "hello"}, typePolicy.NormalizeArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := governance.Fingerprint(toolbrowser.TypeName, map[string]interface{}{"ref": " @e3 ", "text": "hello"}, typePolicy.NormalizeArgs)
+	if err != nil || same != base {
+		t.Fatal("ref whitespace changed fingerprint")
+	}
+	other, err := governance.Fingerprint(toolbrowser.TypeName, map[string]interface{}{"ref": "@e3", "text": "different"}, typePolicy.NormalizeArgs)
+	if err != nil || other == base {
+		t.Fatal("different typed text shares fingerprint")
+	}
+	visionPolicy, ok := reg.Policy(toolbrowser.VisionName)
+	if !ok || visionPolicy.NormalizeArgs == nil {
+		t.Fatal("missing browser_vision normalize policy")
+	}
+	questioned, err := governance.Fingerprint(toolbrowser.VisionName, map[string]interface{}{"question": "what?", "annotate": true}, visionPolicy.NormalizeArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := governance.Fingerprint(toolbrowser.VisionName, map[string]interface{}{"question": "what?"}, visionPolicy.NormalizeArgs)
+	if err != nil || questioned == plain {
+		t.Fatal("annotate did not change vision fingerprint")
+	}
+}
+
+func TestBrowserSweepHookIsNoopWithoutSessions(t *testing.T) {
+	cfg := testConfig()
+	cfg.BrowserEndpointURL = "http://127.0.0.1:9222"
+	reg := newTestRegistry(t, cfg)
+	hook := BrowserSweepHook(reg, config.NewLogger(config.LevelError))
+	counts, err := hook.Sweep(context.Background(), time.Now())
+	if err != nil || counts.RemovedDirs != 0 {
+		t.Fatalf("browser sweep = %+v %v", counts, err)
+	}
+	reg.Close()
 }

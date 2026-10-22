@@ -85,9 +85,20 @@ type imageYAML struct {
 	URL     *string `yaml:"url"`
 	Timeout *string `yaml:"generation_timeout"`
 }
+type browserYAML struct {
+	LaunchCommand     *string `yaml:"launch_command"`
+	EndpointURL       *string `yaml:"endpoint_url"`
+	CommandTimeout    *string `yaml:"command_timeout"`
+	SnapshotThreshold *int    `yaml:"snapshot_threshold"`
+	InactivityTimeout *string `yaml:"inactivity_timeout"`
+	RecordSessions    *bool   `yaml:"record_sessions"`
+	AllowPrivateURLs  *bool   `yaml:"allow_private_urls"`
+	AllowInsecureURLs *bool   `yaml:"allow_insecure_urls"`
+}
 type toolsYAML struct {
-	WebSearch     webYAML   `yaml:"web_search"`
-	ImageGenerate imageYAML `yaml:"image_generate"`
+	WebSearch     webYAML     `yaml:"web_search"`
+	ImageGenerate imageYAML   `yaml:"image_generate"`
+	Browser       browserYAML `yaml:"browser"`
 }
 type platformExtraYAML struct {
 	Token           *string  `yaml:"token"`
@@ -474,7 +485,43 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 			return configErr("config_tool_timeout_invalid", "tools.image_generate.generation_timeout")
 		}
 	}
-	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}} {
+	if doc.Tools.Browser.LaunchCommand != nil {
+		cfg.BrowserLaunchCommand = *doc.Tools.Browser.LaunchCommand
+		if len(cfg.BrowserLaunchCommand) > 1024 || strings.ContainsRune(cfg.BrowserLaunchCommand, 0) {
+			return configErr("config_value_invalid", "tools.browser.launch_command")
+		}
+	}
+	if doc.Tools.Browser.EndpointURL != nil {
+		cfg.BrowserEndpointURL = *doc.Tools.Browser.EndpointURL
+	}
+	if doc.Tools.Browser.CommandTimeout != nil {
+		cfg.BrowserCommandTimeout, err = time.ParseDuration(*doc.Tools.Browser.CommandTimeout)
+		if err != nil || cfg.BrowserCommandTimeout < 5*time.Second || cfg.BrowserCommandTimeout > 10*time.Minute {
+			return configErr("config_tool_timeout_invalid", "tools.browser.command_timeout")
+		}
+	}
+	if doc.Tools.Browser.SnapshotThreshold != nil {
+		cfg.BrowserSnapshotThreshold = *doc.Tools.Browser.SnapshotThreshold
+		if cfg.BrowserSnapshotThreshold < 1000 || cfg.BrowserSnapshotThreshold > 100000 {
+			return configErr("config_value_invalid", "tools.browser.snapshot_threshold")
+		}
+	}
+	if doc.Tools.Browser.InactivityTimeout != nil {
+		cfg.BrowserInactivityTimeout, err = time.ParseDuration(*doc.Tools.Browser.InactivityTimeout)
+		if err != nil || cfg.BrowserInactivityTimeout < 30*time.Second || cfg.BrowserInactivityTimeout > time.Hour {
+			return configErr("config_tool_timeout_invalid", "tools.browser.inactivity_timeout")
+		}
+	}
+	if doc.Tools.Browser.RecordSessions != nil {
+		cfg.BrowserRecordSessions = *doc.Tools.Browser.RecordSessions
+	}
+	if doc.Tools.Browser.AllowPrivateURLs != nil {
+		cfg.BrowserAllowPrivateURLs = *doc.Tools.Browser.AllowPrivateURLs
+	}
+	if doc.Tools.Browser.AllowInsecureURLs != nil {
+		cfg.BrowserAllowInsecureURLs = *doc.Tools.Browser.AllowInsecureURLs
+	}
+	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}, {cfg.BrowserEndpointURL, "tools.browser.endpoint_url"}} {
 		if entry.raw == "" {
 			continue
 		}
@@ -626,7 +673,7 @@ func LoadProfiles(root string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := &Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*Config{}, LogLevel: LevelInfo, ComfyUIGenerationTimeout: 2 * time.Minute, DiscordGroupRequireMention: true, BlueBubblesGroupRequireMention: true}
+	cfg := &Config{ProfileRoot: root, ProfileName: "default", Profiles: map[string]*Config{}, LogLevel: LevelInfo, ComfyUIGenerationTimeout: 2 * time.Minute, BrowserCommandTimeout: 30 * time.Second, BrowserSnapshotThreshold: 15000, BrowserInactivityTimeout: 2 * time.Minute, DiscordGroupRequireMention: true, BlueBubblesGroupRequireMention: true}
 	providers := map[string]providerYAML{}
 	selected := ""
 	if err := applyDocument(cfg, doc, providers, &selected); err != nil {

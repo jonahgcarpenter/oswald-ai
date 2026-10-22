@@ -1,0 +1,217 @@
+package browser
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// launchedBrowser owns a Chromium child process and its DevTools endpoint.
+type launchedBrowser struct {
+	cmd *exec.Cmd
+	dir string
+	url string
+}
+
+// findChromium resolves the browser binary: explicit launch command first,
+// then PATH lookup. Missing installs surface install guidance, never a
+// retry-download loop.
+func findChromium(launchCommand string) (string, []string, error) {
+	if strings.TrimSpace(launchCommand) != "" {
+		fields := strings.Fields(launchCommand)
+		if len(fields) == 0 {
+			return "", nil, fmt.Errorf("invalid browser launch command")
+		}
+		if _, err := exec.LookPath(fields[0]); err != nil {
+			if _, statErr := os.Stat(fields[0]); statErr != nil {
+				return "", nil, fmt.Errorf("browser unavailable: launch command %q not found", fields[0])
+			}
+		}
+		return fields[0], fields[1:], nil
+	}
+	for _, candidate := range []string{"chromium", "chromium-browser", "google-chrome", "google-chrome-stable"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil, nil
+		}
+	}
+	return "", nil, fmt.Errorf("browser unavailable: no Chromium found (tried chromium, chromium-browser, google-chrome); install Chromium or set tools.browser.launch_command")
+}
+
+// launchChromium starts headless Chromium with a private user-data dir and a
+// scrubbed environment, then waits for the DevTools endpoint.
+func launchChromium(ctx context.Context, binary string, extraArgs []string, profileRoot string) (*launchedBrowser, error) {
+	dir, err := sessionDir(profileRoot)
+	if err != nil {
+		return nil, err
+	}
+	port, err := freePort()
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	args := []string{
+		"--headless=new",
+		"--disable-gpu",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-dev-shm-usage",
+		// Bound on-machine disk use: this browser is a stateless page
+		// renderer, not a daily driver; the profile dir is recycled.
+		"--disk-cache-size=67108864",
+		fmt.Sprintf("--remote-debugging-port=%d", port),
+		fmt.Sprintf("--user-data-dir=%s", dir),
+		"about:blank",
+	}
+	args = append(args, extraArgs...)
+	cmd := exec.Command(binary, args...)
+	cmd.Env = scrubBrowserEnv()
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("start browser: %w", err)
+	}
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := waitForEndpoint(ctx, endpoint, cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	return &launchedBrowser{cmd: cmd, dir: dir, url: endpoint}, nil
+}
+
+func waitForEndpoint(ctx context.Context, endpoint string, cmd *exec.Cmd) error {
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return fmt.Errorf("browser exited during startup")
+		}
+		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		targets, err := listTargets(reqCtx, endpoint)
+		cancel()
+		if err == nil && len(targets) > 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("browser debugger did not respond at %s", endpoint)
+}
+
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("allocate browser port: %w", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// sessionBaseDir owns per-session Chromium user-data dirs below the profile
+// cache, so the prune worker (not the profile root) owns their lifecycle.
+func sessionBaseDir(profileRoot string) string {
+	return filepath.Join(profileRoot, "cache", "browser-profiles")
+}
+
+// sessionDir provisions one owner-only session directory as
+// cache/browser-profiles/<id>.
+func sessionDir(profileRoot string) (string, error) {
+	base := sessionBaseDir(profileRoot)
+	if err := os.MkdirAll(base, 0700); err != nil {
+		return "", fmt.Errorf("create browser profile base: %w", err)
+	}
+	for range 5 {
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return "", fmt.Errorf("create browser profile id: %w", err)
+		}
+		dir := filepath.Join(base, hex.EncodeToString(id[:]))
+		if err := os.Mkdir(dir, 0700); err == nil {
+			return dir, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("create browser profile dir: %w", err)
+		}
+	}
+	return "", fmt.Errorf("create browser profile dir: too many collisions")
+}
+
+// SweepStaleProfiles removes orphaned Chromium user-data dirs: legacy
+// oswald-browser-* entries at the profile root (predating cache placement)
+// and every child of cache/browser-profiles. Call at process start, when no
+// live session can exist in this process. Best-effort; missing roots are a
+// no-op. It returns the number of removed directories.
+func SweepStaleProfiles(profileRoot string) int {
+	reaped := 0
+	if strings.TrimSpace(profileRoot) != "" {
+		entries, err := os.ReadDir(profileRoot)
+		if err == nil {
+			for _, e := range entries {
+				name := e.Name()
+				if !strings.HasPrefix(name, "oswald-browser-") || !e.IsDir() {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(profileRoot, name)); err == nil {
+					reaped++
+				}
+			}
+		}
+		base := sessionBaseDir(profileRoot)
+		entries, err = os.ReadDir(base)
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(base, e.Name())); err == nil {
+					reaped++
+				}
+			}
+		}
+	}
+	return reaped
+}
+
+// scrubBrowserEnv keeps a minimal environment: sane PATH/HOME/TMPDIR plus
+// loopback proxy bypass. Only browser backend configuration flows through
+// options, never ambient secrets.
+func scrubBrowserEnv() []string {
+	keep := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "LC_ALL": true}
+	out := make([]string, 0, len(keep)+2)
+	for _, kv := range os.Environ() {
+		if idx := strings.IndexByte(kv, '='); idx > 0 {
+			if keep[kv[:idx]] {
+				out = append(out, kv)
+			}
+		}
+	}
+	out = append(out, "NO_PROXY=localhost,127.0.0.1,::1")
+	out = append(out, "no_proxy=localhost,127.0.0.1,::1")
+	if !hasPath(out) {
+		out = append(out, "PATH=/usr/bin:/bin:/usr/local/bin")
+	}
+	return out
+}
+
+func hasPath(env []string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			return true
+		}
+	}
+	return false
+}
