@@ -234,6 +234,7 @@ tools:
     record_sessions: false
     allow_private_urls: false
     allow_insecure_urls: false
+    restrict_evaluate: false
 # MCP connections are isolated by profile and opened lazily; restart to reload.
 # Each server sets exactly one of url (HTTP) or command (stdio).
 mcp_servers:

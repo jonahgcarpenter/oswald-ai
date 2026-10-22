@@ -105,22 +105,6 @@ func VaultEnterCodeDefinition() llm.ToolDefinition {
 	}
 }
 
-// vaultLogFields builds the per-call agent log context for vault tools.
-func vaultLog(deps Deps, ctx context.Context, name string) (*config.Logger, func(string, string, int), time.Time) {
-	started := time.Now()
-	meta := requestctx.MetadataFromContext(ctx)
-	principal, _ := requestctx.PrincipalFromContext(ctx)
-	agentLog := deps.Log.Agent("agent.tool.browser.vault."+strings.TrimPrefix(name, "browser_vault_"), meta.RequestID, principal.CanonicalUserID, principal.Gateway, meta.Model).With(requestctx.LogFields(ctx)...)
-	completed := func(status, outcome string, itemCount int) {
-		agentLog.Debug("agent.tool.browser.vault.complete", "browser vault completed",
-			config.F("tool_name", name), config.F("status", status), config.F("outcome", outcome),
-			config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
-	}
-	return agentLog, completed, started
-}
-
-// plainString unwraps the double-encoded string form the eval transport
-// returns, tolerating the already-plain form.
 func plainString(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if strings.HasPrefix(trimmed, `"`) {
@@ -159,7 +143,15 @@ func vaultPageOrigin(deps Deps, ctx context.Context, profile string) (string, er
 
 func vaultListHandler(deps Deps) registry.Handler {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-		_, completed, _ := vaultLog(deps, ctx, VaultListName)
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_list", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_list.complete", "browser vault list completed",
+				config.F("tool_name", VaultListName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
 		if err := ctx.Err(); err != nil {
 			completed("error", "error", 0)
 			return governance.Result{}, err
@@ -207,7 +199,15 @@ func vaultListHandler(deps Deps) registry.Handler {
 
 func vaultFillHandler(deps Deps) registry.Handler {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-		_, completed, _ := vaultLog(deps, ctx, VaultFillName)
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_fill", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_fill.complete", "browser vault fill completed",
+				config.F("tool_name", VaultFillName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
 		fail := func(err error) (governance.Result, error) {
 			completed("error", "error", 0)
 			return governance.Result{}, err
@@ -344,7 +344,15 @@ func vaultFillAddress(deps Deps, ctx context.Context, profile, pageOrigin string
 
 func vaultSaveLoginHandler(deps Deps) registry.Handler {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-		_, completed, _ := vaultLog(deps, ctx, VaultSaveLoginName)
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_save_login", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_save_login.complete", "browser vault save login completed",
+				config.F("tool_name", VaultSaveLoginName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
 		if err := ctx.Err(); err != nil {
 			completed("error", "error", 0)
 			return governance.Result{}, err
@@ -375,7 +383,15 @@ func vaultSaveLoginHandler(deps Deps) registry.Handler {
 
 func vaultEnterCodeHandler(deps Deps) registry.Handler {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-		_, completed, _ := vaultLog(deps, ctx, VaultEnterCodeName)
+		started := time.Now()
+		reqMeta := requestctx.MetadataFromContext(ctx)
+		principal, _ := requestctx.PrincipalFromContext(ctx)
+		agentLog := deps.Log.Agent("agent.tool.browser.vault_enter_code", reqMeta.RequestID, principal.CanonicalUserID, principal.Gateway, reqMeta.Model).With(requestctx.LogFields(ctx)...)
+		completed := func(status, outcome string, itemCount int) {
+			agentLog.Debug("agent.tool.browser.vault_enter_code.complete", "browser vault enter code completed",
+				config.F("tool_name", VaultEnterCodeName), config.F("status", status), config.F("outcome", outcome),
+				config.F("item_count", itemCount), config.F("duration_ms", time.Since(started).Milliseconds()))
+		}
 		fail := func(err error) (governance.Result, error) {
 			completed("error", "error", 0)
 			return governance.Result{}, err
