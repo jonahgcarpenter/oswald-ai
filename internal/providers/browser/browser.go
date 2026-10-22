@@ -30,6 +30,12 @@ type Options struct {
 	// AllowInsecureURLs permits plaintext http page loads. Default false
 	// (https only); other schemes stay blocked regardless.
 	AllowInsecureURLs bool
+	// RestrictEvaluate opts into the sensitive-primitive eval denylist
+	// (cookie/storage reads, network emission, form-value extraction).
+	// Default false: the denylist gates on primitive names and would also
+	// block legitimate DOM extraction. Private-destination egress stays
+	// gated in Eval regardless of this flag.
+	RestrictEvaluate bool
 }
 
 // Effective returns Options with defaults and floors applied.

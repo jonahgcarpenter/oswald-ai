@@ -3,7 +3,7 @@ package browser
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"image/draw"
 	_ "image/png"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -324,7 +325,7 @@ func (b *LocalBackend) CloseAll() {
 }
 
 func sweepSnapshotSpills(profileRoot string, now time.Time) int {
-	dir := filepath.Join(profileRoot, "cache", "browser-snapshots")
+	dir := filepath.Join(profileRoot, "cache", "scratch", "browser-snapshots")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
@@ -422,7 +423,7 @@ func (b *LocalBackend) Snapshot(ctx context.Context, profile string, full bool) 
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return SnapshotData{}, err
 	}
 	sess.mu.Lock()
@@ -444,6 +445,8 @@ func (b *LocalBackend) Snapshot(ctx context.Context, profile string, full bool) 
 	if spillErr != nil {
 		return SnapshotData{Snapshot: truncated, ElementCount: len(elements), Truncated: true}, nil
 	}
+	nextLine := strings.Count(truncated, "\n") + 1
+	truncated += fmt.Sprintf("\n[... full snapshot: read_file path=%q offset=%d limit=200]", path, nextLine)
 	return SnapshotData{Snapshot: truncated, ElementCount: len(elements), Truncated: true, Path: path}, nil
 }
 
@@ -457,7 +460,7 @@ func (b *LocalBackend) Click(ctx context.Context, profile, ref string) (Snapshot
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, true); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return SnapshotData{}, err
 	}
 	sess.mu.Lock()
@@ -493,7 +496,7 @@ func (b *LocalBackend) Fill(ctx context.Context, profile, ref, text string) (Sna
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, true); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return SnapshotData{}, err
 	}
 	sess.mu.Lock()
@@ -526,7 +529,7 @@ func (b *LocalBackend) Scroll(ctx context.Context, profile, direction string) (S
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return SnapshotData{}, err
 	}
 	delta := 500
@@ -600,7 +603,7 @@ func (b *LocalBackend) Press(ctx context.Context, profile, key string) (Snapshot
 	if err != nil {
 		return SnapshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, true); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return SnapshotData{}, err
 	}
 	sess.mu.Lock()
@@ -626,7 +629,7 @@ func (b *LocalBackend) Console(ctx context.Context, profile string, clear bool) 
 	if err != nil {
 		return ConsoleData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return ConsoleData{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -665,11 +668,16 @@ func (b *LocalBackend) Eval(ctx context.Context, profile, expression string) (Ev
 	if blockedEvalLiteral(trimmed, b.opts.AllowPrivateURLs) {
 		return EvalData{}, fmt.Errorf("expression targets a blocked URL")
 	}
+	if b.opts.RestrictEvaluate {
+		if reason := sensitiveEvalReason(trimmed); reason != "" {
+			return EvalData{}, fmt.Errorf("expression uses a sensitive browser primitive (%s) blocked by restrict_evaluate; use browser_snapshot or browser_console without expression for normal inspection", reason)
+		}
+	}
 	sess, err := b.existing(profile)
 	if err != nil {
 		return EvalData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return EvalData{}, err
 	}
 	sess.mu.Lock()
@@ -706,7 +714,7 @@ func (b *LocalBackend) Images(ctx context.Context, profile string) (ImagesData, 
 	if err != nil {
 		return ImagesData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return ImagesData{}, err
 	}
 	sess.mu.Lock()
@@ -735,7 +743,7 @@ func (b *LocalBackend) Screenshot(ctx context.Context, profile string, annotate 
 	if err != nil {
 		return ScreenshotData{}, err
 	}
-	if err := b.guardCurrentURL(sess, false); err != nil {
+	if err := b.guardCurrentURL(ctx, profile, sess); err != nil {
 		return ScreenshotData{}, err
 	}
 	sess.mu.Lock()
@@ -761,20 +769,53 @@ func (b *LocalBackend) Screenshot(ctx context.Context, profile string, annotate 
 	return ScreenshotData{PNG: overlayBoxes(png, boxes, viewport)}, nil
 }
 
-// guardCurrentURL enforces read/input guards on the stored page URL.
-// Fail-open only when the probe itself is unusable (empty URL).
-func (b *LocalBackend) guardCurrentURL(sess *browserSession, isInput bool) error {
+// guardCurrentURL enforces read/input guards on the live page URL. The stored
+// URL is checked first; the live location.href is then probed so an eval
+// that moved the page to a private address cannot be read from afterwards.
+// The probe fails open only when the probe itself is unusable (empty
+// result); a confirmed private page is parked on about:blank and the
+// session recycled so later calls cannot read internal content.
+func (b *LocalBackend) guardCurrentURL(ctx context.Context, profile string, sess *browserSession) error {
 	sess.mu.Lock()
 	current := sess.currentURL
+	pt := sess.transport
 	sess.mu.Unlock()
 	if strings.TrimSpace(current) == "" {
 		return nil
 	}
-	_ = isInput
 	if err := CheckFinalURL(current, b.opts.AllowPrivateURLs, b.opts.AllowInsecureURLs); err != nil {
+		b.parkBlocked(profile, sess, pt)
+		return err
+	}
+	if pt == nil {
+		return nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	live, err := pt.Evaluate(probeCtx, "location.href")
+	if err != nil {
+		return nil
+	}
+	live = trimQuotes(strings.TrimSpace(live))
+	if live == "" || live == current {
+		return nil
+	}
+	if err := CheckFinalURL(live, b.opts.AllowPrivateURLs, b.opts.AllowInsecureURLs); err != nil {
+		b.parkBlocked(profile, sess, pt)
 		return err
 	}
 	return nil
+}
+
+// parkBlocked moves a blocked page to about:blank and drops the session so
+// no later call can read the internal content it navigated to.
+func (b *LocalBackend) parkBlocked(profile string, sess *browserSession, pt pageTransport) {
+	if pt != nil {
+		blankCtx, blankCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = pt.Blank(blankCtx)
+		blankCancel()
+	}
+	b.recycle(profile, sess)
 }
 
 func (b *LocalBackend) refreshElements(ctx context.Context, sess *browserSession, pt pageTransport) ([]Element, string) {
@@ -903,15 +944,15 @@ func spillSnapshot(profileRoot, content string) (string, error) {
 	if len(content) > fullSnapshotCap {
 		content = content[:fullSnapshotCap]
 	}
-	dir := filepath.Join(profileRoot, "cache", "browser-snapshots")
+	dir := filepath.Join(profileRoot, "cache", "scratch", "browser-snapshots")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, hex.EncodeToString(id[:])+".txt")
+	// The content hash names the file so identical snapshots dedupe to one
+	// spill. Scratch is model-readable through read_file, so the truncation
+	// note can point the model at the full tree for paging.
+	sum := sha256.Sum256([]byte(content))
+	path := filepath.Join(dir, "browser-snapshot-"+hex.EncodeToString(sum[:])[:16]+".txt")
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return "", err
 	}
@@ -944,22 +985,32 @@ func validateFillText(text string) error {
 	return nil
 }
 
-// blockedEvalLiteral pre-scans for direct fetches of private targets.
+// jsURLLiteralRE finds URL-shaped literals in JS expressions. Fetch/XHR
+// calls and bare string navigations alike land here; a private-host fetch
+// never updates location.href, so the post-eval page-URL recheck cannot see
+// it and the literals are pre-screened instead.
+var jsURLLiteralRE = regexp.MustCompile(`(?i)https?://[^\s'"` + "`" + `)\]<>]+`)
+
+// blockedEvalLiteral pre-scans for private/metadata destinations embedded in
+// a JS expression. Fail-open only via allowPrivate.
 func blockedEvalLiteral(expr string, allowPrivate bool) bool {
 	if allowPrivate {
 		return false
 	}
-	lowered := strings.ToLower(expr)
-	if !strings.Contains(lowered, "fetch(") && !strings.Contains(lowered, "xmlhttprequest") {
-		return false
-	}
-	for host := range cloudMetadataHosts {
-		if strings.Contains(lowered, host) {
+	for _, lit := range jsURLLiteralRE.FindAllString(expr, -1) {
+		lit = strings.TrimRight(lit, ".,;")
+		parsed, err := url.Parse(lit)
+		if err != nil || parsed.Host == "" {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+		if host == "" {
+			continue
+		}
+		if cloudMetadataHosts[host] || cloudMetadataHosts[strings.ToLower(strings.TrimSuffix(parsed.Host, "."))] {
 			return true
 		}
-	}
-	for _, token := range []string{"127.0.0.1", "localhost", "10.", "192.168.", "172.16."} {
-		if strings.Contains(lowered, token) {
+		if blocked, _ := isPrivateDestination(host); blocked {
 			return true
 		}
 	}

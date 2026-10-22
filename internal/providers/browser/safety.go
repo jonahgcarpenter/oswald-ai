@@ -65,6 +65,75 @@ var cloudMetadataHosts = map[string]bool{
 	"192.0.0.192":              true,
 }
 
+// sensitiveEvalPatterns gates risky primitives by name: cookie and storage
+// reads, network emission, and form-value extraction. It blocks names, not
+// actual exfiltration, so legitimate DOM reads can trip it; it stays behind
+// the restrict_evaluate opt-in while private-destination egress stays gated
+// separately in Eval regardless of the flag.
+var sensitiveEvalPatterns = []struct {
+	re     *regexp.Regexp
+	reason string
+}{
+	{regexp.MustCompile(`(?i)\bdocument\s*\.\s*cookie\b`), "document.cookie"},
+	{regexp.MustCompile(`(?i)\b(?:localStorage|sessionStorage)\b`), "web storage"},
+	{regexp.MustCompile(`(?i)\bindexedDB\b`), "IndexedDB"},
+	{regexp.MustCompile(`(?i)\bcaches\s*\.\s*(?:open|match|keys)\b`), "Cache Storage"},
+	{regexp.MustCompile(`(?i)\bnavigator\s*\.\s*(?:clipboard|credentials|serviceWorker)\b`), "navigator sensitive API"},
+	{regexp.MustCompile(`(?i)\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(`), "network request"},
+	{regexp.MustCompile(`(?i)\bnavigator\s*\.\s*sendBeacon\s*\(`), "network beacon"},
+	{regexp.MustCompile(`(?is)\bdocument\s*\.\s*forms\b.*\bvalue\b`), "form value extraction"},
+	{regexp.MustCompile(`(?is)\bquerySelector(?:All)?\s*\([^)]*(?:input|textarea|password)[^)]*\).*\bvalue\b`), "form value extraction"},
+}
+
+// sensitiveEvalTokens catches quoted spellings (document["cookie"],
+// globalThis["fetch"]) by matching string literals as well as direct
+// spellings.
+var sensitiveEvalTokens = []struct {
+	token  string
+	reason string
+}{
+	{"cookie", "document.cookie"},
+	{"localstorage", "web storage"},
+	{"sessionstorage", "web storage"},
+	{"indexeddb", "IndexedDB"},
+	{"caches", "Cache Storage"},
+	{"clipboard", "navigator sensitive API"},
+	{"credentials", "navigator sensitive API"},
+	{"serviceworker", "navigator sensitive API"},
+	{"fetch", "network request"},
+	{"xmlhttprequest", "network request"},
+	{"websocket", "network request"},
+	{"eventsource", "network request"},
+	{"sendbeacon", "network beacon"},
+}
+
+var jsStringLiteralRE = regexp.MustCompile(`'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|` + "`(?:\\.|[^`\\\\])*`")
+
+// sensitiveEvalReason returns why an expression trips the sensitive-primitive
+// denylist, or empty when it does not.
+func sensitiveEvalReason(expr string) string {
+	if expr == "" {
+		return ""
+	}
+	for _, p := range sensitiveEvalPatterns {
+		if p.re.MatchString(expr) {
+			return p.reason
+		}
+	}
+	lowered := strings.ToLower(expr)
+	var literals strings.Builder
+	for _, m := range jsStringLiteralRE.FindAllString(expr, -1) {
+		literals.WriteString(strings.ToLower(m))
+	}
+	lit := literals.String()
+	for _, t := range sensitiveEvalTokens {
+		if strings.Contains(lowered, t.token) || strings.Contains(lit, t.token) {
+			return t.reason
+		}
+	}
+	return ""
+}
+
 // RedactSecrets replaces fixed-shape credential material. It is pattern-based,
 // not a secret detector; callers must still avoid logging page content.
 func RedactSecrets(s string) string {

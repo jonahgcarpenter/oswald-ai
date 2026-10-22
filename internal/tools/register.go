@@ -193,6 +193,7 @@ func registerBrowserTools(reg *registry.Registry, cfg *config.Config, cache *ima
 		RecordSessions:    cfg.BrowserRecordSessions,
 		AllowPrivateURLs:  cfg.BrowserAllowPrivateURLs,
 		AllowInsecureURLs: cfg.BrowserAllowInsecureURLs,
+		RestrictEvaluate:  cfg.BrowserRestrictEvaluate,
 	}.Effective()
 	backend := providerbrowser.NewLocalBackend(opts, cfg.ProfileRoot)
 	handlers := toolbrowser.NewHandlers(toolbrowser.Deps{Backend: backend, Cache: cache, Log: log})

@@ -94,6 +94,7 @@ type browserYAML struct {
 	RecordSessions    *bool   `yaml:"record_sessions"`
 	AllowPrivateURLs  *bool   `yaml:"allow_private_urls"`
 	AllowInsecureURLs *bool   `yaml:"allow_insecure_urls"`
+	RestrictEvaluate  *bool   `yaml:"restrict_evaluate"`
 }
 type toolsYAML struct {
 	WebSearch     webYAML     `yaml:"web_search"`
@@ -520,6 +521,9 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	}
 	if doc.Tools.Browser.AllowInsecureURLs != nil {
 		cfg.BrowserAllowInsecureURLs = *doc.Tools.Browser.AllowInsecureURLs
+	}
+	if doc.Tools.Browser.RestrictEvaluate != nil {
+		cfg.BrowserRestrictEvaluate = *doc.Tools.Browser.RestrictEvaluate
 	}
 	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}, {cfg.BrowserEndpointURL, "tools.browser.endpoint_url"}} {
 		if entry.raw == "" {

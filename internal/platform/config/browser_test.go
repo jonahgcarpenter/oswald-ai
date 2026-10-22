@@ -42,15 +42,18 @@ func TestBrowserConfigDefaults(t *testing.T) {
 	if cfg.BrowserRecordSessions || cfg.BrowserAllowPrivateURLs || cfg.BrowserAllowInsecureURLs {
 		t.Fatal("browser safety defaults must be fail-closed")
 	}
+	if cfg.BrowserRestrictEvaluate {
+		t.Fatal("restrict_evaluate default must be off")
+	}
 }
 
 func TestBrowserConfigParses(t *testing.T) {
-	root := browserConfigFixture(t, "  browser:\n    endpoint_url: \"http://127.0.0.1:9222\"\n    command_timeout: 45s\n    snapshot_threshold: 20000\n    inactivity_timeout: 5m\n    record_sessions: true\n    allow_private_urls: true\n    allow_insecure_urls: true\n    launch_command: \"chromium --no-sandbox\"\n")
+	root := browserConfigFixture(t, "  browser:\n    endpoint_url: \"http://127.0.0.1:9222\"\n    command_timeout: 45s\n    snapshot_threshold: 20000\n    inactivity_timeout: 5m\n    record_sessions: true\n    allow_private_urls: true\n    allow_insecure_urls: true\n    restrict_evaluate: true\n    launch_command: \"chromium --no-sandbox\"\n")
 	cfg, err := LoadProfiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BrowserEndpointURL != "http://127.0.0.1:9222" || cfg.BrowserCommandTimeout != 45*time.Second || cfg.BrowserSnapshotThreshold != 20000 || cfg.BrowserInactivityTimeout != 5*time.Minute || !cfg.BrowserRecordSessions || !cfg.BrowserAllowPrivateURLs || !cfg.BrowserAllowInsecureURLs || cfg.BrowserLaunchCommand != "chromium --no-sandbox" {
+	if cfg.BrowserEndpointURL != "http://127.0.0.1:9222" || cfg.BrowserCommandTimeout != 45*time.Second || cfg.BrowserSnapshotThreshold != 20000 || cfg.BrowserInactivityTimeout != 5*time.Minute || !cfg.BrowserRecordSessions || !cfg.BrowserAllowPrivateURLs || !cfg.BrowserAllowInsecureURLs || !cfg.BrowserRestrictEvaluate || cfg.BrowserLaunchCommand != "chromium --no-sandbox" {
 		t.Fatalf("browser config = %+v", cfg)
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +205,94 @@ func TestSnapshotFailureMarksSuspect(t *testing.T) {
 	}
 }
 
+func TestRestrictEvaluateDenylist(t *testing.T) {
+	page := &fakePage{title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG()}
+	newBackend := func(restrict bool) *LocalBackend {
+		opts := (Options{RestrictEvaluate: restrict}).Effective()
+		return NewLocalBackendWithDial(opts, "", func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+			return page, nil, nil
+		})
+	}
+	ctx := context.Background()
+	open := newBackend(false)
+	if _, err := open.Navigate(ctx, "alice", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := open.Eval(ctx, "alice", "document.cookie"); err != nil {
+		t.Fatalf("unrestricted eval blocked: %v", err)
+	}
+	locked := newBackend(true)
+	if _, err := locked.Navigate(ctx, "alice", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := locked.Eval(ctx, "alice", "document.cookie"); err == nil {
+		t.Fatal("restricted eval allowed document.cookie")
+	} else if !strings.Contains(err.Error(), "restrict_evaluate") {
+		t.Fatalf("denylist error = %v", err)
+	}
+	if _, err := locked.Eval(ctx, "alice", "document.title"); err != nil {
+		t.Fatalf("restricted eval blocked benign expression: %v", err)
+	}
+}
+
+func TestLiveProbeParksPrivatePage(t *testing.T) {
+	page := &fakePage{title: "Example", elements: `[{"ref":"@e1","role":"link","name":"Home"}]`, text: `"hello"`, images: `[]`, png: samplePNG()}
+	b := testBackend(map[string]*fakePage{"alice": page})
+	ctx := context.Background()
+	if _, err := b.Navigate(ctx, "alice", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	// An eval that moves the page to a private address must not be readable.
+	page.url = "http://127.0.0.1/evil"
+	if _, err := b.Snapshot(ctx, "alice", false); err == nil {
+		t.Fatal("snapshot on privately-navigated page succeeded")
+	}
+	if _, err := b.Snapshot(ctx, "alice", false); err == nil {
+		t.Fatal("snapshot after park succeeded")
+	} else if !strings.Contains(err.Error(), "browser_navigate") {
+		t.Fatalf("park error = %v", err)
+	}
+}
+
+func TestSpillIsHashedUnderScratch(t *testing.T) {
+	root := t.TempDir()
+	first, err := spillSnapshot(root, "snapshot content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := spillSnapshot(root, "snapshot content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("identical snapshots spilled twice: %q vs %q", first, second)
+	}
+	if !strings.Contains(first, filepath.Join("cache", "scratch", "browser-snapshots")) {
+		t.Fatalf("spill not under scratch: %q", first)
+	}
+	other, err := spillSnapshot(root, "different content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other == first {
+		t.Fatal("distinct snapshots shared a spill file")
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(first, old, old); err != nil {
+		t.Fatal(err)
+	}
+	b := NewLocalBackend((Options{}).Effective(), root)
+	if got := b.Sweep(time.Now()); got < 1 {
+		t.Fatalf("spill sweep reaped %d", got)
+	}
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Fatal("old spill survived sweep")
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("fresh spill was reaped")
+	}
+}
+
 func TestSuspectRecycleAndSweep(t *testing.T) {
 	b := testBackend(nil)
 	ctx := context.Background()
@@ -222,5 +312,44 @@ func TestSuspectRecycleAndSweep(t *testing.T) {
 	b.mu.Unlock()
 	if got := b.Sweep(time.Now()); got < 1 {
 		t.Fatalf("sweep reaped %d", got)
+	}
+}
+
+func TestSnapshotTruncationPointsAtReadFile(t *testing.T) {
+	var items strings.Builder
+	items.WriteString("[")
+	for i := 1; i <= 30; i++ {
+		if i > 1 {
+			items.WriteString(",")
+		}
+		fmt.Fprintf(&items, `{"ref":"@e%d","role":"link","name":"%s"}`, i, strings.Repeat("n", 100))
+	}
+	items.WriteString("]")
+	root := t.TempDir()
+	opts := Options{SnapshotThreshold: 1000}.Effective()
+	page := &fakePage{title: "Example", elements: items.String(), text: `"hello"`, images: `[]`, png: samplePNG()}
+	b := NewLocalBackendWithDial(opts, root, func(_ context.Context, sess *browserSession) (pageTransport, *launchedBrowser, error) {
+		return page, nil, nil
+	})
+	ctx := context.Background()
+	if _, err := b.Navigate(ctx, "alice", "https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := b.Snapshot(ctx, "alice", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Truncated || snap.Path == "" {
+		t.Fatalf("oversized snapshot not spilled: %+v", len(snap.Snapshot))
+	}
+	if !strings.Contains(snap.Snapshot, "read_file path=") {
+		t.Fatalf("truncation note lacks read_file pointer: %q", snap.Snapshot[len(snap.Snapshot)-200:])
+	}
+	stored, err := os.ReadFile(snap.Path)
+	if err != nil {
+		t.Fatalf("spill unreadable at %q: %v", snap.Path, err)
+	}
+	if !strings.Contains(string(stored), "@e30") {
+		t.Fatal("spill is missing tail elements")
 	}
 }

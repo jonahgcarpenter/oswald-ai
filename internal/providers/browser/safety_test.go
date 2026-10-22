@@ -107,3 +107,55 @@ func TestValidateNavigateURL(t *testing.T) {
 		t.Fatal("redaction did not fire")
 	}
 }
+
+func TestBlockedEvalLiteralScansAllURLs(t *testing.T) {
+	for _, expr := range []string{
+		`fetch("http://169.254.169.254/latest/meta-data")`,
+		`await (await fetch("https://metadata.google.internal/")).text()`,
+		`location.href = "http://127.0.0.1:3000/admin"`,
+		`var u = "http://localhost:8080/x"; fetch(u)`,
+		`fetch("http://10.0.0.5/")`,
+	} {
+		if !blockedEvalLiteral(expr, false) {
+			t.Fatalf("allowed private-URL expression %q", expr)
+		}
+	}
+	for _, expr := range []string{
+		`document.title`,
+		`document.querySelectorAll("a").length`,
+		`fetch("https://example.com/api")`,
+	} {
+		if blockedEvalLiteral(expr, false) {
+			t.Fatalf("blocked benign expression %q", expr)
+		}
+	}
+	if blockedEvalLiteral(`fetch("http://127.0.0.1/")`, true) {
+		t.Fatal("allowPrivate did not bypass literal scan")
+	}
+}
+
+func TestSensitiveEvalReason(t *testing.T) {
+	for _, expr := range []string{
+		`document.cookie`,
+		`document["cookie"]`,
+		`localStorage.getItem("k")`,
+		`fetch("/api")`,
+		`new WebSocket("wss://example.com")`,
+		`document.querySelector("input[name=email]").value`,
+		`document.forms[0].value`,
+	} {
+		if reason := sensitiveEvalReason(expr); reason == "" {
+			t.Fatalf("denylist missed %q", expr)
+		}
+	}
+	for _, expr := range []string{
+		`document.title`,
+		`document.querySelectorAll("a").length`,
+		`window.scrollY`,
+		``,
+	} {
+		if reason := sensitiveEvalReason(expr); reason != "" {
+			t.Fatalf("denylist hit benign %q: %s", expr, reason)
+		}
+	}
+}

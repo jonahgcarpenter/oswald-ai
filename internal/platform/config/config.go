@@ -50,7 +50,12 @@ type Config struct {
 	// BrowserAllowInsecureURLs opts into plaintext http page loads. Default
 	// false (https only). Other schemes stay blocked regardless.
 	BrowserAllowInsecureURLs bool
-	LogLevel                 Level
+	// BrowserRestrictEvaluate opts into the sensitive-primitive eval
+	// denylist (cookie/storage reads, network emission, form-value
+	// extraction). Default false: the denylist gates on primitive names
+	// and also blocks legitimate DOM extraction.
+	BrowserRestrictEvaluate bool
+	LogLevel                Level
 }
 
 // RetentionPolicy supplies code-owned worker bounds.
