@@ -81,17 +81,18 @@ oswald-ai/
 ├── internal/agent/        # iterative foreground loop: context, streaming, tools/history, images, retries
 ├── internal/broker/       # FIFO conversation lanes, profile fences, bounded admission
 ├── internal/session/      # memory (sessions/delivery/history) + compaction (+budget) + soul (policy)
-├── internal/tools/        # builtin registry/governance/exposure + tool groups (memory, search, web, vision, image)
+├── internal/tools/        # builtin registry/governance/exposure + tool groups (memory, search, web, vision, image, browser)
+├── internal/vault/         # profile-scoped encrypted credential store for browser autofill
 ├── internal/workspace/    # workspace file/shell tools + process (tracked background processes)
 ├── internal/transport/    # gateway (discord, imessage, openai + routing/runtime) + media (normalize/cache)
-├── internal/providers/    # llm (model contract) + web (brave/searxng) + image_generate (comfy_ui)
+├── internal/providers/    # llm (model contract) + web (brave/searxng) + image_generate (comfy_ui) + browser (local headless CDP)
 ├── internal/mcp/          # profile-configured bridge (tool_search/describe/call), OAuth, projection
 └── internal/platform/     # config + database (state.db) + profiles/identity/approvals + cron +
                            # requestctx/lease/prune (narrow shared contracts)
 ```
 
 **User state:** `.oswald/` (default/global root: `config.yaml`, private `.env`, `SOUL.md`, `memories/`,
-`cache/`, `state.db`); named profiles at `.oswald/profiles/<name>/`. `oswald setup` seeds missing
+`cache/`, `vault/`, `state.db`); named profiles at `.oswald/profiles/<name>/`. `oswald setup` seeds missing
 entries only and never overwrites; `oswald profile create/delete` provisions/removes one subtree.
 
 ### Responsibility-file layout

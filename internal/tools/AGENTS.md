@@ -6,14 +6,15 @@ Applies on top of the root `AGENTS.md` (never-rename-the-outside-world and never
 
 `bootstrap.go` builds `BuiltinDefinitions()` and the config-driven registry
 (`NewRegistryWithImageCache`, disabling `image_generate` without ComfyUI, `web_search` without a
-backend, `session_search` without a store). `register.go` wires handlers, policies, and argument
+backend, `browser_*`/`browser_vault_*` without an endpoint or launch command,
+`session_search` without a store). `register.go` wires handlers, policies, and argument
 normalizers. `registry/` holds definitions, handlers, policies, and per-visibility catalogs;
 `governance/` owns the global caps (50 handler executions, 30 tool-bearing responses per request)
 plus the warn/block/halt ladders and result-text framing; `exposure/` computes request-local
 visibility; `output/` strips ANSI and redacts secrets (`bearer`, api keys, `sk-`, `ghp_`,
 `github_pat_`, `xox[baprs]-`). `toolsets.go` bundles code-owned sets — `core` (memory, search,
-web, vision, image, plus file tools), `terminal`, `code_execution`, `cronjob` — which gateways map
-to and the API intersects with caller `named`/`allowed_tools`.
+web, vision, image, browser, vault, plus file tools), `terminal`, `code_execution`, `cronjob` —
+which gateways map to and the API intersects with caller `named`/`allowed_tools`.
 
 ## Per-tool contracts
 
@@ -31,10 +32,24 @@ to and the API intersects with caller `named`/`allowed_tools`.
 - `vision_analyze` — question ≤2,000 runes, optional 4-int region, cached-or-URL sources.
 - `image_generate` — prompt ≤2,000 runes, fixed landscape/square/portrait ratios, HTTPS or
   cached-cache sources only; previews are request-local, durable history keeps text.
+- `browser_*` — eleven local-headless tools (`browser/` leaf package): `navigate` opens a URL
+  and returns a compact snapshot; `snapshot`/`click`/`type`/`scroll`/`back`/`press` act by `@eN`
+  ref and refresh the snapshot; `get_images` lists non-data-URL page images; `vision` attaches a
+  native screenshot (optional annotated boxes); `console` reads buffered console/JS errors or
+  evaluates one JS expression; `dialog` accepts/dismisses a blocking native dialog surfaced in
+  `pending_dialogs`. Flat `{"success": true, ...}` envelopes inside the untrusted wrapper;
+  oversized snapshots truncate at line boundaries with the full tree spilled to
+  `cache/scratch/browser-snapshots/<hash>.txt` for `read_file` paging.
+- `browser_vault_*` — four model-blind autofill tools over the same session: `list` (handles
+  plus metadata, never passwords), `fill` (login password or address fields, exact-origin bound,
+  card kinds refuse fail-closed), `save_login` (returns the operator `oswald vault add` command;
+  this session cannot prompt), `enter_code` (TOTP from a saved seed or `prompt_unavailable`).
+  Metadata-only history, hashed args, secret registry scrubbing on every browser output path.
 
-History policy in one line: `memory` metadata-only, `session_search`/`web_search` searchable,
-image-tool text nonsearchable — with 16 KiB args and 16,000 result runes per call inside a 64 KiB
-aggregate trace. `session_search` never logs query or message content.
+History policy in one line: `memory`/`browser_vault_*` metadata-only, `session_search`/`web_search`
+searchable, image-tool text nonsearchable — with 16 KiB args and 16,000 result runes per call
+inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser
+and vault tools never log URLs, page content, expressions, or secrets — only counts and chars.
 
 ## Tests
 

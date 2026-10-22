@@ -22,6 +22,14 @@ redirects. `image_generate/comfy_ui/` is a dedicated serialized client (single-f
 Large Turbo graph: pinned UNet, dual CLIP, VAE, shift 3, euler/sgm_uniform, 4 steps, CFG 1, fresh
 seed per generation.
 
+`browser/` drives one on-machine headless Chromium per profile over CDP (`cdp.go` multiplexed
+websocket, `cdp_page.go` one page target, `launcher.go` private user-data dir with scrubbed env,
+`safety.go` URL/secret policy). Profiles are islands: sessions never cross profiles. `backend.go`
+owns navigation with readiness wait plus partial-load degrade, ref-addressed interaction,
+console buffers, dialog tracking, screenshots with optional box annotation, and a trusted
+`VaultEval` lane that bypasses only the `restrict_evaluate` denylist. Spills hash-name into
+`cache/scratch/browser-snapshots/`; the hourly prune hook reaps idle sessions and day-old spills.
+
 ## Bounds that bite
 
 Queries: ≤400 runes, ≤50 words, valid UTF-8, no control chars. Provider bodies ≤2 MiB; the first
@@ -34,6 +42,15 @@ ComfyUI requests control only prompt, ratio (1280×720 / 1024² / 720×1280), op
 denoise (default .75, range 0.1–0.9, image-edit only). Output is PNG/JPEG/GIF/WebP ≤8 MiB with
 dims ≤8192 and MIME plus decode-config validated. Timeouts start after caller-cancelable permit
 acquisition, and upstream cancellation always interrupts provider work.
+
+Browser bounds: one command timeout (floor 5s, default 30s; 60s open, 120s first open),
+compact-snapshot threshold (floor 1,000 runes, default 15,000, full tree capped at 2M chars),
+session inactivity reap (floor 30s, default 120s). URLs are fail-closed: https only unless
+`allow_insecure_urls`, loopback/private/link-local/CGNAT plus cloud-metadata hosts blocked
+unless `allow_private_urls`, secret-bearing query params refused, login-flow params
+(`token`/`auth`/`code`) allowed. Post-navigation landings revalidate with about:blank parking;
+eval pre-screens embedded URL literals and post-checks `location.href`. `restrict_evaluate`
+(default off) adds the sensitive-primitive denylist; the vault lane bypasses only that flag.
 
 ## Tests
 
