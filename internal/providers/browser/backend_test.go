@@ -284,7 +284,7 @@ func TestSpillIsHashedUnderScratch(t *testing.T) {
 	if first != second {
 		t.Fatalf("identical snapshots spilled twice: %q vs %q", first, second)
 	}
-	if !strings.Contains(first, filepath.Join("cache", "scratch", "browser-snapshots")) {
+	if !strings.Contains(first, filepath.Join("cache", "browser")) {
 		t.Fatalf("spill not under scratch: %q", first)
 	}
 	other, err := spillSnapshot(root, "different content")

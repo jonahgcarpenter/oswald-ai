@@ -277,10 +277,18 @@ func (w *Workspace) checkDenied(rel string) error {
 	}
 	// Managed cache is never written directly: the model may use
 	// cache/scratch/ for temporary files, but cache siblings (processes,
-	// images, ad-hoc GOPATH-style dirs) are service-owned.
+	// images, ad-hoc GOPATH-style dirs) are service-owned. The one
+	// exception is browser snapshot spills at
+	// cache/browser/scratch-*.txt, which stay model-readable through
+	// read_file for snapshot paging; profile-* session dirs stay denied.
 	if first == "cache" {
 		if rel == "cache/scratch" || strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator)) {
 			return nil
+		}
+		if rest, ok := strings.CutPrefix(rel, "cache"+string(filepath.Separator)+"browser"+string(filepath.Separator)); ok {
+			if !strings.Contains(rest, string(filepath.Separator)) && strings.HasPrefix(rest, "scratch-") && strings.HasSuffix(rest, ".txt") {
+				return nil
+			}
 		}
 		return &DenyError{Rel: rel, Category: denyCache}
 	}
@@ -338,11 +346,10 @@ func RepairCache(root, profile string, log *config.Logger) {
 	paths := []string{
 		filepath.Join(root, "cache"),
 		filepath.Join(root, "cache", "scratch"),
-		filepath.Join(root, "cache", "scratch", "browser-snapshots"),
+		filepath.Join(root, "cache", "browser"),
 		filepath.Join(root, "cache", "images"),
 		filepath.Join(root, "cache", "documents"),
 		filepath.Join(root, "cache", "processes"),
-		filepath.Join(root, "cache", "browser-profiles"),
 	}
 	for _, path := range paths {
 		info, err := os.Lstat(path)

@@ -39,7 +39,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   evaluates one JS expression; `dialog` accepts/dismisses a blocking native dialog surfaced in
   `pending_dialogs`. Flat `{"success": true, ...}` envelopes inside the untrusted wrapper;
   oversized snapshots truncate at line boundaries with the full tree spilled to
-  `cache/scratch/browser-snapshots/<hash>.txt` for `read_file` paging.
+  `cache/browser/scratch-<hash>.txt` for `read_file` paging.
 - `browser_vault_*` — four model-blind autofill tools over the same session: `list` (handles
   plus metadata, never passwords), `fill` (login password or address fields, exact-origin bound,
   card kinds refuse fail-closed), `save_login` (returns the operator `oswald vault add` command;
