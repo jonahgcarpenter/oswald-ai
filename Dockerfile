@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   sqlite3 \
   libstdc++6 \
   ffmpeg \
+  poppler-utils \
   python3 \
   chromium \
   fonts-liberation \

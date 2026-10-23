@@ -50,7 +50,8 @@ never logged.
 
 This is a Go application, not a JavaScript/frontend project. Module declares Go 1.25.7. SQLite and
 image codecs need CGO and a C/C++ toolchain; use the `sqlite_fts5` build tag on every command or
-SQLite symbols fail. Discord GIFV extraction needs `ffmpeg` and `ffprobe`.
+SQLite symbols fail. Discord GIFV extraction needs `ffmpeg` and `ffprobe`. PDF text
+extraction prefers `pdftotext` (poppler-utils), falling back to the stdlib scan.
 
 ```bash
 go build -tags sqlite_fts5 ./...
