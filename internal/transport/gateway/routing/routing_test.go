@@ -73,8 +73,8 @@ func TestBuildPromptCompactsUnsupportedAttachments(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip]"},
-		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt]"},
+		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
+		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
 	} {
 		if got := BuildPrompt(test.prompt, nil, test.labels, nil); got != test.want {
 			t.Fatalf("prompt=%q want=%q", got, test.want)
@@ -104,7 +104,7 @@ func TestBuildPromptIncludesReplyImagesAndUnsupportedAttachments(t *testing.T) {
 	if len(decision.Images) != 2 {
 		t.Fatalf("expected current and reply image, got %d", len(decision.Images))
 	}
-	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt]"
+	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"
 	if decision.Prompt != want {
 		t.Fatalf("unexpected prompt:\n%s", decision.Prompt)
 	}

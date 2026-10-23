@@ -97,9 +97,9 @@ func UnsupportedFilesNote(labels []string) string {
 		return ""
 	}
 	if len(labels) == 1 {
-		return fmt.Sprintf("[User sent an unsupported attachment: %s]", labels[0])
+		return fmt.Sprintf("[User sent an unsupported attachment: %s. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]", labels[0])
 	}
-	return fmt.Sprintf("[User sent unsupported attachments: %s]", strings.Join(labels, ", "))
+	return fmt.Sprintf("[User sent unsupported attachments: %s. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]", strings.Join(labels, ", "))
 }
 
 func combineImages(currentImages []llm.InputImage, currentUnsupported []string, reply *ReplyContext) ([]llm.InputImage, []string) {
