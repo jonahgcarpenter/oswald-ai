@@ -20,6 +20,11 @@ import (
 // Reads stay open under the file groups (secret reads still escalate
 // through ScanSecretRead); only writes are denied here. /dev/null and the
 // standard /dev/fd aliases are exempt: discarding output is not a write.
+//
+// ScanProtectedRead below hard-denies path-shaped references to protected
+// names (secrets anywhere, cross-profile state.db, /proc|sys|dev), which
+// reads alone cannot be allowed to reach. Same-profile state.db stays on
+// the reviewer path via ScanStoreAccess.
 
 var (
 	reCdTarget = regexp.MustCompile(`(?:^|[;&|\n]\s*)\s*cd\s+([^\s;&|]+)`)
@@ -171,6 +176,66 @@ func checkToken(resolved, root string) (string, bool) {
 	return DenyMessage(displayPath(resolved, root), group, true), true
 }
 
+// ScanProtectedRead reports path-shaped references to protected names:
+// secrets at any depth, cross-profile state.db, and /proc|sys|dev. Reads
+// of these can never be allowed (file tools deny them too), so unlike
+// system reads they hard-deny here instead of roaming. Same-profile
+// state.db classifies system and stays open; its sqlite handling still
+// escalates through ScanStoreAccess. /dev/null and the stdio aliases are
+// exempt: `< /dev/null` discards input rather than touching a device.
+func ScanProtectedRead(command, workdir, root string, shell bool) (string, bool) {
+	text := command
+	if shell {
+		text = proseBlanked(normalizeCommand(command))
+	}
+	root = filepath.Clean(root)
+	if strings.TrimSpace(text) == "" || root == "" || root == "." || root == "/" {
+		return "", false
+	}
+	workdir = filepath.Clean(workdir)
+	bases := []string{workdir}
+	if shell {
+		for _, m := range reCdTarget.FindAllStringSubmatch(text, -1) {
+			if len(m) < 2 || len(bases) >= 8 {
+				continue
+			}
+			if target := resolveCandidate(m[1], workdir); target != "" {
+				bases = append(bases, target)
+			}
+		}
+	}
+	check := func(shape, base string) (string, bool) {
+		resolved := resolveWriteTarget(shape, base)
+		if resolved == "" || devNullAliases[resolved] {
+			return "", false
+		}
+		if Classify(resolved, root) != GroupProtected {
+			return "", false
+		}
+		return DenyMessage(displayPath(resolved, root), GroupProtected, false), true
+	}
+	if shell {
+		for _, token := range strings.Fields(text) {
+			for _, base := range bases {
+				if reason, blocked := check(token, base); blocked {
+					return reason, true
+				}
+			}
+		}
+		return "", false
+	}
+	for _, seg := range splitSegments(text) {
+		for _, lit := range pyPathLiterals(seg) {
+			for _, base := range bases {
+				if reason, blocked := check(lit, base); blocked {
+					return reason, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
 func isDestructiveOperandCommand(token string) bool {
 	switch strings.ToLower(strings.Trim(token, "\"'();")) {
 	case "rm", "rmdir", "touch", "mkdir":
@@ -219,7 +284,7 @@ func pyPathLiterals(seg string) []string {
 			if i := strings.Index(lit, "?"); i >= 0 {
 				lit = lit[:i]
 			}
-			if !strings.Contains(lit, "/") && !strings.HasPrefix(lit, ".") && lit != ".." {
+			if !strings.ContainsAny(lit, "/.") && lit != ".." {
 				continue
 			}
 			out = append(out, lit)

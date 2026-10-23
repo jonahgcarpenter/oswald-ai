@@ -54,10 +54,12 @@ within a 64 KiB aggregate trace.
 1. Lifecycle scan — supervised-gateway markers and referenced scripts (≤1 MiB, NUL-checked;
    unscannable fails closed).
 2. Self-repo git-mutation block when a `.git` dir is present.
-3. Confined-write scan — write sinks (redirections, `tee`, `cp`/`mv` dests, `sed -i`, `rm`/`touch`/
+3. Confined-write scan plus protected-read scan — write sinks (redirections, `tee`, `cp`/`mv` dests, `sed -i`, `rm`/`touch`/
    `mkdir` operands, `dd of=`, Python `open()` modes and mutating stdlib/`pathlib` calls)
-   resolving outside agent-owned groups → hard deny with the group message. Reads roam free;
-   protected reads in shell escalate via the secret-read reviewer path instead.
+   resolving outside agent-owned groups → hard deny with the group message; path-shaped references to
+   protected names (secrets anywhere, cross-profile `state.db`, `/proc|sys|dev`) → hard deny even for
+   reads. Reads otherwise roam free; non-path secret references still escalate via the secret-read
+   reviewer path instead.
 4. Foreground detachment refusal (`nohup`, trailing `&`, dev servers, `http.server`) with a
    `background=true` rewrite hint.
 5. Normalized semantic layer (line-continuation/`$IFS`/fullwidth folding, quote-aware positions).

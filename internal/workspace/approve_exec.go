@@ -36,8 +36,8 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 		return governance.Result{}, err
 	}
 	// Replay re-checks every deny-class rule: approval overrides the
-	// recoverable reviewer path only, never unrecoverable, fetch, or
-	// confined-write denials.
+	// recoverable reviewer path only, never unrecoverable, fetch,
+	// confined-write, or protected-read denials.
 	live := stripInert(pending.Command)
 	if reason, blocked := ScanUnrecoverable(live); blocked {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
@@ -46,6 +46,9 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
 	if reason, blocked := ScanConfinedWrite(pending.Command, pending.Workdir, ws.Root(), true); blocked {
+		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
+	}
+	if reason, blocked := ScanProtectedRead(pending.Command, pending.Workdir, ws.Root(), true); blocked {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
 	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, pending.Timeout, pending.Background, pending.Persist, 0, "")

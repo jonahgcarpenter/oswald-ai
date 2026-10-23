@@ -47,6 +47,9 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		if reason, blocked := ScanConfinedWrite(code, ws.Root(), ws.Root(), false); blocked {
 			return governance.Result{}, errors.New(reason)
 		}
+		if reason, blocked := ScanProtectedRead(code, ws.Root(), ws.Root(), false); blocked {
+			return governance.Result{}, errors.New(reason)
+		}
 		reset, err := boolArg(args, "reset", false)
 		if err != nil {
 			return governance.Result{}, err

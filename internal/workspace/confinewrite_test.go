@@ -1,11 +1,13 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
@@ -189,5 +191,105 @@ func TestProcessManageWriteConfined(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "system-managed") {
 		t.Fatalf("write allowed cross-profile data: %v", err)
+	}
+}
+
+func TestScanProtectedReadShell(t *testing.T) {
+	_, alice, bob := profileTree(t)
+	bobState := filepath.Join(bob, "state.db")
+
+	deny := map[string]string{
+		"cd " + bob + " && sqlite3 state.db \"SELECT id FROM sessions;\"": "session_search",
+		"sqlite3 " + bobState + " \"SELECT id FROM sessions;\"":           "session_search",
+		"cat " + bobState:                   "session_search",
+		"cat .env":                          "protected",
+		"cat " + filepath.Join(bob, ".env"): "protected",
+		"cat /proc/self/environ":            "protected",
+	}
+	for cmd, want := range deny {
+		if reason, blocked := ScanProtectedRead(cmd, alice, alice, true); !blocked {
+			t.Errorf("shell allowed protected read: %q", cmd)
+		} else if !strings.Contains(reason, want) {
+			t.Errorf("shell deny %q = %q, want %q", cmd, reason, want)
+		}
+	}
+
+	allow := []string{
+		"cat config.yaml",
+		"cat " + filepath.Join(bob, "SOUL.md"),
+		"cat /etc/hostname",
+		"sqlite3 state.db \"SELECT id FROM sessions;\"",
+		`echo "cat .env"`,
+		"grep -r credentials docs/",
+		"env | head -5",
+		"cmd < /dev/null",
+		"ls",
+		"go test ./...",
+	}
+	for _, cmd := range allow {
+		if reason, blocked := ScanProtectedRead(cmd, alice, alice, true); blocked {
+			t.Errorf("shell denied safe command %q: %q", cmd, reason)
+		}
+	}
+}
+
+func TestScanProtectedReadCode(t *testing.T) {
+	_, alice, bob := profileTree(t)
+
+	deny := map[string]string{
+		"open('.env').read()": "protected",
+		"open('" + filepath.Join(bob, "state.db") + "').read()": "session_search",
+		"open('" + filepath.Join(alice, ".env") + "').read()":   "protected",
+		"open('credentials.json').read()":                       "protected",
+	}
+	for code, want := range deny {
+		if reason, blocked := ScanProtectedRead(code, alice, alice, false); !blocked {
+			t.Errorf("code allowed protected read: %q", code)
+		} else if !strings.Contains(reason, want) {
+			t.Errorf("code deny %q = %q, want %q", code, reason, want)
+		}
+	}
+
+	allow := []string{
+		"open('notes.md').read()",
+		"open('" + filepath.Join(bob, "SOUL.md") + "').read()",
+		"open('/etc/passwd').read()",
+		"print('v1.2 done')",
+		"open('state.db').read()",
+	}
+	for _, code := range allow {
+		if reason, blocked := ScanProtectedRead(code, alice, alice, false); blocked {
+			t.Errorf("code denied safe snippet %q: %q", code, reason)
+		}
+	}
+}
+
+func TestTerminalDeniesCrossProfileStateRead(t *testing.T) {
+	_, alice, bob := profileTree(t)
+	if err := os.Chmod(alice, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(alice, "alice")
+	term := NewTerminalHandler(ws, process.NewManager(alice))
+	res, err := term(testContext("req-xstate"), map[string]interface{}{
+		"command": "cd " + bob + " && sqlite3 state.db \"SELECT id FROM sessions;\"",
+	})
+	if err != nil {
+		t.Fatalf("deny returned error: %v", err)
+	}
+	if !strings.Contains(res.Content, `"status":"blocked"`) || !strings.Contains(res.Content, "session_search") {
+		t.Fatalf("missing blocked envelope: %q", res.Content)
+	}
+}
+
+func TestExecuteApprovedRefusesProtectedRead(t *testing.T) {
+	_, alice, bob := profileTree(t)
+	if err := os.Chmod(alice, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWorkspace(alice, "alice")
+	pending := approvals.Pending{Profile: "alice", SessionKey: "s", Command: "cat " + filepath.Join(bob, "state.db"), Workdir: alice, Scratch: alice, Timeout: 30}
+	if _, err := ExecuteApproved(context.Background(), ws, process.NewManager(alice), pending); err == nil || !strings.Contains(err.Error(), "refused on re-scan") {
+		t.Fatalf("replay allowed protected read: %v", err)
 	}
 }

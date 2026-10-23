@@ -108,12 +108,18 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
+			if reason, blocked := ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
+				return governance.Result{}, errors.New(reason)
+			}
 			if err := pm.Write(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
 			return governance.Result{Content: "stdin written", Outcome: governance.OutcomeProductive}, nil
 		case "submit":
 			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
+				return governance.Result{}, errors.New(reason)
+			}
+			if reason, blocked := ScanProtectedRead(data, ws.Root(), ws.Root(), false); blocked {
 				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Submit(sessionID, data); err != nil {

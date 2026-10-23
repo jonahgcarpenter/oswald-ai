@@ -117,6 +117,9 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		if reason, blocked := ScanConfinedWrite(command, workdir, ws.Root(), true); blocked {
 			return deniedResult(reason), nil
 		}
+		if reason, blocked := ScanProtectedRead(command, workdir, ws.Root(), true); blocked {
+			return deniedResult(reason), nil
+		}
 		if !background {
 			if err := RefuseDetachableForeground(command); err != nil {
 				return governance.Result{}, err
