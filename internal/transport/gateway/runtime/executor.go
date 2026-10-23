@@ -46,6 +46,14 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		if strings.TrimSpace(req.Text) != "" {
 			promptType = "text_image"
 		}
+	} else if len(req.Documents) > 0 {
+		promptType = "document"
+		if strings.TrimSpace(req.Text) != "" {
+			promptType = "text_document"
+		}
+		if len(req.Images) > 0 {
+			promptType = "text_image_document"
+		}
 	} else if promptType == "empty" && len(req.Unsupported) > 0 {
 		promptType = "unsupported"
 	}
@@ -57,6 +65,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Text:               req.Text,
 		CurrentImages:      req.Images,
 		CurrentUnsupported: req.Unsupported,
+		CurrentDocuments:   req.Documents,
 		Reply:              req.Reply,
 	})
 	if decision.Action == routing.ActionIgnore {
@@ -97,6 +106,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		f := append(requestctx.LogFields(workCtx), []config.Field{
 			config.F("request_id", req.RequestID), config.F("request_kind", kind),
 			config.F("prompt_type", promptType), config.F("image_count", len(req.Images)), config.F("model_image_count", len(decision.Images)),
+			config.F("document_count", len(req.Documents)), config.F("model_document_count", len(decision.Documents)),
 			config.F("command_name", commandName),
 		}...)
 		if userID != "" {
@@ -121,6 +131,16 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 			inputType = "image"
 			if strings.TrimSpace(req.Text) != "" {
 				inputType = "text_image"
+			}
+		}
+		if len(decision.Documents) > 0 {
+			if inputType == "text" {
+				inputType = "document"
+				if strings.TrimSpace(req.Text) != "" {
+					inputType = "text_document"
+				}
+			} else {
+				inputType += "_document"
 			}
 		}
 		return append(fields, config.F("input_type", inputType))
@@ -417,6 +437,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		config.F("profile", userID),
 		config.F("identity_assurance", req.Principal.Assurance),
 		config.F("image_count", len(decision.Images)),
+		config.F("document_count", len(decision.Documents)),
 		config.F("is_group", req.IsGroup),
 		config.F("is_mention", req.IsMention),
 		config.F("is_reply", req.Reply != nil),
@@ -446,6 +467,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		ServiceTier:             req.ServiceTier,
 		Ctx:                     req.Context,
 		Images:                  decision.Images,
+		Documents:               decision.Documents,
 		StreamFunc:              req.StreamFunc,
 		EscalationNotify:        req.EscalationNotify,
 		ResponseChan:            make(chan broker.Result, 1),

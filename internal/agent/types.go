@@ -2,9 +2,9 @@ package agent
 
 import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 )
 
 // ModelMetrics holds performance data from a single LLM call.
@@ -126,6 +126,7 @@ type Request struct {
 	// stateless requests. Empty omits it from responses.
 	ServiceTier string
 	Images      []llm.InputImage
+	Documents   []media.DocumentRef
 	StreamFunc  func(StreamChunk)
 }
 

@@ -7,11 +7,12 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/discord"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/imessage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/openai"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 )
 
 // NewServicesFromConfig creates all enabled gateway services for the current runtime config.
@@ -38,6 +39,9 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 			Runtime: runtimeDeps,
 			Log:     log,
 		}
+		if strings.TrimSpace(cfg.ProfileRoot) != "" {
+			discordGateway.DocCache = docache.New(cfg.ProfileRoot)
+		}
 		services = append(services, discordGateway)
 	} else {
 		gatewayLog.Debug("gateway.discord.disabled", "discord gateway is disabled", config.F("is_token_set", false))
@@ -60,6 +64,9 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 				Links:               links,
 				Runtime:             runtimeDeps,
 				Log:                 log,
+			}
+			if strings.TrimSpace(cfg.ProfileRoot) != "" {
+				iMessageGateway.DocCache = docache.New(cfg.ProfileRoot)
 			}
 			services = append(services, iMessageGateway)
 		}

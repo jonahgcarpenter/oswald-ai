@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -81,6 +82,7 @@ type Request struct {
 	// previous lifecycle-only behavior.
 	Ctx        context.Context
 	Images     []llm.InputImage
+	Documents  []media.DocumentRef
 	StreamFunc func(agent.StreamChunk)
 	// EscalationNotify reports a parked approval ask while the tool call
 	// blocks. It is installed in the request context when set.
@@ -330,7 +332,7 @@ func (b *Broker) Submit(req *Request) error {
 		b.mu.Unlock()
 		resp, err := b.agent.Process(requestctx.WithPrincipal(w.ctx, req.Principal), agent.Request{
 			RequestID: req.RequestID, Principal: req.Principal, DisplayName: req.DisplayName,
-			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, SkipMemory: req.SkipMemory, EnabledToolsets: req.EnabledToolsets, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, StreamFunc: req.StreamFunc,
+			SessionKey: req.SessionKey, Prompt: req.Prompt, Stateless: req.Stateless, SkipMemory: req.SkipMemory, EnabledToolsets: req.EnabledToolsets, ClientHistory: req.ClientHistory, ClientTools: req.ClientTools, ClientToolChoice: req.ClientToolChoice, ClientParallelToolCalls: req.ClientParallelToolCalls, ClientGeneration: req.ClientGeneration, ServiceTier: req.ServiceTier, Images: req.Images, Documents: req.Documents, StreamFunc: req.StreamFunc,
 			IsDirect: req.IsDirect, ChatLabel: req.ChatLabel, PlatformMessageID: req.PlatformMessageID, ChatDisplayName: req.ChatDisplayName, ChatID: req.ChatID, TransportProfile: req.TransportProfile,
 		})
 		b.logExecutionComplete(requestctx.WithPrincipal(w.ctx, req.Principal), req.Usage, resp, err)

@@ -2,6 +2,7 @@ package imessage
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"mime"
@@ -34,10 +35,16 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int, scope
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
 		if len(images) >= maxImages {
+			if isDocumentCandidate(attachment.TransferName, attachment.MimeType) {
+				continue
+			}
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.MimeType != "" && !media.LooksLikeImageMIME(attachment.MimeType) {
+			if isDocumentCandidate(attachment.TransferName, attachment.MimeType) {
+				continue
+			}
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -63,6 +70,17 @@ func (g *Gateway) loadImagesLimit(attachments []attachment, maxImages int, scope
 		return nil, unsupported
 	}
 	return images, unsupported
+}
+
+func isDocumentCandidate(filename, mimeType string) bool {
+	if media.IsExtractableDocument(filename) {
+		return true
+	}
+	mime := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	return false
 }
 
 func attachmentLabels(attachments []attachment) []string {
@@ -117,6 +135,104 @@ func (g *Gateway) fetchAttachmentImage(attachment attachment, scoped ...*config.
 
 	image := result.Image
 	return image, nil
+}
+
+// loadDocuments downloads supported document attachments into the private
+// document cache. Image payloads stay with the image lane.
+func (g *Gateway) loadDocuments(attachments []attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
+	log := g.log(scoped...)
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	docs := make([]media.DocumentRef, 0, len(attachments))
+	unsupported := make([]string, 0)
+	total := 0
+	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.TransferName, attachment.MimeType)
+		if media.LooksLikeImageMIME(attachment.MimeType) {
+			continue
+		}
+		if !isDocumentCandidate(attachment.TransferName, attachment.MimeType) {
+			continue
+		}
+		if len(docs) >= media.MaxDocumentsPerRequest {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if attachment.TotalBytes > media.MaxDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if total+attachment.TotalBytes > media.MaxTotalDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if g.DocCache == nil {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		data, err := g.fetchDocumentBytes(attachment)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected imessage document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		total += len(data)
+		if total > media.MaxTotalDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		name, mime, err := media.SniffDocument(attachment.TransferName, attachment.MimeType, data)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected imessage document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		path, err := g.DocCache.Save(context.Background(), userID, name, data)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected imessage document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		docs = append(docs, media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data))})
+	}
+	if len(docs) == 0 {
+		return nil, unsupported
+	}
+	return docs, unsupported
+}
+
+func (g *Gateway) fetchDocumentBytes(attachment attachment) ([]byte, error) {
+	if strings.TrimSpace(attachment.GUID) == "" {
+		return nil, fmt.Errorf("attachment GUID is empty")
+	}
+	endpoint, err := buildBlueBubblesAttachmentEndpoint(g.BlueBubblesURL, attachment.GUID, g.BlueBubblesPassword)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build BlueBubbles attachment request: %w", err)
+	}
+	resp, err := g.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download BlueBubbles attachment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download BlueBubbles attachment failed with status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxDocumentBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read BlueBubbles attachment: %w", err)
+	}
+	if len(body) > media.MaxDocumentBytes {
+		return nil, fmt.Errorf("attachment exceeds %d bytes", media.MaxDocumentBytes)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("attachment is empty")
+	}
+	return body, nil
 }
 
 // sendCommandAttachment sends one in-memory attachment through BlueBubbles.

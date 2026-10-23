@@ -26,6 +26,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
@@ -227,11 +228,12 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		processor.agents[name] = engine
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
+		cleanup.Add(docache.SweepHook(docache.NewProfileCache(profile.ProfileRoot, name), rootLog))
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
 		cleanup.Add(workspace.CacheChildrenHook(profile.ProfileRoot, rootLog, map[string]struct{}{
-			"scratch": {}, "images": {}, "processes": {}, "browser-profiles": {},
+			"scratch": {}, "images": {}, "documents": {}, "processes": {}, "browser-profiles": {},
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)

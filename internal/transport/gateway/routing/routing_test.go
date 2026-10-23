@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -72,8 +73,8 @@ func TestBuildPromptCompactsUnsupportedAttachments(t *testing.T) {
 		labels []string
 		want   string
 	}{
-		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip]"},
-		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt]"},
+		{prompt: " describe this ", labels: []string{" file.pdf ", "", "file.pdf", "archive.zip"}, want: "describe this\n\n[User sent unsupported attachments: file.pdf, archive.zip. They were not saved. You cannot read these file types — ask the user to paste their contents or resend them in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
+		{prompt: " ", labels: []string{"notes.txt"}, want: "[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"},
 	} {
 		if got := BuildPrompt(test.prompt, nil, test.labels, nil); got != test.want {
 			t.Fatalf("prompt=%q want=%q", got, test.want)
@@ -103,7 +104,7 @@ func TestBuildPromptIncludesReplyImagesAndUnsupportedAttachments(t *testing.T) {
 	if len(decision.Images) != 2 {
 		t.Fatalf("expected current and reply image, got %d", len(decision.Images))
 	}
-	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt]"
+	want := "[Replying to Alice: \"look at this\" with image; unsupported attachment: doc.pdf]\n\nwhat is it?\n\n[User sent an unsupported attachment: notes.txt. It was not saved. You cannot read this file type — ask the user to paste its contents or resend it in a supported format (pdf, txt, md, csv, docx, xlsx, or an image).]"
 	if decision.Prompt != want {
 		t.Fatalf("unexpected prompt:\n%s", decision.Prompt)
 	}
@@ -153,5 +154,36 @@ func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
 	}
 	if got := BuildPrompt("what happens?", nil, nil, reply); got != "[Replying to Alice's GIF contact sheet showing its contents over time]\n\nwhat happens?" {
 		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
+func TestBuildPromptIncludesDocuments(t *testing.T) {
+	docs := []media.DocumentRef{{Path: "/private/a.pdf", Filename: "a.pdf", MIMEType: "application/pdf"}}
+	if got := BuildPrompt("summarize", nil, nil, nil, docs); got != "summarize\n\n[The user sent a document: 'a.pdf'. It is saved at: /private/a.pdf. Its text is not inlined (binary format). Extract the document text with read_file before answering, instead of asking the user to paste the contents.]" {
+		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
+func TestDecideAcceptsDocumentOnlyPrompt(t *testing.T) {
+	docs := []media.DocumentRef{{Path: "/private/a.txt", Filename: "a.txt", MIMEType: "text/plain"}}
+	decision := Decide(Input{Text: " ", CurrentDocuments: docs})
+	if decision.Action != ActionLLM {
+		t.Fatalf("expected llm, got %q", decision.Action)
+	}
+	if len(decision.Documents) != 1 {
+		t.Fatalf("expected 1 document, got %d", len(decision.Documents))
+	}
+	if !strings.Contains(decision.Prompt, "/private/a.txt") {
+		t.Fatalf("prompt missing document path: %q", decision.Prompt)
+	}
+}
+
+func TestCombineDocumentsCapsAtMax(t *testing.T) {
+	var current []media.DocumentRef
+	for i := 0; i < media.MaxDocumentsPerRequest+2; i++ {
+		current = append(current, media.DocumentRef{Path: "/private/a.txt"})
+	}
+	if got := combineDocuments(current, nil); len(got) != media.MaxDocumentsPerRequest {
+		t.Fatalf("expected cap %d, got %d", media.MaxDocumentsPerRequest, len(got))
 	}
 }
