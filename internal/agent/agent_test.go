@@ -787,6 +787,7 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	chat := &fakeChatter{responses: []*llm.ChatResponse{
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
 		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "still reasoning"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning again"}},
 	}}
 	agent, store := newTestAgent(t, chat, nil, nil)
 
@@ -799,6 +800,14 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	}
 	if resp.Response != emptyResponseFallback {
 		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 3 {
+		t.Fatalf("expected two retry chat calls, got %d calls", len(primary))
+	}
+	secondRetry := primary[2].Messages[len(primary[2].Messages)-1]
+	if secondRetry.Role != "user" || secondRetry.Content != emptyResponseRetryPrompt {
+		t.Fatalf("expected repeated review prompt, got %+v", secondRetry)
 	}
 	foundFallbackChunk := false
 	for _, chunk := range chunks {
@@ -816,6 +825,114 @@ func TestProcessFallsBackAfterEmptyRetry(t *testing.T) {
 	}
 	if len(turns) != 1 || turns[0].AssistantText != emptyResponseFallback {
 		t.Fatalf("unexpected stored turn: %+v", turns)
+	}
+}
+
+func TestProcessRecoversOnSecondEmptyRetry(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "still reasoning"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
+	}}
+	agent, store := newTestAgent(t, chat, nil, nil)
+
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "visible answer" {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 3 {
+		t.Fatalf("expected two retry chat calls, got %d calls", len(primary))
+	}
+
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].AssistantText != "visible answer" {
+		t.Fatalf("unexpected stored turn: %+v", turns)
+	}
+}
+
+func TestProcessEmptyBudgetResetsAfterProductiveWork(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		toolCallResponse("call-1", "test.lookup", map[string]interface{}{"q": "a"}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		toolCallResponse("call-2", "test.lookup", map[string]interface{}{"q": "b"}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("lookup result"), nil
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	agent, store := newTestAgent(t, chat, nil, reg)
+
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "visible answer" {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	// Three blanks separated by productive tool work: without a per-occurrence
+	// reset the third blank would fall back instead of retrying.
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 6 {
+		t.Fatalf("expected six chat calls, got %d calls", len(primary))
+	}
+
+	turns, err := store.RecentSessionTurns("user-1", "session-1", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].AssistantText != "visible answer" {
+		t.Fatalf("unexpected stored turn: %+v", turns)
+	}
+}
+
+func TestProcessToolsDisabledBlankRetriesOnce(t *testing.T) {
+	chat := &fakeChatter{responses: []*llm.ChatResponse{
+		toolCallResponse("call-1", "test.lookup", map[string]interface{}{"q": "a"}),
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Thinking: "reasoning only"}},
+		{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "visible answer"}},
+	}}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.lookup", Description: "Lookup"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return productiveResult("lookup result"), nil
+	}); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+	agent.toolPolicy = governance.GlobalPolicy{MaxExecutions: 1, MaxToolIterations: 10}
+
+	resp, err := processAgent(agent, "req-1", "imessage", "session-1", "user-1", "Display", "question", nil, nil)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if resp.Response != "visible answer" {
+		t.Fatalf("unexpected response %q", resp.Response)
+	}
+	primary := primaryRequests(chat.requests)
+	if len(primary) != 3 {
+		t.Fatalf("expected tools-disabled call plus one retry, got %d calls", len(primary))
+	}
+	if len(primary[1].Tools) != 0 || len(primary[2].Tools) != 0 {
+		t.Fatalf("retry must keep tools disabled: %+v vs %+v", primary[1].Tools, primary[2].Tools)
+	}
+	notice := primary[1].Messages[len(primary[1].Messages)-1]
+	if notice.Role != "user" || notice.Content != toolBudgetExhaustedNotice {
+		t.Fatalf("disabled call must announce the spent budget: %+v", notice)
+	}
+	lastRetry := primary[2].Messages[len(primary[2].Messages)-1]
+	if lastRetry.Role != "user" || lastRetry.Content != emptyResponseRetryPrompt {
+		t.Fatalf("unexpected disabled-path retry prompt: %+v", lastRetry)
 	}
 }
 
