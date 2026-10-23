@@ -141,6 +141,9 @@ func TestProfileStartupUsesIndependentAgentsAndOnlyPublicCommands(t *testing.T) 
 		if _, err := os.Stat(filepath.Join(root, "state.db")); err != nil {
 			t.Fatal("missing profile-local state", err)
 		}
+		if _, err := os.Stat(filepath.Join(root, "cache", "scratch")); !os.IsNotExist(err) {
+			t.Fatal("scratch created eagerly instead of lazily")
+		}
 	}
 	if _, err := os.Stat(filepath.Join(cfg.ProfileRoot, "database", "oswald.db")); !os.IsNotExist(err) {
 		t.Fatal("shared legacy database created")

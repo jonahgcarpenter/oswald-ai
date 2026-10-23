@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
 )
@@ -56,9 +56,7 @@ func NewCronjobManageHandler(ws *Workspace, store *cron.Store) func(context.Cont
 			return abs, err
 		}
 		runner.ResolveDir = func(raw string) (string, error) { return ws.ResolveDir(raw) }
-		if scratch, err := ws.EnsureScratch(); err == nil {
-			runner.Scratch = scratch
-		}
+		runner.Scratch = ws.ScratchDir()
 	}
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
