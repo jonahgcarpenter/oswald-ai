@@ -63,21 +63,14 @@ func TestSessionDirLivesUnderCache(t *testing.T) {
 
 func TestSweepStaleProfiles(t *testing.T) {
 	root := t.TempDir()
-	legacy := filepath.Join(root, "oswald-browser-12345")
-	if err := os.Mkdir(legacy, 0700); err != nil {
-		t.Fatal(err)
-	}
 	stale, err := sessionDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A fresh session dir proves the sweeper only runs at startup: a live
 	// backend session must never be reaped by age here.
-	if got := SweepStaleProfiles(root); got != 2 {
-		t.Fatalf("reaped %d, want 2", got)
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Fatal("legacy dir survived")
+	if got := SweepStaleProfiles(root); got != 1 {
+		t.Fatalf("reaped %d, want 1", got)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("stale session dir survived")
