@@ -1256,6 +1256,8 @@ func newIMessageTestGateway(t *testing.T, blueBubblesURL string) (*Gateway, *bro
 		Broker:              b,
 		messageIndex:        make(map[string]messageContext),
 		contactNames:        make(map[string]contactNameCacheEntry),
+		coalesceQuiet:       20 * time.Millisecond,
+		coalesceMaxHold:     100 * time.Millisecond,
 	}
 	return g, b, chat
 }

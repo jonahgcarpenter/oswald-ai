@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -46,6 +47,7 @@ func (g *Gateway) Start(b *broker.Broker) error {
 		return err
 	}
 	g.ensureWebhookRegistered(log)
+	g.clearStaleTypingIndicators(log)
 	log.Debug("gateway.listen", "imessage gateway listener starting", config.F("port", g.Port))
 	listenAddr := listener.Addr().String()
 	if host, _, splitErr := net.SplitHostPort(listenAddr); splitErr == nil {
@@ -105,6 +107,10 @@ type Gateway struct {
 	contactNames        map[string]contactNameCacheEntry
 	chatNameMu          sync.RWMutex
 	chatNames           map[string]chatNameCacheEntry
+	coalesceMu          sync.Mutex
+	coalesceBatches     map[string]*coalesceBatch
+	coalesceQuiet       time.Duration
+	coalesceMaxHold     time.Duration
 }
 
 func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {
