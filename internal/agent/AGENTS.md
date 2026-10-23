@@ -21,7 +21,8 @@ bind, append, page).
 
 ## Turn loop (`agent.go::Process`)
 
-Iterative, with a one-shot empty-output retry and a final tools-disabled completion:
+Iterative, with per-occurrence empty-output retries and an exhaustion-announcing
+tools-disabled completion:
 
 ```
 refresh catalog; set ToolChoice (first call only)
@@ -29,7 +30,10 @@ if pressure >= 70%: Summarize(full session JSON) -> markdown cache (blocking, la
 for iteration:
     response = chatWithImageRetries() // up to 5 attempts, shrinking images
     normalize tool call IDs; record usage
-    if response has no tool calls: break
+    if response has no tool calls:
+        if blank and consecutive/total retry budget remains:
+            append review nudge; continue // resets on productive iterations
+        break
     append assistant message
     for each call in order:
         stream tool_call; BeforeExecution (governance)
@@ -37,7 +41,8 @@ for iteration:
         append tool message + history batch; bound image results
         break batch on HaltDecision
     break loop on GlobalStopReason (degraded final answer)
-if governance exhausted: one final tool-less model call
+if governance exhausted: final tool-less call announcing the spent budget
+    (one retry with the same review nudge if it returns blank)
 finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped if stateless)
 ```
 

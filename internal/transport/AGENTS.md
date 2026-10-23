@@ -11,8 +11,9 @@ token, iMessage on BlueBubbles settings, with port/URL validation). Concrete pac
 ignore-vs-LLM-vs-command decision before any expensive work, and `runtime/Execute()` runs the
 profile fence, group-scope check, command/LLM dispatch, broker submission, and delivery marking.
 Per-transport wires: `discord/` (inbound, replies, streaming status, FIFO outbound, REST, labels,
-cron sender), `imessage/` (BlueBubbles client, webhook listener + registration, chronological
-thread replies, final-only responses), `openai/` (stateless bearer-key API). `media/` normalizes
+cron sender), `imessage/` (BlueBubbles client, webhook listener + registration, multipart
+coalescing, link-preview filtering, chronological thread replies, final-only responses, startup
+typing sweep), `openai/` (stateless bearer-key API). `media/` normalizes
 attachments and `media/imagecache/` pins private cache paths with a 24h TTL hook.
 
 ## Admission (cheap before expensive)
@@ -41,7 +42,9 @@ unmentioned group reply invokes only when that predecessor is an eligible bot me
 thread lookups expose no fallback root context: chronological continuation, not exact UI-target
 proof. New stored turns keep `[Replying to ...]` enrichment and `[Image attached at: ...]`
 annotations alongside incoming text, so history retains what was answered; quoted text stays
-untrusted reference, never deployment instruction.
+untrusted reference, never deployment instruction. Link-unfurl preview payloads are dropped from
+both inbound and reply contexts (the URL text is kept) so the agent fetches link content itself
+instead of receiving unvalidated preview media.
 
 The OpenAI API is text-only: no commands (a leading `/` is a pre-runtime `400`), no persistence,
 no attachments. Client history is lower-authority quoted reference, and caller-owned tool calls
@@ -54,6 +57,10 @@ streamed output; all final answers share one FIFO outbound worker (20 entries / 
 admission, 15s attempts, 1–30s exponential retry with numeric Retry-After able to exceed the cap).
 iMessage sends typing/read indicators and a final-only response with plain-send fallback; the
 webhook route is operator-configurable and registration degrades to WARN, never a startup failure.
+iMessage splits one user send into per-part webhooks (text, attachment, link preview), so rapid
+parts from one sender/chat coalesce into a single turn (1000ms quiet / 3000ms max hold, guid
+dedupe, creation-time ordering) before admission. Startup best-effort clears stale typing
+indicators via a bounded chat sweep.
 
 Media in: at most 4 images, 10 MiB each (JPEG/PNG/GIF/WebP/HEIC/HEIF), normalized to ≤2560 longest
 edge / 280 KiB JPEG/PNG. GIFs use the first frame or a ≤4-tile contact sheet; GIFV extracts up to
