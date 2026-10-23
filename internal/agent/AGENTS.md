@@ -55,7 +55,7 @@ finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped i
   advising instead of refusing. Caps are 50 handler executions and 30 tool-bearing responses.
 - **Generated images never auto-deliver.** The model delivers one only by emitting a
   `MEDIA:/absolute/path` token in its final response (resolved against the managed cache first,
-  then CWD-confined raw paths); at most 4 logical images per request. Previews ride tool results;
+  then raw absolute paths under the file groups); at most 4 logical images per request. Previews ride tool results;
   follow-ups replay text only.
 - **Reasoning is never persisted** in conversation or tool history. Summaries and tool history are
   untrusted lower-authority reference — quoted context, never deployment instruction.

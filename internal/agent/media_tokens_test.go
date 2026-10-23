@@ -12,9 +12,9 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func TestStripMediaTokens(t *testing.T) {
@@ -142,13 +142,36 @@ func TestMediaTokenRejectsOutsideAndSecretCWDPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Valid control image inside the workspace.
+	// Valid control images inside the workspace.
 	good := filepath.Join(ws, "ok.jpg")
 	if err := os.WriteFile(good, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Secret, state, and cache-managed paths must stay denied.
-	for _, name := range []string{".env", "state.db", "SOUL.md"} {
+	// System-managed paths with image content attach: same-profile state
+	// and soul basenames are readable, but the extension gate below still
+	// requires a real image extension.
+	stateImg := filepath.Join(ws, "state.db")
+	if err := os.WriteFile(stateImg, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	memImg := filepath.Join(ws, "memories", "pic.jpg")
+	if err := os.MkdirAll(filepath.Dir(memImg), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(memImg, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	crossDir := filepath.Join(ws, "profiles", "other")
+	if err := os.MkdirAll(crossDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	crossImg := filepath.Join(crossDir, "pic.jpg")
+	if err := os.WriteFile(crossImg, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Secret and cache-managed paths stay denied; the extension gate below
+	// still requires a real image extension regardless of group.
+	for _, name := range []string{".env", "SOUL.md"} {
 		if err := os.WriteFile(filepath.Join(ws, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -182,8 +205,10 @@ func TestMediaTokenRejectsOutsideAndSecretCWDPaths(t *testing.T) {
 		{"control", good, true},
 		{"scratch", scratchImg, true},
 		{"secret env", filepath.Join(ws, ".env"), false},
-		{"state db", filepath.Join(ws, "state.db"), false},
-		{"soul", filepath.Join(ws, "SOUL.md"), false},
+		{"state db extension gate", filepath.Join(ws, "state.db"), false},
+		{"soul extension gate", filepath.Join(ws, "SOUL.md"), false},
+		{"system memories image", memImg, true},
+		{"cross-profile image", crossImg, true},
 		{"managed cache bypass", managedImg, false},
 		{"non image", filepath.Join(ws, "note.jpg"), false},
 		{"outside cwd", "/etc/passwd", false},
