@@ -120,6 +120,7 @@ type messageLookupData struct {
 	Handle                messageHandle   `json:"handle"`
 	Chats                 []messageChat   `json:"chats"`
 	Attachments           []attachment    `json:"attachments"`
+	BalloonBundleID       string          `json:"balloonBundleId"`
 }
 
 type contactQueryRequest struct {

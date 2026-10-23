@@ -332,11 +332,13 @@ func (g *Gateway) replyLookupHTTP(ctx context.Context, method, endpoint string, 
 func (g *Gateway) replyContextFromMessage(data messageLookupData, chatGUID string) messageContext {
 	// Delivery receipts are not required for authorship; group messages may
 	// lack them. Explicit errors, corruption, and retraction still block admission.
+	// Link-unfurl previews are not user content: keep the URL text, drop the payload.
+	realAttachments := filterRealAttachments(data.Attachments, data.BalloonBundleID)
 	ctx := messageContext{
-		ChatGUID: chatGUID, Text: strings.TrimSpace(data.Text), Attachments: data.Attachments,
+		ChatGUID: chatGUID, Text: strings.TrimSpace(data.Text), Attachments: realAttachments,
 		IsFromBot: data.IsFromMe && data.SendError != nil && *data.SendError == 0 && !data.IsCorrupt &&
 			(data.DateRetracted == nil || *data.DateRetracted == 0) &&
-			(strings.TrimSpace(data.Text) != "" || len(data.Attachments) > 0),
+			(strings.TrimSpace(data.Text) != "" || len(realAttachments) > 0),
 		CreatedAt: time.Now(),
 	}
 	if data.IsFromMe {

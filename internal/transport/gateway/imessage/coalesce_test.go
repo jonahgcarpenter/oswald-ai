@@ -80,3 +80,30 @@ func TestEnqueueDedupesSameGUID(t *testing.T) {
 		batch.timer.Stop()
 	}
 }
+
+func TestFilterRealAttachments(t *testing.T) {
+	preview := attachment{GUID: "p", TransferName: "AF.pluginPayloadAttachment", UTI: "dyn.age81a5dzq7y066dbtf0g82peqf4hk2pdrb00n5xy"}
+	real := attachment{GUID: "img", MimeType: "image/jpeg", TransferName: "IMG_5319.JPG", UTI: "public.jpeg"}
+	if got := filterRealAttachments([]attachment{preview, real}, ""); len(got) != 1 || got[0].GUID != "img" {
+		t.Fatalf("attachment-level preview not filtered: %+v", got)
+	}
+	if got := filterRealAttachments([]attachment{real}, urlBalloonProvider); len(got) != 0 {
+		t.Fatalf("balloon provider not filtered: %+v", got)
+	}
+}
+
+func TestReplyContextFromLinkPreviewDropsImages(t *testing.T) {
+	g := &Gateway{Log: config.NewLogger(config.LevelError)}
+	data := messageLookupData{
+		GUID: "link-guid", Text: "https://x.com/popcrave/status/123", BalloonBundleID: urlBalloonProvider,
+		Attachments: []attachment{{GUID: "p1", TransferName: "A.pluginPayloadAttachment"}, {GUID: "p2", UTI: "dyn.age81a5dzq7y066dbtf0g82peqf4hk2pdrb00n5xy"}},
+		Handle:      messageHandle{Address: "+15551234567"}, Chats: []messageChat{{GUID: "chat", Style: chatStyleDirect}},
+	}
+	ctx := g.replyContextFromMessage(data, "chat")
+	if ctx.Text != "https://x.com/popcrave/status/123" {
+		t.Fatalf("reply text lost: %q", ctx.Text)
+	}
+	if len(ctx.Attachments) != 0 {
+		t.Fatalf("reply preview not filtered: %+v", ctx.Attachments)
+	}
+}

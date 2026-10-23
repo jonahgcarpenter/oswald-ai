@@ -147,13 +147,7 @@ func mergeCoalescedEntries(entries []coalesceEntry) (webhookMessage, string, tim
 		if text := strings.TrimSpace(entry.msg.Text); text != "" {
 			texts = append(texts, text)
 		}
-		if entry.msg.BalloonBundleID == urlBalloonProvider {
-			continue
-		}
-		for _, att := range entry.msg.Attachments {
-			if isPreviewAttachment(att) {
-				continue
-			}
+		for _, att := range filterRealAttachments(entry.msg.Attachments, entry.msg.BalloonBundleID) {
 			if strings.TrimSpace(att.GUID) != "" {
 				if _, dup := seenAttachments[att.GUID]; dup {
 					continue
@@ -185,4 +179,20 @@ func isPreviewAttachment(att attachment) bool {
 		return true
 	}
 	return strings.TrimSpace(att.MimeType) == "" && strings.HasPrefix(strings.TrimSpace(att.UTI), "dyn.")
+}
+
+// filterRealAttachments drops link-unfurl preview payloads, keeping the URL
+// text and real attachments. A URL balloon carries no user content.
+func filterRealAttachments(attachments []attachment, balloonBundleID string) []attachment {
+	if balloonBundleID == urlBalloonProvider {
+		return nil
+	}
+	kept := make([]attachment, 0, len(attachments))
+	for _, att := range attachments {
+		if isPreviewAttachment(att) {
+			continue
+		}
+		kept = append(kept, att)
+	}
+	return kept
 }

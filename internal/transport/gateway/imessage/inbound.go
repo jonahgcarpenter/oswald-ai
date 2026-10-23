@@ -153,11 +153,13 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 				IsFromBot:  replyCtx.IsFromBot,
 			}
 			if len(replyCtx.Attachments) > 0 {
-				remainingImageSlots := media.MaxImagesPerRequest - len(images)
-				if remainingImageSlots > 0 {
-					reply.Images, reply.Unsupported = g.loadImagesLimit(replyCtx.Attachments, remainingImageSlots, log)
+				realAttachments := filterRealAttachments(replyCtx.Attachments, "")
+				if len(realAttachments) == 0 {
+					reply.Unsupported = nil
+				} else if remainingImageSlots := media.MaxImagesPerRequest - len(images); remainingImageSlots > 0 {
+					reply.Images, reply.Unsupported = g.loadImagesLimit(realAttachments, remainingImageSlots, log)
 				} else {
-					reply.Unsupported = attachmentLabels(replyCtx.Attachments)
+					reply.Unsupported = attachmentLabels(realAttachments)
 				}
 			}
 			log.Debug("gateway.reply_context.applied", "applied imessage reply context", config.F("request_id", requestID), config.F("chat_id", chat.GUID), config.F("is_bot_reply", replyCtx.IsFromBot), config.F("reply_image_count", len(reply.Images)))
