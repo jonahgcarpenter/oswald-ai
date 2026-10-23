@@ -8,8 +8,9 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 )
 
 // Name returns the human-readable gateway name.
@@ -93,6 +94,7 @@ type Gateway struct {
 	Log                 *config.Logger
 	Broker              *broker.Broker
 	HTTPClient          *http.Client
+	DocCache            *docache.Cache
 	capabilityMu        sync.Mutex
 	capabilitiesLoaded  bool
 	privateAPIEnabled   bool

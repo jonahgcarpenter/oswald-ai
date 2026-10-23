@@ -1,6 +1,9 @@
 package routing
 
-import "github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+import (
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+)
 
 // Action describes how a gateway should handle a normalized inbound message.
 type Action string
@@ -25,6 +28,7 @@ type Input struct {
 	Text               string
 	CurrentImages      []llm.InputImage
 	CurrentUnsupported []string
+	CurrentDocuments   []media.DocumentRef
 	Reply              *ReplyContext
 }
 
@@ -43,6 +47,7 @@ type ReplyContext struct {
 	IsFromBot             bool
 	Images                []llm.InputImage
 	Unsupported           []string
+	Documents             []media.DocumentRef
 	IsUnavailable         bool
 	AttachmentUnavailable bool
 }
@@ -52,6 +57,7 @@ type Decision struct {
 	Action       Action
 	Prompt       string
 	Images       []llm.InputImage
+	Documents    []media.DocumentRef
 	ResponseText string
 	Reason       string
 }

@@ -26,12 +26,13 @@ func Decide(input Input) Decision {
 	}
 
 	images, unsupported := combineImages(input.CurrentImages, input.CurrentUnsupported, reply)
-	prompt := BuildPrompt(text, images, unsupported, reply)
-	if strings.TrimSpace(prompt) == "" && len(images) == 0 {
+	documents := combineDocuments(input.CurrentDocuments, reply)
+	prompt := BuildPrompt(text, images, unsupported, reply, documents)
+	if strings.TrimSpace(prompt) == "" && len(images) == 0 && len(documents) == 0 {
 		return Decision{Action: ActionGatewayFallback, ResponseText: "What do you want idiot.", Reason: "empty_prompt"}
 	}
 
-	return Decision{Action: ActionLLM, Prompt: prompt, Images: images, Reason: "llm"}
+	return Decision{Action: ActionLLM, Prompt: prompt, Images: images, Documents: documents, Reason: "llm"}
 }
 
 // Preflight cheaply identifies messages that should be ignored before gateways
@@ -62,8 +63,8 @@ func ShouldIgnoreUninvokedGroup(isGroup, isMention, isReplyToBot, isCommand bool
 }
 
 // BuildPrompt builds the exact current-turn text sent to the LLM.
-func BuildPrompt(text string, images []llm.InputImage, unsupported []string, reply *ReplyContext) string {
-	parts := make([]string, 0, 3)
+func BuildPrompt(text string, images []llm.InputImage, unsupported []string, reply *ReplyContext, documents ...[]media.DocumentRef) string {
+	parts := make([]string, 0, 4)
 	if replyText := formatReplyContext(reply); replyText != "" {
 		parts = append(parts, replyText)
 	}
@@ -74,6 +75,13 @@ func BuildPrompt(text string, images []llm.InputImage, unsupported []string, rep
 	}
 	if text != "" {
 		parts = append(parts, text)
+	}
+	var docs []media.DocumentRef
+	for _, group := range documents {
+		docs = append(docs, group...)
+	}
+	if note := media.DocumentsNote(docs); note != "" {
+		parts = append(parts, note)
 	}
 	if note := UnsupportedFilesNote(unsupported); note != "" {
 		parts = append(parts, note)
@@ -110,6 +118,26 @@ func combineImages(currentImages []llm.InputImage, currentUnsupported []string, 
 		}
 	}
 	return images, compactLabels(unsupported)
+}
+
+func combineDocuments(current []media.DocumentRef, reply *ReplyContext) []media.DocumentRef {
+	docs := append([]media.DocumentRef(nil), current...)
+	if len(docs) > media.MaxDocumentsPerRequest {
+		docs = docs[:media.MaxDocumentsPerRequest]
+	}
+	if reply == nil {
+		return docs
+	}
+	for _, doc := range reply.Documents {
+		if len(docs) >= media.MaxDocumentsPerRequest {
+			break
+		}
+		if strings.TrimSpace(doc.Path) == "" {
+			continue
+		}
+		docs = append(docs, doc)
+	}
+	return docs
 }
 
 func formatReplyContext(reply *ReplyContext) string {

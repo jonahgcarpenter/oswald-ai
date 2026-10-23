@@ -12,6 +12,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -89,6 +90,7 @@ type Request struct {
 	// to the agent for stateless requests.
 	ServiceTier string
 	Images      []llm.InputImage
+	Documents   []media.DocumentRef
 	Unsupported []string
 	Reply       *routing.ReplyContext
 

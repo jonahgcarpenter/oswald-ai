@@ -195,6 +195,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	displayName := request.DisplayName
 	userPrompt := request.Prompt
 	userImages := request.Images
+	userDocuments := request.Documents
 	streamCallback := request.StreamFunc
 	startedAt := time.Now()
 	reqLog := a.log.Agent("agent", requestID, senderID, gateway, a.model)
@@ -240,6 +241,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	reqLog.Debug("agent.request.start", "agent request started",
 		config.F("prompt_chars", len(userPrompt)),
 		config.F("image_count", len(userImages)),
+		config.F("document_count", len(userDocuments)),
 	)
 
 	if ctx == nil {
@@ -438,7 +440,6 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
 	userMemoryContent := sessionMemoryUserContent(userPrompt, contextImages[:len(userImages)])
-	_ = userMemoryContent
 	cachedMarkdown := ""
 	if a.summarizer != nil && !request.Stateless && sessionGeneration > 0 {
 		cachedMarkdown = a.summarizer.Get(senderID, sessionKey, sessionGeneration)

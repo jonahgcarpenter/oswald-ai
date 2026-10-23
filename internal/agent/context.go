@@ -72,6 +72,8 @@ func stripReplyContext(prompt string) (string, bool) {
 func sessionMemoryUserContent(prompt string, images []requestctx.InputImage) string {
 	// Keep gateway reply enrichment with its owning user turn so later history
 	// retains what the user was answering, without replaying attachment bytes.
+	// Inbound document paths already ride inside the prompt note built at
+	// routing time, so they persist here with no extra annotation.
 	content := promptWithAttachedImages(strings.TrimSpace(prompt), images)
 	uncached := 0
 	for _, image := range images {

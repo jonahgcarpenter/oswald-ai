@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
@@ -153,5 +154,36 @@ func TestBuildPromptDescribesGIFContactSheetInReply(t *testing.T) {
 	}
 	if got := BuildPrompt("what happens?", nil, nil, reply); got != "[Replying to Alice's GIF contact sheet showing its contents over time]\n\nwhat happens?" {
 		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
+func TestBuildPromptIncludesDocuments(t *testing.T) {
+	docs := []media.DocumentRef{{Path: "/private/a.pdf", Filename: "a.pdf", MIMEType: "application/pdf"}}
+	if got := BuildPrompt("summarize", nil, nil, nil, docs); got != "summarize\n\n[The user sent a document: 'a.pdf'. It is saved at: /private/a.pdf. Its text is not inlined (binary format). Extract the document text with read_file before answering, instead of asking the user to paste the contents.]" {
+		t.Fatalf("unexpected prompt %q", got)
+	}
+}
+
+func TestDecideAcceptsDocumentOnlyPrompt(t *testing.T) {
+	docs := []media.DocumentRef{{Path: "/private/a.txt", Filename: "a.txt", MIMEType: "text/plain"}}
+	decision := Decide(Input{Text: " ", CurrentDocuments: docs})
+	if decision.Action != ActionLLM {
+		t.Fatalf("expected llm, got %q", decision.Action)
+	}
+	if len(decision.Documents) != 1 {
+		t.Fatalf("expected 1 document, got %d", len(decision.Documents))
+	}
+	if !strings.Contains(decision.Prompt, "/private/a.txt") {
+		t.Fatalf("prompt missing document path: %q", decision.Prompt)
+	}
+}
+
+func TestCombineDocumentsCapsAtMax(t *testing.T) {
+	var current []media.DocumentRef
+	for i := 0; i < media.MaxDocumentsPerRequest+2; i++ {
+		current = append(current, media.DocumentRef{Path: "/private/a.txt"})
+	}
+	if got := combineDocuments(current, nil); len(got) != media.MaxDocumentsPerRequest {
+		t.Fatalf("expected cap %d, got %d", media.MaxDocumentsPerRequest, len(got))
 	}
 }

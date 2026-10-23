@@ -26,6 +26,7 @@ import (
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
@@ -134,12 +135,13 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	pm := process.NewManager(cfg.ProfileRoot)
 	cronStore := cron.NewStore(cfg.ProfileRoot)
+	docCache := docache.NewProfileCache(cfg.ProfileRoot, cfg.ProfileName)
 	workspaceTools := []struct {
 		name    string
 		policy  governance.ToolPolicy
 		handler registry.Handler
 	}{
-		{workspace.ReadFileName, governance.ToolPolicy{NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandler(ws))},
+		{workspace.ReadFileName, governance.ToolPolicy{NormalizeArgs: normalizeReadFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewReadFileHandlerWithDocCache(ws, docCache))},
 		{workspace.WriteFileName, governance.ToolPolicy{NormalizeArgs: normalizeWriteFileArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewWriteFileHandler(ws))},
 		{workspace.PatchName, governance.ToolPolicy{NormalizeArgs: normalizePatchArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewPatchHandler(ws))},
 		{workspace.SearchFilesName, governance.ToolPolicy{NormalizeArgs: normalizeSearchFilesArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: true}}, registry.Handler(workspace.NewSearchFilesHandler(ws))},

@@ -37,10 +37,16 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int, scop
 	for _, attachment := range attachments {
 		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
 		if len(images) >= maxImages {
+			if isDocumentCandidate(attachment.Filename, attachment.ContentType) {
+				continue
+			}
 			unsupported = append(unsupported, label)
 			continue
 		}
 		if attachment.ContentType != "" && !media.LooksLikeImageMIME(attachment.ContentType) {
+			if isDocumentCandidate(attachment.Filename, attachment.ContentType) {
+				continue
+			}
 			unsupported = append(unsupported, label)
 			continue
 		}
@@ -66,6 +72,108 @@ func (dg *Gateway) loadImagesLimit(attachments []Attachment, maxImages int, scop
 		return nil, unsupported
 	}
 	return images, unsupported
+}
+
+func isDocumentCandidate(filename, contentType string) bool {
+	if media.IsExtractableDocument(filename) {
+		return true
+	}
+	mime := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if strings.HasPrefix(mime, "text/") {
+		return true
+	}
+	return false
+}
+
+// loadDocuments downloads supported document attachments into the private
+// document cache. Image payloads stay with the image lane; anything outside
+// the extractable set is reported as unsupported.
+func (dg *Gateway) loadDocuments(attachments []Attachment, userID string, scoped ...*config.Logger) ([]media.DocumentRef, []string) {
+	log := dg.log(scoped...)
+	if len(attachments) == 0 {
+		return nil, nil
+	}
+	docs := make([]media.DocumentRef, 0, len(attachments))
+	unsupported := make([]string, 0)
+	total := 0
+	for _, attachment := range attachments {
+		label := media.AttachmentLabel(attachment.Filename, attachment.ContentType)
+		if media.LooksLikeImageMIME(attachment.ContentType) {
+			continue
+		}
+		if !isDocumentCandidate(attachment.Filename, attachment.ContentType) {
+			continue
+		}
+		if len(docs) >= media.MaxDocumentsPerRequest {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if attachment.Size > media.MaxDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if total+attachment.Size > media.MaxTotalDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		if dg.DocCache == nil {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		data, err := dg.fetchDocumentBytes(attachment.URL, label)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected discord document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		total += len(data)
+		if total > media.MaxTotalDocumentBytes {
+			unsupported = append(unsupported, label)
+			continue
+		}
+		name, mime, err := media.SniffDocument(attachment.Filename, attachment.ContentType, data)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected discord document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		path, err := dg.DocCache.Save(context.Background(), userID, name, data)
+		if err != nil {
+			log.Debug("gateway.document.rejected", "rejected discord document", config.F("status", "degraded"))
+			unsupported = append(unsupported, label)
+			continue
+		}
+		docs = append(docs, media.DocumentRef{Path: path, Filename: name, MIMEType: mime, Size: int64(len(data))})
+	}
+	if len(docs) == 0 {
+		return nil, unsupported
+	}
+	return docs, unsupported
+}
+
+func (dg *Gateway) fetchDocumentBytes(rawURL, label string) ([]byte, error) {
+	if strings.TrimSpace(rawURL) == "" {
+		return nil, fmt.Errorf("document URL is empty")
+	}
+	resp, err := dg.httpClient(15 * time.Second).Get(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("download document: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("download document: unexpected status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, media.MaxDocumentBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read document: %w", err)
+	}
+	if len(body) > media.MaxDocumentBytes {
+		return nil, fmt.Errorf("document exceeds %d bytes", media.MaxDocumentBytes)
+	}
+	if len(body) == 0 {
+		return nil, fmt.Errorf("document is empty")
+	}
+	return body, nil
 }
 
 func discordAttachmentLabels(attachments []Attachment) []string {

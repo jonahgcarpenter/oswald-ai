@@ -11,7 +11,10 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/docextract"
 )
 
 const (
@@ -22,11 +25,19 @@ const (
 // NewReadFileHandler returns the paginated text-file reader.
 func NewReadFileHandler(ws *Workspace) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
-		return readFileCall(ctx, ws, args)
+		return readFileCall(ctx, ws, nil, args)
 	}
 }
 
-func readFileCall(ctx context.Context, ws *Workspace, args map[string]interface{}) (governance.Result, error) {
+// NewReadFileHandlerWithDocCache returns the reader with private inbound
+// document cache access. Cache paths named in prompts resolve here.
+func NewReadFileHandlerWithDocCache(ws *Workspace, docs *docache.Cache) func(context.Context, map[string]interface{}) (governance.Result, error) {
+	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
+		return readFileCall(ctx, ws, docs, args)
+	}
+}
+
+func readFileCall(ctx context.Context, ws *Workspace, docs *docache.Cache, args map[string]interface{}) (governance.Result, error) {
 	if err := ctx.Err(); err != nil {
 		return governance.Result{}, err
 	}
@@ -48,6 +59,9 @@ func readFileCall(ctx context.Context, ws *Workspace, args map[string]interface{
 	if err != nil || limit < 1 || limit > defaultReadMax {
 		return governance.Result{}, errors.New("limit must be an integer between 1 and 2000")
 	}
+	if result, err, ok := readCachedDocument(ctx, docs, strings.TrimSpace(rawPath), offset, limit); ok {
+		return result, err
+	}
 	abs, _, err := ws.Resolve(rawPath)
 	if err != nil {
 		if rel, category, ok := AsDeny(err); ok {
@@ -67,6 +81,9 @@ func readFileCall(ctx context.Context, ws *Workspace, args map[string]interface{
 			return governance.Result{}, errors.New("file not found")
 		}
 		return governance.Result{}, errors.New("file is unavailable")
+	}
+	if isBinaryContainer(abs) {
+		return readExtractedWorkspaceFile(ctx, ws, abs, data, offset, limit)
 	}
 	if !utf8.Valid(data) {
 		return governance.Result{}, errors.New("cannot read images/binary — use vision_analyze for images")
@@ -119,6 +136,104 @@ func readFileCall(ctx context.Context, ws *Workspace, args map[string]interface{
 		return governance.Result{Content: "(empty file)", Outcome: governance.OutcomeProductive}, nil
 	}
 	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+}
+
+// isBinaryContainer reports whether abs needs document extraction instead of
+// the raw text path.
+func isBinaryContainer(abs string) bool {
+	switch strings.ToLower(strings.TrimSpace(filepath.Ext(abs))) {
+	case ".docx", ".xlsx", ".pdf":
+		return true
+	}
+	return false
+}
+
+// readCachedDocument resolves a private inbound document cache path for the
+// calling profile and renders its extracted text. ok is false when path is
+// not a cache document, letting the workspace path take over.
+func readCachedDocument(ctx context.Context, docs *docache.Cache, path string, offset, limit int) (governance.Result, error, bool) {
+	if docs == nil || !filepath.IsAbs(path) {
+		return governance.Result{}, nil, false
+	}
+	principal, ok := requestctx.PrincipalFromContext(ctx)
+	if !ok || !principal.Authenticated() {
+		return governance.Result{}, nil, false
+	}
+	data, _, err := docs.Resolve(ctx, principal.CanonicalUserID, path)
+	if err != nil {
+		if strings.Contains(path, string(filepath.Separator)+"cache"+string(filepath.Separator)+"documents"+string(filepath.Separator)) {
+			return governance.Result{}, errors.New("file is unavailable"), true
+		}
+		return governance.Result{}, nil, false
+	}
+	text, err := docextract.Extract(path, data)
+	if err != nil {
+		return governance.Result{}, errors.New("document extraction failed — " + err.Error()), true
+	}
+	content, truncated, nextOffset, total := paginateExtracted(text, offset, limit)
+	if offset > total+1 {
+		return governance.Result{}, fmt.Errorf("offset exceeds file length (%d lines)", total), true
+	}
+	if truncated {
+		return governance.Result{Content: content + fmt.Sprintf("\n[truncated at ~100K characters; continue with offset %d]", nextOffset), Outcome: governance.OutcomeProductive}, nil, true
+	}
+	if content == "" {
+		return governance.Result{Content: "(empty file)", Outcome: governance.OutcomeProductive}, nil, true
+	}
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil, true
+}
+
+// readExtractedWorkspaceFile renders a workspace binary container through the
+// document extractor with the standard pagination envelope.
+func readExtractedWorkspaceFile(ctx context.Context, ws *Workspace, abs string, data []byte, offset, limit int) (governance.Result, error) {
+	text, err := docextract.Extract(abs, data)
+	if err != nil {
+		return governance.Result{}, errors.New("cannot read images/binary — use vision_analyze for images")
+	}
+	content, truncated, nextOffset, total := paginateExtracted(text, offset, limit)
+	if offset > total+1 {
+		return governance.Result{}, fmt.Errorf("offset exceeds file length (%d lines)", total)
+	}
+	if truncated {
+		return governance.Result{Content: content + fmt.Sprintf("\n[truncated at ~100K characters; continue with offset %d]", nextOffset), Outcome: governance.OutcomeProductive}, nil
+	}
+	if content == "" {
+		return governance.Result{Content: "(empty file)", Outcome: governance.OutcomeProductive}, nil
+	}
+	ws.NoteFullRead(requestID(ctx), abs, FileHash(data))
+	return governance.Result{Content: content, Outcome: governance.OutcomeProductive}, nil
+}
+
+// paginateExtracted splits extracted text into numbered lines with the shared
+// character budget.
+func paginateExtracted(text string, offset, limit int) (string, bool, int, int) {
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	total := len(lines)
+	if offset > total+1 {
+		return "", false, 0, total
+	}
+	end := offset - 1 + limit
+	if end > total {
+		end = total
+	}
+	var sb strings.Builder
+	chars := 0
+	truncated := false
+	nextOffset := 0
+	for i := offset - 1; i < end; i++ {
+		entry := fmt.Sprintf("%d|%s\n", i+1, lines[i])
+		if chars+len(entry) > readCharBudget {
+			truncated = true
+			nextOffset = i + 1
+			break
+		}
+		sb.WriteString(entry)
+		chars += len(entry)
+	}
+	return strings.TrimSuffix(sb.String(), "\n"), truncated, nextOffset, total
 }
 
 func readRegularFile(abs string) ([]byte, error) {
