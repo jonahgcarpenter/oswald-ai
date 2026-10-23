@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"sync"
+	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -105,6 +106,10 @@ type Gateway struct {
 	contactNames        map[string]contactNameCacheEntry
 	chatNameMu          sync.RWMutex
 	chatNames           map[string]chatNameCacheEntry
+	coalesceMu          sync.Mutex
+	coalesceBatches     map[string]*coalesceBatch
+	coalesceQuiet       time.Duration
+	coalesceMaxHold     time.Duration
 }
 
 func (g *Gateway) log(scoped ...*config.Logger) *config.Logger {

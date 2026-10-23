@@ -33,6 +33,9 @@ type webhookMessage struct {
 	ThreadOriginatorGUID  string          `json:"threadOriginatorGuid"`
 	ThreadOriginatorPart  string          `json:"threadOriginatorPart"`
 	Chats                 []messageChat   `json:"chats"`
+	OriginalROWID         int64           `json:"originalROWID"`
+	DateCreated           *int64          `json:"dateCreated"`
+	BalloonBundleID       string          `json:"balloonBundleId"`
 }
 
 type attachment struct {
@@ -40,6 +43,7 @@ type attachment struct {
 	MimeType     string `json:"mimeType"`
 	TransferName string `json:"transferName"`
 	TotalBytes   int    `json:"totalBytes"`
+	UTI          string `json:"uti"`
 }
 
 type messageHandle struct {

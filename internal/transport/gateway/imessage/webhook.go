@@ -61,7 +61,7 @@ func (g *Gateway) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		go g.processReceivedMessage(event.Data, requestID, receivedAt)
+		go g.enqueueCoalesced(event.Data, requestID, receivedAt)
 		w.WriteHeader(http.StatusAccepted)
 	case "typing-indicator":
 		g.logIgnoredMessage("typing_indicator", eventType, event.Data, config.F("request_id", requestID))
