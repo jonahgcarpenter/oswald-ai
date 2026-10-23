@@ -42,10 +42,10 @@ func NewWriteFileHandler(ws *Workspace) func(context.Context, map[string]interfa
 		if len(content) > 2<<20 {
 			return governance.Result{}, errors.New("content exceeds size limit")
 		}
-		abs, _, err := ws.Resolve(rawPath)
+		abs, rel, err := ws.ResolveWrite(rawPath)
 		if err != nil {
-			if rel, category, ok := AsDeny(err); ok {
-				return governance.Result{}, errors.New(DenyMessage(rel, category, true))
+			if drel, group, ok := AsDeny(err); ok {
+				return governance.Result{}, errors.New(DenyMessage(drel, group, true))
 			}
 			return governance.Result{}, err
 		}
@@ -77,7 +77,6 @@ func NewWriteFileHandler(ws *Workspace) func(context.Context, map[string]interfa
 			return governance.Result{}, errors.New("write verification failed")
 		}
 		ws.NoteWrite(reqID, abs, FileHash(data))
-		rel, _ := filepath.Rel(ws.Root(), abs)
 		return governance.Result{
 			Content: fmt.Sprintf("Wrote %s (%d bytes, verified:%s)", rel, len(data), verified[:12]),
 			Outcome: governance.OutcomeProductive,

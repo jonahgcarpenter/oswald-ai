@@ -9,41 +9,47 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
-func TestCacheDeniedExceptScratch(t *testing.T) {
+func TestCacheReadsAllowedWritesDenied(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
-	allow := []string{
+	allowWrite := []string{
 		"cache/scratch/a.txt",
 		"cache/scratch/nested/b.txt",
 	}
-	for _, raw := range allow {
-		if _, _, err := ws.Resolve(raw); err != nil {
-			t.Errorf("scratch allowed path rejected %q: %v", raw, err)
+	for _, raw := range allowWrite {
+		if _, _, err := ws.ResolveWrite(raw); err != nil {
+			t.Errorf("scratch write rejected %q: %v", raw, err)
 		}
 	}
-	deny := []string{
+	readOnly := []string{
 		"cache",
 		"cache/scratch_go/x",
 		"cache/scratch-gopath/x",
 		"cache/processes/x",
 		"cache/images/x",
 		"cache/foo",
+		"cache/browser/scratch-abc.txt",
+		"cache/browser/profile-abc",
 	}
-	for _, raw := range deny {
-		_, _, err := ws.Resolve(raw)
-		if err == nil {
-			t.Errorf("managed cache allowed: %q", raw)
+	for _, raw := range readOnly {
+		if _, _, err := ws.Resolve(raw); err != nil {
+			t.Errorf("managed cache read denied %q: %v", raw, err)
 			continue
 		}
-		rel, category, ok := AsDeny(err)
-		if !ok || category != denyCache {
-			t.Errorf("wrong deny for %q: %v (rel=%q cat=%d ok=%v)", raw, err, rel, category, ok)
+		_, _, err := ws.ResolveWrite(raw)
+		if err == nil {
+			t.Errorf("managed cache write allowed: %q", raw)
+			continue
 		}
-		if msg := DenyMessage(rel, category, true); !strings.Contains(msg, "cache/scratch") {
-			t.Errorf("deny message missing scratch hint %q: %q", raw, msg)
+		rel, group, ok := AsDeny(err)
+		if !ok || group != GroupSystem {
+			t.Errorf("wrong deny for %q: %v (rel=%q group=%d ok=%v)", raw, err, rel, group, ok)
+		}
+		if msg := DenyMessage(rel, group, true); !strings.Contains(msg, "cache/scratch") && !strings.Contains(msg, "system-managed") {
+			t.Errorf("deny message missing for %q: %q", raw, msg)
 		}
 	}
 }

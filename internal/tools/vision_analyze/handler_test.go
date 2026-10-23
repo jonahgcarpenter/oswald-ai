@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
 
@@ -193,23 +193,34 @@ func TestHandlerWorkspaceImages(t *testing.T) {
 		t.Fatal("relative workspace image load succeeded")
 	}
 
-	// Escapes fail closed.
+	// Outside reads resolve under Table 3 (system-managed).
 	outside := filepath.Join(filepath.Dir(root), "outside.png")
 	if err := os.WriteFile(outside, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": outside, "question": "Describe"}); err == nil {
-		t.Fatal("workspace escape load succeeded")
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": outside, "question": "Describe"}); err != nil {
+		t.Fatalf("outside workspace load failed: %v", err)
 	}
 
-	// Operator state is denied with a category message, not the generic error.
+	// Same-profile state.db reads are allowed (system-managed); the
+	// cross-profile copy stays sealed with the session_search redirect.
 	statePath := filepath.Join(root, "state.db")
 	if err := os.WriteFile(statePath, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": statePath, "question": "Describe"})
-	if err == nil || !strings.Contains(err.Error(), "application-owned state") {
-		t.Fatalf("state denial=%v", err)
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": statePath, "question": "Describe"}); err != nil {
+		t.Fatalf("same-profile state load failed: %v", err)
+	}
+	crossState := filepath.Join(root, "profiles", "other", "state.db")
+	if err := os.MkdirAll(filepath.Dir(crossState), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(crossState, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": crossState, "question": "Describe"})
+	if err == nil || !strings.Contains(err.Error(), "session_search") {
+		t.Fatalf("cross-profile state denial=%v", err)
 	}
 
 	// Non-image workspace files are rejected.
@@ -221,7 +232,7 @@ func TestHandlerWorkspaceImages(t *testing.T) {
 		t.Fatal("non-image workspace load succeeded")
 	}
 
-	// Cross-profile isolation: default profile cannot reach profiles/*.
+	// Cross-profile reads resolve under Table 2 (system-managed).
 	defaultRoot := t.TempDir()
 	other := filepath.Join(defaultRoot, "profiles", "jonah", "pic.png")
 	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
@@ -231,17 +242,17 @@ func TestHandlerWorkspaceImages(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultHandler := NewHandlerWithWorkspace(imagecache.New(t.TempDir()), workspaceForTest(defaultRoot, "default"))
-	if _, err := defaultHandler(visionContext("default", "discord"), map[string]interface{}{"image_url": other, "question": "Describe"}); err == nil {
-		t.Fatal("cross-profile workspace load succeeded")
+	if _, err := defaultHandler(visionContext("default", "discord"), map[string]interface{}{"image_url": other, "question": "Describe"}); err != nil {
+		t.Fatalf("cross-profile workspace load failed: %v", err)
 	}
 
-	// Symlinks escaping the workspace fail closed.
+	// Symlinks resolving outside load under the same Table 3 rule.
 	link := filepath.Join(root, "link.png")
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": link, "question": "Describe"}); err == nil {
-		t.Fatal("workspace symlink escape load succeeded")
+	if _, err := handler(visionContext("jonah", "discord"), map[string]interface{}{"image_url": link, "question": "Describe"}); err != nil {
+		t.Fatalf("symlinked outside load failed: %v", err)
 	}
 }
 

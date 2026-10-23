@@ -3,10 +3,12 @@
 // Each profile gets one CurrentWorkingDir bound at registry construction from
 // the profile's validated ProfileRoot: the default profile uses the global
 // root itself, named profiles use <root>/profiles/<name>/. Model-supplied
-// paths resolve inside that directory only; anything escaping via ..,
-// absolute prefixes, or symlinks is rejected. The default profile
-// additionally denies profiles/* and operator secrets that live inside its
-// working directory.
+// paths resolve through Classify into same-trust file groups: protected
+// secrets are sealed everywhere, tool-managed paths are read-only, and
+// agent-owned paths (plus, for reads, anything outside the workspace that
+// the container user may see) stay open. Writes outside agent-owned paths
+// fail closed via ResolveWrite; the shell pre-execution chain enforces the
+// same groups for terminal, execute_code, and process input.
 package workspace
 
 import (
@@ -23,10 +25,9 @@ import (
 
 // Workspace binds file and terminal execution to one profile directory.
 type Workspace struct {
-	root      string
-	profile   string
-	isDefault bool
-	mu        sync.Mutex
+	root    string
+	profile string
+	mu      sync.Mutex
 	// reads tracks request-local full-file reads for the write_file gate:
 	// request ID -> absolute path -> content hash.
 	reads map[string]map[string]string
@@ -42,10 +43,9 @@ func NewWorkspace(root, profile string) *Workspace {
 		}
 	}
 	return &Workspace{
-		root:      abs,
-		profile:   strings.TrimSpace(profile),
-		isDefault: strings.TrimSpace(profile) == "" || strings.TrimSpace(profile) == "default",
-		reads:     make(map[string]map[string]string),
+		root:    abs,
+		profile: strings.TrimSpace(profile),
+		reads:   make(map[string]map[string]string),
 	}
 }
 
@@ -81,10 +81,12 @@ func (w *Workspace) EnsureScratch() (string, error) {
 	return dir, nil
 }
 
-// Resolve maps a model-supplied path into the workspace. It accepts
+// Resolve maps a model-supplied path to an absolute path. It accepts
 // absolute paths, CWD-relative paths, and ~/paths (resolved inside the
-// workspace, never the OS home). It returns the absolute path and the
-// CWD-relative form. Escapes and denied operator paths fail closed.
+// workspace, never the OS home). Paths outside the workspace resolve for
+// reads under Table 3 (system-managed, container user as backstop);
+// protected paths fail closed. It returns the absolute path and a display
+// form (workspace-relative when inside, absolute when outside).
 func (w *Workspace) Resolve(raw string) (string, string, error) {
 	if w == nil || w.root == "" {
 		return "", "", errors.New("workspace is unavailable")
@@ -108,13 +110,6 @@ func (w *Workspace) Resolve(raw string) (string, string, error) {
 	default:
 		abs = filepath.Join(cwd, trimmed)
 	}
-	rel, err := filepath.Rel(cwd, abs)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", "", errors.New("path escapes the working directory")
-	}
-	if err := w.checkDenied(rel); err != nil {
-		return "", "", err
-	}
 	if err := validateRoot(cwd); err != nil {
 		return "", "", err
 	}
@@ -122,18 +117,38 @@ func (w *Workspace) Resolve(raw string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	rel, err = filepath.Rel(cwd, resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", "", errors.New("path escapes the working directory")
+	if group := Classify(resolved, cwd); group == GroupProtected {
+		return "", "", &DenyError{Rel: displayPath(resolved, cwd), Group: group}
 	}
-	if err := w.checkDenied(rel); err != nil {
+	return resolved, displayPath(resolved, cwd), nil
+}
+
+// ResolveWrite resolves a path for writing: anything outside agent-owned
+// paths fails closed with its file-group denial.
+func (w *Workspace) ResolveWrite(raw string) (string, string, error) {
+	abs, display, err := w.Resolve(raw)
+	if err != nil {
 		return "", "", err
 	}
-	return resolved, rel, nil
+	if group := Classify(abs, w.root); group != GroupAgent {
+		return "", "", &DenyError{Rel: display, Group: group}
+	}
+	return abs, display, nil
+}
+
+// displayPath renders a resolved path for model messages: workspace-relative
+// when inside, absolute when outside.
+func displayPath(abs, root string) string {
+	if rel, err := filepath.Rel(root, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+		return rel
+	}
+	return abs
 }
 
 // ResolveDir maps a working-directory argument inside the workspace,
-// defaulting empty input to the workspace root. The directory must exist.
+// defaulting empty input to the workspace root. Working directories stay
+// jailed: outside paths fail closed even though reads may roam. The
+// directory must exist.
 func (w *Workspace) ResolveDir(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -146,6 +161,9 @@ func (w *Workspace) ResolveDir(raw string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if rel, rerr := filepath.Rel(w.root, abs); rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("path escapes the working directory")
+	}
 	info, err := os.Lstat(abs)
 	if err != nil {
 		return "", errors.New("working directory does not exist")
@@ -154,145 +172,6 @@ func (w *Workspace) ResolveDir(raw string) (string, error) {
 		return "", errors.New("working directory is not a directory")
 	}
 	return abs, nil
-}
-
-// DenyCategory classifies denied workspace paths for model-visible messages.
-type DenyCategory int
-
-const (
-	denyNone DenyCategory = iota
-	denyState
-	denyCredential
-	denyEnv
-	denyMemory
-	denySoul
-	denyConfig
-	denyProfile
-	denyCache
-)
-
-// DenyError marks a path refused by the workspace sandbox. Error stays
-// generic for logs; handlers render DenyMessage for the model instead.
-type DenyError struct {
-	Rel      string
-	Category DenyCategory
-}
-
-func (e *DenyError) Error() string { return "path is not accessible" }
-
-// DenyMessage renders the category message for a read (write=false) or
-// write (write=true) refusal. The relative path is workspace-inside, so
-// naming it is safe.
-func DenyMessage(rel string, category DenyCategory, write bool) string {
-	switch category {
-	case denyState:
-		if write {
-			return "Write denied: '" + rel + "' is a protected system file and cannot be written by tools."
-		}
-		return "Access denied: " + rel + " is application-owned state and cannot be read directly; use session_search for conversation history."
-	case denyCredential:
-		if write {
-			return "Write denied: '" + rel + "' is a protected credential file and cannot be written by tools."
-		}
-		return "Access denied: " + rel + " is a credential store and cannot be read directly."
-	case denyEnv:
-		if write {
-			return "Write denied: '" + rel + "' is a secret-bearing environment file and cannot be written by tools."
-		}
-		return "Access denied: " + rel + " is a secret-bearing environment file and cannot be read to prevent leakage."
-	case denyMemory:
-		if write {
-			return "Memory write denied by policy \u2014 use the memory tool; direct file edits bypass locking, bounds, and validation."
-		}
-		return "Access denied: " + rel + " is managed memory state; use the memory tool to read durable memory."
-	case denySoul:
-		if write {
-			return "Write denied: '" + rel + "' is protected operator policy and cannot be written by tools."
-		}
-		return "Access denied: " + rel + " is operator policy and cannot be read directly; the active policy is already in your system prompt."
-	case denyConfig:
-		if write {
-			return "Write denied: '" + rel + "' is protected operator configuration and cannot be written by tools."
-		}
-		return "Access denied: " + rel + " is operator configuration and cannot be read by tools."
-	case denyProfile:
-		return "Access denied: " + rel + " belongs to another profile and cannot be accessed."
-	case denyCache:
-		if write {
-			return "Write denied: '" + rel + "' is managed cache; write temporary files under 'cache/scratch/'."
-		}
-		return "Access denied: " + rel + " is managed cache; use 'cache/scratch/' for temporary files."
-	default:
-		return "path is not accessible"
-	}
-}
-
-// AsDeny extracts a sandbox denial from a Resolve error.
-func AsDeny(err error) (string, DenyCategory, bool) {
-	var derr *DenyError
-	if errors.As(err, &derr) {
-		return derr.Rel, derr.Category, true
-	}
-	return "", denyNone, false
-}
-
-func (w *Workspace) checkDenied(rel string) error {
-	// Operator secrets are never reachable through workspace tools, even
-	// though they live inside a profile directory.
-	parts := strings.Split(rel, string(filepath.Separator))
-	first := ""
-	if len(parts) > 0 {
-		first = parts[0]
-	}
-	base := filepath.Base(rel)
-	switch base {
-	case "state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.db-journal-mode":
-		return &DenyError{Rel: rel, Category: denyState}
-	case "config.yaml":
-		return &DenyError{Rel: rel, Category: denyConfig}
-	case ".env":
-		return &DenyError{Rel: rel, Category: denyEnv}
-	case "SOUL.md":
-		return &DenyError{Rel: rel, Category: denySoul}
-	}
-	if strings.HasPrefix(base, ".env") {
-		return &DenyError{Rel: rel, Category: denyEnv}
-	}
-	if base == "credentials" || strings.HasPrefix(base, "credentials.") ||
-		strings.HasSuffix(base, "credentials.json") ||
-		strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
-		return &DenyError{Rel: rel, Category: denyEnv}
-	}
-	switch first {
-	case "mcp-tokens":
-		return &DenyError{Rel: rel, Category: denyCredential}
-	case "profiles":
-		if w.isDefault {
-			return &DenyError{Rel: rel, Category: denyProfile}
-		}
-	}
-	// Memory-tool state bypasses entry validation and locking.
-	if first == "memories" {
-		return &DenyError{Rel: rel, Category: denyMemory}
-	}
-	// Managed cache is never written directly: the model may use
-	// cache/scratch/ for temporary files, but cache siblings (processes,
-	// images, ad-hoc GOPATH-style dirs) are service-owned. The one
-	// exception is browser snapshot spills at
-	// cache/browser/scratch-*.txt, which stay model-readable through
-	// read_file for snapshot paging; profile-* session dirs stay denied.
-	if first == "cache" {
-		if rel == "cache/scratch" || strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator)) {
-			return nil
-		}
-		if rest, ok := strings.CutPrefix(rel, "cache"+string(filepath.Separator)+"browser"+string(filepath.Separator)); ok {
-			if !strings.Contains(rest, string(filepath.Separator)) && strings.HasPrefix(rest, "scratch-") && strings.HasSuffix(rest, ".txt") {
-				return nil
-			}
-		}
-		return &DenyError{Rel: rel, Category: denyCache}
-	}
-	return nil
 }
 
 // NoteFullRead records a complete read of abs for requestID.

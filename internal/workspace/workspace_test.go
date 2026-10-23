@@ -22,15 +22,33 @@ func testContext(requestID string) context.Context {
 	return ctx
 }
 
-func TestResolveRejectsEscape(t *testing.T) {
+func TestResolveReadsOutside(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "alice")
-	for _, raw := range []string{"../x", "../../etc/passwd", "/etc/passwd", "~/../x"} {
+	// Outside reads resolve (system-managed); only protected names fail.
+	for _, raw := range []string{"../x", "../../etc/passwd", "/etc/hostname", "~/../x"} {
+		abs, display, err := ws.Resolve(raw)
+		if err != nil {
+			t.Fatalf("outside read denied: %q: %v", raw, err)
+		}
+		if filepath.IsAbs(raw) && (abs != raw || display != raw) {
+			t.Fatalf("outside resolve = %q %q", abs, display)
+		}
+		if _, _, err := ws.ResolveWrite(raw); err == nil {
+			t.Fatalf("outside write allowed: %q", raw)
+		}
+	}
+	for _, raw := range []string{"/proc/self/environ", "/sys/x", "../.env"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
-			t.Fatalf("escape allowed: %q", raw)
+			t.Fatalf("protected outside read allowed: %q", raw)
+		}
+	}
+	for _, raw := range []string{"", "   ", "bad\x00path", strings.Repeat("x", 5000)} {
+		if _, _, err := ws.Resolve(raw); err == nil {
+			t.Fatalf("invalid path allowed: %q", raw)
 		}
 	}
 	abs, rel, err := ws.Resolve("sub/dir/file.txt")
@@ -42,15 +60,46 @@ func TestResolveRejectsEscape(t *testing.T) {
 	}
 }
 
-func TestDefaultDeniesProfilesAndSecrets(t *testing.T) {
+func TestSameAndCrossProfileGroups(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
 	ws := NewWorkspace(root, "default")
-	for _, raw := range []string{"profiles/alice/x", "config.yaml", ".env", "state.db", "state.db-wal", "mcp-tokens/tok", "memories/MEMORY.md", "SOUL.md"} {
+	// Same-profile: secrets sealed, everything else readable.
+	for _, raw := range []string{".env", ".env.local", "mcp-tokens/tok", "deploy.pem", "vault/credentials.json"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
-			t.Fatalf("denied path allowed: %q", raw)
+			t.Fatalf("protected path allowed: %q", raw)
+		}
+	}
+	for _, raw := range []string{"config.yaml", "state.db", "SOUL.md", "memories/MEMORY.md", "cache/images/a.png", "cache/scratch/a.txt", "notes.md"} {
+		if _, _, err := ws.Resolve(raw); err != nil {
+			t.Fatalf("read denied: %q: %v", raw, err)
+		}
+	}
+	if _, _, err := ws.ResolveWrite("SOUL.md"); err != nil {
+		t.Fatalf("same-profile SOUL.md write denied: %v", err)
+	}
+	if _, _, err := ws.ResolveWrite("notes.md"); err != nil {
+		t.Fatalf("same-profile notes write denied: %v", err)
+	}
+	for _, raw := range []string{"config.yaml", "state.db", "memories/MEMORY.md", "cache/images/a.png", ".env"} {
+		if _, _, err := ws.ResolveWrite(raw); err == nil {
+			t.Fatalf("system/protected write allowed: %q", raw)
+		}
+	}
+	// Cross-profile: readable except secrets and state.db.
+	for _, raw := range []string{"profiles/alice/SOUL.md", "profiles/alice/config.yaml", "profiles/alice/notes.md", "profiles/alice/memories/USER.md", "profiles/alice/cache/scratch/a.txt"} {
+		if _, _, err := ws.Resolve(raw); err != nil {
+			t.Fatalf("cross-profile read denied: %q: %v", raw, err)
+		}
+		if _, _, err := ws.ResolveWrite(raw); err == nil {
+			t.Fatalf("cross-profile write allowed: %q", raw)
+		}
+	}
+	for _, raw := range []string{"profiles/alice/.env", "profiles/alice/state.db"} {
+		if _, _, err := ws.Resolve(raw); err == nil {
+			t.Fatalf("cross-profile secret allowed: %q", raw)
 		}
 	}
 	namedRoot := filepath.Join(root, "profiles", "alice")
@@ -58,13 +107,16 @@ func TestDefaultDeniesProfilesAndSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	named := NewWorkspace(namedRoot, "alice")
-	for _, raw := range []string{"config.yaml", "state.db", "mcp-tokens/x"} {
-		if _, _, err := named.Resolve(raw); err == nil {
-			t.Fatalf("named denied path allowed: %q", raw)
+	for _, raw := range []string{"config.yaml", "SOUL.md", "state.db", "notes.md"} {
+		if _, _, err := named.Resolve(raw); err != nil {
+			t.Fatalf("named read denied: %q: %v", raw, err)
 		}
 	}
-	if _, _, err := named.Resolve("notes.md"); err != nil {
-		t.Fatalf("named allowed path rejected: %v", err)
+	if _, _, err := named.Resolve("mcp-tokens/x"); err == nil {
+		t.Fatal("named secret allowed")
+	}
+	if _, _, err := named.ResolveWrite("SOUL.md"); err != nil {
+		t.Fatalf("named SOUL.md write denied: %v", err)
 	}
 }
 
@@ -653,26 +705,50 @@ func TestDenyMessagesCategorized(t *testing.T) {
 	ws := NewWorkspace(root, "default")
 	read := NewReadFileHandler(ws)
 	write := NewWriteFileHandler(ws)
+	for _, p := range []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "MEMORY.md"), filepath.Join("profiles", "alice", "x")} {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("data\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cases := []struct {
 		call string
 		args map[string]interface{}
 		want string
 	}{
-		{"read", map[string]interface{}{"path": ".env.local"}, "secret-bearing environment file"},
-		{"read", map[string]interface{}{"path": "state.db"}, "application-owned state"},
-		{"read", map[string]interface{}{"path": "config.yaml"}, "operator configuration"},
-		{"read", map[string]interface{}{"path": "profiles/alice/x"}, "another profile"},
-		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, "managed memory state"},
-		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, "protected operator policy"},
-		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "Memory write denied"},
-		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "secret-bearing"},
+		{"read", map[string]interface{}{"path": ".env.local"}, "protected"},
+		{"read", map[string]interface{}{"path": "profiles/alice/state.db"}, "session_search"},
+		{"read", map[string]interface{}{"path": "config.yaml"}, ""},
+		{"read", map[string]interface{}{"path": "profiles/alice/x"}, ""},
+		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, ""},
+		{"read", map[string]interface{}{"path": "SOUL.md"}, ""},
+		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, ""},
+		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "system-managed"},
+		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "memory tool"},
+		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "protected"},
+		{"write", map[string]interface{}{"path": "profiles/alice/notes.md", "content": "x"}, "system-managed"},
 	}
 	for _, tc := range cases {
 		var err error
 		if tc.call == "read" {
 			_, err = read(testContext("req-deny"), tc.args)
 		} else {
+			// Seed the read-before-write gate for agent-owned paths.
+			if tc.want == "" {
+				if _, rerr := read(testContext("req-deny"), map[string]interface{}{"path": tc.args["path"]}); rerr != nil {
+					t.Fatalf("seed read %v = %v", tc.args["path"], rerr)
+				}
+			}
 			_, err = write(testContext("req-deny"), tc.args)
+		}
+		if tc.want == "" {
+			if err != nil {
+				t.Fatalf("%s %v = %v, want success", tc.call, tc.args["path"], err)
+			}
+			continue
 		}
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s %v = %v, want %q", tc.call, tc.args["path"], err, tc.want)
