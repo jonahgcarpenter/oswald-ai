@@ -38,6 +38,15 @@ const (
 	contextCompactionFallback     = "I cannot continue because I ran out of context. Any completed actions have not been undone. Try splitting the remaining task into smaller steps."
 	generatedImagePartialResponse = "The model could not finish the request. The generated images were cached but not delivered; any completed actions have not been undone. Ask again to continue editing."
 	sessionPromptPressurePrefix   = "session-prompt-pressure-v1"
+	// maxConsecutiveEmptyRetries bounds nudges per blank occurrence: each
+	// blank gets up to this many continues with the same prompt.
+	maxConsecutiveEmptyRetries = 2
+	// maxEmptyRetriesPerTurn backstops the per-occurrence budget so a
+	// blank-work-blank cycle still terminates at the hardcoded fallback.
+	maxEmptyRetriesPerTurn = 4
+	// toolBudgetExhaustedNotice tells the model its hard tool limit is spent
+	// so it answers from gathered results instead of planning more calls.
+	toolBudgetExhaustedNotice = "The tool budget for this request is exhausted: no further tool calls are available. Review the results gathered so far and give your final answer now."
 )
 
 // MarkdownSummarizer compacts a full session into markdown in one
@@ -561,7 +570,11 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	toolGovernanceStopReason := ""
 	temporaryParserFallback := false
 	imageSizeFallbackUsed := false
-	emptyRetryDone := false
+	// emptyConsecutive counts back-to-back blanks for the per-occurrence
+	// budget and resets on productive iterations; emptyTotal is the
+	// absolute per-turn backstop.
+	emptyConsecutive := 0
+	emptyTotal := 0
 	useFallback := func(content string) {
 		accumulatedContent.Reset()
 		accumulatedContent.WriteString(content)
@@ -667,7 +680,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						a.recordChatUsage(ctx, reqLog, senderID, sessionKey, sessionGeneration, usage)
 						rebuilt := AssemblePromptContext(dynamicSystemPrompt, contextBlock, modelUserPrompt, userImages, markdown, preservedRecentTailCount(recentTurns, inputLimit), recentTurns, req.Tools, inputLimit)
 						messages = rebuilt.Messages
-						if emptyRetryDone && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
+						if emptyConsecutive > 0 && (len(messages) == 0 || messages[len(messages)-1].Content != emptyResponseRetryPrompt) {
 							messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
 						}
 						req.Messages = messages
@@ -752,10 +765,10 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 						return &Response{Model: a.model, Response: errorText, Error: errorText}, nil
 					}
 				}
-			} else if emptyRetryDone && len(generatedImages) == 0 {
-				// The empty-response continue already spent the one extra model
-				// call. A generic failure here maps to the empty fallback, not
-				// a provider error, matching the previous retry semantics.
+			} else if emptyConsecutive > 0 && len(generatedImages) == 0 {
+				// An empty-response continue was already spent: the model had
+				// its extra chance, so a generic failure here maps to the
+				// empty fallback, not a provider error.
 				reqLog.Warn("agent.response.empty_retry_failed", "empty-response retry failed",
 					config.F("status", "degraded"),
 					config.ErrorField(err),
@@ -799,11 +812,13 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			if visibleContent == "" {
 				visibleContent = resp.Message.Content
 			}
-			if strings.TrimSpace(visibleContent) == "" && !emptyRetryDone {
-				emptyRetryDone = true
+			if strings.TrimSpace(visibleContent) == "" && emptyConsecutive < maxConsecutiveEmptyRetries && emptyTotal < maxEmptyRetriesPerTurn {
+				emptyConsecutive++
+				emptyTotal++
 				messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
-				reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying once",
+				reqLog.Warn("agent.response.empty_retry", "model returned no visible response; retrying",
 					config.F("thinking_chars", len(resp.Message.Thinking)),
+					config.F("retry_attempt", emptyTotal),
 					config.F("status", "retry"),
 				)
 				continue
@@ -811,6 +826,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			reqLog.Debug("agent.loop.complete", "agent loop completed", config.F("iteration_count", iteration))
 			break
 		}
+		// The response did productive work, so the per-occurrence blank
+		// budget resets: the next blank gets a fresh set of continues.
+		emptyConsecutive = 0
 		// Stateless API: caller-owned tools are never executed server-side.
 		// Return them verbatim so the external app can run the standard loop.
 		// Only currently offered tools qualify; disallowed or hallucinated
@@ -1163,6 +1181,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 	if toolGovernanceStopReason != "" {
 		accumulatedContent.Reset()
+		// The model cannot see the removed tool catalog, so say plainly
+		// that the hard budget is spent and a final answer is due.
+		messages = append(messages, llm.ChatMessage{Role: "user", Content: toolBudgetExhaustedNotice})
 		finalReq := req
 		finalReq.Tools = nil
 		finalReq.Messages = messages
@@ -1172,6 +1193,29 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 
 		modelIterations++
 		resp, err, imageRetriesExhausted := a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
+		if err == nil && len(generatedImages) == 0 && emptyTotal < maxEmptyRetriesPerTurn && ctx.Err() == nil {
+			visibleFinal := accumulatedContent.String()
+			if visibleFinal == "" && resp != nil {
+				visibleFinal = resp.Message.Content
+			}
+			if strings.TrimSpace(visibleFinal) == "" {
+				// The tools-disabled completion blanked the same way the
+				// in-loop retry covers: nudge once with tools still off and
+				// ask the model to answer from the gathered results.
+				emptyConsecutive++
+				emptyTotal++
+				messages = append(messages, llm.ChatMessage{Role: "user", Content: emptyResponseRetryPrompt})
+				finalReq.Messages = messages
+				accumulatedContent.Reset()
+				reqLog.Warn("agent.response.empty_retry", "tools-disabled completion was empty; retrying",
+					config.F("thinking_chars", len(resp.Message.Thinking)),
+					config.F("retry_attempt", emptyTotal),
+					config.F("status", "retry"),
+				)
+				modelIterations++
+				resp, err, imageRetriesExhausted = a.chatWithImageRetries(ctx, finalReq, chatCallback, reqLog)
+			}
+		}
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
@@ -1221,9 +1265,9 @@ finalize:
 		finalThinking = lastResp.Message.Thinking
 	}
 	if strings.TrimSpace(finalContent) == "" {
-		// The in-loop empty retry already gave the model one more turn with
-		// tools intact. If it is still empty here, fall back without another
-		// model call.
+		// The in-loop empty retries already gave the model two more turns
+		// with tools intact. If it is still empty here, fall back without
+		// another model call.
 		if len(generatedImages) > 0 {
 			useFallback(generatedImagePartialResponse)
 			finalContent = generatedImagePartialResponse

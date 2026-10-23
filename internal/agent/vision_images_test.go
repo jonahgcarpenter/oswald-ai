@@ -80,6 +80,14 @@ func TestVisionLoadsPreviousAttachmentWithoutGenerationOrDelivery(t *testing.T) 
 		t.Fatalf("loaded images=%d tool results=%d", imageCount, toolCount)
 	}
 	loaded := final.Messages[len(final.Messages)-1]
+	for i := len(final.Messages) - 1; i >= 0; i-- {
+		// The tools-disabled completion may carry a trailing budget notice
+		// after the last tool result; retention is about tool content.
+		if final.Messages[i].Role == "tool" {
+			loaded = final.Messages[i]
+			break
+		}
+	}
 	if !strings.Contains(loaded.Content, "private-vision-question-5") || strings.Contains(loaded.Content, "private-vision-question-0") {
 		t.Fatal("did not retain only the four latest loaded images")
 	}
