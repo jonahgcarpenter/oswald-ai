@@ -29,7 +29,7 @@ func TestResolveReadsOutside(t *testing.T) {
 	}
 	ws := NewWorkspace(root, "alice")
 	// Outside reads resolve (system-managed); only protected names fail.
-	for _, raw := range []string{"../x", "../../etc/passwd", "/etc/hostname", "~/../x"} {
+	for _, raw := range []string{"../x", "../../etc/passwd", "/etc/hostname", "/proc/cpuinfo", "~/../x"} {
 		abs, display, err := ws.Resolve(raw)
 		if err != nil {
 			t.Fatalf("outside read denied: %q: %v", raw, err)
@@ -41,7 +41,7 @@ func TestResolveReadsOutside(t *testing.T) {
 			t.Fatalf("outside write allowed: %q", raw)
 		}
 	}
-	for _, raw := range []string{"/proc/self/environ", "/sys/x", "../.env"} {
+	for _, raw := range []string{"/proc/self/environ", "/proc/1/cmdline", "../.env"} {
 		if _, _, err := ws.Resolve(raw); err == nil {
 			t.Fatalf("protected outside read allowed: %q", raw)
 		}

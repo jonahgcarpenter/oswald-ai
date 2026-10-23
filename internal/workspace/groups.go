@@ -116,10 +116,13 @@ func Classify(abs, root string) Group {
 		}
 		return GroupAgent
 	}
-	// Outside the workspace root: the container user is the backstop.
-	// Virtual filesystems that could leak process secrets stay sealed.
-	for _, dir := range []string{"/proc", "/sys", "/dev"} {
-		if abs == dir || strings.HasPrefix(abs, dir+string(filepath.Separator)) {
+	// Outside the workspace root: the container user is the backstop. Only
+	// per-process secret vectors stay sealed (environment and command
+	// lines can carry credentials); telemetry elsewhere under /proc, /sys,
+	// and /dev resolves system-managed.
+	if underPath(abs, "/proc") {
+		switch filepath.Base(abs) {
+		case "environ", "cmdline":
 			return GroupProtected
 		}
 	}

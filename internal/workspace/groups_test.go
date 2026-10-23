@@ -37,9 +37,13 @@ func TestClassifyGroups(t *testing.T) {
 		{filepath.Join(root, "mcp-tokens", "tok"), GroupProtected},
 		{filepath.Join(root, "profiles", "bob", "mcp-tokens", "tok"), GroupProtected},
 		// Outside the tree: virtual filesystems stay sealed.
+		// Sealed: process secret vectors, even though /proc telemetry roams.
 		{filepath.Join(string(filepath.Separator), "proc", "self", "environ"), GroupProtected},
-		{filepath.Join(string(filepath.Separator), "sys", "x"), GroupProtected},
-		{filepath.Join(string(filepath.Separator), "dev", "null"), GroupProtected},
+		{filepath.Join(string(filepath.Separator), "proc", "1", "cmdline"), GroupProtected},
+		// Roaming telemetry reads as system-managed.
+		{filepath.Join(string(filepath.Separator), "proc", "cpuinfo"), GroupSystem},
+		{filepath.Join(string(filepath.Separator), "sys", "x"), GroupSystem},
+		{filepath.Join(string(filepath.Separator), "dev", "null"), GroupSystem},
 		// state.db: system same-profile, protected cross-profile.
 		{filepath.Join(root, "state.db"), GroupSystem},
 		{filepath.Join(root, "state.db-wal"), GroupSystem},

@@ -65,6 +65,7 @@ func TestScanConfinedWriteShell(t *testing.T) {
 		"cat " + bobSoul,
 		"cat config.yaml",
 		"cat /etc/hostname",
+		"cat /proc/cpuinfo",
 		"cat ../alice/notes.md",
 		`echo "echo x > /tmp/outside.txt"`,
 		"echo hi > /dev/null",
