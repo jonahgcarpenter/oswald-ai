@@ -185,28 +185,15 @@ func sessionDir(profileRoot string) (string, error) {
 	return "", fmt.Errorf("create browser profile dir: too many collisions")
 }
 
-// SweepStaleProfiles removes orphaned Chromium user-data dirs: legacy
-// oswald-browser-* entries at the profile root (predating cache placement)
-// and every child of cache/browser-profiles. Call at process start, when no
-// live session can exist in this process. Best-effort; missing roots are a
-// no-op. It returns the number of removed directories.
+// SweepStaleProfiles removes orphaned Chromium user-data dirs under
+// cache/browser-profiles. Call at process start, when no live session can
+// exist in this process. Best-effort; missing roots are a no-op. It returns
+// the number of removed directories.
 func SweepStaleProfiles(profileRoot string) int {
 	reaped := 0
 	if strings.TrimSpace(profileRoot) != "" {
-		entries, err := os.ReadDir(profileRoot)
-		if err == nil {
-			for _, e := range entries {
-				name := e.Name()
-				if !strings.HasPrefix(name, "oswald-browser-") || !e.IsDir() {
-					continue
-				}
-				if err := os.RemoveAll(filepath.Join(profileRoot, name)); err == nil {
-					reaped++
-				}
-			}
-		}
 		base := sessionBaseDir(profileRoot)
-		entries, err = os.ReadDir(base)
+		entries, err := os.ReadDir(base)
 		if err == nil {
 			for _, e := range entries {
 				if !e.IsDir() {

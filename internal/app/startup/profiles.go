@@ -229,6 +229,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
 		cleanup.Add(docache.SweepHook(docache.NewProfileCache(profile.ProfileRoot, name), rootLog))
+		workspace.RepairCache(profile.ProfileRoot, name, rootLog)
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
@@ -244,9 +245,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 				return abs, err
 			}
 			cronRunner.ResolveDir = func(raw string) (string, error) { return ws.ResolveDir(raw) }
-			if scratch, err := ws.EnsureScratch(); err == nil {
-				cronRunner.Scratch = scratch
-			}
+			cronRunner.Scratch = ws.ScratchDir()
 		}
 		cronStores[name] = cron.NewStore(profile.ProfileRoot)
 		cronRunners[name] = cronRunner

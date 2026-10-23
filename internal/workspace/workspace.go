@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // Workspace binds file and terminal execution to one profile directory.
@@ -323,6 +325,43 @@ func (w *Workspace) NoteWrite(requestID, abs, hash string) {
 func FileHash(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// RepairCache tightens permissions on existing cache directories without
+// creating anything. Missing paths stay missing so creation remains lazy on
+// first tool use; symlinks and non-directories are left for the fail-closed
+// checks elsewhere.
+func RepairCache(root, profile string, log *config.Logger) {
+	if err := validateRoot(root); err != nil {
+		return
+	}
+	paths := []string{
+		filepath.Join(root, "cache"),
+		filepath.Join(root, "cache", "scratch"),
+		filepath.Join(root, "cache", "scratch", "browser-snapshots"),
+		filepath.Join(root, "cache", "images"),
+		filepath.Join(root, "cache", "documents"),
+		filepath.Join(root, "cache", "processes"),
+		filepath.Join(root, "cache", "browser-profiles"),
+	}
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if info.Mode().Perm()&0077 == 0 {
+			continue
+		}
+		if err := os.Chmod(path, 0700); err != nil {
+			continue
+		}
+		if log != nil {
+			log.Server("workspace").Debug("workspace.cache.repaired", "repaired cache permissions", config.F("profile", profile))
+		}
+	}
 }
 
 func validateRoot(root string) error {

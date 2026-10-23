@@ -63,16 +63,12 @@ func TestProfileInterpolationMissingVariableDoesNotLeakContent(t *testing.T) {
 }
 
 func TestProfileEnvironmentRejectsUnsafeFilesAndYAML(t *testing.T) {
-	for _, mode := range []string{"symlink", "permissions", "duplicate", "alias", "unknown"} {
+	for _, mode := range []string{"symlink", "duplicate", "alias", "unknown"} {
 		t.Run(mode, func(t *testing.T) {
 			root := profileConfigFixture(t, syntheticProfileConfig)
 			switch mode {
 			case "symlink":
 				if err := os.Symlink("config.yaml", filepath.Join(root, ".env")); err != nil {
-					t.Fatal(err)
-				}
-			case "permissions":
-				if err := os.WriteFile(filepath.Join(root, ".env"), []byte("KEY=private-canary\n"), 0644); err != nil {
 					t.Fatal(err)
 				}
 			case "duplicate":
@@ -92,6 +88,25 @@ func TestProfileEnvironmentRejectsUnsafeFilesAndYAML(t *testing.T) {
 				t.Fatal("unsafe configuration was accepted")
 			}
 		})
+	}
+}
+
+func TestProfileEnvironmentRepairsPermissions(t *testing.T) {
+	root := profileConfigFixture(t, syntheticProfileConfig)
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("KEY=private-canary\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProfiles(root); err != nil {
+		t.Fatalf("repairable permissions rejected: %v", err)
+	}
+	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0700 {
+		t.Fatalf("config dir not repaired: %v %v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(root, ".env")); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf(".env not repaired: %v %v", info, err)
 	}
 }
 

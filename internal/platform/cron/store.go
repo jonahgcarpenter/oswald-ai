@@ -645,6 +645,7 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 	env := []string{"PATH=/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
 	if r != nil {
 		if r.Scratch != "" {
+			ensureScratchDir(r.Root, r.Scratch)
 			env = append(env, "TMPDIR="+r.Scratch)
 		}
 		if r.Root != "" {
@@ -657,6 +658,44 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 	cmd.Stderr = &boundedWriter{buf: &buf, limit: 64 << 10}
 	err = cmd.Run()
 	return strings.TrimRight(buf.String(), "\n"), err
+}
+
+// ensureScratchDir lazily creates the cron scratch directory on first use.
+// Only components at or below root are touched; system ancestors above root
+// are never created or chmodded. Failures are silent: the caller still sets
+// TMPDIR and lets script execution surface the error.
+func ensureScratchDir(root, scratch string) {
+	if scratch == "" || root == "" {
+		return
+	}
+	rel, err := filepath.Rel(root, scratch)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Mkdir(current, 0700); err != nil {
+				return
+			}
+			continue
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return
+		}
+		if current == scratch && info.Mode().Perm()&0077 != 0 {
+			_ = os.Chmod(current, 0700)
+		}
+	}
 }
 
 func hashString(s string) string {

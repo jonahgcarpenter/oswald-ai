@@ -191,11 +191,30 @@ var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 // ValidProfileName excludes traversal, hidden entries, and the reserved default name.
 func ValidProfileName(name string) bool { return name != "default" && profileNameRE.MatchString(name) }
 
+func logPermRepair(source string) {
+	NewLogger(LevelInfo).Server("config").Debug("config.perms.repaired", "repaired private permissions", F("config_source", source))
+}
+
+func repairPrivateDir(abs, source string) {
+	info, err := os.Lstat(abs)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	if err := os.Chmod(abs, 0700); err != nil {
+		return
+	}
+	logPermRepair(source)
+}
+
 func privateDirectory(path, source string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return withConfigSource(configErr("config_dir_unavailable", ""), source)
 	}
+	repairPrivateDir(abs, source)
 	current := string(os.PathSeparator)
 	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
 		if part == "" {
