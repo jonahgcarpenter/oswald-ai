@@ -44,11 +44,8 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		if len(code) > 200<<10 {
 			return governance.Result{}, errors.New("code exceeds size limit")
 		}
-		if ScanProfileEscapeCode(code, ws.Root()) {
-			return governance.Result{}, errors.New("cross-profile access is not allowed")
-		}
-		if ScanManagedCacheCode(code, ws.Root()) {
-			return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
+		if reason, blocked := ScanConfinedWrite(code, ws.Root(), ws.Root(), false); blocked {
+			return governance.Result{}, errors.New(reason)
 		}
 		reset, err := boolArg(args, "reset", false)
 		if err != nil {

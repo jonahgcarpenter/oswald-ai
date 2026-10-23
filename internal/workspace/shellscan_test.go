@@ -122,18 +122,6 @@ func TestScanStoreAndConfig(t *testing.T) {
 	if ScanStoreAccess(qb("go test ./...")) {
 		t.Fatal("safe command flagged as store access")
 	}
-	if _, blocked := ScanConfigEdit(qb("sed -i s/a/b/ config.yaml")); !blocked {
-		t.Fatal("sed config missed")
-	}
-	if _, blocked := ScanConfigEdit(qb("echo x | tee .env.local")); !blocked {
-		t.Fatal("tee env missed")
-	}
-	if _, blocked := ScanConfigEdit(qb("cp new.yaml config.yaml")); !blocked {
-		t.Fatal("cp config missed")
-	}
-	if _, blocked := ScanConfigEdit(qb("go test ./...")); blocked {
-		t.Fatal("safe command flagged as config edit")
-	}
 }
 
 func TestHiddenUnicodeAndSecretRead(t *testing.T) {

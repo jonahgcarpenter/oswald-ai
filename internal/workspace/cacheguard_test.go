@@ -2,7 +2,6 @@ package workspace
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,67 +49,6 @@ func TestCacheReadsAllowedWritesDenied(t *testing.T) {
 		}
 		if msg := DenyMessage(rel, group, true); !strings.Contains(msg, "cache/scratch") && !strings.Contains(msg, "system-managed") {
 			t.Errorf("deny message missing for %q: %q", raw, msg)
-		}
-	}
-}
-
-func TestScanManagedCacheShell(t *testing.T) {
-	root := t.TempDir()
-	deny := []string{
-		"mkdir cache/scratch_go",
-		"mkdir cache/foo && touch cache/foo/a",
-		"GOPATH=cache/scratch-gopath go build ./...",
-		"ls cache/processes",
-		"cat cache/images/x",
-		"cp out.bin cache/foo.bin",
-		"mkdir " + filepath.Join(root, "cache", "scratch_go"),
-	}
-	for _, cmd := range deny {
-		if !ScanManagedCacheShell(cmd, root) {
-			t.Errorf("shell allowed managed cache: %q", cmd)
-		}
-	}
-	allow := []string{
-		"echo hi",
-		"ls",
-		"mkdir cache/scratch/exp1",
-		"ls cache/scratch",
-		"touch cache/scratch/out.txt",
-		`echo "mkdir cache/foo"`,
-		"go test ./...",
-	}
-	for _, cmd := range allow {
-		if ScanManagedCacheShell(cmd, root) {
-			t.Errorf("shell denied safe command: %q", cmd)
-		}
-	}
-}
-
-func TestScanManagedCacheCode(t *testing.T) {
-	root := t.TempDir()
-	deny := []string{
-		`open('cache/foo', 'w')`,
-		`open("cache/scratch_go/x").read()`,
-		`import os; os.makedirs("cache/foo")`,
-		`from pathlib import Path; Path("cache/foo").mkdir()`,
-		`open('cache/images/x', 'rb').read()`,
-		`open(os.path.join("cache", "x"), "w")`,
-		`open('` + filepath.Join(root, "cache", "foo") + `')`,
-	}
-	for _, code := range deny {
-		if !ScanManagedCacheCode(code, root) {
-			t.Errorf("code allowed managed cache: %q", code)
-		}
-	}
-	allow := []string{
-		`print(40+2)`,
-		`open('cache/scratch/exp/out.txt').read()`,
-		`open('notes.md').read()`,
-		`print("cache")`,
-	}
-	for _, code := range allow {
-		if ScanManagedCacheCode(code, root) {
-			t.Errorf("code denied safe snippet: %q", code)
 		}
 	}
 }

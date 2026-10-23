@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // ProcessManageDefinition returns the background-process companion contract.
@@ -105,22 +105,16 @@ func NewProcessManageHandler(ws *Workspace, pm *process.Manager) func(context.Co
 			}
 			return governance.Result{Content: fmt.Sprintf("session_id: %s\nstatus: %s\nexit_code: %d", info.ID, info.Status, info.ExitCode), Outcome: governance.OutcomeProductive}, nil
 		case "write":
-			if ScanProfileEscapeCode(data, ws.Root()) {
-				return governance.Result{}, errors.New("cross-profile access is not allowed")
-			}
-			if ScanManagedCacheCode(data, ws.Root()) {
-				return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
+			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
+				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Write(sessionID, data); err != nil {
 				return governance.Result{}, err
 			}
 			return governance.Result{Content: "stdin written", Outcome: governance.OutcomeProductive}, nil
 		case "submit":
-			if ScanProfileEscapeCode(data, ws.Root()) {
-				return governance.Result{}, errors.New("cross-profile access is not allowed")
-			}
-			if ScanManagedCacheCode(data, ws.Root()) {
-				return governance.Result{}, errors.New("managed cache access is not allowed: write temporary files under cache/scratch/")
+			if reason, blocked := ScanConfinedWrite(data, ws.Root(), ws.Root(), false); blocked {
+				return governance.Result{}, errors.New(reason)
 			}
 			if err := pm.Submit(sessionID, data); err != nil {
 				return governance.Result{}, err
