@@ -26,7 +26,7 @@ func TestRepairCacheRepairsWithoutCreating(t *testing.T) {
 			t.Fatalf("%s not repaired: %v %v", dir, info, err)
 		}
 	}
-	for _, dir := range []string{"cache/images", "cache/documents", "cache/processes", "cache/browser-profiles"} {
+	for _, dir := range []string{"cache/images", "cache/documents", "cache/processes", "cache/browser"} {
 		if _, err := os.Stat(filepath.Join(root, dir)); !os.IsNotExist(err) {
 			t.Fatalf("%s created eagerly", dir)
 		}

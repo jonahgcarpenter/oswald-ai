@@ -287,48 +287,6 @@ func ScanStoreAccess(live string) bool {
 	return strings.Contains(live, "<") || strings.Contains(live, ">")
 }
 
-var (
-	reSedInPlace = regexp.MustCompile(`\bsed\s+[^;&|]*-i\b`)
-	reTeeTarget  = regexp.MustCompile(`\btee\s+(?:-[a-zA-Z]*\s+)*(\S+)`)
-	reRedirectOp = regexp.MustCompile(`>>?\s*(\S+)`)
-	reCopyOver   = regexp.MustCompile(`\b(?:cp|mv)\s+\S+\s+(\S+)`)
-)
-
-func tokenHitsConfig(token string) bool {
-	token = strings.Trim(token, "\"'();")
-	base := filepath.Base(token)
-	if base == "config.yaml" {
-		return true
-	}
-	if strings.HasPrefix(base, ".env") {
-		return true
-	}
-	return false
-}
-
-// ScanConfigEdit reports in-place config edits for a hard deny. Ask the
-// operator instead: no config writer exists for the model.
-func ScanConfigEdit(live string) (string, bool) {
-	if reSedInPlace.MatchString(live) {
-		for _, token := range strings.Fields(live) {
-			if tokenHitsConfig(token) {
-				return "in-place edit of agent config", true
-			}
-		}
-	}
-	if match := reTeeTarget.FindStringSubmatch(live); match != nil && tokenHitsConfig(match[1]) {
-		return "in-place edit of agent config", true
-	}
-	for _, re := range []*regexp.Regexp{reRedirectOp, reCopyOver} {
-		for _, match := range re.FindAllStringSubmatch(live, -1) {
-			if len(match) > 1 && tokenHitsConfig(match[1]) {
-				return "in-place edit of agent config", true
-			}
-		}
-	}
-	return "", false
-}
-
 // deniedResult renders a hard shell denial. The envelope is returned as a
 // successful unproductive result so the model sees the exact contract.
 func deniedResult(reason string) governance.Result {

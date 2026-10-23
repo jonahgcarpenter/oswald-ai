@@ -234,7 +234,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))
 		cleanup.Add(workspace.CacheChildrenHook(profile.ProfileRoot, rootLog, map[string]struct{}{
-			"scratch": {}, "images": {}, "documents": {}, "processes": {}, "browser-profiles": {},
+			"scratch": {}, "images": {}, "documents": {}, "processes": {}, "browser": {},
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)

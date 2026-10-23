@@ -44,13 +44,15 @@ recallable, deduped to one entry per lineage root.
 
 ## Soul and files (why two mechanisms)
 
-`SOUL.md` (≤1 MiB, profile file else root fallback) is operator policy the model can never edit;
-runtime never copies, migrates, or deletes it. `USER.md` (≤1,375 runes) and `MEMORY.md` (≤2,200
-runes, `§`-separated entries) are model-editable through the `memory` tool only: one action or
-1–20 ordered ops per atomic batch, replace/remove needing exact unique `old_text`, stable
-per-target flock files with re-read, validation, synced temp-file rename, and directory sync.
-Capacity errors return current entries for consolidation. No cross-file/SQLite/delivery
-transaction exists — that absence is deliberate, and external editors must follow the locks.
+`SOUL.md` (≤1 MiB, profile file else root fallback) is operator policy the model edits as an
+agent-owned workspace file same-profile (read-only cross-profile); runtime never copies,
+migrates, or deletes it. `USER.md` (≤1,375 runes) and `MEMORY.md` (≤2,200
+runes, `§`-separated entries) are system-managed: directly readable, but writable only through
+the `memory` tool: one action or 1–20 ordered ops per atomic batch, replace/remove needing exact
+unique `old_text`, stable per-target flock files with re-read, validation, synced temp-file
+rename, and directory sync. Capacity errors return current entries for consolidation. No
+cross-file/SQLite/delivery transaction exists — that absence is deliberate, and external editors
+must follow the locks.
 
 Images: at most 4 refs per exchange, 8 per session, and only delivered active-generation refs
 load. Cache files expire after 24h and are never reconstructed from SQLite.

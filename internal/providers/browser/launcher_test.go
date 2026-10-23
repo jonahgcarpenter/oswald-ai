@@ -47,7 +47,7 @@ func TestSessionDirLivesUnderCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBase := filepath.Join(root, "cache", "browser-profiles") + string(filepath.Separator)
+	wantBase := filepath.Join(root, "cache", "browser") + string(filepath.Separator)
 	if !strings.HasPrefix(dir, wantBase) {
 		t.Fatalf("session dir = %q, want under %q", dir, wantBase)
 	}
@@ -89,7 +89,7 @@ func TestSweepReapsOrphanProfileDirs(t *testing.T) {
 	if err := os.MkdirAll(base, 0700); err != nil {
 		t.Fatal(err)
 	}
-	orphan := filepath.Join(base, "deadbeef")
+	orphan := filepath.Join(base, "profile-deadbeef")
 	if err := os.Mkdir(orphan, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestSweepReapsOrphanProfileDirs(t *testing.T) {
 	if err := os.Chtimes(orphan, old, old); err != nil {
 		t.Fatal(err)
 	}
-	fresh := filepath.Join(base, "freshbeef")
+	fresh := filepath.Join(base, "profile-freshbeef")
 	if err := os.Mkdir(fresh, 0700); err != nil {
 		t.Fatal(err)
 	}

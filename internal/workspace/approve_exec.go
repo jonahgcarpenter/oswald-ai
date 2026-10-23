@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 // ExecuteApproved replays a user-approved pending command. The destructive
@@ -36,24 +36,20 @@ func ExecuteApproved(ctx context.Context, ws *Workspace, pm *process.Manager, pe
 		return governance.Result{}, err
 	}
 	// Replay re-checks every deny-class rule: approval overrides the
-	// recoverable reviewer path only, never unrecoverable, fetch, config,
-	// or cross-profile denials.
+	// recoverable reviewer path only, never unrecoverable, fetch,
+	// confined-write, or protected-read denials.
 	live := stripInert(pending.Command)
-	quoted := proseBlanked(normalizeCommand(pending.Command))
 	if reason, blocked := ScanUnrecoverable(live); blocked {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
 	if verdict, reason := classifyFetch(pending.Command, live, pending.Workdir); verdict == fetchDeny {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
-	if reason, blocked := ScanConfigEdit(quoted); blocked {
+	if reason, blocked := ScanConfinedWrite(pending.Command, pending.Workdir, ws.Root(), true); blocked {
 		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
-	if ScanProfileEscapeShell(pending.Command, pending.Workdir) {
-		return governance.Result{}, errors.New("approved command refused on re-scan: cross-profile access")
-	}
-	if ScanManagedCacheShell(pending.Command, pending.Workdir) {
-		return governance.Result{}, errors.New("approved command refused on re-scan: managed cache access")
+	if reason, blocked := ScanProtectedRead(pending.Command, pending.Workdir, ws.Root(), true); blocked {
+		return governance.Result{}, errors.New("approved command refused on re-scan: " + reason)
 	}
 	return executeTerminalCommand(ctx, pm, pending.RequestID, pending.Command, pending.Workdir, pending.Scratch, pending.Timeout, pending.Background, pending.Persist, 0, "")
 }

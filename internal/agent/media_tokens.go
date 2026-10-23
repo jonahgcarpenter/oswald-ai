@@ -17,6 +17,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	_ "golang.org/x/image/webp"
 	"golang.org/x/sys/unix"
 )
@@ -48,10 +49,11 @@ func trimTokenPunctuation(path string) string {
 // stored history.
 //
 // Cache resolution is confined by imagecache.Resolve to regular, private,
-// unexpired cache images owned by senderID. The CWD fallback is confined by
-// resolveCWDImage to regular image files under workspaceRoot with
-// containment, symlink, secret, size, and MIME enforcement. Paths outside
-// both fail closed and are stripped text-only. The text-only API gateway
+// unexpired cache images owned by senderID. The CWD fallback resolves raw
+// absolute paths under the file groups (protected names sealed, managed
+// cache via the cache resolver) with symlink, secret, size, and MIME
+// enforcement. Paths resolving nowhere fail closed and are stripped
+// text-only. The text-only API gateway
 // strips tokens without attaching. Combined tool plus media attachments stay
 // within media.ValidateOutputAttachments; overflow and filename collisions
 // are dropped.
@@ -99,12 +101,13 @@ func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, ga
 	return stripped, attached
 }
 
-// resolveCWDImage reads a regular image file at an absolute path confined
-// inside the profile working directory. Managed cache paths must go through
-// imagecache.Resolve (which enforces ownership and expiry); this fallback
-// denies cache siblings except cache/scratch so expiry semantics are
-// preserved, and denies operator secrets, state, memory, tokens, and
-// cross-profile paths mirroring the workspace sandbox.
+// resolveCWDImage reads a regular image file at an absolute path. Managed
+// cache paths must go through imagecache.Resolve (which enforces ownership
+// and expiry); this fallback denies cache siblings except cache/scratch so
+// expiry semantics are preserved, and denies protected names through the
+// shared file groups. Everything else resolves under the same-trust model:
+// system and agent paths (including outside the workspace) may attach,
+// subject to image validation below.
 func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, string, error) {
 	root := strings.TrimSpace(a.workspaceRoot)
 	if root == "" {
@@ -114,11 +117,10 @@ func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, strin
 		return nil, "", errOutsideWorkspace
 	}
 	clean := filepath.Clean(path)
-	rel, err := filepath.Rel(root, clean)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, "", errOutsideWorkspace
+	if workspace.Classify(clean, root) == workspace.GroupProtected {
+		return nil, "", errDeniedWorkspacePath
 	}
-	if deniedCWDPath(rel) {
+	if inManagedCache(clean, root) {
 		return nil, "", errDeniedWorkspacePath
 	}
 	if err := ctx.Err(); err != nil {
@@ -129,11 +131,10 @@ func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, strin
 		return nil, "", errOutsideWorkspace
 	}
 	resolved = filepath.Clean(resolved)
-	rel, err = filepath.Rel(root, resolved)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return nil, "", errOutsideWorkspace
+	if workspace.Classify(resolved, root) == workspace.GroupProtected {
+		return nil, "", errDeniedWorkspacePath
 	}
-	if deniedCWDPath(rel) {
+	if inManagedCache(resolved, root) {
 		return nil, "", errDeniedWorkspacePath
 	}
 	if info, err := os.Lstat(resolved); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
@@ -180,42 +181,18 @@ var (
 	errUnsupportedImage    = errors.New("unsupported image signature")
 )
 
-// deniedCWDPath mirrors the workspace sandbox denies relevant to MEDIA
-// delivery: operator secrets, application state, managed memory, tokens,
-// cross-profile subtrees, and managed cache except the scratch area (which
-// stays readable so model-produced temp images can attach; cache/images
-// must go through the cache resolver with ownership and expiry).
-func deniedCWDPath(rel string) bool {
+// inManagedCache reports workspace cache paths that must resolve through the
+// managed image cache (ownership and expiry) instead of the raw CWD
+// fallback. cache/scratch stays readable so model-produced temp images can
+// attach.
+func inManagedCache(abs, root string) bool {
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return false
+	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	first := ""
-	if len(parts) > 0 {
-		first = parts[0]
-	}
-	base := filepath.Base(rel)
-	switch base {
-	case "state.db", "state.db-wal", "state.db-shm", "state.db-journal", "state.db-journal-mode",
-		"config.yaml", ".env", "SOUL.md":
-		return true
-	}
-	if strings.HasPrefix(base, ".env") {
-		return true
-	}
-	if base == "credentials" || strings.HasPrefix(base, "credentials.") ||
-		strings.HasSuffix(base, "credentials.json") ||
-		strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
-		return true
-	}
-	switch first {
-	case "mcp-tokens", "memories", "profiles":
-		return true
-	}
-	if first == "cache" {
-		if rel == "cache/scratch" || strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator)) {
-			return false
-		}
-		return true
-	}
-	return false
+	return len(parts) > 0 && parts[0] == "cache" &&
+		rel != "cache" && rel != "cache/scratch" && !strings.HasPrefix(rel, "cache/scratch"+string(filepath.Separator))
 }
 
 // readLimited reads f up to limit bytes; callers size-check before trusting.

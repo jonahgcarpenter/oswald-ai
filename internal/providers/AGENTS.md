@@ -28,7 +28,7 @@ websocket, `cdp_page.go` one page target, `launcher.go` private user-data dir wi
 owns navigation with readiness wait plus partial-load degrade, ref-addressed interaction,
 console buffers, dialog tracking, screenshots with optional box annotation, and a trusted
 `VaultEval` lane that bypasses only the `restrict_evaluate` denylist. Spills hash-name into
-`cache/scratch/browser-snapshots/`; the hourly prune hook reaps idle sessions and day-old spills.
+`cache/browser/scratch-<hash>.txt`; the hourly prune hook reaps idle sessions and day-old spills.
 
 ## Bounds that bite
 

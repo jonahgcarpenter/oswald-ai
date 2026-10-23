@@ -293,7 +293,7 @@ func sweepOrphanProfiles(profileRoot string, live map[string]bool, now time.Time
 	}
 	reaped := 0
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "profile-") {
 			continue
 		}
 		full := filepath.Join(sessionBaseDir(profileRoot), e.Name())
@@ -325,14 +325,14 @@ func (b *LocalBackend) CloseAll() {
 }
 
 func sweepSnapshotSpills(profileRoot string, now time.Time) int {
-	dir := filepath.Join(profileRoot, "cache", "scratch", "browser-snapshots")
+	dir := filepath.Join(profileRoot, "cache", "browser")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
 	reaped := 0
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "scratch-") || !strings.HasSuffix(e.Name(), ".txt") {
 			continue
 		}
 		info, err := e.Info()
@@ -1008,15 +1008,15 @@ func spillSnapshot(profileRoot, content string) (string, error) {
 	if len(content) > fullSnapshotCap {
 		content = content[:fullSnapshotCap]
 	}
-	dir := filepath.Join(profileRoot, "cache", "scratch", "browser-snapshots")
+	dir := filepath.Join(profileRoot, "cache", "browser")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
 	// The content hash names the file so identical snapshots dedupe to one
-	// spill. Scratch is model-readable through read_file, so the truncation
-	// note can point the model at the full tree for paging.
+	// spill. The scratch- file is model-readable through read_file, so the
+	// truncation note can point the model at the full tree for paging.
 	sum := sha256.Sum256([]byte(content))
-	path := filepath.Join(dir, "browser-snapshot-"+hex.EncodeToString(sum[:])[:16]+".txt")
+	path := filepath.Join(dir, "scratch-"+hex.EncodeToString(sum[:])[:16]+".txt")
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		return "", err
 	}

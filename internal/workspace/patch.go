@@ -45,10 +45,10 @@ func NewPatchHandler(ws *Workspace) func(context.Context, map[string]interface{}
 		if err != nil {
 			return governance.Result{}, err
 		}
-		abs, _, err := ws.Resolve(rawPath)
+		abs, _, err := ws.ResolveWrite(rawPath)
 		if err != nil {
-			if rel, category, ok := AsDeny(err); ok {
-				return governance.Result{}, errors.New(DenyMessage(rel, category, true))
+			if rel, group, ok := AsDeny(err); ok {
+				return governance.Result{}, errors.New(DenyMessage(rel, group, true))
 			}
 			return governance.Result{}, err
 		}

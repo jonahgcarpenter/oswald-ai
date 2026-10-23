@@ -157,14 +157,15 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// sessionBaseDir owns per-session Chromium user-data dirs below the profile
-// cache, so the prune worker (not the profile root) owns their lifecycle.
+// sessionBaseDir owns per-session Chromium user-data dirs and snapshot
+// spills below the profile cache, so the prune worker (not the profile
+// root) owns their lifecycle.
 func sessionBaseDir(profileRoot string) string {
-	return filepath.Join(profileRoot, "cache", "browser-profiles")
+	return filepath.Join(profileRoot, "cache", "browser")
 }
 
 // sessionDir provisions one owner-only session directory as
-// cache/browser-profiles/<id>.
+// cache/browser/profile-<id>.
 func sessionDir(profileRoot string) (string, error) {
 	base := sessionBaseDir(profileRoot)
 	if err := os.MkdirAll(base, 0700); err != nil {
@@ -175,7 +176,7 @@ func sessionDir(profileRoot string) (string, error) {
 		if _, err := rand.Read(id[:]); err != nil {
 			return "", fmt.Errorf("create browser profile id: %w", err)
 		}
-		dir := filepath.Join(base, hex.EncodeToString(id[:]))
+		dir := filepath.Join(base, "profile-"+hex.EncodeToString(id[:]))
 		if err := os.Mkdir(dir, 0700); err == nil {
 			return dir, nil
 		} else if !errors.Is(err, os.ErrExist) {
@@ -186,7 +187,7 @@ func sessionDir(profileRoot string) (string, error) {
 }
 
 // SweepStaleProfiles removes orphaned Chromium user-data dirs under
-// cache/browser-profiles. Call at process start, when no live session can
+// cache/browser. Call at process start, when no live session can
 // exist in this process. Best-effort; missing roots are a no-op. It returns
 // the number of removed directories.
 func SweepStaleProfiles(profileRoot string) int {
@@ -196,7 +197,7 @@ func SweepStaleProfiles(profileRoot string) int {
 		entries, err := os.ReadDir(base)
 		if err == nil {
 			for _, e := range entries {
-				if !e.IsDir() {
+				if !e.IsDir() || !strings.HasPrefix(e.Name(), "profile-") {
 					continue
 				}
 				if err := os.RemoveAll(filepath.Join(base, e.Name())); err == nil {

@@ -9,10 +9,10 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 const (
@@ -103,7 +103,7 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 			return governance.Result{}, errors.New("workspace is unavailable")
 		}
 		// Security chain: lifecycle first (force cannot bypass), then
-		// self-repo, then cross-profile containment, then foreground
+		// self-repo, then confined-write containment, then foreground
 		// guidance, then the normalized semantic layer (unrecoverable deny,
 		// fetch policy, store/config scans, recoverable escalations), then
 		// destructive-pattern review.
@@ -114,11 +114,11 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		if err := BlockSelfRepo(command, workdir); err != nil {
 			return governance.Result{}, err
 		}
-		if ScanProfileEscapeShell(command, workdir) {
-			return deniedResult("cross-profile access"), nil
+		if reason, blocked := ScanConfinedWrite(command, workdir, ws.Root(), true); blocked {
+			return deniedResult(reason), nil
 		}
-		if ScanManagedCacheShell(command, workdir) {
-			return deniedResult("managed cache access: write temporary files under cache/scratch/"), nil
+		if reason, blocked := ScanProtectedRead(command, workdir, ws.Root(), true); blocked {
+			return deniedResult(reason), nil
 		}
 		if !background {
 			if err := RefuseDetachableForeground(command); err != nil {
@@ -138,9 +138,6 @@ func NewTerminalHandler(ws *Workspace, pm *process.Manager) func(context.Context
 		}
 		if ScanSecretRead(quoted) {
 			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, "read secrets")
-		}
-		if reason, blocked := ScanConfigEdit(quoted); blocked {
-			return deniedResult(reason), nil
 		}
 		if detectHiddenUnicode(command) {
 			return reviewDangerous(ctx, ws, pm, principal, command, workdir, scratch, timeout, background, persist, heartbeat, notifyNote, "hidden unicode content")
