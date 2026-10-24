@@ -47,7 +47,7 @@ RUN mkdir -p /usr/share/keyrings \
   && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system oswald-group && useradd --system --gid oswald-group --home-dir /home/oswald --no-create-home oswald
+RUN groupadd -r -g 999 oswald-group && useradd -r -u 999 --gid oswald-group --home-dir /home/oswald --no-create-home oswald
 
 # Home directory for the service user; operator data lives in its .oswald root.
 RUN install -d -m 0755 -o oswald -g oswald-group /home/oswald

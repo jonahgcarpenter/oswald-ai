@@ -195,6 +195,9 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return nil
 		}
 		profile, _ := directory.Config(name)
+		soul.RepairProfile(profile.ProfileRoot, filepath.Join(cfg.ProfileRoot, "SOUL.md"))
+		files.RepairProfile(profile.ProfileRoot, name)
+		workspace.RepairCache(profile.ProfileRoot, name, rootLog)
 		store, err := memory.NewProfileStore(ctx, profile.ProfileRoot, name, rootLog)
 		if err != nil {
 			return &Error{Event: "app.profile_storage.init_failed", Message: "failed to open profile state", Cause: err}
@@ -229,7 +232,6 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))
 		cleanup.Add(docache.SweepHook(docache.NewProfileCache(profile.ProfileRoot, name), rootLog))
-		workspace.RepairCache(profile.ProfileRoot, name, rootLog)
 		cleanup.Add(workspace.SweepHook(profile.ProfileRoot, rootLog))
 		cleanup.Add(process.Shared(profile.ProfileRoot).PruneHook(rootLog))
 		cleanup.Add(tools.BrowserSweepHook(registry, rootLog))

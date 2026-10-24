@@ -42,6 +42,40 @@ func (s *Store) Read(ctx context.Context, owner string) (string, error) {
 	return content, err
 }
 
+// RepairProfile tightens permissions on existing soul paths without creating
+// anything. Missing paths stay missing, symlinks and non-directories are left
+// for the fail-closed checks in Read. Foreign-owned paths fail Chmod as
+// non-root and are likewise left for Read to reject.
+func RepairProfile(root, defaultSoul string) {
+	repairSoulDir(root)
+	repairSoulFile(filepath.Join(root, "SOUL.md"))
+	if defaultSoul != "" {
+		repairSoulFile(defaultSoul)
+	}
+}
+
+func repairSoulDir(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	_ = os.Chmod(path, 0700)
+}
+
+func repairSoulFile(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	_ = os.Chmod(path, 0600)
+}
+
 func validateProfileRoot(root string) error {
 	abs, err := filepath.Abs(root)
 	if err != nil {
