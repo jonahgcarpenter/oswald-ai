@@ -92,6 +92,7 @@ Operator commands run from a terminal against your `.oswald/` root:
 | `oswald profile create <name>` | Provision a new named profile subtree.                                                   |
 | `oswald profile delete <name>` | Remove a named profile subtree (refuses `default`, requires confirmation).               |
 | `oswald mcp auth <server>`     | Interactively authorize an MCP server (browser or device flow).                          |
+| `oswald gateway <name> <enable\|disable>` | Flip `platforms.<name>.enabled` for `discord`, `bluebubbles`, or `api` (restart to apply). |
 
 ## Documentation
 

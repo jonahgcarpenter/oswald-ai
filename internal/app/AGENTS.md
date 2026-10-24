@@ -16,11 +16,13 @@ with workers joined before stores close, and errors returned only after cleanup.
 `main` or `cli` assembles stores, workers, or gateways; gateway start failures are asynchronous
 logs, and listeners can outlive `Run` until process exit.
 
-`cli/cli.go` dispatches `setup | start | profile | mcp | vault | help` with exit codes 0/1/2 and injectable
+`cli/cli.go` dispatches `setup | start | profile | mcp | gateway | vault | help` with exit codes 0/1/2 and injectable
 stdio. `setup` seeds missing entries only and rolls back partial state; `profile create` scaffolds
 one private subtree (`.env`, minimal `config.yaml`, approved-schema `state.db`, root `SOUL.md`
 copy) and `profile delete` refuses `default` over an explicit `y`/`yes`. `mcp auth` is the only
-interactive OAuth path. `commands/` holds the `Definition/Request/Result/Handler` contract and
+interactive OAuth path. `gateway <name> <enable|disable>` flips only the global
+`platforms.<name>.enabled` flag (`discord|bluebubbles|api`, exact match, no aliases) via an
+atomic `config.yaml` rewrite; the running server picks it up on restart. `commands/` holds the `Definition/Request/Result/Handler` contract and
 `/name` parsing; `builtin/` registers the six public handlers (`/help`, `/new`, `/stop`,
 `/approve`, `/deny`, `/compact`).
 
