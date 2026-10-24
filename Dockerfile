@@ -58,6 +58,7 @@ COPY --from=builder /app/oswald /opt/oswald/oswald
 COPY --from=builder /app/oswald-server /opt/oswald/oswald-server
 
 ENV PATH="/opt/oswald:${PATH}"
+ENV HOME=/home/oswald TMPDIR=/tmp
 
 USER oswald
 WORKDIR /home/oswald
