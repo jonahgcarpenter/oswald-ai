@@ -271,6 +271,43 @@ func writeFile(ctx context.Context, dir, name, content string) error {
 	return d.Sync()
 }
 
+// RepairProfile tightens permissions on existing profile memory paths without
+// creating anything. Missing paths stay missing so creation remains lazy;
+// symlinks and foreign-owned paths are left for the fail-closed checks.
+func RepairProfile(root, profile string) {
+	if root == "" || profile == "" || !safeID.MatchString(profile) {
+		return
+	}
+	repairMemoryDir(root)
+	dir := filepath.Join(root, "memories")
+	repairMemoryDir(dir)
+	for _, name := range []string{"USER.md", "MEMORY.md", "USER.md.lock", "MEMORY.md.lock"} {
+		repairMemoryFile(filepath.Join(dir, name))
+	}
+}
+
+func repairMemoryDir(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	_ = os.Chmod(path, 0700)
+}
+
+func repairMemoryFile(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	_ = os.Chmod(path, 0600)
+}
+
 func (s *Store) withDir(ctx context.Context, userID string, create bool, fn func(string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
