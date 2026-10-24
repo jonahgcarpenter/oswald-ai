@@ -223,14 +223,14 @@ func runShell(ctx context.Context, command, dir, scratch string, timeoutSecs int
 	}
 	cmd := exec.CommandContext(runCtx, shell, "-c", command)
 	cmd.Dir = dir
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"PATH=/usr/bin:/bin:/usr/local/bin",
 		"HOME=" + userHome(),
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + dir,
 		"OSWALD_SCRATCH=" + scratch,
-	}
+	}, process.GitHubTokenEnv()...)
 	var buf bytes.Buffer
 	cmd.Stdout = &limitedWriter{buf: &buf, limit: maxTerminalOutput}
 	cmd.Stderr = &limitedWriter{buf: &buf, limit: maxTerminalOutput}

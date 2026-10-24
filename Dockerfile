@@ -24,6 +24,8 @@ LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
+  curl \
+  gnupg \
   tzdata \
   libsqlite3-0 \
   sqlite3 \
@@ -34,6 +36,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   chromium \
   fonts-liberation \
   fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI for agent-assisted repo workflows; auth comes from GH_TOKEN at
+# runtime, never from the image.
+RUN mkdir -p /usr/share/keyrings \
+  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg status=none \
+  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system oswald-group && useradd --system --gid oswald-group --home-dir /home/oswald --no-create-home oswald

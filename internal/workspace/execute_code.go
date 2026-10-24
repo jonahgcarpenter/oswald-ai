@@ -13,6 +13,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	outputpkg "github.com/jonahgcarpenter/oswald-ai/internal/tools/output"
+	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
 
 const (
@@ -83,7 +84,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 		defer cancel()
 		cmd := exec.CommandContext(runCtx, python, name)
 		cmd.Dir = ws.Root()
-		cmd.Env = []string{
+		cmd.Env = append([]string{
 			"PATH=/usr/bin:/bin:/usr/local/bin",
 			"HOME=" + userHome(),
 			"LANG=C.UTF-8",
@@ -91,7 +92,7 @@ func NewExecuteCodeHandler(ws *Workspace) func(context.Context, map[string]inter
 			"OSWALD_WORKSPACE=" + ws.Root(),
 			"OSWALD_SCRATCH=" + scratch,
 			"PYTHONDONTWRITEBYTECODE=1",
-		}
+		}, process.GitHubTokenEnv()...)
 		var buf bytes.Buffer
 		cmd.Stdout = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
 		cmd.Stderr = &limitedWriter{buf: &buf, limit: maxExecuteCodeOutput}
