@@ -186,13 +186,14 @@ func (m *Manager) Spawn(ownerRequest, command, workdir, scratch string, timeoutS
 	}
 	cmd := exec.Command(shell, "-c", command)
 	cmd.Dir = workdir
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"PATH=/usr/bin:/bin:/usr/local/bin",
+		"HOME=" + sandboxHome(),
 		"LANG=C.UTF-8",
 		"TMPDIR=" + scratch,
 		"OSWALD_WORKSPACE=" + workdir,
 		"OSWALD_SCRATCH=" + scratch,
-	}
+	}, GitHubTokenEnv()...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		out.Close()
