@@ -8,7 +8,7 @@ Applies on top of the root `AGENTS.md` (operator-state and persisted-contract in
 and `OswaldToolEvent` timeline. A turn is: validate principal → load soul, file/session memory,
 images, and cached markdown → build the dynamic system prompt (soul + trusted
 operating-directives block) → merge the tool catalog → 70% markdown compaction check →
-`AssemblePromptContext` → iterate model ↔ tool calls → finalize, resolve MEDIA, persist.
+`AssemblePromptContext` → iterate model ↔ tool calls → finalize, resolve MEDIA/FILE, persist.
 Stateless API turns share the whole path but skip persistence and return `over_budget`
 instead of compacting.
 
@@ -16,7 +16,7 @@ The files split by responsibility: `context.go` (prompt assembly), `tools.go` (c
 `executeTool`, governance text), `tool_history.go` (model-visible vs persisted redacted calls),
 `session_images.go` / `image_tool_results.go` /
 `image_retry.go` (image planning, newest-4 retention, downscaling retries), `media_tokens.go`
-(MEDIA resolution), `stream.go` (`StreamChunk`), `session_store.go` (persistence contract: resolve,
+(MEDIA/FILE resolution), `stream.go` (`StreamChunk`), `session_store.go` (persistence contract: resolve,
 bind, append, page).
 
 ## Turn loop (`agent.go::Process`)
@@ -43,7 +43,7 @@ for iteration:
     break loop on GlobalStopReason (degraded final answer)
 if governance exhausted: final tool-less call announcing the spent budget
     (one retry with the same review nudge if it returns blank)
-finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped if stateless)
+finalize: pick final content, resolve MEDIA/FILE, AppendPendingSessionTurn (skipped if stateless)
 ```
 
 ## Invariants (every change is reviewed against these)
@@ -61,7 +61,8 @@ finalize: pick final content, resolve MEDIA, AppendPendingSessionTurn (skipped i
 - **Generated images never auto-deliver.** The model delivers one only by emitting a
   `MEDIA:/absolute/path` token in its final response (resolved against the managed cache first,
   then raw absolute paths under the file groups); at most 4 logical images per request. Previews ride tool results;
-  follow-ups replay text only.
+  follow-ups replay text only. Generic workspace files deliver via `FILE:/absolute/path`
+  (same confinement, no image validation, any MIME).
 - **Reasoning is never persisted** in conversation or tool history. Summaries and tool history are
   untrusted lower-authority reference — quoted context, never deployment instruction.
 
@@ -77,5 +78,5 @@ failures; Qwen parser failure retries the identical request once.
 ## Tests
 
 Turn tests use fake model clients with scripted tool-call sequences. Assert budget fit/over-budget
-shapes, blocked-call correlation, retry exhaustion, MEDIA resolution vs denial, and stateless
+shapes, blocked-call correlation, retry exhaustion, MEDIA/FILE resolution vs denial, and stateless
 non-persistence — not prompt text snapshots.

@@ -9,6 +9,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +27,14 @@ import (
 // Only absolute paths match; relative paths and bare words are left alone.
 var mediaTokenPattern = regexp.MustCompile(`MEDIA:(/\S+)`)
 
+// fileTokenPattern matches FILE:/absolute/path tokens in final model text.
+// Same absolute-path rule as MEDIA; generic files of any type accepted.
+var fileTokenPattern = regexp.MustCompile(`FILE:(/\S+)`)
+
+// responseTokenPattern matches both delivery directives in textual order so
+// shared attachment caps and dedupe respect the model's ordering.
+var responseTokenPattern = regexp.MustCompile(`(MEDIA|FILE):(/\S+)`)
+
 // collapseStrippedWhitespace tidies text left behind by removed MEDIA tokens
 // without reflowing the model's own paragraphs.
 func collapseStrippedWhitespace(content string) string {
@@ -41,44 +50,54 @@ func trimTokenPunctuation(path string) string {
 	return strings.TrimRight(path, `.,;:!?)]}'"`)
 }
 
-// resolveResponseMedia extracts MEDIA:/absolute/path tokens from final model
-// text, resolves each against the sender's unexpired managed image cache
-// first, then against raw absolute paths inside the profile working
-// directory, and returns stripped text plus deliverable attachments. Tokens
-// are delivery directives, not message content: they never survive into
-// stored history.
+// resolveResponseMedia extracts MEDIA:/absolute/path and FILE:/absolute/path
+// tokens from final model text, resolves each against the sender's unexpired
+// managed image cache first (MEDIA only), then against raw absolute paths
+// inside the profile working directory, and returns stripped text plus
+// deliverable attachments. Tokens are delivery directives, not message
+// content: they never survive into stored history.
 //
 // Cache resolution is confined by imagecache.Resolve to regular, private,
 // unexpired cache images owned by senderID. The CWD fallback resolves raw
 // absolute paths under the file groups (protected names sealed, managed
-// cache via the cache resolver) with symlink, secret, size, and MIME
-// enforcement. Paths resolving nowhere fail closed and are stripped
+// cache via the cache resolver) with symlink, secret, and size enforcement:
+// MEDIA additionally requires a still-image signature with matching
+// extension, while FILE accepts any file type via content sniffing with an
+// extension fallback. Paths resolving nowhere fail closed and are stripped
 // text-only. The text-only API gateway
 // strips tokens without attaching. Combined tool plus media attachments stay
 // within media.ValidateOutputAttachments; overflow and filename collisions
-// are dropped.
+// are dropped. Dedupe is shared by absolute path across both directives.
 func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, gateway, senderID, content string, existing []media.OutputAttachment) (string, []media.OutputAttachment) {
-	matches := mediaTokenPattern.FindAllStringSubmatch(content, -1)
-	stripped := collapseStrippedWhitespace(mediaTokenPattern.ReplaceAllString(content, ""))
-	if len(matches) == 0 || gateway == "openai" || (a.imageCache == nil && strings.TrimSpace(a.workspaceRoot) == "") {
+	ordered := responseTokenPattern.FindAllStringSubmatch(content, -1)
+	stripped := collapseStrippedWhitespace(fileTokenPattern.ReplaceAllString(mediaTokenPattern.ReplaceAllString(content, ""), ""))
+	if len(ordered) == 0 || gateway == "openai" || (a.imageCache == nil && strings.TrimSpace(a.workspaceRoot) == "") {
 		return stripped, nil
 	}
-	seen := make(map[string]bool, len(matches))
+	seen := make(map[string]bool, len(ordered))
 	var attached []media.OutputAttachment
 	dropped := 0
-	for _, match := range matches {
-		path := trimTokenPunctuation(match[1])
+	fileAttached := 0
+	for _, match := range ordered {
+		kind := match[1]
+		path := trimTokenPunctuation(match[2])
 		if seen[path] {
 			continue
 		}
 		seen[path] = true
 		var data []byte
 		var mimeType string
-		if a.imageCache != nil {
-			data, mimeType, _ = a.imageCache.Resolve(ctx, senderID, path)
-		}
-		if data == nil && strings.TrimSpace(a.workspaceRoot) != "" {
-			data, mimeType, _ = a.resolveCWDImage(ctx, path)
+		if kind == "MEDIA" {
+			if a.imageCache != nil {
+				data, mimeType, _ = a.imageCache.Resolve(ctx, senderID, path)
+			}
+			if data == nil && strings.TrimSpace(a.workspaceRoot) != "" {
+				data, mimeType, _ = a.resolveCWDImage(ctx, path)
+			}
+		} else {
+			if strings.TrimSpace(a.workspaceRoot) != "" {
+				data, mimeType, _ = a.resolveCWDFile(ctx, path)
+			}
 		}
 		if data == nil {
 			dropped++
@@ -94,9 +113,12 @@ func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, ga
 			continue
 		}
 		attached = append(attached, candidate)
+		if kind == "FILE" {
+			fileAttached++
+		}
 	}
 	if log != nil {
-		log.Debug("agent.response.media", "resolved MEDIA tokens from model response", config.F("attached_count", len(attached)), config.F("dropped_count", dropped))
+		log.Debug("agent.response.media", "resolved delivery tokens from model response", config.F("attached_count", len(attached)), config.F("dropped_count", dropped), config.F("file_attached_count", fileAttached))
 	}
 	return stripped, attached
 }
@@ -109,6 +131,41 @@ func (a *Agent) resolveResponseMedia(ctx context.Context, log *config.Logger, ga
 // system and agent paths (including outside the workspace) may attach,
 // subject to image validation below.
 func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, string, error) {
+	data, resolved, err := a.openCWDRegularFile(ctx, path)
+	if err != nil {
+		return nil, "", err
+	}
+	mimeType, err := validateCWDImage(data, resolved)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, mimeType, nil
+}
+
+// resolveCWDFile reads a regular file of any type at an absolute path for
+// FILE: delivery. It enforces the same confinement as resolveCWDImage
+// (protected names sealed, managed cache via the cache resolver, symlink and
+// size enforcement) but accepts any file type: the MIME type is sniffed from
+// content with an extension fallback, defaulting to
+// application/octet-stream.
+func (a *Agent) resolveCWDFile(ctx context.Context, path string) ([]byte, string, error) {
+	data, resolved, err := a.openCWDRegularFile(ctx, path)
+	if err != nil {
+		return nil, "", err
+	}
+	mimeType, err := sniffCWDFileMIME(data, resolved)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, mimeType, nil
+}
+
+// openCWDRegularFile securely opens a regular file under the same-trust
+// model shared by MEDIA and FILE delivery. It denies protected names and
+// managed cache paths (except cache/scratch) before and after symlink
+// resolution, opens with O_NOFOLLOW, and returns at most
+// MaxOutputAttachmentBytes+1 bytes for caller size checks.
+func (a *Agent) openCWDRegularFile(ctx context.Context, path string) ([]byte, string, error) {
 	root := strings.TrimSpace(a.workspaceRoot)
 	if root == "" {
 		return nil, "", errNoWorkspace
@@ -152,7 +209,10 @@ func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, strin
 	}
 	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > media.MaxOutputAttachmentBytes {
 		f.Close()
-		return nil, "", errImageOutOfBounds
+		if info.Size() == 0 || info.Size() > media.MaxOutputAttachmentBytes {
+			return nil, "", errFileOutOfBounds
+		}
+		return nil, "", errOutsideWorkspace
 	}
 	if err := ctx.Err(); err != nil {
 		f.Close()
@@ -166,11 +226,7 @@ func (a *Agent) resolveCWDImage(ctx context.Context, path string) ([]byte, strin
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	mimeType, err := validateCWDImage(data, resolved)
-	if err != nil {
-		return nil, "", err
-	}
-	return data, mimeType, nil
+	return data, resolved, nil
 }
 
 var (
@@ -178,6 +234,7 @@ var (
 	errOutsideWorkspace    = errors.New("path escapes the working directory")
 	errDeniedWorkspacePath = errors.New("path is not accessible")
 	errImageOutOfBounds    = errors.New("image size out of bounds")
+	errFileOutOfBounds     = errors.New("file size out of bounds")
 	errUnsupportedImage    = errors.New("unsupported image signature")
 )
 
@@ -240,4 +297,28 @@ func validateCWDImage(data []byte, path string) (string, error) {
 		return "", errUnsupportedImage
 	}
 	return mimeType, nil
+}
+
+// sniffCWDFileMIME returns a transport-valid MIME type for generic FILE
+// delivery. Content sniffing wins; when it is generic (octet-stream or
+// text/plain) an extension lookup refines it. The result always parses as
+// type/subtype, defaulting to application/octet-stream.
+func sniffCWDFileMIME(data []byte, path string) (string, error) {
+	if len(data) == 0 || len(data) > media.MaxOutputAttachmentBytes {
+		return "", errFileOutOfBounds
+	}
+	sniffed := http.DetectContentType(data)
+	if sniffed == "application/octet-stream" || strings.HasPrefix(sniffed, "text/plain") {
+		if ext := strings.ToLower(strings.TrimSpace(filepath.Ext(path))); ext != "" {
+			if byExt := strings.TrimSpace(mime.TypeByExtension(ext)); byExt != "" {
+				if mt, _, err := mime.ParseMediaType(byExt); err == nil && strings.Contains(mt, "/") {
+					sniffed = byExt
+				}
+			}
+		}
+	}
+	if mt, _, err := mime.ParseMediaType(strings.TrimSpace(sniffed)); err != nil || !strings.Contains(mt, "/") {
+		return "application/octet-stream", nil
+	}
+	return strings.TrimSpace(sniffed), nil
 }
