@@ -67,7 +67,8 @@ edge / 280 KiB JPEG/PNG. GIFs use the first frame or a ≤4-tile contact sheet; 
 4 ffmpeg frames. Orientation is corrected before resize — all eight EXIF orientations for
 JPEG/EXIF-bearing PNG/WebP, ordered `irot`/`imir` for HEIC/HEIF with container transforms winning
 so pixels are never double-rotated. Out: ≤8 MiB each, 10 files / 80 MiB total, safe unique
-basenames. `MEDIA:/absolute/path` tokens resolve against the sender's cache first, then raw absolute paths
+basenames. `MEDIA:/absolute/path` (images) and `FILE:/absolute/path` (any file type)
+tokens resolve against the sender's cache first (MEDIA only), then raw absolute paths
 under the file groups (protected names sealed, managed cache via the cache resolver), and are
 stripped before history and the text-only API.
 

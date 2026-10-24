@@ -1281,11 +1281,12 @@ finalize:
 			)
 		}
 	}
-	// MEDIA:/absolute/path tokens in final model text are delivery directives:
-	// resolve them against the sender's managed image cache, attach what
-	// resolves, and persist the stripped text so tokens never re-fire.
-	// Generated images have no automatic delivery; they attach only through these tokens.
-	if strings.Contains(finalContent, "MEDIA:") {
+	// MEDIA:/absolute/path and FILE:/absolute/path tokens in final model text
+	// are delivery directives: resolve them against the sender's managed
+	// image cache (MEDIA only) and workspace files, attach what resolves,
+	// and persist the stripped text so tokens never re-fire. Generated images
+	// have no automatic delivery; they attach only through MEDIA tokens.
+	if strings.Contains(finalContent, "MEDIA:") || strings.Contains(finalContent, "FILE:") {
 		stripped, mediaAttachments := a.resolveResponseMedia(ctx, reqLog, gateway, senderID, finalContent, outputAttachments)
 		finalContent = stripped
 		outputAttachments = append(outputAttachments, mediaAttachments...)
@@ -1363,7 +1364,7 @@ finalize:
 	if finalContent == generatedImagePartialResponse {
 		responseKind = "image_partial"
 	}
-	// Attachments-only turns (MEDIA tokens stripped all visible text) still
+	// Attachments-only turns (MEDIA/FILE tokens stripped all visible text) still
 	// persist so delivery gating and history stay consistent.
 	if (finalContent != "" || len(outputAttachments) > 0) && a.userMemory != nil && sessionGeneration > 0 && !request.Stateless {
 		persistenceStatus = "failed"
