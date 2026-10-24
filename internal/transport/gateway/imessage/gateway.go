@@ -90,6 +90,9 @@ type Gateway struct {
 	BlueBubblesURL      string
 	BlueBubblesPassword string
 	WebhookPath         string
+	// WebhookCallbackHost overrides interface auto-detection for the
+	// address BlueBubbles dials back to. Empty preserves detection.
+	WebhookCallbackHost string
 	MentionPatterns     []*regexp.Regexp
 	Links               identity.Resolver
 	Runtime             gatewayruntime.Dependencies

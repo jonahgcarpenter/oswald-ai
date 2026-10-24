@@ -116,6 +116,55 @@ func TestEnsureWebhookRegisteredPostsForStaleHost(t *testing.T) {
 	}
 }
 
+func TestEnsureWebhookRegisteredUsesCallbackHostOverride(t *testing.T) {
+	fx := newWebhookRegisterFixture(t,
+		`{"status":200,"message":"ok","data":[]}`,
+		http.StatusOK, http.StatusOK)
+	g := fx.gateway()
+	g.WebhookCallbackHost = "192.168.4.50"
+	g.ensureWebhookRegistered()
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.postCount != 1 {
+		t.Fatalf("expected one register POST, got %d", fx.postCount)
+	}
+	wantURL := "http://192.168.4.50:8090/bluebubbles/webhook?password=Password234!"
+	if fx.posts[0].URL != wantURL {
+		t.Fatalf("register URL = %q, want %q", fx.posts[0].URL, wantURL)
+	}
+}
+
+func TestEnsureWebhookRegisteredSkipsWhenOverrideMatches(t *testing.T) {
+	fx := newWebhookRegisterFixture(t,
+		`{"status":200,"message":"ok","data":[{"id":7,"url":"http://192.168.4.50:8090/bluebubbles/webhook?password=Password234!","events":["new-message"]}]}`,
+		http.StatusOK, http.StatusOK)
+	g := fx.gateway()
+	g.WebhookCallbackHost = "192.168.4.50"
+	g.ensureWebhookRegistered()
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.postCount != 0 {
+		t.Fatalf("expected no register POST for matching override host, got %d", fx.postCount)
+	}
+}
+
+func TestEnsureWebhookRegisteredPostsForStaleHostWithOverride(t *testing.T) {
+	fx := newWebhookRegisterFixture(t,
+		`{"status":200,"message":"ok","data":[{"id":2,"url":"http://10.244.0.159:8090/bluebubbles/webhook?password=Password234!","events":["new-message"]}]}`,
+		http.StatusOK, http.StatusOK)
+	g := fx.gateway()
+	g.WebhookCallbackHost = "192.168.4.50"
+	g.ensureWebhookRegistered()
+	fx.mu.Lock()
+	defer fx.mu.Unlock()
+	if fx.postCount != 1 {
+		t.Fatalf("expected register POST replacing pod-IP webhook, got %d", fx.postCount)
+	}
+	if !strings.HasPrefix(fx.posts[0].URL, "http://192.168.4.50:8090/bluebubbles/webhook") {
+		t.Fatalf("unexpected register URL %q", fx.posts[0].URL)
+	}
+}
+
 func TestEnsureWebhookRegisteredFailOpen(t *testing.T) {
 	listFail := newWebhookRegisterFixture(t, `server error`, http.StatusInternalServerError, http.StatusOK)
 	listFail.gateway().ensureWebhookRegistered()

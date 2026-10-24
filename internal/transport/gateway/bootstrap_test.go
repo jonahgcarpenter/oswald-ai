@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/imessage"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/profiles"
 )
 
 func testProfileDirectory(t *testing.T, log *config.Logger) *profiles.Directory {
@@ -32,15 +32,15 @@ func TestNewServicesFromConfigEnablesConfiguredGateways(t *testing.T) {
 		t.Fatalf("unexpected discord services %q", serviceNames(services))
 	}
 
-	services, err = NewServicesFromConfig(&config.Config{DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw", BlueBubblesWebhookPath: "/custom-webhook", BlueBubblesMentionPatterns: []*regexp.Regexp{regexp.MustCompile(`^(?:@?Oswald\b)`)}}, links, runtimeDeps, log)
+	services, err = NewServicesFromConfig(&config.Config{DiscordToken: "token", BlueBubblesListenPort: "8090", BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw", BlueBubblesWebhookPath: "/custom-webhook", BlueBubblesWebhookCallbackHost: "192.168.4.50", BlueBubblesMentionPatterns: []*regexp.Regexp{regexp.MustCompile(`^(?:@?Oswald\b)`)}}, links, runtimeDeps, log)
 	if err != nil {
 		t.Fatalf("configured services: %v", err)
 	}
 	if serviceNames(services) != "Discord, iMessage" {
 		t.Fatalf("unexpected configured services %q", serviceNames(services))
 	}
-	if gateway, ok := services[1].(*imessage.Gateway); !ok || gateway.WebhookPath != "/custom-webhook" || len(gateway.MentionPatterns) != 1 {
-		t.Fatal("iMessage webhook path and mention patterns were not passed to the gateway")
+	if gateway, ok := services[1].(*imessage.Gateway); !ok || gateway.WebhookPath != "/custom-webhook" || gateway.WebhookCallbackHost != "192.168.4.50" || len(gateway.MentionPatterns) != 1 {
+		t.Fatal("iMessage webhook path, callback host, and mention patterns were not passed to the gateway")
 	}
 }
 

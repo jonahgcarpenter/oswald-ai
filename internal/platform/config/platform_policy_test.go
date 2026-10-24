@@ -135,6 +135,50 @@ func TestLegacyPlatformKeysAreRejected(t *testing.T) {
 	}
 }
 
+func TestWebhookCallbackHostValidation(t *testing.T) {
+	for _, tc := range []struct{ name, extra, want string }{
+		{"ipv4", "      webhook_callback_host: 192.168.4.50\n", "192.168.4.50"},
+		{"hostname", "      webhook_callback_host: oswald.lan\n", "oswald.lan"},
+		{"single label", "      webhook_callback_host: oswald\n", "oswald"},
+		{"ipv6", "      webhook_callback_host: fd00::1\n", "fd00::1"},
+		{"with scheme", "      webhook_callback_host: http://192.168.4.50\n", ""},
+		{"with port", "      webhook_callback_host: 192.168.4.50:8090\n", ""},
+		{"with path", "      webhook_callback_host: 192.168.4.50/hook\n", ""},
+		{"empty label", "      webhook_callback_host: oswald..lan\n", ""},
+		{"leading dash", "      webhook_callback_host: -oswald\n", ""},
+		{"whitespace trimmed", "      webhook_callback_host: '  oswald.lan '\n", "oswald.lan"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := blueBubblesPolicyFixture(t, tc.extra)
+			cfg, err := LoadProfiles(root)
+			if tc.want == "" {
+				configErr, ok := AsConfigError(err)
+				if !ok || configErr.Code != "config_value_invalid" || configErr.Path != "platforms.bluebubbles.extra.webhook_callback_host" {
+					t.Fatalf("validation mismatch: %+v err=%v", configErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.BlueBubblesWebhookCallbackHost != tc.want {
+				t.Fatalf("callback host = %q, want %q", cfg.BlueBubblesWebhookCallbackHost, tc.want)
+			}
+		})
+	}
+}
+
+func TestWebhookCallbackHostDefaultsWhenOmitted(t *testing.T) {
+	root := blueBubblesPolicyFixture(t, "")
+	cfg, err := LoadProfiles(root)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.BlueBubblesWebhookCallbackHost != "" {
+		t.Fatalf("default callback host = %q, want empty", cfg.BlueBubblesWebhookCallbackHost)
+	}
+}
+
 func TestMentionPatternAndWebhookPathValidation(t *testing.T) {
 	for _, tc := range []struct{ name, extra, wantPath string }{
 		{"lookbehind unsupported", "      mention_pattern:\n        - '(?<![\\w@])@?Oswald\\b'\n", "platforms.bluebubbles.extra.mention_pattern"},

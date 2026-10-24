@@ -67,10 +67,16 @@ func (g *Gateway) ensureWebhookRegistered(scoped ...*config.Logger) {
 	log.Debug("gateway.bluebubbles.webhook_ensured", "registered BlueBubbles webhook", config.F("is_registered", true))
 }
 
-// webhookCallbackIP returns the local address used to reach the BlueBubbles
-// server. DHCP drift changes this over time, which is why the callback is
-// re-verified on every start instead of persisted.
+// webhookCallbackIP returns the address BlueBubbles dials back to: the
+// configured webhook_callback_host when set (Kubernetes pods must supply
+// their LAN-reachable address, since interface detection returns the
+// cluster-internal pod IP), otherwise the local address used to reach the
+// BlueBubbles server. DHCP drift changes this over time, which is why the
+// callback is re-verified on every start instead of persisted.
 func (g *Gateway) webhookCallbackIP() (string, bool) {
+	if host := strings.TrimSpace(g.WebhookCallbackHost); host != "" {
+		return strings.ToLower(host), true
+	}
 	parsed, err := url.Parse(strings.TrimSpace(g.BlueBubblesURL))
 	if err != nil || parsed.Host == "" {
 		return "", false
