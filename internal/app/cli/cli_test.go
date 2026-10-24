@@ -20,6 +20,7 @@ func TestRunUsageAndDispatch(t *testing.T) {
 		{"global help flag", []string{"--help"}, exitOK},
 		{"help command", []string{"help"}, exitOK},
 		{"profile without subcommand", []string{"profile"}, exitUsage},
+		{"gateway without subcommand", []string{"gateway"}, exitUsage},
 		{"unknown profile command", []string{"profile", "frobnicate"}, exitUsage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

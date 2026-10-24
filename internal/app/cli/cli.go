@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/setup"
@@ -52,6 +53,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return profiles.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "mcp":
 		return mcp.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
+	case "gateway":
+		return gateway.Run(ctx, *root, rest[1:], stdout, stderr)
 	case "vault":
 		return clivault.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "help":
@@ -73,6 +76,8 @@ commands:
   profile create <name>  create a private operator profile
   profile delete <name>  delete an operator profile and its data
   mcp auth <server>      authorize a profile MCP server with OAuth
+  gateway <name> <enable|disable>
+                         enable or disable a gateway platform
   vault add|list|rm      manage the profile credential vault
 `)
 }
