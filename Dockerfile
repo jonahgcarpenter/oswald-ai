@@ -18,7 +18,8 @@ COPY internal/ ./internal/
 RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald ./cmd/oswald
 RUN CGO_ENABLED=1 go build -tags sqlite_fts5 -o oswald-server ./cmd/oswald-server
 
-FROM debian:bookworm-slim
+# Pinned release snapshot for reproducible runtime builds; bump deliberately.
+FROM debian:bookworm-20261020-slim
 
 LABEL org.opencontainers.image.source="https://github.com/jonahgcarpenter/oswald-ai"
 
@@ -27,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   curl \
   gnupg \
   tzdata \
+  libatomic1 \
   libsqlite3-0 \
   sqlite3 \
   libstdc++6 \
@@ -36,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   chromium \
   fonts-liberation \
   fonts-noto-color-emoji \
+  xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI for agent-assisted repo workflows; auth comes from GH_TOKEN at
@@ -46,6 +49,16 @@ RUN mkdir -p /usr/share/keyrings \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
   && apt-get update && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
+
+# Node.js 26 for stdio MCP servers; package auth/config stays manual.
+ARG NODE_VERSION=26.9.0
+RUN curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+    | tar -xJ -C /opt/ \
+  && mv /opt/node-v${NODE_VERSION}-linux-x64 /opt/node \
+  && ln -s /opt/node/bin/node /usr/local/bin/node \
+  && ln -s /opt/node/bin/npm /usr/local/bin/npm \
+  && ln -s /opt/node/bin/npx /usr/local/bin/npx \
+  && node --version && npm --version
 
 RUN groupadd --system oswald-group && useradd --system --gid oswald-group --home-dir /home/oswald --no-create-home oswald
 
