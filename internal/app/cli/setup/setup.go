@@ -214,6 +214,7 @@ platforms:
       webhook_host: 0.0.0.0
       webhook_port: 8080
       webhook_path: /bluebubbles-webhook
+      # webhook_callback_host: 192.168.1.50  # LAN-reachable callback override (e.g. Kubernetes); empty keeps interface auto-detect.
       allowed_users: []
       banned_users: []
       require_mention: true  # Group messages must begin with a mention.

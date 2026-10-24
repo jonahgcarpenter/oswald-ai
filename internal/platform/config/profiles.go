@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -67,6 +68,7 @@ const (
 )
 
 var webhookPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]{1,127}$`)
+var webhookCallbackLabelRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 
 type providerYAML struct {
 	API string  `yaml:"api"`
@@ -102,18 +104,19 @@ type toolsYAML struct {
 	Browser       browserYAML `yaml:"browser"`
 }
 type platformExtraYAML struct {
-	Token           *string  `yaml:"token"`
-	AllowedUsers    []string `yaml:"allowed_users"`
-	BannedUsers     []string `yaml:"banned_users"`
-	RequireMention  *bool    `yaml:"require_mention"`
-	ServerURL       string   `yaml:"server_url"`
-	ServerPassword  *string  `yaml:"server_password"`
-	WebhookHost     string   `yaml:"webhook_host"`
-	WebhookPort     int      `yaml:"webhook_port"`
-	WebhookPath     string   `yaml:"webhook_path"`
-	MentionPatterns []string `yaml:"mention_pattern"`
-	APIHost         string   `yaml:"api_host"`
-	APIPort         int      `yaml:"api_port"`
+	Token               *string  `yaml:"token"`
+	AllowedUsers        []string `yaml:"allowed_users"`
+	BannedUsers         []string `yaml:"banned_users"`
+	RequireMention      *bool    `yaml:"require_mention"`
+	ServerURL           string   `yaml:"server_url"`
+	ServerPassword      *string  `yaml:"server_password"`
+	WebhookHost         string   `yaml:"webhook_host"`
+	WebhookCallbackHost string   `yaml:"webhook_callback_host"`
+	WebhookPort         int      `yaml:"webhook_port"`
+	WebhookPath         string   `yaml:"webhook_path"`
+	MentionPatterns     []string `yaml:"mention_pattern"`
+	APIHost             string   `yaml:"api_host"`
+	APIPort             int      `yaml:"api_port"`
 }
 type platformYAML struct {
 	Enabled bool              `yaml:"enabled"`
@@ -241,7 +244,7 @@ var platformExtraKeys = map[string]bool{
 	"token": true, "allowed_users": true, "banned_users": true,
 	"require_mention": true,
 	"server_url":      true, "server_password": true,
-	"webhook_host": true, "webhook_port": true, "webhook_path": true, "mention_pattern": true,
+	"webhook_host": true, "webhook_callback_host": true, "webhook_port": true, "webhook_path": true, "mention_pattern": true,
 	"api_host": true, "api_port": true,
 }
 
@@ -787,6 +790,10 @@ func LoadProfiles(root string) (*Config, error) {
 			if err != nil {
 				return nil, withConfigPath(err, base+"webhook_path")
 			}
+			cfg.BlueBubblesWebhookCallbackHost, err = parseWebhookCallbackHost(x.WebhookCallbackHost)
+			if err != nil {
+				return nil, withConfigPath(err, base+"webhook_callback_host")
+			}
 			cfg.BlueBubblesMentionPatterns, err = compileMentionPatterns(x.MentionPatterns, base+"mention_pattern")
 			if err != nil {
 				return nil, err
@@ -875,6 +882,33 @@ func normalizeIdentities(platform string, values []string) ([]string, error) {
 		normalized = append(normalized, id)
 	}
 	return normalized, nil
+}
+
+// parseWebhookCallbackHost validates an operator-supplied BlueBubbles
+// callback host: the LAN-reachable address BlueBubbles dials back to.
+// Empty means unset (auto-detect via the outbound interface). Otherwise a
+// bare IP literal or DNS hostname — no scheme, port, path, userinfo, or
+// whitespace — bounded to 253 bytes.
+func parseWebhookCallbackHost(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 253 {
+		return "", configErr("config_value_invalid", "")
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return value, nil
+	}
+	if strings.Contains(value, ":") {
+		return "", configErr("config_value_invalid", "")
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !webhookCallbackLabelRE.MatchString(label) {
+			return "", configErr("config_value_invalid", "")
+		}
+	}
+	return value, nil
 }
 
 // parseWebhookPath validates an operator-supplied BlueBubbles webhook route.

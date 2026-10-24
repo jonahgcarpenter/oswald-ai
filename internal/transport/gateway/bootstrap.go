@@ -60,6 +60,7 @@ func NewServicesFromConfig(cfg *config.Config, links identity.Resolver, runtimeD
 				BlueBubblesURL:      baseURL,
 				BlueBubblesPassword: cfg.BlueBubblesPassword,
 				WebhookPath:         cfg.BlueBubblesWebhookPath,
+				WebhookCallbackHost: cfg.BlueBubblesWebhookCallbackHost,
 				MentionPatterns:     cfg.BlueBubblesMentionPatterns,
 				Links:               links,
 				Runtime:             runtimeDeps,

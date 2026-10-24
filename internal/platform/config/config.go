@@ -20,6 +20,9 @@ type Config struct {
 	BlueBubblesURL                 string
 	BlueBubblesPassword            string
 	BlueBubblesWebhookPath         string
+	// BlueBubblesWebhookCallbackHost overrides auto-detected callback
+	// address registration. Empty preserves UDP-dial interface detection.
+	BlueBubblesWebhookCallbackHost string
 	BlueBubblesMentionPatterns     []*regexp.Regexp
 	DiscordToken                   string
 	OpenAIListenHost               string
