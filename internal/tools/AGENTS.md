@@ -45,9 +45,17 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   card kinds refuse fail-closed), `save_login` (returns the operator `oswald vault add` command;
   this session cannot prompt), `enter_code` (TOTP from a saved seed or `prompt_unavailable`).
   Metadata-only history, hashed args, secret registry scrubbing on every browser output path.
+- `clarify` — blocking single-flight question form (1–5 questions, ≤4 choices each).
+  Parks one pending ask per conversation (5-minute window) and walks the questions
+  one at a time: each goes out as its own text, the user's reply answers it, and the
+  next follows. Answers return as this call's tool result
+  (`{responses, outcome}` with `submitted/cancelled/timed_out/undelivered`);
+  timeouts and cancellations keep answered-so-far. Replies are
+  intercepted pre-broker so they never start a turn; `/new` and `/stop` cancel the wait.
+  Hidden on the stateless API and unattended transports (fail-closed `undelivered`).
 
 History policy in one line: `memory`/`browser_vault_*` metadata-only, `session_search`/`web_search`
-searchable, image-tool text nonsearchable — with 16 KiB args and 16,000 result runes per call
+searchable, image-tool and `clarify` text nonsearchable — with 16 KiB args and 16,000 result runes per call
 inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser
 and vault tools never log URLs, page content, expressions, or secrets — only counts and chars.
 

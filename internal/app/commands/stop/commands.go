@@ -4,9 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 )
 
 // Canceler stops only the current profile conversation's active agent request.
@@ -32,6 +33,7 @@ func (h handler) Execute(_ context.Context, req commands.Request) (commands.Resu
 	}
 	report := h.canceler.CancelActiveAgentWork(req.Principal.CanonicalUserID, req.SessionKey)
 	approvals.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
+	toolclarify.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
 	if report.ActiveSignaled == 0 {
 		return commands.Result{Text: "Nothing is currently running in this conversation.", Outcome: commands.Outcome{Status: "ok", ReasonCode: "no_op", Operation: "stop.session"}}, nil
 	}

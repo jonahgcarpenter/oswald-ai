@@ -11,6 +11,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
@@ -100,6 +101,9 @@ type Request struct {
 	// status chunk instead; transports without live progress send a real
 	// message through this hook.
 	EscalationNotify workspace.EscalationNotifier
+	// ClarifyAsk reports a parked clarify ask while the tool call blocks,
+	// with the same transport split as EscalationNotify.
+	ClarifyAsk toolclarify.Notifier
 	// OnAllowed runs after profile authentication, before fallback, command, or model work.
 	OnAllowed func()
 }

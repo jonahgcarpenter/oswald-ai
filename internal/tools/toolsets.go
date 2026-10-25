@@ -34,6 +34,7 @@ var coreTools = []string{
 	"browser_vault_fill",
 	"browser_vault_save_login",
 	"browser_vault_enter_code",
+	"clarify",
 	"read_file",
 	"write_file",
 	"patch",

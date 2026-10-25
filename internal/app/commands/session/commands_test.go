@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 )
 
 type fakeStarter struct {
@@ -49,5 +50,28 @@ func TestNewSessionCommandRejectsUnauthenticatedIdentity(t *testing.T) {
 	result, err := service.Execute(context.Background(), commands.Request{Principal: identity.Principal{}, SessionKey: "session", Raw: "/new"})
 	if err == nil || starter.userID != "" || result.Text != "" {
 		t.Fatalf("result=%q starter=%+v err=%v", result.Text, starter, err)
+	}
+}
+
+func TestNewSessionCommandDeniesParkedClarify(t *testing.T) {
+	starter := &fakeStarter{}
+	service, err := commands.NewServiceWithCommands(commands.Command{Handler: New(starter)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolclarify.Reset()
+	answer := make(chan toolclarify.Answer, 1)
+	if !toolclarify.Request(toolclarify.Pending{Profile: "user", SessionKey: "session", Answer: answer}) {
+		t.Fatal("request rejected")
+	}
+	principal := identity.Principal{CanonicalUserID: "user", Gateway: "discord", ExternalID: "user", Assurance: identity.AssuranceDiscordGateway}
+	if _, err := service.Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "session", Raw: "/new"}); err != nil {
+		t.Fatal(err)
+	}
+	if toolclarify.Has("user", "session") {
+		t.Fatal("parked clarify survived /new")
+	}
+	if _, ok := <-answer; ok {
+		t.Fatal("waiter not signaled as cancelled")
 	}
 }

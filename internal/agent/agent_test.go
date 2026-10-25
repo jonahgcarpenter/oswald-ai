@@ -28,6 +28,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	filememory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -509,6 +510,46 @@ func TestProcessHidesImageGenerationForTextOnlyGateways(t *testing.T) {
 			request := primaryRequests(chat.requests)[0]
 			if requestHasTool(request, imagegenerate.Name) != test.wantImage {
 				t.Fatalf("tools=%+v want image=%t", request.Tools, test.wantImage)
+			}
+		})
+	}
+}
+
+func TestProcessHidesClarifyForStatelessGateway(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		gateway     string
+		wantClarify bool
+	}{
+		{name: "discord", gateway: "discord", wantClarify: true},
+		{name: "openai", gateway: "openai"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chat := &fakeChatter{responses: []*llm.ChatResponse{{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "done"}}}}
+			reg := registry.New(config.NewLogger(config.LevelError))
+			definition := toolclarify.Definition()
+			schema := definition.Parameters
+			if err := registerTestTool(t, reg, testToolSpec{Name: definition.Name, Description: definition.Description, Schema: &schema}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+				return productiveResult("unused"), nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			a, _ := newTestAgent(t, chat, nil, reg)
+			var err error
+			if test.gateway == "openai" {
+				_, err = a.Process(context.Background(), Request{
+					Principal: identity.Principal{CanonicalUserID: "user-1", Gateway: "openai", ExternalID: identity.LocalOpenAIIdentifier, Assurance: identity.AssuranceLocalLoopback},
+					Prompt:    "hello", Stateless: true,
+				})
+			} else {
+				_, err = processAgent(a, "visibility", test.gateway, "session", "user-1", "Display", "hello", nil, nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := primaryRequests(chat.requests)[0]
+			if requestHasTool(request, toolclarify.Name) != test.wantClarify {
+				t.Fatalf("tools=%+v want clarify=%t", request.Tools, test.wantClarify)
 			}
 		})
 	}

@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/approvals"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 )
 
 // Starter closes one canonical user's current session so the next turn opens a
@@ -37,5 +38,6 @@ func (h *handler) Execute(ctx context.Context, req commands.Request) (commands.R
 		return commands.Result{}, err
 	}
 	approvals.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
+	toolclarify.DenySession(req.Principal.CanonicalUserID, req.SessionKey)
 	return commands.Result{Text: "Started a new session. Past conversations remain searchable.", Outcome: commands.Outcome{Status: "ok", Operation: "session.new", IsChanged: true, AffectedCount: 1}}, nil
 }

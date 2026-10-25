@@ -108,6 +108,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		visionanalyze.Name: true,
 		websearch.Name:     true,
 		toolmemory.Name:    true,
+		"clarify":          true,
 		"read_file":        true,
 		"write_file":       true,
 		"patch":            true,

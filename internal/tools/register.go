@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -117,6 +118,10 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	if err := reg.RegisterHandler(toolmemory.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolmemory.NewHandler(fileStore))); err != nil {
 		return fmt.Errorf("register memory tool: %w", err)
+	}
+
+	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {
+		return fmt.Errorf("register clarify tool: %w", err)
 	}
 
 	if profileStore != nil {
@@ -487,5 +492,41 @@ func normalizeCronjobManageArgs(args map[string]interface{}) interface{} {
 		sum := sha256.Sum256([]byte(prompt))
 		normalized["prompt_hash"] = hex.EncodeToString(sum[:])
 	}
+	return normalized
+}
+
+// normalizeClarifyArgs canonicalizes the question form so repeated identical
+// asks collapse while distinct forms stay distinct. Raw question text never
+// survives normalization, only counts and a hash.
+func normalizeClarifyArgs(args map[string]interface{}) interface{} {
+	questions, _ := args["questions"].([]interface{})
+	normalized := map[string]interface{}{"question_count": len(questions)}
+	choiceCount := 0
+	var sb strings.Builder
+	for _, raw := range questions {
+		entry, _ := raw.(map[string]interface{})
+		if entry == nil {
+			continue
+		}
+		if text, ok := entry["question"].(string); ok {
+			sb.WriteString(strings.Join(strings.Fields(text), " "))
+			sb.WriteString("\x00")
+		}
+		if multi, ok := entry["multi_select"].(bool); ok && multi {
+			sb.WriteString("multi\x00")
+		}
+		if rawChoices, ok := entry["choices"].([]interface{}); ok {
+			for _, rawChoice := range rawChoices {
+				if choice, ok := rawChoice.(string); ok {
+					choiceCount++
+					sb.WriteString(strings.Join(strings.Fields(choice), " "))
+					sb.WriteString("\x00")
+				}
+			}
+		}
+	}
+	normalized["choice_count"] = choiceCount
+	sum := sha256.Sum256([]byte(sb.String()))
+	normalized["form_hash"] = hex.EncodeToString(sum[:])
 	return normalized
 }

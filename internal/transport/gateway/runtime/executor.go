@@ -470,6 +470,7 @@ func Execute(req Request, deps Dependencies, responder Responder) (outcome Outco
 		Documents:               decision.Documents,
 		StreamFunc:              req.StreamFunc,
 		EscalationNotify:        req.EscalationNotify,
+		ClarifyAsk:              req.ClarifyAsk,
 		ResponseChan:            make(chan broker.Result, 1),
 	}
 	submitErr := deps.Broker.Submit(brokerReq)

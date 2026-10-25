@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
@@ -538,5 +539,26 @@ func ensureEscalationNotify(ctx context.Context, streamCallback func(StreamChunk
 			}
 		}
 		streamCallback(StreamChunk{Type: ChunkNotice, Text: text})
+	})
+}
+
+// ensureClarifyAsk keeps a gateway-provided clarify asker when one is already
+// installed; otherwise it installs a pinned standalone ask for transports
+// that render live progress. The ask stays pinned while the tool call blocks
+// so the user sees what is needed.
+func ensureClarifyAsk(ctx context.Context, streamCallback func(StreamChunk)) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	if toolclarify.NotifierFromContext(ctx) != nil || streamCallback == nil {
+		return ctx
+	}
+	return toolclarify.WithNotifier(ctx, func(notice toolclarify.Notice) error {
+		text := toolclarify.RenderAskOne(notice.Question, notice.MinutesLeft)
+		if notice.Expired {
+			text = toolclarify.RenderExpired()
+		}
+		streamCallback(StreamChunk{Type: ChunkNotice, Text: text})
+		return nil
 	})
 }
