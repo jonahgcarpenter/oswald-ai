@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // tokenDirName is the profile-local directory holding OAuth material. It
@@ -84,10 +86,109 @@ func ensurePrivateDir(dir string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("OAuth token directory is not a safe directory")
 	}
+	if info.Mode().Perm()&0077 == 0 {
+		return nil
+	}
 	if err := os.Chmod(dir, 0700); err != nil {
 		return err
 	}
 	return nil
+}
+
+func logTokenRepair(profile, server, artifact string, before os.FileMode) {
+	fields := []config.Field{
+		config.F("config_source", artifact),
+		config.F("old_mode", int(before.Perm())),
+		config.F("profile", profile),
+	}
+	if server != "" {
+		fields = append(fields, config.F("server_name", server))
+	}
+	config.NewLogger(config.LevelWarn).Server("mcp").Warn("mcp.perms.repaired", "repaired private permissions", fields...)
+}
+
+func repairTokenDir(dir, profile string) {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(dir, 0700); err != nil {
+		return
+	}
+	logTokenRepair(profile, "", "mcp_tokens_dir", before)
+}
+
+func repairTokenFile(path, profile, server, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logTokenRepair(profile, server, artifact, before)
+}
+
+// RepairTokens tightens permissions on existing MCP OAuth material without
+// creating anything. Missing paths stay missing so creation remains lazy;
+// symlinks and foreign-owned paths are left for the fail-closed checks.
+func RepairTokens(profileRoot, profile string, servers []string) {
+	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
+		return
+	}
+	root, err := filepath.Abs(profileRoot)
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(root, tokenDirName)
+	repairTokenDir(dir, profile)
+	suffixes := []struct{ suffix, artifact string }{
+		{".json", "mcp_tokens_tokens"},
+		{".client.json", "mcp_tokens_client"},
+		{".meta.json", "mcp_tokens_metadata"},
+		{".cimd-off", "mcp_tokens_cimd_off"},
+		{".lock", "mcp_tokens_lock"},
+	}
+	seen := map[string]bool{}
+	for _, server := range servers {
+		if validateServerName(server) != nil || seen[server] {
+			continue
+		}
+		seen[server] = true
+		for _, entry := range suffixes {
+			repairTokenFile(filepath.Join(dir, server+entry.suffix), profile, server, entry.artifact)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		for _, suffix := range suffixes {
+			if !strings.HasSuffix(name, suffix.suffix) || len(name) == len(suffix.suffix) {
+				continue
+			}
+			server := strings.TrimSuffix(name, suffix.suffix)
+			if validateServerName(server) != nil || seen[server+suffix.suffix] {
+				break
+			}
+			seen[server+suffix.suffix] = true
+			repairTokenFile(filepath.Join(dir, name), profile, server, suffix.artifact)
+			break
+		}
+	}
 }
 
 func (s *tokenStore) path(suffix string) string {

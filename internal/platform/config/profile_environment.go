@@ -17,7 +17,7 @@ import (
 
 type profileEnvironment map[string]string
 
-func repairPrivateFile(path, source string) {
+func repairPrivateFile(path, source, profile string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -25,10 +25,11 @@ func repairPrivateFile(path, source string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
+	before := info.Mode()
 	if err := os.Chmod(path, 0600); err != nil {
 		return
 	}
-	logPermRepair(source)
+	logPermRepair(source, before, profile)
 }
 
 func readPrivateConfig(path string, optional bool) ([]byte, error) {
@@ -44,7 +45,7 @@ func readPrivateConfig(path string, optional bool) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 256*1024 {
 		return nil, configErr("config_file_unsafe", "")
 	}
-	if filepath.Base(path) == ".env" && info.Mode().Perm()&0077 != 0 {
+	if info.Mode().Perm()&0077 != 0 {
 		return nil, configErr("config_file_unsafe", "")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 256*1024+1))
@@ -56,8 +57,8 @@ func readPrivateConfig(path string, optional bool) ([]byte, error) {
 
 // loadProfileEnvironment reads one private .env file. Named profiles merge the
 // default environment first so inherited values resolve without duplication.
-func loadProfileEnvironment(root, source string) (profileEnvironment, error) {
-	repairPrivateFile(filepath.Join(root, ".env"), source)
+func loadProfileEnvironment(root, source, profile string) (profileEnvironment, error) {
+	repairPrivateFile(filepath.Join(root, ".env"), source, profile)
 	data, err := readPrivateConfig(filepath.Join(root, ".env"), true)
 	if err != nil {
 		return nil, withConfigSource(err, source)

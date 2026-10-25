@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 const maxSoulBytes = 1 << 20
@@ -46,15 +48,23 @@ func (s *Store) Read(ctx context.Context, owner string) (string, error) {
 // anything. Missing paths stay missing, symlinks and non-directories are left
 // for the fail-closed checks in Read. Foreign-owned paths fail Chmod as
 // non-root and are likewise left for Read to reject.
-func RepairProfile(root, defaultSoul string) {
-	repairSoulDir(root)
-	repairSoulFile(filepath.Join(root, "SOUL.md"))
+func RepairProfile(root, defaultSoul, profile string) {
+	repairSoulDir(root, profile)
+	repairSoulFile(filepath.Join(root, "SOUL.md"), "soul_file", profile)
 	if defaultSoul != "" {
-		repairSoulFile(defaultSoul)
+		repairSoulFile(defaultSoul, "soul_default_file", profile)
 	}
 }
 
-func repairSoulDir(path string) {
+func logSoulRepair(artifact string, before os.FileMode, profile string) {
+	fields := []config.Field{config.F("config_source", artifact), config.F("old_mode", int(before.Perm()))}
+	if profile != "" {
+		fields = append(fields, config.F("profile", profile))
+	}
+	config.NewLogger(config.LevelWarn).Server("soul").Warn("soul.perms.repaired", "repaired private permissions", fields...)
+}
+
+func repairSoulDir(path, profile string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -62,10 +72,14 @@ func repairSoulDir(path string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
-	_ = os.Chmod(path, 0700)
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logSoulRepair("soul_dir", before, profile)
 }
 
-func repairSoulFile(path string) {
+func repairSoulFile(path, artifact, profile string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -73,7 +87,11 @@ func repairSoulFile(path string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
-	_ = os.Chmod(path, 0600)
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logSoulRepair(artifact, before, profile)
 }
 
 func validateProfileRoot(root string) error {

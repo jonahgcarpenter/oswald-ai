@@ -94,6 +94,25 @@ func expectedObjects() ([]schemaObject, error) {
 
 // OpenState initializes only an empty profile database. Nonempty incompatible
 // schemas are rejected before durability pragmas or canonical mutations.
+func logDBRepair(artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("database").Warn("database.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())))
+}
+
+func repairDBFile(path, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logDBRepair(artifact, before)
+}
+
 func OpenState(ctx context.Context, path string, log *config.Logger) (_ *DB, resultErr error) {
 	started := time.Now()
 	created := false
@@ -126,18 +145,25 @@ func OpenState(ctx context.Context, path string, log *config.Logger) (_ *DB, res
 		}
 	}
 	if info, err := os.Lstat(abs); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("unsafe profile database file")
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+			repairDBFile(abs, "state_db")
+			if info, err := os.Lstat(abs); err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+				return nil, errors.New("unsafe profile database file")
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 	// SQLite opens these sidecars itself. Refuse pre-existing unsafe paths rather
 	// than letting an operator-directory symlink redirect database writes.
+	sidecarArtifacts := map[string]string{"-wal": "state_db_wal", "-shm": "state_db_shm", "-journal": "state_db_journal"}
 	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
 		if info, err := os.Lstat(abs + suffix); err == nil {
-			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-				return nil, errors.New("unsafe profile database sidecar")
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+				repairDBFile(abs+suffix, sidecarArtifacts[suffix])
+				if info, err := os.Lstat(abs + suffix); err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+					return nil, errors.New("unsafe profile database sidecar")
+				}
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return nil, err

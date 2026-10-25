@@ -194,11 +194,15 @@ var profileNameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 // ValidProfileName excludes traversal, hidden entries, and the reserved default name.
 func ValidProfileName(name string) bool { return name != "default" && profileNameRE.MatchString(name) }
 
-func logPermRepair(source string) {
-	NewLogger(LevelInfo).Server("config").Debug("config.perms.repaired", "repaired private permissions", F("config_source", source))
+func logPermRepair(source string, before os.FileMode, profile string) {
+	fields := []Field{F("config_source", source), F("old_mode", int(before.Perm()))}
+	if profile != "" {
+		fields = append(fields, F("profile", profile))
+	}
+	NewLogger(LevelWarn).Server("config").Warn("config.perms.repaired", "repaired private permissions", fields...)
 }
 
-func repairPrivateDir(abs, source string) {
+func repairPrivateDir(abs, source, profile string) {
 	info, err := os.Lstat(abs)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -206,18 +210,19 @@ func repairPrivateDir(abs, source string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
+	before := info.Mode()
 	if err := os.Chmod(abs, 0700); err != nil {
 		return
 	}
-	logPermRepair(source)
+	logPermRepair(source, before, profile)
 }
 
-func privateDirectory(path, source string) error {
+func privateDirectory(path, source, profile string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return withConfigSource(configErr("config_dir_unavailable", ""), source)
 	}
-	repairPrivateDir(abs, source)
+	repairPrivateDir(abs, source, profile)
 	current := string(os.PathSeparator)
 	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
 		if part == "" {
@@ -678,14 +683,15 @@ func LoadProfiles(root string) (*Config, error) {
 	if err != nil {
 		return nil, withConfigSource(configErr("config_dir_unavailable", ""), "global_root")
 	}
-	if err := privateDirectory(root, "global_root"); err != nil {
+	if err := privateDirectory(root, "global_root", "default"); err != nil {
 		return nil, err
 	}
+	repairPrivateFile(filepath.Join(root, "config.yaml"), "global_config", "default")
 	raw, err := readYAMLNode(filepath.Join(root, "config.yaml"), false)
 	if err != nil {
 		return nil, withConfigSource(err, "global_config")
 	}
-	env, err := loadProfileEnvironment(root, "global_env")
+	env, err := loadProfileEnvironment(root, "global_env", "default")
 	if err != nil {
 		return nil, err
 	}
@@ -817,9 +823,10 @@ func LoadProfiles(root string) (*Config, error) {
 	}
 	for name := range names {
 		profileRoot := filepath.Join(root, "profiles", name)
-		if err := privateDirectory(profileRoot, "profile_root"); err != nil {
+		if err := privateDirectory(profileRoot, "profile_root", name); err != nil {
 			return nil, err
 		}
+		repairPrivateFile(filepath.Join(profileRoot, "config.yaml"), "profile_config", name)
 		profileRaw, err := readYAMLNode(filepath.Join(profileRoot, "config.yaml"), true)
 		if err != nil {
 			return nil, withConfigSource(err, "profile_config")
@@ -828,7 +835,7 @@ func LoadProfiles(root string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		ownEnv, err := loadProfileEnvironment(profileRoot, "profile_env")
+		ownEnv, err := loadProfileEnvironment(profileRoot, "profile_env", name)
 		if err != nil {
 			return nil, err
 		}
