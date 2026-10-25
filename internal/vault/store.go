@@ -25,6 +25,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // Item kinds. Login and address items are fillable; payment items can be
@@ -106,6 +108,54 @@ func NewStore(profileRoot string) *Store {
 		vaultPath: filepath.Join(dir, vaultFileName),
 		lockPath:  filepath.Join(dir, lockFileName),
 	}
+}
+
+func logVaultRepair(profile, artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("vault").Warn("vault.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
+}
+
+func repairVaultDir(path, profile string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logVaultRepair(profile, "vault_dir", before)
+}
+
+func repairVaultFile(path, profile, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logVaultRepair(profile, artifact, before)
+}
+
+// RepairProfile tightens permissions on existing vault material without
+// creating anything. Missing paths stay missing; symlinks and foreign-owned
+// paths are left for the fail-closed checks.
+func RepairProfile(profileRoot, profile string) {
+	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
+		return
+	}
+	dir := filepath.Join(profileRoot, "vault")
+	repairVaultDir(dir, profile)
+	repairVaultFile(filepath.Join(dir, keyFileName), profile, "vault_key")
+	repairVaultFile(filepath.Join(dir, vaultFileName), profile, "vault_store")
+	repairVaultFile(filepath.Join(dir, lockFileName), profile, "vault_lock")
 }
 
 type record struct {

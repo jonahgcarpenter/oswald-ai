@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 // resolveFunc maps a model path to an absolute path inside the profile CWD.
@@ -28,6 +30,7 @@ type Runner struct {
 	ResolveDir dirFunc
 	Root       string
 	Scratch    string
+	Profile    string
 }
 
 // Create validates and stores a new job.
@@ -645,7 +648,7 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 	env := []string{"PATH=/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8"}
 	if r != nil {
 		if r.Scratch != "" {
-			ensureScratchDir(r.Root, r.Scratch)
+			ensureScratchDir(r.Root, r.Scratch, r.Profile)
 			env = append(env, "TMPDIR="+r.Scratch)
 		}
 		if r.Root != "" {
@@ -664,7 +667,54 @@ func runScriptFile(ctx context.Context, r *Runner, script, workdir string, bound
 // Only components at or below root are touched; system ancestors above root
 // are never created or chmodded. Failures are silent: the caller still sets
 // TMPDIR and lets script execution surface the error.
-func ensureScratchDir(root, scratch string) {
+func logCronRepair(profile, artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("cron").Warn("cron.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
+}
+
+func repairCronDir(path, profile, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logCronRepair(profile, artifact, before)
+}
+
+func repairCronFile(path, profile, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logCronRepair(profile, artifact, before)
+}
+
+// RepairProfile tightens permissions on existing cron material without
+// creating anything. Missing paths stay missing; symlinks and foreign-owned
+// paths are left for the fail-closed checks.
+func RepairProfile(profileRoot, profile string) {
+	if strings.TrimSpace(profileRoot) == "" || strings.TrimSpace(profile) == "" {
+		return
+	}
+	dir := filepath.Join(profileRoot, "cron")
+	repairCronDir(dir, profile, "cron_dir")
+	repairCronFile(filepath.Join(dir, "jobs.json"), profile, "cron_jobs")
+	repairCronFile(filepath.Join(dir, "executions.jsonl"), profile, "cron_executions")
+}
+
+func ensureScratchDir(root, scratch, profile string) {
 	if scratch == "" || root == "" {
 		return
 	}
@@ -693,7 +743,11 @@ func ensureScratchDir(root, scratch string) {
 			return
 		}
 		if current == scratch && info.Mode().Perm()&0077 != 0 {
-			_ = os.Chmod(current, 0700)
+			before := info.Mode()
+			if err := os.Chmod(current, 0700); err != nil {
+				return
+			}
+			logCronRepair(profile, "cron_scratch", before)
 		}
 	}
 }

@@ -219,19 +219,29 @@ func FileHash(data []byte) string {
 // first tool use; symlinks and non-directories are left for the fail-closed
 // checks elsewhere.
 func RepairCache(root, profile string, log *config.Logger) {
+	logger := log
+	if logger == nil {
+		logger = config.NewLogger(config.LevelWarn)
+	}
+	if info, err := os.Lstat(root); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0077 != 0 {
+		before := info.Mode()
+		if err := os.Chmod(root, 0700); err == nil {
+			logger.Server("workspace").Warn("workspace.cache.repaired", "repaired cache permissions", config.F("profile", profile), config.F("config_source", "workspace_root"), config.F("old_mode", int(before.Perm())))
+		}
+	}
 	if err := validateRoot(root); err != nil {
 		return
 	}
-	paths := []string{
-		filepath.Join(root, "cache"),
-		filepath.Join(root, "cache", "scratch"),
-		filepath.Join(root, "cache", "browser"),
-		filepath.Join(root, "cache", "images"),
-		filepath.Join(root, "cache", "documents"),
-		filepath.Join(root, "cache", "processes"),
+	paths := []struct{ path, artifact string }{
+		{filepath.Join(root, "cache"), "cache"},
+		{filepath.Join(root, "cache", "scratch"), "cache/scratch"},
+		{filepath.Join(root, "cache", "browser"), "cache/browser"},
+		{filepath.Join(root, "cache", "images"), "cache/images"},
+		{filepath.Join(root, "cache", "documents"), "cache/documents"},
+		{filepath.Join(root, "cache", "processes"), "cache/processes"},
 	}
-	for _, path := range paths {
-		info, err := os.Lstat(path)
+	for _, entry := range paths {
+		info, err := os.Lstat(entry.path)
 		if err != nil {
 			continue
 		}
@@ -241,12 +251,11 @@ func RepairCache(root, profile string, log *config.Logger) {
 		if info.Mode().Perm()&0077 == 0 {
 			continue
 		}
-		if err := os.Chmod(path, 0700); err != nil {
+		before := info.Mode()
+		if err := os.Chmod(entry.path, 0700); err != nil {
 			continue
 		}
-		if log != nil {
-			log.Server("workspace").Debug("workspace.cache.repaired", "repaired cache permissions", config.F("profile", profile))
-		}
+		logger.Server("workspace").Warn("workspace.cache.repaired", "repaired cache permissions", config.F("profile", profile), config.F("config_source", entry.artifact), config.F("old_mode", int(before.Perm())))
 	}
 }
 

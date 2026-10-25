@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/prune"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"golang.org/x/sys/unix"
@@ -46,6 +47,45 @@ func New(root string) *Cache { return &Cache{root: root, now: time.Now} }
 // NewProfileCache owns documents directly below one manually provisioned profile.
 func NewProfileCache(root, profile string) *Cache {
 	return &Cache{root: root, profile: profile, now: time.Now}
+}
+
+func logDocRepair(profile, artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("docache").Warn("docache.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
+}
+
+// RepairProfile tightens permissions on existing cached documents without
+// creating anything. Missing paths stay missing; symlinks and foreign-owned
+// paths are left for the fail-closed checks.
+func RepairProfile(root, profile string) {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(profile) == "" {
+		return
+	}
+	dir := filepath.Join(root, "cache", "documents")
+	if info, err := os.Lstat(dir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0077 != 0 {
+		before := info.Mode()
+		if err := os.Chmod(dir, 0700); err == nil {
+			logDocRepair(profile, "documents_dir", before)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !docName.MatchString(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 == 0 {
+			continue
+		}
+		before := info.Mode()
+		if err := os.Chmod(path, 0600); err != nil {
+			continue
+		}
+		logDocRepair(profile, "documents_file", before)
+	}
 }
 
 func (c *Cache) rootPath() (string, error) {

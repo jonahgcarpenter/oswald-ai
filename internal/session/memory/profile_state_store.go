@@ -58,14 +58,53 @@ type profileExchangeState struct {
 }
 
 // NewProfileStore opens state.db below an existing, trusted profile directory.
+func logStateRepair(profile, artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("memory").Warn("state.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
+}
+
+func repairStateDir(path, profile string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logStateRepair(profile, "state_dir", before)
+}
+
+func repairStateFile(path, profile, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	if info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logStateRepair(profile, artifact, before)
+}
+
 func NewProfileStore(ctx context.Context, root, profile string, log *config.Logger) (*ProfileStore, error) {
 	if profile != "default" && !config.ValidProfileName(profile) {
 		return nil, errors.New("invalid profile store owner")
 	}
+	repairStateDir(root, profile)
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("profile state directory is not private")
 	}
+	repairStateFile(filepath.Join(root, "state.db"), profile, "state_db")
+	repairStateFile(filepath.Join(root, "state.db-wal"), profile, "state_db_wal")
+	repairStateFile(filepath.Join(root, "state.db-shm"), profile, "state_db_shm")
+	repairStateFile(filepath.Join(root, "state.db-journal"), profile, "state_db_journal")
 	db, err := database.OpenState(ctx, filepath.Join(root, "state.db"), log)
 	if err != nil {
 		return nil, err

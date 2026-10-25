@@ -94,8 +94,11 @@ func TestSetupWarnsOnInsecureExistingFile(t *testing.T) {
 	if code := Run(context.Background(), root, nil, &stdout, &stderr); code != exitOK {
 		t.Fatalf("re-seed = %d", code)
 	}
-	if !strings.Contains(stderr.String(), "chmod 600") {
-		t.Fatalf("missing insecure-permission warning: %q", stderr.String())
+	if !strings.Contains(stdout.String(), "repaired") {
+		t.Fatalf("missing repaired report: %q", stdout.String())
+	}
+	if info, err := os.Stat(filepath.Join(root, ".env")); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf(".env not healed: %v %v", info, err)
 	}
 }
 

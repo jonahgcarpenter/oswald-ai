@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 const (
@@ -38,10 +40,13 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 		verb := "kept"
 		if result.created {
 			verb = "created"
+		} else if result.repaired {
+			verb = "repaired"
 		}
-		fmt.Fprintf(stdout, "%s %s\n", verb, filepath.Join(displayRoot, result.name))
-		if result.insecure {
-			fmt.Fprintf(stderr, "warning: %s has group/other permissions; run `chmod 600 %s`\n", filepath.Join(displayRoot, result.name), filepath.Join(displayRoot, result.name))
+		if result.repaired {
+			fmt.Fprintf(stdout, "%s %s (was %04o)\n", verb, filepath.Join(displayRoot, result.name), int(result.before.Perm()))
+		} else {
+			fmt.Fprintf(stdout, "%s %s\n", verb, filepath.Join(displayRoot, result.name))
 		}
 	}
 	fmt.Fprintf(stdout, "setup complete: edit %s and %s, then run `oswald start`\n", filepath.Join(displayRoot, "config.yaml"), filepath.Join(displayRoot, ".env"))
@@ -51,11 +56,29 @@ func Run(ctx context.Context, root string, args []string, stdout, stderr io.Writ
 type seedResult struct {
 	name     string
 	created  bool
-	insecure bool
+	repaired bool
+	before   os.FileMode
 }
 
 // seed provisions the root directory, the profiles container, and the default
-// files at their required permissions.
+// files at their required permissions. Existing loose permissions are
+// tightened in place with a WARN; content is never overwritten.
+func logSetupRepair(artifact string, before os.FileMode) {
+	config.NewLogger(config.LevelWarn).Server("setup").Warn("setup.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", "default"))
+}
+
+func repairSetupDir(path, artifact string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 == 0 {
+		return
+	}
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logSetupRepair(artifact, before)
+}
+
 func seed(ctx context.Context, root string) ([]seedResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -73,6 +96,7 @@ func seed(ctx context.Context, root string) ([]seedResult, error) {
 	if err := requireDirectory(abs); err != nil {
 		return nil, err
 	}
+	repairSetupDir(abs, "setup_root")
 	profilesDir := filepath.Join(abs, "profiles")
 	if err := os.Mkdir(profilesDir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
@@ -80,6 +104,7 @@ func seed(ctx context.Context, root string) ([]seedResult, error) {
 	if err := requireDirectory(profilesDir); err != nil {
 		return nil, err
 	}
+	repairSetupDir(profilesDir, "setup_profiles")
 	files := []struct{ name, content string }{
 		{"config.yaml", defaultConfig},
 		{".env", defaultEnv},
@@ -94,8 +119,13 @@ func seed(ctx context.Context, root string) ([]seedResult, error) {
 		}
 		result := seedResult{name: file.name, created: created}
 		if !created {
-			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() && info.Mode().Perm()&0077 != 0 {
-				result.insecure = true
+			if info, statErr := os.Lstat(path); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0077 != 0 {
+				before := info.Mode()
+				if err := os.Chmod(path, 0600); err == nil {
+					result.repaired = true
+					result.before = before
+					logSetupRepair(file.name, before)
+				}
 			}
 		}
 		results = append(results, result)

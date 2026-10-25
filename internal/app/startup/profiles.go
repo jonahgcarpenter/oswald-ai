@@ -28,6 +28,7 @@ import (
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
+	"github.com/jonahgcarpenter/oswald-ai/internal/vault"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace/process"
 )
@@ -195,9 +196,18 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 			return nil
 		}
 		profile, _ := directory.Config(name)
-		soul.RepairProfile(profile.ProfileRoot, filepath.Join(cfg.ProfileRoot, "SOUL.md"))
+		soul.RepairProfile(profile.ProfileRoot, filepath.Join(cfg.ProfileRoot, "SOUL.md"), name)
 		files.RepairProfile(profile.ProfileRoot, name)
 		workspace.RepairCache(profile.ProfileRoot, name, rootLog)
+		serverNames := make([]string, 0, len(profile.MCPServers))
+		for _, server := range profile.MCPServers {
+			serverNames = append(serverNames, server.Name)
+		}
+		mcp.RepairTokens(profile.ProfileRoot, name, serverNames)
+		vault.RepairProfile(profile.ProfileRoot, name)
+		cron.RepairProfile(profile.ProfileRoot, name)
+		imagecache.RepairProfile(profile.ProfileRoot, name)
+		docache.RepairProfile(profile.ProfileRoot, name)
 		store, err := memory.NewProfileStore(ctx, profile.ProfileRoot, name, rootLog)
 		if err != nil {
 			return &Error{Event: "app.profile_storage.init_failed", Message: "failed to open profile state", Cause: err}
@@ -240,7 +250,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		}))
 		cleanup.Start()
 		pruneWorkers = append(pruneWorkers, cleanup)
-		cronRunner := &cron.Runner{Root: profile.ProfileRoot}
+		cronRunner := &cron.Runner{Root: profile.ProfileRoot, Profile: name}
 		if ws := workspace.NewWorkspace(profile.ProfileRoot, name); ws.Root() != "" {
 			cronRunner.Resolve = func(raw string) (string, error) {
 				abs, _, err := ws.Resolve(raw)

@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
 const separator = "§"
@@ -278,15 +280,19 @@ func RepairProfile(root, profile string) {
 	if root == "" || profile == "" || !safeID.MatchString(profile) {
 		return
 	}
-	repairMemoryDir(root)
+	repairMemoryDir(root, "files_root_dir", profile)
 	dir := filepath.Join(root, "memories")
-	repairMemoryDir(dir)
+	repairMemoryDir(dir, "files_memories_dir", profile)
 	for _, name := range []string{"USER.md", "MEMORY.md", "USER.md.lock", "MEMORY.md.lock"} {
-		repairMemoryFile(filepath.Join(dir, name))
+		repairMemoryFile(filepath.Join(dir, name), "memories/"+name, profile)
 	}
 }
 
-func repairMemoryDir(path string) {
+func logFilesRepair(artifact string, before os.FileMode, profile string) {
+	config.NewLogger(config.LevelWarn).Server("files").Warn("files.perms.repaired", "repaired private permissions", config.F("config_source", artifact), config.F("old_mode", int(before.Perm())), config.F("profile", profile))
+}
+
+func repairMemoryDir(path, artifact, profile string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -294,10 +300,14 @@ func repairMemoryDir(path string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
-	_ = os.Chmod(path, 0700)
+	before := info.Mode()
+	if err := os.Chmod(path, 0700); err != nil {
+		return
+	}
+	logFilesRepair(artifact, before, profile)
 }
 
-func repairMemoryFile(path string) {
+func repairMemoryFile(path, artifact, profile string) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return
@@ -305,7 +315,11 @@ func repairMemoryFile(path string) {
 	if info.Mode().Perm()&0077 == 0 {
 		return
 	}
-	_ = os.Chmod(path, 0600)
+	before := info.Mode()
+	if err := os.Chmod(path, 0600); err != nil {
+		return
+	}
+	logFilesRepair(artifact, before, profile)
 }
 
 func (s *Store) withDir(ctx context.Context, userID string, create bool, fn func(string) error) error {
