@@ -8,6 +8,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
@@ -128,5 +129,22 @@ func (g *Gateway) approvalAskNotifier(r *runtimeResponder, requestID string) wor
 		if err := r.sendAndRemember(text); err != nil {
 			g.log().With(config.F("request_id", requestID)).Debug("gateway.approval_ask.failed", "failed to send approval ask", config.ErrorField(err))
 		}
+	}
+}
+
+// clarifyAskNotifier reports a parked clarify ask as a standalone reply
+// while the tool call blocks. Delivery failures are returned so the waiter
+// can finalize as undelivered; they never unblock the waiter otherwise.
+func (g *Gateway) clarifyAskNotifier(r *runtimeResponder, requestID string) toolclarify.Notifier {
+	return func(notice toolclarify.Notice) error {
+		text := toolclarify.RenderAskOne(notice.Question, notice.MinutesLeft)
+		if notice.Expired {
+			text = toolclarify.RenderExpired()
+		}
+		if err := r.sendAndRemember(text); err != nil {
+			g.log().With(config.F("request_id", requestID)).Debug("gateway.clarify_ask.failed", "failed to send clarify ask", config.ErrorField(err))
+			return err
+		}
+		return nil
 	}
 }

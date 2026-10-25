@@ -14,6 +14,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 	"github.com/jonahgcarpenter/oswald-ai/internal/workspace"
 )
@@ -87,7 +88,10 @@ type Request struct {
 	// EscalationNotify reports a parked approval ask while the tool call
 	// blocks. It is installed in the request context when set.
 	EscalationNotify workspace.EscalationNotifier
-	ResponseChan     chan Result
+	// ClarifyAsk reports a parked clarify ask while the tool call blocks.
+	// It is installed in the request context when set.
+	ClarifyAsk   toolclarify.Notifier
+	ResponseChan chan Result
 }
 
 // Result is the response payload delivered to the originating gateway.
@@ -289,6 +293,9 @@ func (b *Broker) Submit(req *Request) error {
 	requestCtx = requestctx.WithPrincipal(requestCtx, req.Principal)
 	if req.EscalationNotify != nil {
 		requestCtx = workspace.WithEscalationNotify(requestCtx, req.EscalationNotify)
+	}
+	if req.ClarifyAsk != nil {
+		requestCtx = toolclarify.WithNotifier(requestCtx, req.ClarifyAsk)
 	}
 	requestCtx = requestctx.WithUsageCollector(requestCtx, req.Usage)
 	w := &work{key: laneKey(req.Principal, req.SessionKey), request: req, ctx: requestCtx, cancel: cancel, ownerUserID: req.Principal.CanonicalUserID}

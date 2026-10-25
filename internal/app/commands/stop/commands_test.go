@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 )
 
 type fakeCanceler struct {
@@ -43,5 +44,23 @@ func TestStopRejectsMissingPrincipalAndMissingCanceler(t *testing.T) {
 	principal := identity.Principal{CanonicalUserID: "alice", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
 	if _, err := New(nil).Execute(context.Background(), commands.Request{Principal: principal}); err == nil {
 		t.Fatal("missing canceler ignored")
+	}
+}
+
+func TestStopDeniesParkedClarify(t *testing.T) {
+	toolclarify.Reset()
+	answer := make(chan toolclarify.Answer, 1)
+	if !toolclarify.Request(toolclarify.Pending{Profile: "alice", SessionKey: "discord:dm:123", Answer: answer}) {
+		t.Fatal("request rejected")
+	}
+	principal := identity.Principal{CanonicalUserID: "alice", Gateway: "discord", ExternalID: "123", Assurance: identity.AssuranceDiscordGateway}
+	if _, err := New(&fakeCanceler{}).Execute(context.Background(), commands.Request{Principal: principal, SessionKey: "discord:dm:123"}); err != nil {
+		t.Fatal(err)
+	}
+	if toolclarify.Has("alice", "discord:dm:123") {
+		t.Fatal("parked clarify survived /stop")
+	}
+	if _, ok := <-answer; ok {
+		t.Fatal("waiter not signaled as cancelled")
 	}
 }

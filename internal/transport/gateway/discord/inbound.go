@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
@@ -123,6 +124,13 @@ func (dg *Gateway) handleReceivedMessage(msg MessageCreate, requestID string, re
 		sessionKey = "discord:dm:" + msg.Author.ID
 	} else {
 		sessionKey = "discord:" + msg.ChannelID + ":" + msg.Author.ID
+	}
+	// A parked clarify ask owns this conversation until answered: free-text
+	// replies fulfill it instead of starting a new turn. Commands flow
+	// through so /stop and /new still cancel the wait.
+	if !isCommandAttempt && strings.TrimSpace(text) != "" && toolclarify.Fulfill(principal.CanonicalUserID, sessionKey, text) {
+		log.Debug("gateway.clarify.fulfilled", "delivered user reply to parked clarify ask", config.F("request_id", requestID), config.F("message_chars", len(text)))
+		return
 	}
 
 	var reply *routing.ReplyContext

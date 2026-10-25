@@ -10,6 +10,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/requestctx"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/routing"
 	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
@@ -132,6 +133,13 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	sessionKey := g.sessionKey(chat, normalizedSenderID)
 	rememberCronChat(sessionKey, chat.GUID)
 	log = log.With(config.F("profile", canonicalUserID))
+	// A parked clarify ask owns this conversation until answered: free-text
+	// replies fulfill it instead of starting a new turn. Commands flow
+	// through so /stop and /new still cancel the wait.
+	if !currentIsCommandAttempt && strings.TrimSpace(textWithoutMention) != "" && toolclarify.Fulfill(canonicalUserID, sessionKey, textWithoutMention) {
+		log.Debug("gateway.clarify.fulfilled", "delivered user reply to parked clarify ask", config.F("request_id", requestID), config.F("message_chars", len(textWithoutMention)))
+		return
+	}
 	var reply *routing.ReplyContext
 	if replyGUID != "" {
 		if replyFound {
@@ -193,6 +201,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 	// blocks. Streaming transports leave this unset and render the agent's
 	// status chunk instead.
 	askNotify := g.approvalAskNotifier(responder, requestID)
+	clarifyAsk := g.clarifyAskNotifier(responder, requestID)
 	gatewayruntime.Execute(gatewayruntime.Request{
 		ReceivedAt: receivedAt,
 		RequestID:  requestID,
@@ -212,6 +221,7 @@ func (g *Gateway) processReceivedMessage(msg webhookMessage, requestID string, r
 		IsReplyToBot:      currentIsReplyToBot,
 		Text:              textWithoutMention,
 		EscalationNotify:  askNotify,
+		ClarifyAsk:        clarifyAsk,
 		PublicUserText:    publicUserText,
 		PlatformMessageID: msg.GUID,
 		ChatDisplayName:   chatDisplayName,

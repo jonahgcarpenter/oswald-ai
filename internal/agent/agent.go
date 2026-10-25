@@ -19,6 +19,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory/files"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
+	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -279,6 +280,7 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	toolExposure := exposure.NewExposure()
 	if strings.EqualFold(strings.TrimSpace(gateway), "openai") {
 		toolExposure.HideBuiltins(imagegenerate.Name)
+		toolExposure.HideBuiltins(toolclarify.Name)
 	}
 	ctx = requestctx.WithToolExposer(ctx, toolExposure)
 	ctx = workspace.WithReviewer(ctx, workspace.NewLLMReviewer(a.chatClient, a.model))
@@ -286,6 +288,8 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	// gateway-provided asker (real message on transports without live
 	// progress), else fall back to a streaming status chunk.
 	ctx = ensureEscalationNotify(ctx, streamCallback, gateway)
+	// Parked clarify asks surface the same way while the tool call blocks.
+	ctx = ensureClarifyAsk(ctx, streamCallback)
 	toolGovernor := governance.New(a.toolPolicy)
 
 	// Read the canonical user's operator-managed soul fresh on every request.
