@@ -300,6 +300,13 @@ func TestPlatformNotesPerGateway(t *testing.T) {
 	if !strings.Contains(imessage, "responding via iMessage") || !strings.Contains(imessage, "single iMessage") {
 		t.Fatalf("imessage platform notes = %q", imessage)
 	}
+	for _, notes := range []string{discord, imessage} {
+		for _, want := range []string{"MEDIA:/absolute/path/to/file", "FILE:/absolute/path/to/file", ".gif", "Files of any type"} {
+			if !strings.Contains(notes, want) {
+				t.Fatalf("platform notes missing %q: %q", want, notes)
+			}
+		}
+	}
 	for _, gateway := range []string{"openai", "unknown", ""} {
 		if got := platformNotes(gateway); got != "" {
 			t.Fatalf("platform notes for %q = %q, want empty", gateway, got)
