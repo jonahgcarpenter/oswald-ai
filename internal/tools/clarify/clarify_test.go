@@ -156,7 +156,7 @@ func TestParseAnswerWholeReply(t *testing.T) {
 
 func TestRenderAskOneLettersAndProgress(t *testing.T) {
 	text := RenderAskOne(Question{Question: "Color?", Choices: []string{"red", "blue"}}, 5)
-	if strings.Contains(text, "1. Color?") || !strings.Contains(text, "A. red (Recommended)") || !strings.Contains(text, "B. blue") || !strings.Contains(text, "C. Other") || !strings.Contains(text, "5 minutes") {
+	if strings.Contains(text, "1. Color?") || !strings.Contains(text, "A. red (Recommended)") || !strings.Contains(text, "B. blue") || !strings.Contains(text, "C. Other") || !strings.Contains(text, "Reply with the letter, your own answer, or skip.") || !strings.Contains(text, "5 minutes") {
 		t.Fatalf("single ask text = %q", text)
 	}
 	// No transport-specific hint lines: the footer alone describes the format.
@@ -169,11 +169,11 @@ func TestRenderAskOneLettersAndProgress(t *testing.T) {
 		t.Fatalf("prefixed ask text = %q", prefixed)
 	}
 	open := RenderAskOne(Question{Question: "Why?"}, 5)
-	if !strings.Contains(open, "Reply with your answer.") || strings.Contains(open, "letter") {
+	if !strings.Contains(open, "Reply with your answer or skip.") || strings.Contains(open, "letter") {
 		t.Fatalf("open ask text = %q", open)
 	}
 	multi := RenderAskOne(Question{Question: "Toppings?", Choices: []string{"cheese", "ham"}, MultiSelect: true}, 5)
-	if !strings.Contains(multi, "Reply with a letter or multiple letters in a comma-separated list (eg. `B`, `A`).") || strings.Contains(multi, "pick several letters") || !strings.Contains(multi, "C. Other") {
+	if !strings.Contains(multi, "Reply with the letter(s) in a comma-separated list, your own answer, or skip.") || strings.Contains(multi, "pick several letters") || !strings.Contains(multi, "C. Other") {
 		t.Fatalf("multi ask text = %q", multi)
 	}
 }

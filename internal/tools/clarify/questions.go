@@ -176,16 +176,15 @@ func ResultContent(responses []Response, outcome, notice string) string {
 }
 
 // replyPrompt renders the reply footer: letter-based when the question has
-// choices (multi-select invites a comma-separated list), free-text
-// otherwise.
+// choices, free-text otherwise.
 func replyPrompt(question Question) string {
 	if len(question.Choices) > 0 {
 		if question.MultiSelect {
-			return "Reply with a letter or multiple letters in a comma-separated list (eg. `B`, `A`)."
+			return "Reply with the letter(s) in a comma-separated list, your own answer, or skip."
 		}
-		return "Reply with the letter (e.g. `B`) or your own answer."
+		return "Reply with the letter, your own answer, or skip."
 	}
-	return "Reply with your answer."
+	return "Reply with your answer or skip."
 }
 
 // RenderExpired renders the expiry follow-up: sent only when the wait lapses
