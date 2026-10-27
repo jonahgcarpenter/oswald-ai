@@ -105,9 +105,13 @@ type GlobalPolicy struct {
 	MaxToolIterations int
 }
 
-// DefaultGlobalPolicy returns the fixed request-wide safety ceilings.
+// DefaultGlobalPolicy returns the request-wide safety-valve ceilings. These
+// are a runaway/cost backstop, not the normal stop rule: progress signals
+// (loop-guardrail ladders plus the no-progress window) halt stuck requests
+// well before the valve, while genuinely productive work runs past the old
+// 50/30 limits untouched.
 func DefaultGlobalPolicy() GlobalPolicy {
-	return GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 30}
+	return GlobalPolicy{MaxExecutions: 500, MaxToolIterations: 200}
 }
 
 // Validate checks the request-wide limits.
@@ -151,8 +155,9 @@ const (
 
 // Governor tracks one request's tool usage and request-wide budget. It is
 // intentionally not safe for concurrent use because Agent.Process executes
-// one tool batch serially. Per-tool blocking is gone: every advertised call
-// executes, and loop-guardrail ladders advise instead of refusing.
+// one tool batch serially. Progress signals are the normal stop rule: the
+// loop-guardrail ladders and the consecutive no-progress window halt stuck
+// requests, and the request-wide valve only backstops runaways.
 type Governor struct {
 	global          GlobalPolicy
 	stats           map[string]*ToolStats
@@ -161,7 +166,7 @@ type Governor struct {
 	globalReason    string
 
 	// Loop-guardrail state. Failure/no-progress ladders track repeated
-	// signatures so exact-error replays warn instead of retrying blindly.
+	// signatures so exact-error replays halt instead of retrying blindly.
 	exactFailures    map[string]int
 	sameToolFailures map[string]int
 	noProgress       map[string]noProgressEntry
@@ -171,7 +176,11 @@ type Governor struct {
 	identicalFirstID string
 	history          []historyEntry
 	haltDecision     *Decision
-	hardStop         bool
+	// nonProductiveStreak counts consecutive completed calls that were
+	// failures or unproductive successes across all tools. Any productive
+	// (or degraded-delivering) result resets it. Repeatable pollers never
+	// increment it so background polling cannot trip the window.
+	nonProductiveStreak int
 }
 
 // New creates request-local governance state.
@@ -184,10 +193,6 @@ func New(global GlobalPolicy) *Governor {
 		noProgress:       make(map[string]noProgressEntry),
 	}
 }
-
-// SetHardStopEnabled toggles blocking/halt behavior. It stays false in v1
-// (warn-only); phase 3 flips it on unattended paths after log observation.
-func (g *Governor) SetHardStopEnabled(enabled bool) { g.hardStop = enabled }
 
 // HaltDecision returns the first block/halt decision, if any.
 func (g *Governor) HaltDecision() *Decision { return g.haltDecision }
@@ -222,14 +227,13 @@ func (g *Governor) BeforeExecution(name string, args map[string]interface{}, pol
 		return Decision{ReasonCode: ReasonGlobalLimit}
 	}
 	decision := Decision{Allowed: true}
-	// Fingerprints still feed the loop-guardrail ladders; repeats execute.
-	// The hard-stop ladder blocks below stay dormant until hard-stop is
-	// enabled.
+	// Fingerprints feed the loop-guardrail ladders. Exact and idempotent
+	// replays halt here; other ladders halt in AfterCall/ObserveCall.
 	fingerprint, ferr := Fingerprint(name, args, policy.NormalizeArgs)
 	if ferr != nil {
 		fingerprint = ""
 	}
-	if g.hardStop && fingerprint != "" {
+	if fingerprint != "" {
 		if count := g.exactFailures[fingerprint]; count >= ExactBlockAfter {
 			stats.Blocked++
 			blocked := Decision{ReasonCode: ReasonRepeatedExactBlock}
@@ -285,6 +289,9 @@ func (g *Governor) ToolIterations() int { return g.toolIterations }
 
 // ExactFailures returns the exact-signature failure count for a fingerprint.
 func (g *Governor) ExactFailures(fingerprint string) int { return g.exactFailures[fingerprint] }
+
+// NonProductiveStreak returns the current consecutive non-productive count.
+func (g *Governor) NonProductiveStreak() int { return g.nonProductiveStreak }
 
 // SameToolFailures returns the same-tool failure count for a tool name.
 func (g *Governor) SameToolFailures(name string) int { return g.sameToolFailures[name] }

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/identity"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/exposure"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
@@ -239,7 +239,25 @@ func governanceResultText(reason string) string {
 		return "Tool call halted: the same failing tool path repeated without progress. Stop retrying it and choose a different approach."
 	case governance.ReasonIdempotentNoProgressBlock:
 		return "Tool call blocked: the same call returned the same result repeatedly. Use the earlier result or change the query."
+	case governance.ReasonNoProgressWindowHalt:
+		return "Tool call halted: the last several tool calls produced no productive result. Use the results already gathered or explain the blocker."
 	default:
 		return "Tool call blocked by request policy. Continue with the available information."
+	}
+}
+
+// isProgressHaltReason reports whether a stop reason came from progress
+// signals rather than the safety-valve count ceilings.
+func isProgressHaltReason(reason string) bool {
+	switch reason {
+	case governance.ReasonRepeatedExactBlock,
+		governance.ReasonSameToolHalt,
+		governance.ReasonIdenticalStreakHalt,
+		governance.ReasonIdenticalCycleHalt,
+		governance.ReasonIdempotentNoProgressBlock,
+		governance.ReasonNoProgressWindowHalt:
+		return true
+	default:
+		return false
 	}
 }

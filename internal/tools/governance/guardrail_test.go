@@ -117,7 +117,6 @@ func TestObserveCycleNotice(t *testing.T) {
 
 func TestHardStopExactBlock(t *testing.T) {
 	g := New(GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 50})
-	g.SetHardStopEnabled(true)
 	policy := ToolPolicy{}
 	args := map[string]interface{}{"q": "same"}
 	for i := 0; i < 5; i++ {

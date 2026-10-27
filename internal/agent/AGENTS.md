@@ -56,8 +56,10 @@ finalize: pick final content, resolve MEDIA/FILE, AppendPendingSessionTurn (skip
   but the newest 3 turns as `USER`, zero tools) returns plain markdown with no size cap.
 - **Tool authorization is per-iteration.** Discovery can never authorize another call in the same
   emitted batch. Every declared call executes serially and gets a correlated result appended,
-  including blocked ones — failures, empties, and repeats all run, with loop-guardrail warnings
-  advising instead of refusing. Caps are 50 handler executions and 30 tool-bearing responses.
+  including blocked ones — failures, empties, and repeats all run until progress signals
+  halt the loop (exact/same-tool/idempotent/identical ladders plus a 12-deep no-progress
+  window); the valve caps are a 500-execution / 200 tool-response backstop. Halted and
+  valve-exhausted loops both finish with a tools-disabled final answer.
 - **Generated images never auto-deliver.** The model delivers one only by emitting a
   `MEDIA:/absolute/path` token in its final response (resolved against the managed cache first,
   then raw absolute paths under the file groups); at most 4 logical images per request. Previews ride tool results;

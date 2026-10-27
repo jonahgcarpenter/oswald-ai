@@ -18,6 +18,13 @@ const (
 	NoProgressWarnAfter  = 2
 	NoProgressBlockAfter = 5
 	IdenticalNoticeAfter = 3
+	// NoProgressWindow halts a request after this many consecutive completed
+	// calls with no productive result across all tools. It catches varied
+	// but useless work (different failing tools, different empty queries)
+	// that no single-signature ladder sees. Any productive or
+	// degraded-delivering result resets the streak; repeatable pollers never
+	// increment it.
+	NoProgressWindow     = 12
 	CycleMinPeriod       = 2
 	CycleMaxPeriod       = 4
 	CycleHistory         = 64
@@ -26,7 +33,7 @@ const (
 )
 
 // Guardrail reason codes. Warn codes are model-visible advice; block/halt
-// codes gate execution only when hard-stop is enabled (phase 3).
+// codes gate execution and stop the request loop.
 const (
 	ReasonRepeatedExactBlock        = "repeated_exact_failure_block"
 	ReasonRepeatedExactWarning      = "repeated_exact_failure_warning"
@@ -36,10 +43,11 @@ const (
 	ReasonIdempotentNoProgressBlock = "idempotent_no_progress_block"
 	ReasonIdenticalStreakHalt       = "identical_call_streak_halt"
 	ReasonIdenticalCycleHalt        = "identical_cycle_halt"
+	ReasonNoProgressWindowHalt      = "no_progress_window_halt"
 )
 
-// GuardrailAdvice is warn-only in v1 (Warn=true, execution already happened).
-// Block/Halt populate only when hard-stop is enabled.
+// GuardrailAdvice carries warn/block/halt guidance for one completed call.
+// Warn appends model-visible advice; Block/Halt stop the request loop.
 type GuardrailAdvice struct {
 	Action  string // "", "warn", "block", "halt"
 	Code    string
@@ -73,7 +81,8 @@ type historyEntry struct {
 // AfterCall updates legacy statistics and loop-guardrail ladders for one
 // completed permitted execution, then returns warn/block/halt advice.
 // failed counts only execErr != nil; unproductive counts only successful
-// non-productive outcomes; degraded success counts as neither.
+// non-productive outcomes; degraded-delivering success counts as productive
+// progress and resets the no-progress window.
 func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string, result Result, execErr error) GuardrailAdvice {
 	stats := g.toolStats(name)
 	failed, unproductive := classifyCall(execErr, result)
@@ -83,6 +92,15 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 		stats.Unproductive++
 	} else {
 		stats.Productive++
+	}
+
+	// Sliding no-progress window: any productive delivery resets the streak;
+	// failures and unproductive successes advance it (pollers excluded).
+	// This is the catch-all for varied-but-useless work no single ladder sees.
+	if !failed && !unproductive {
+		g.nonProductiveStreak = 0
+	} else if !isRepeatablePoller(name) {
+		g.nonProductiveStreak++
 	}
 
 	if failed {
@@ -98,7 +116,7 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 		if fp != "" {
 			delete(g.noProgress, fp)
 		}
-		if g.hardStop && !isFailureTolerant(name) {
+		if !isFailureTolerant(name) {
 			if g.sameToolFailures[name] >= SameHaltAfter {
 				halt := Decision{ReasonCode: ReasonSameToolHalt}
 				g.setHaltDecision(&halt)
@@ -107,7 +125,7 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 		}
 		if fp != "" {
 			if count := g.exactFailures[fp]; count >= ExactWarnAfter {
-				if g.hardStop && count >= ExactBlockAfter {
+				if count >= ExactBlockAfter {
 					block := Decision{ReasonCode: ReasonRepeatedExactBlock}
 					g.setHaltDecision(&block)
 					return GuardrailAdvice{Action: "block", Code: ReasonRepeatedExactBlock, Count: count, Tool: name, Message: exactBlockMessage(name, count)}
@@ -116,7 +134,13 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 			}
 		}
 		if count := g.sameToolFailures[name]; count >= SameWarnAfter {
+			if halt := g.checkNoProgressWindow(name); halt.Code != "" {
+				return halt
+			}
 			return GuardrailAdvice{Action: "warn", Code: ReasonSameToolWarning, Count: count, Tool: name, Message: sameWarnMessage(name, count)}
+		}
+		if halt := g.checkNoProgressWindow(name); halt.Code != "" {
+			return halt
 		}
 		return GuardrailAdvice{}
 	}
@@ -141,13 +165,30 @@ func (g *Governor) AfterCall(name string, args map[string]interface{}, fp string
 		}
 		g.noProgress[fp] = entry
 		if entry.count >= NoProgressWarnAfter {
-			if g.hardStop && entry.count >= NoProgressBlockAfter {
+			if entry.count >= NoProgressBlockAfter {
 				block := Decision{ReasonCode: ReasonIdempotentNoProgressBlock}
 				g.setHaltDecision(&block)
 				return GuardrailAdvice{Action: "block", Code: ReasonIdempotentNoProgressBlock, Count: entry.count, Tool: name, Message: noProgressBlockMessage(name, entry.count)}
 			}
 			return GuardrailAdvice{Action: "warn", Code: ReasonIdempotentNoProgressWarn, Count: entry.count, Tool: name, Message: noProgressWarnMessage(name, entry.count)}
 		}
+	}
+	if unproductive {
+		if halt := g.checkNoProgressWindow(name); halt.Code != "" {
+			return halt
+		}
+	}
+	return GuardrailAdvice{}
+}
+
+// checkNoProgressWindow halts when the consecutive no-progress streak fills
+// the full window. Callers invoke it on non-productive completions after the
+// more specific ladders have been consulted.
+func (g *Governor) checkNoProgressWindow(name string) GuardrailAdvice {
+	if g.nonProductiveStreak >= NoProgressWindow {
+		halt := Decision{ReasonCode: ReasonNoProgressWindowHalt}
+		g.setHaltDecision(&halt)
+		return GuardrailAdvice{Action: "halt", Code: ReasonNoProgressWindowHalt, Count: g.nonProductiveStreak, Tool: name, Message: noProgressWindowMessage(name, g.nonProductiveStreak)}
 	}
 	return GuardrailAdvice{}
 }
@@ -183,7 +224,7 @@ func (g *Governor) ObserveCall(name string, args map[string]interface{}, content
 		out.Notice = fmt.Sprintf("[agent note: this is the 3rd consecutive identical call to %s with identical arguments returning the same result. Do not repeat it \u2014 change arguments, use a different tool, or proceed with what you have.]", name)
 		out.Kind = "identical_streak_notice"
 	}
-	if g.hardStop && !repeatable && g.identicalCount >= NoProgressBlockAfter {
+	if !repeatable && g.identicalCount >= NoProgressBlockAfter {
 		halt := Decision{ReasonCode: ReasonIdenticalStreakHalt}
 		g.setHaltDecision(&halt)
 		out.Notice = fmt.Sprintf("[Tool hard stop: %s; count=%d; the same call returned the same result %d times in a row. Stop repeating it.]", ReasonIdenticalStreakHalt, g.identicalCount, g.identicalCount)
@@ -194,11 +235,9 @@ func (g *Governor) ObserveCall(name string, args map[string]interface{}, content
 		if !historyHasRepeatable(g.history[len(g.history)-period*laps:]) {
 			out.Kind = "identical_cycle_notice"
 			out.Notice = fmt.Sprintf("[agent note: the last %d rounds repeated the same cycle of %d tool calls (ending with %s) with identical arguments and identical results. Do not repeat the batch \u2014 change arguments, use a different tool, or proceed with what you have.]", laps, period, name)
-			if g.hardStop {
-				halt := Decision{ReasonCode: ReasonIdenticalCycleHalt}
-				g.setHaltDecision(&halt)
-				out.Kind = ReasonIdenticalCycleHalt
-			}
+			halt := Decision{ReasonCode: ReasonIdenticalCycleHalt}
+			g.setHaltDecision(&halt)
+			out.Kind = ReasonIdenticalCycleHalt
 		}
 	}
 	if !failed && g.identicalCount >= 2 && utf8.RuneCountInString(content) >= StubMinChars {
@@ -241,6 +280,10 @@ func noProgressWarnMessage(tool string, count int) string {
 
 func noProgressBlockMessage(tool string, count int) string {
 	return fmt.Sprintf("Stopped %s: the same call with identical arguments returned the same result %d times in a row. Use the earlier result or change strategy.", tool, count)
+}
+
+func noProgressWindowMessage(tool string, count int) string {
+	return fmt.Sprintf("Stopped %s: the last %d tool calls produced no productive result. Stop repeating unproductive paths; use the results already gathered or explain the blocker.", tool, count)
 }
 
 // resultHash digests canonical JSON when parseable, else raw text. A small

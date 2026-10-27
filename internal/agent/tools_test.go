@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -201,5 +202,62 @@ func TestStatelessLengthFinishPropagates(t *testing.T) {
 	}
 	if resp.FinishReason != "" {
 		t.Fatalf("finish reason %q, want empty (stop default)", resp.FinishReason)
+	}
+}
+
+func TestProgressHaltReasonMapping(t *testing.T) {
+	for _, reason := range []string{
+		governance.ReasonRepeatedExactBlock,
+		governance.ReasonSameToolHalt,
+		governance.ReasonIdenticalStreakHalt,
+		governance.ReasonIdenticalCycleHalt,
+		governance.ReasonIdempotentNoProgressBlock,
+		governance.ReasonNoProgressWindowHalt,
+	} {
+		if !isProgressHaltReason(reason) {
+			t.Fatalf("reason %q should count as a progress halt", reason)
+		}
+		if text := governanceResultText(reason); text == "" || len(text) < 10 {
+			t.Fatalf("reason %q missing halt text", reason)
+		}
+	}
+	for _, reason := range []string{governance.ReasonGlobalLimit, governance.ReasonIterationLimit, governance.ReasonUnadvertised, "other"} {
+		if isProgressHaltReason(reason) {
+			t.Fatalf("reason %q should not count as a progress halt", reason)
+		}
+	}
+}
+
+func TestProcessStuckLoopHaltsWithStuckNotice(t *testing.T) {
+	args := map[string]interface{}{"q": "same"}
+	responses := []*llm.ChatResponse{}
+	for i := 1; i <= 5; i++ {
+		responses = append(responses, toolCallResponse("call-"+string(rune('0'+i)), "test.stuck", args))
+	}
+	responses = append(responses, &llm.ChatResponse{Model: "test-model", Message: llm.ChatMessage{Role: "assistant", Content: "final answer"}})
+	chat := &fakeChatter{responses: responses}
+	reg := registry.New(config.NewLogger(config.LevelError))
+	if err := registerTestTool(t, reg, testToolSpec{Name: "test.stuck", Description: "Stuck"}, testToolPolicy(), func(context.Context, map[string]interface{}) (governance.Result, error) {
+		return governance.Result{}, errors.New("boom")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent, _ := newTestAgent(t, chat, nil, reg)
+
+	resp, err := processAgent(agent, "stuck-1", "imessage", "session-1", "user-1", "User", "go", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Kind != "tool_limit" || resp.Response != "final answer" {
+		t.Fatalf("stuck response = %+v, want tool_limit final answer", resp)
+	}
+	requests := primaryRequests(chat.requests)
+	if len(requests) == 0 || len(requests[len(requests)-1].Tools) != 0 {
+		t.Fatalf("final request must disable tools: %+v", requests)
+	}
+	finalReq := requests[len(requests)-1]
+	notice := finalReq.Messages[len(finalReq.Messages)-1]
+	if notice.Role != "user" || notice.Content != toolStuckNotice {
+		t.Fatalf("stuck halt must announce stalled progress, got %+v", notice)
 	}
 }
