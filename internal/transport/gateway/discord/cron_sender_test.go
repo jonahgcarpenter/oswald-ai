@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 type cronRoundTripper func(*http.Request) (*http.Response, error)
@@ -53,17 +54,17 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 
 	// Server channel session carries its channel ID in the key; no lookup is
 	// triggered.
-	if err := sender.SendText(context.Background(), "alice", "discord:chan9:user1", "hello group"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "discord:chan9:user1", "hello group", nil); err != nil {
 		t.Fatal(err)
 	}
 	// DM resolves through remembered inbound traffic.
 	rememberCronChannel("discord:dm:user1", "dm-chan")
-	if err := sender.SendText(context.Background(), "alice", "discord:dm:user1", "hello dm"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "discord:dm:user1", "hello dm", nil); err != nil {
 		t.Fatal(err)
 	}
 	// Long text chunks to Discord-sized messages.
 	long := strings.Repeat("x", 2500)
-	if err := sender.SendText(context.Background(), "alice", "discord:chan9:user1", long); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "discord:chan9:user1", long, nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -81,7 +82,7 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 	// Unknown DM session falls back to the Discord API (POST /users/@me/channels
 	// returns the existing DM channel when one already exists) and delivers
 	// to the resolved channel, so a fresh process can still deliver.
-	if err := sender.SendText(context.Background(), "alice", "discord:dm:stranger", "hi"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "discord:dm:stranger", "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -104,8 +105,55 @@ func TestCronSenderUnrecognizedKeyFailsClosed(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"m1"}`))}, nil
 	})}
 	sender := dg.CronSender()
-	if err := sender.SendText(context.Background(), "alice", "unknown:shape:key", "hi"); err == nil {
+	if err := sender.Deliver(context.Background(), "alice", "unknown:shape:key", "hi", nil); err == nil {
 		t.Fatal("unrecognized session key sent")
+	}
+}
+
+// TestCronSenderDeliversAttachments covers the cron attachment boundary:
+// text goes first and file attachments follow in one message.
+func TestCronSenderDeliversAttachments(t *testing.T) {
+	var mu sync.Mutex
+	var contents []string
+	var files []string
+	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
+	dg.HTTPClient = &http.Client{Transport: cronRoundTripper(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Error(err)
+			} else if r.MultipartForm != nil {
+				for _, headers := range r.MultipartForm.File {
+					for _, h := range headers {
+						files = append(files, h.Filename)
+					}
+				}
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"m2"}`))}, nil
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		contents = append(contents, toString(payload["content"]))
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"m1"}`))}, nil
+	})}
+	sender := dg.CronSender()
+
+	attachments := []media.OutputAttachment{
+		{Filename: "sales.txt", MIMEType: "text/plain", Data: []byte("row1")},
+	}
+	if err := sender.Deliver(context.Background(), "alice", "discord:chan9:user1", "weekly sales", attachments); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(contents) != 1 || contents[0] != "weekly sales" {
+		t.Fatalf("contents = %v", contents)
+	}
+	if len(files) != 1 || files[0] != "sales.txt" {
+		t.Fatalf("files = %v", files)
 	}
 }
 

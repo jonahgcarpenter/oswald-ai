@@ -96,7 +96,7 @@ func wireCronDispatchers(names []string, cronStores map[string]*cron.Store, cron
 			if result.Response.Error != "" {
 				return cron.AgentResult{Text: result.Response.Response}, errors.New(result.Response.Error)
 			}
-			return cron.AgentResult{Text: result.Response.Response}, nil
+			return cron.AgentResult{Text: result.Response.Response, Attachments: result.Response.Attachments}, nil
 		case <-ctx.Done():
 			return cron.AgentResult{}, ctx.Err()
 		}

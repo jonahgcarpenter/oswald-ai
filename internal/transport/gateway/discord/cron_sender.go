@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // cronChannelCache bounds remembered origin destinations.
@@ -62,12 +64,12 @@ type cronSender struct {
 	gateway *Gateway
 }
 
-// SendText delivers finished job output to an origin session. Group and
+// Deliver delivers finished job output to an origin session. Group and
 // server channels carry their channel in the key; DM sessions resolve
 // through remembered inbound traffic, falling back to the Discord API so
 // delivery works even with no inbound traffic since process start. Text is
-// chunked to Discord-sized messages.
-func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) error {
+// chunked to Discord-sized messages and attachments follow in one message.
+func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, attachments []media.OutputAttachment) error {
 	if s.gateway == nil {
 		return errors.New("discord gateway is unavailable")
 	}
@@ -99,13 +101,24 @@ func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) er
 			return errors.New("no live channel binding for origin session " + key)
 		}
 	}
-	for _, chunk := range chunkDiscordText(text) {
-		if err := ctx.Err(); err != nil {
-			return err
+	if strings.TrimSpace(text) != "" || len(attachments) == 0 {
+		for _, chunk := range chunkDiscordText(text) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if _, err := s.gateway.sendMessage(channel, chunk, ""); err != nil {
+				return err
+			}
 		}
-		if _, err := s.gateway.sendMessage(channel, chunk, ""); err != nil {
-			return err
-		}
+	}
+	if len(attachments) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := s.gateway.sendCommandAttachment(channel, commands.Result{Attachments: attachments}, ""); err != nil {
+		return err
 	}
 	return nil
 }

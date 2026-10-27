@@ -310,7 +310,7 @@ func (s *Store) runScriptJob(ctx context.Context, r *Runner, job *Job) (Executio
 	if d == nil {
 		d = &Dispatcher{Store: s, Runner: r}
 	}
-	d.deliver(job, &ex, out)
+	d.deliver(job, &ex, out, nil)
 	s.appendLedger(ex)
 	s.finishRun(job.ID, status, ex.DeliveryError, status == "script_error")
 	return ex, out, nil

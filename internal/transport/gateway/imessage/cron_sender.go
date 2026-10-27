@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/cron"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // cronChatCache bounds remembered origin destinations.
@@ -61,7 +62,7 @@ type cronSender struct {
 	gateway *Gateway
 }
 
-// SendText delivers finished job output to an origin session. Group
+// Deliver delivers finished job output to an origin session. Group
 // sessions carry their chat GUID in the key; DM sessions resolve through
 // remembered inbound traffic, falling back to the canonical BlueBubbles
 // iMessage direct-chat GUID ("iMessage;-;<handle>") so delivery works even
@@ -69,7 +70,9 @@ type cronSender struct {
 // the concrete "iMessage" service: the "any" service is only meaningful for
 // reading, and BlueBubbles send endpoints reject it (the AppleScript
 // fallback fails, and non-AppleScript methods report "Chat does not exist").
-func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) error {
+// Text goes first and attachments follow top-level in the same chat: cron
+// turns answer no user message, so there is nothing to thread to.
+func (s cronSender) Deliver(ctx context.Context, _, sessionKey, text string, attachments []media.OutputAttachment) error {
 	if s.gateway == nil {
 		return errors.New("imessage gateway is unavailable")
 	}
@@ -101,9 +104,21 @@ func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) er
 		return err
 	}
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(attachments) == 0 {
 		text = "(empty result)"
 	}
-	_, err := s.gateway.sendTextReply(guid, text, "", 0)
-	return err
+	if text != "" {
+		if _, err := s.gateway.sendTextReply(guid, text, "", 0); err != nil {
+			return err
+		}
+	}
+	for _, attachment := range attachments {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.gateway.sendCommandAttachment(guid, "", attachment); err != nil {
+			return err
+		}
+	}
+	return nil
 }
