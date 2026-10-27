@@ -110,16 +110,16 @@ func (dg *Gateway) editMessage(channelID, messageID, content string) error {
 	return err
 }
 
-// ensureDMChannel opens (or reuses, the endpoint is idempotent) the bot's
-// direct-message channel with a user so origin delivery can reach a user
-// that has not sent inbound traffic since process start.
+// ensureDMChannel opens (or reuses — Discord returns the existing DM
+// channel) the bot's direct-message channel with a user so origin delivery
+// can reach a user that has not sent inbound traffic since process start.
 func (dg *Gateway) ensureDMChannel(userID string) (string, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return "", errors.New("discord DM origin session has no user ID")
 	}
 	url := fmt.Sprintf("%s/users/@me/channels", dg.apiBaseURL())
-	created, err := dg.doMessageJSON(http.MethodPut, url, map[string][]string{"recipients": {userID}})
+	created, err := dg.doMessageJSON(http.MethodPost, url, map[string]string{"recipient_id": userID})
 	if err != nil {
 		return "", err
 	}

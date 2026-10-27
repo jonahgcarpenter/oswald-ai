@@ -26,16 +26,16 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 	var dmOpens []string
 	dg := &Gateway{Log: config.NewLogger(config.LevelError)}
 	dg.HTTPClient = &http.Client{Transport: cronRoundTripper(func(r *http.Request) (*http.Response, error) {
-		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/users/@me/channels") {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/users/@me/channels") {
 			var payload map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Error(err)
 			}
 			mu.Lock()
-			if recs, ok := payload["recipients"].([]interface{}); ok && len(recs) == 1 {
-				dmOpens = append(dmOpens, r.Method+" "+r.URL.Path+" "+toString(recs[0]))
+			if rec, ok := payload["recipient_id"].(string); ok && rec != "" {
+				dmOpens = append(dmOpens, r.Method+" "+r.URL.Path+" "+rec)
 			} else {
-				dmOpens = append(dmOpens, r.Method+" "+r.URL.Path+" <bad recipients>")
+				dmOpens = append(dmOpens, r.Method+" "+r.URL.Path+" <bad recipient_id>")
 			}
 			mu.Unlock()
 			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"id":"resolved-dm-chan"}`))}, nil
@@ -78,14 +78,14 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// Unknown DM session falls back to the Discord API (PUT /users/@me/channels
-	// is idempotent) and delivers to the resolved channel, so a fresh process
-	// can still deliver.
+	// Unknown DM session falls back to the Discord API (POST /users/@me/channels
+	// returns the existing DM channel when one already exists) and delivers
+	// to the resolved channel, so a fresh process can still deliver.
 	if err := sender.SendText(context.Background(), "alice", "discord:dm:stranger", "hi"); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	if len(dmOpens) != 1 || !strings.HasPrefix(dmOpens[0], "PUT ") || !strings.Contains(dmOpens[0], "/users/@me/channels stranger") {
+	if len(dmOpens) != 1 || !strings.HasPrefix(dmOpens[0], "POST ") || !strings.Contains(dmOpens[0], "/users/@me/channels stranger") {
 		t.Fatalf("expected idempotent DM channel open for stranger, got %v", dmOpens)
 	}
 	if len(sends) != 5 || !strings.HasSuffix(sends[4], "/channels/resolved-dm-chan/messages hi") {
