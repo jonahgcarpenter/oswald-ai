@@ -61,22 +61,37 @@ type cronSender struct {
 	gateway *Gateway
 }
 
-// SendText delivers finished job output to an origin session: group
-// sessions carry their chat GUID in the key, DMs resolve through
-// remembered inbound traffic.
+// SendText delivers finished job output to an origin session. Group
+// sessions carry their chat GUID in the key; DM sessions resolve through
+// remembered inbound traffic, falling back to the canonical BlueBubbles
+// direct-chat GUID ("any;-;<handle>") so delivery works even with no
+// inbound traffic since process start.
 func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) error {
 	if s.gateway == nil {
 		return errors.New("imessage gateway is unavailable")
 	}
+	key := strings.TrimSpace(sessionKey)
+	parts := strings.SplitN(key, ":", 3)
+	var dmPeer string
 	guid := ""
-	parts := strings.SplitN(strings.TrimSpace(sessionKey), ":", 3)
-	if len(parts) == 3 && parts[0] == "imessage" && parts[1] != "dm" && parts[1] != "" {
-		guid = parts[1]
-	} else {
+	if len(parts) == 3 && parts[0] == "imessage" && parts[1] != "" {
+		if parts[1] == "dm" {
+			dmPeer = strings.TrimSpace(parts[2])
+		} else {
+			guid = parts[1]
+		}
+	}
+	if dmPeer != "" {
+		if remembered, ok := lookupCronChat(key); ok {
+			guid = remembered
+		} else {
+			guid = "any;-;" + dmPeer
+		}
+	} else if guid == "" {
 		var ok bool
-		guid, ok = lookupCronChat(sessionKey)
+		guid, ok = lookupCronChat(key)
 		if !ok {
-			return errors.New("no live chat binding for origin session")
+			return errors.New("no live chat binding for origin session " + key)
 		}
 	}
 	if err := ctx.Err(); err != nil {

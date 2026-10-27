@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -61,22 +62,41 @@ type cronSender struct {
 	gateway *Gateway
 }
 
-// SendText delivers finished job output to an origin session: group
-// sessions carry their channel in the key, DMs resolve through remembered
-// inbound traffic. Text is chunked to Discord-sized messages.
+// SendText delivers finished job output to an origin session. Group and
+// server channels carry their channel in the key; DM sessions resolve
+// through remembered inbound traffic, falling back to the Discord API so
+// delivery works even with no inbound traffic since process start. Text is
+// chunked to Discord-sized messages.
 func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) error {
 	if s.gateway == nil {
 		return errors.New("discord gateway is unavailable")
 	}
+	key := strings.TrimSpace(sessionKey)
+	parts := strings.SplitN(key, ":", 3)
+	var dmUser string
 	channel := ""
-	parts := strings.SplitN(strings.TrimSpace(sessionKey), ":", 3)
-	if len(parts) == 3 && parts[0] == "discord" && parts[1] != "dm" && parts[1] != "" {
-		channel = parts[1]
-	} else {
+	if len(parts) == 3 && parts[0] == "discord" && parts[1] != "" {
+		if parts[1] == "dm" {
+			dmUser = strings.TrimSpace(parts[2])
+		} else {
+			channel = parts[1]
+		}
+	}
+	if dmUser != "" {
+		if remembered, ok := lookupCronChannel(key); ok {
+			channel = remembered
+		} else {
+			resolved, err := s.gateway.ensureDMChannel(dmUser)
+			if err != nil {
+				return fmt.Errorf("no live channel binding for origin session %s: %w", key, err)
+			}
+			channel = resolved
+		}
+	} else if channel == "" {
 		var ok bool
-		channel, ok = lookupCronChannel(sessionKey)
+		channel, ok = lookupCronChannel(key)
 		if !ok {
-			return errors.New("no live channel binding for origin session")
+			return errors.New("no live channel binding for origin session " + key)
 		}
 	}
 	for _, chunk := range chunkDiscordText(text) {

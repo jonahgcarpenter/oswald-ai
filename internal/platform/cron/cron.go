@@ -128,14 +128,15 @@ func (j *Job) EffectivePaused() bool {
 
 // Execution is one ledger entry.
 type Execution struct {
-	JobID         string `json:"job_id"`
-	Instant       int64  `json:"scheduled_instant"`
-	StartedUnix   int64  `json:"started_unix"`
-	FinishedUnix  int64  `json:"finished_unix"`
-	Status        string `json:"status"`
-	OutputPreview string `json:"output_preview,omitempty"`
-	Delivered     bool   `json:"delivered"`
-	DeliveryError string `json:"delivery_error,omitempty"`
+	JobID             string   `json:"job_id"`
+	Instant           int64    `json:"scheduled_instant"`
+	StartedUnix       int64    `json:"started_unix"`
+	FinishedUnix      int64    `json:"finished_unix"`
+	Status            string   `json:"status"`
+	OutputPreview     string   `json:"output_preview,omitempty"`
+	Delivered         bool     `json:"delivered"`
+	DeliveryError     string   `json:"delivery_error,omitempty"`
+	RegisteredSenders []string `json:"registered_senders,omitempty"`
 }
 
 // Store owns jobs.json for one profile root.
