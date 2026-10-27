@@ -16,17 +16,17 @@ import (
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/agent"
-	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/commands"
-	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
+	"github.com/jonahgcarpenter/oswald-ai/internal/broker"
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
-	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
-	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
+	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/soul"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	gatewayruntime "github.com/jonahgcarpenter/oswald-ai/internal/transport/gateway/runtime"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T) {
@@ -198,7 +198,7 @@ func TestIMessageStreamsModelToolRoundsButDeliversOnlyFinalResponse(t *testing.T
 	}
 	deliveryMu.Lock()
 	defer deliveryMu.Unlock()
-	if want := []string{"/api/v1/message/attachment", "/api/v1/message/text"}; !reflect.DeepEqual(deliveries, want) {
+	if want := []string{"/api/v1/message/text", "/api/v1/message/attachment"}; !reflect.DeepEqual(deliveries, want) {
 		t.Fatalf("deliveries=%v want %v", deliveries, want)
 	}
 }

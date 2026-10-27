@@ -236,21 +236,44 @@ func (g *Gateway) fetchDocumentBytes(attachment attachment) ([]byte, error) {
 }
 
 // sendCommandAttachment sends one in-memory attachment through BlueBubbles.
-func (g *Gateway) sendCommandAttachment(chatGUID string, attachment commands.Attachment) error {
+// When selectedMessageGUID is set and the private API is available the
+// attachment is threaded under the user's message, mirroring sendTextReply.
+// A failed threaded attempt falls back to a plain top-level send so delivery
+// does not hard-fail where threading is unsupported.
+func (g *Gateway) sendCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) error {
 	if err := attachment.Validate(); err != nil {
 		return err
 	}
+	threadGUID := strings.TrimSpace(selectedMessageGUID)
+	if threadGUID != "" && g.blueBubblesPrivateAPIAvailable(g.log()) {
+		if err := g.postCommandAttachment(chatGUID, threadGUID, attachment); err == nil {
+			return nil
+		} else {
+			g.log().Warn("gateway.send.retry", "retrying imessage attachment send without private reply fields", config.F("default_method", defaultSendMethod), config.F("status", "retry"), config.ErrorField(err))
+		}
+	}
+	return g.postCommandAttachment(chatGUID, "", attachment)
+}
+
+// postCommandAttachment posts one attachment payload. A non-empty
+// selectedMessageGUID threads the send via the private API.
+func (g *Gateway) postCommandAttachment(chatGUID, selectedMessageGUID string, attachment commands.Attachment) error {
 	endpoint, err := buildBlueBubblesEndpoint(g.BlueBubblesURL, "/api/v1/message/attachment", g.BlueBubblesPassword)
 	if err != nil {
 		return err
 	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	for name, value := range map[string]string{
+	fields := map[string]string{
 		"chatGuid": chatGUID,
 		"name":     attachment.Filename,
 		"tempGuid": newTempGUID(),
-	} {
+	}
+	if strings.TrimSpace(selectedMessageGUID) != "" {
+		fields["selectedMessageGuid"] = strings.TrimSpace(selectedMessageGUID)
+		fields["method"] = defaultSendMethod
+	}
+	for name, value := range fields {
 		if err := writer.WriteField(name, value); err != nil {
 			return fmt.Errorf("write BlueBubbles attachment field: %w", err)
 		}

@@ -47,13 +47,15 @@ func (r *runtimeResponder) SendCommandResponse(result commands.Result) error {
 	if len(attachments) == 0 {
 		return r.sendAndRemember(result.Text)
 	}
-	for _, attachment := range attachments {
-		if err := r.gateway.sendCommandAttachment(r.chatGUID, attachment); err != nil {
+	if strings.TrimSpace(result.Text) != "" {
+		if err := r.sendAndRemember(result.Text); err != nil {
 			return err
 		}
 	}
-	if strings.TrimSpace(result.Text) != "" {
-		return r.sendAndRemember(result.Text)
+	for _, attachment := range attachments {
+		if err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -76,17 +78,22 @@ func (r *runtimeResponder) SendAgentResponse(response *agent.Response) error {
 	if err := media.ValidateOutputAttachments(response.Attachments); err != nil {
 		return err
 	}
-	for _, attachment := range response.Attachments {
-		if err := r.gateway.sendCommandAttachment(r.chatGUID, attachment); err != nil {
+	responseText := strings.TrimSpace(response.Response)
+	if responseText != "" {
+		if err := r.sendAndRemember(responseText); err != nil {
 			return err
 		}
 	}
-	responseText := strings.TrimSpace(response.Response)
+	for _, attachment := range response.Attachments {
+		if err := r.gateway.sendCommandAttachment(r.chatGUID, r.selectedMessageGUID, attachment); err != nil {
+			return err
+		}
+	}
 	if responseText == "" {
 		r.gateway.log().Debug("gateway.response.empty", "imessage agent returned empty response", config.F("request_id", r.requestID), config.F("chat_id", r.chatGUID), config.F("status", "degraded"))
 		return nil
 	}
-	return r.sendAndRemember(responseText)
+	return nil
 }
 
 // stopProcessingIndicators clears the typing indicator after a send so a
