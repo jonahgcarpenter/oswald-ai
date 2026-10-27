@@ -12,9 +12,14 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
 )
 
+// TestCronSenderGroupAndDM covers every origin shape the cron dispatcher can
+// route. Group sessions carry their chat GUID in the key; DM sessions resolve
+// through remembered inbound traffic, falling back to the canonical
+// BlueBubbles direct-chat GUID so delivery works with no inbound traffic since
+// process start.
 func TestCronSenderGroupAndDM(t *testing.T) {
 	var mu sync.Mutex
-	var payloads []string
+	var guids []string
 	g := &Gateway{Log: config.NewLogger(config.LevelError), BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}
 	g.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var payload map[string]interface{}
@@ -22,12 +27,13 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 			t.Error(err)
 		}
 		mu.Lock()
-		payloads = append(payloads, r.URL.Path)
+		guids = append(guids, r.URL.Path+" "+toString(payload["chatGuid"]))
 		mu.Unlock()
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"guid":"m1"}}`))}, nil
 	})}
 	sender := g.CronSender()
-	// Group session carries its chat GUID.
+
+	// Group session carries its chat GUID in the key; no lookup is triggered.
 	if err := sender.SendText(context.Background(), "alice", "imessage:chat-guid;+;group:user1", "hello group"); err != nil {
 		t.Fatal(err)
 	}
@@ -37,14 +43,43 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	if len(payloads) != 2 || payloads[0] != "/api/v1/message/text" || payloads[1] != "/api/v1/message/text" {
-		t.Fatalf("payloads = %v", payloads)
+	if len(guids) != 2 || guids[0] != "/api/v1/message/text chat-guid;+;group" || guids[1] != "/api/v1/message/text dm-guid" {
+		t.Fatalf("guids = %v", guids)
 	}
-	// Unknown DM session fails closed with a remedy.
-	if err := sender.SendText(context.Background(), "alice", "imessage:dm:stranger", "hi"); err == nil {
-		t.Fatal("unknown session sent")
+	mu.Unlock()
+
+	// Unknown DM session falls back to the canonical direct-chat GUID derived
+	// from the peer in the session key, so a fresh process can still deliver.
+	if err := sender.SendText(context.Background(), "alice", "imessage:dm:stranger", "hi"); err != nil {
+		t.Fatal(err)
 	}
+	mu.Lock()
+	if len(guids) != 3 || guids[2] != "/api/v1/message/text any;-;stranger" {
+		t.Fatalf("expected derived direct-chat GUID fallback, got %v", guids)
+	}
+	mu.Unlock()
+}
+
+// TestCronSenderUnrecognizedKeyFailsClosed guards that a session key that is
+// neither a group key nor a well-formed DM key is still rejected rather than
+// silently routed to a fabricated GUID.
+func TestCronSenderUnrecognizedKeyFailsClosed(t *testing.T) {
+	g := &Gateway{Log: config.NewLogger(config.LevelError), BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}
+	g.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Error("no request should be sent for an unrecognized key")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"guid":"m1"}}`))}, nil
+	})}
+	sender := g.CronSender()
+	if err := sender.SendText(context.Background(), "alice", "unknown:shape:key", "hi"); err == nil {
+		t.Fatal("unrecognized session key sent")
+	}
+}
+
+func toString(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

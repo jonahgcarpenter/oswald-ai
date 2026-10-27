@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -288,7 +289,8 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
 	sender, ok := d.Senders[strings.TrimSpace(job.OriginGateway)]
 	if !ok || sender == nil {
 		ex.Delivered = false
-		ex.DeliveryError = "no live sender for origin gateway"
+		ex.DeliveryError = "no live sender for origin gateway " + strings.TrimSpace(job.OriginGateway)
+		ex.RegisteredSenders = sortedSenderNames(d.Senders)
 		ex.Status = "delivery_failed"
 		return
 	}
@@ -301,6 +303,20 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
 		return
 	}
 	ex.Delivered = true
+}
+
+// sortedSenderNames lists the registered cron sender gateways in stable
+// order for diagnostics.
+func sortedSenderNames(senders map[string]Sender) []string {
+	names := make([]string, 0, len(senders))
+	for name, sender := range senders {
+		if sender == nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // wrapDelivery bounds delivered text. The agent response goes out
