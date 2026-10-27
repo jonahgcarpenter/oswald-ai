@@ -22,8 +22,9 @@ jobs:
             // frontmatter; gh CLI needs --label passed explicitly).
             const hasBugShape = body.includes('## Claim') && body.includes('## Evidence');
             const hasFeatureShape = body.includes('## Problem') && body.includes('## Proposed shape');
-            if (!labels.includes('bug') && !labels.includes('enhancement')) {
-              const inferred = hasBugShape ? 'bug' : (hasFeatureShape ? 'enhancement' : null);
+            const hasModificationShape = body.includes('## Current behavior') && body.includes('## Proposed change');
+            if (!labels.includes('bug') && !labels.includes('feature') && !labels.includes('modification')) {
+              const inferred = hasBugShape ? 'bug' : (hasModificationShape ? 'modification' : (hasFeatureShape ? 'feature' : null));
               if (inferred) {
                 await github.rest.issues.addLabels({
                   ...context.repo,
@@ -34,19 +35,28 @@ jobs:
               }
             }
             const isBug = labels.includes('bug');
+            const isModification = labels.includes('modification');
             const required = isBug
               ? ['## Claim', '## Evidence', '## Area', '## Verification', '## Secrets check']
-              : ['## Problem', '## Proposed shape', '## Scope'];
+              : (isModification
+                ? ['## Current behavior', '## Proposed change', '## Motivation', '## Scope', '## Area', '## Secrets check']
+                : ['## Problem', '## Proposed shape', '## Scope']);
             const stripComments = s => s.replace(/<!--[\s\S]*?-->/g, '').trim();
             const missing = [];
             for (const h of required) {
               const section = (body.split(h)[1] || '').split(/^## /m)[0] || '';
               if (stripComments(section) === '') missing.push(h);
             }
-            if (isBug && !/[a-z_]+\/[a-z_0-9]+\.go:\d+/i.test(stripComments(body))) {
-              missing.push('exact file:line in Evidence');
+            const needsLine = isBug || isModification;
+            if (needsLine && !/[a-z_]+\/[a-z_0-9]+\.go:\d+/i.test(stripComments(body))) {
+              missing.push(isBug ? 'exact file:line in Evidence' : 'exact file:line in Current behavior');
             }
             if (missing.length > 0) {
+              const hint = isBug
+                ? 'an issue without Evidence (repro + exact line) goes back for questions before any fix'
+                : (isModification
+                  ? 'a request without Current behavior (exact line) and Proposed change goes back for questions first'
+                  : 'a request without Problem, Proposed shape, and Scope goes back for questions first');
               await github.rest.issues.addLabels({
                 ...context.repo,
                 issue_number: context.payload.issue.number,
@@ -55,7 +65,7 @@ jobs:
               await github.rest.issues.createComment({
                 ...context.repo,
                 issue_number: context.payload.issue.number,
-                body: `Thanks for filing. This looks incomplete — missing or empty: ${missing.map(m => `\`${m}\``).join(', ')}.\n\nPlease update the body using the template at \`.github/ISSUE_TEMPLATE/\`; an issue without Evidence (repro + exact line) goes back for questions before any fix.`,
+                body: `Thanks for filing. This looks incomplete — missing or empty: ${missing.map(m => `\`${m}\``).join(', ')}.\n\nPlease update the body using the template at \`.github/ISSUE_TEMPLATE/\`; ${hint}.`,
               });
             } else {
               try {

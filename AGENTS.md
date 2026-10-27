@@ -37,8 +37,8 @@ fixing it; change-detector or source-reading tests.
 `/new` keeps history by design, delivery gating is intentional. A fix that cannot point to the line
 where the behavior manifests has an unverified premise.
 
-**Filing issues:** use `.github/ISSUE_TEMPLATE/bug_report.md` or `feature_request.md`
-as the body shape. No Evidence section (repro + exact line), no fix — the issue goes
+**Filing issues:** use `.github/ISSUE_TEMPLATE/bug_report.md`, `feature_request.md`,
+or `modification.md` as the body shape. No Evidence section (repro + exact line), no fix — the issue goes
 back for questions first.
 
 **Security:** endpoints, catalogs, commands, and credentials are trusted operator configuration, not

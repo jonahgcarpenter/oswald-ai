@@ -1,9 +1,9 @@
 ---
 name: Feature request
 about: Propose a change or new capability
-labels: enhancement
+labels: feature
 ---
-<!-- File with: gh issue create --template feature_request.md --label enhancement --body-file <file> --title "..." -->
+<!-- File with: gh issue create --template feature_request.md --label feature --body-file <file> --title "..." -->
 
 ## Problem
 
