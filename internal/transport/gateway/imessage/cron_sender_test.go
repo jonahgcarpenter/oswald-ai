@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // TestCronSenderGroupAndDM covers every origin shape the cron dispatcher can
@@ -34,12 +35,12 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 	sender := g.CronSender()
 
 	// Group session carries its chat GUID in the key; no lookup is triggered.
-	if err := sender.SendText(context.Background(), "alice", "imessage:chat-guid;+;group:user1", "hello group"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "imessage:chat-guid;+;group:user1", "hello group", nil); err != nil {
 		t.Fatal(err)
 	}
 	// DM resolves through remembered inbound traffic.
 	rememberCronChat("imessage:dm:user1", "dm-guid")
-	if err := sender.SendText(context.Background(), "alice", "imessage:dm:user1", "hello dm"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "imessage:dm:user1", "hello dm", nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -52,7 +53,7 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 	// from the peer in the session key, so a fresh process can still deliver.
 	// The service segment is the concrete "iMessage" service, not "any":
 	// BlueBubbles send endpoints reject the "any" service.
-	if err := sender.SendText(context.Background(), "alice", "imessage:dm:stranger", "hi"); err != nil {
+	if err := sender.Deliver(context.Background(), "alice", "imessage:dm:stranger", "hi", nil); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -72,8 +73,58 @@ func TestCronSenderUnrecognizedKeyFailsClosed(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"guid":"m1"}}`))}, nil
 	})}
 	sender := g.CronSender()
-	if err := sender.SendText(context.Background(), "alice", "unknown:shape:key", "hi"); err == nil {
+	if err := sender.Deliver(context.Background(), "alice", "unknown:shape:key", "hi", nil); err == nil {
 		t.Fatal("unrecognized session key sent")
+	}
+}
+
+// TestCronSenderDeliversAttachments covers the cron attachment boundary:
+// text goes first and the file attachment follows top-level in the same chat.
+func TestCronSenderDeliversAttachments(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	var attachmentNames []string
+	g := &Gateway{Log: config.NewLogger(config.LevelError), BlueBubblesURL: "http://bb", BlueBubblesPassword: "pw"}
+	g.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path == "/api/v1/message/attachment" {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Error(err)
+			} else {
+				_, header, err := r.FormFile("attachment")
+				if err != nil {
+					t.Error(err)
+				} else {
+					attachmentNames = append(attachmentNames, header.Filename)
+				}
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"guid":"a1"}}`))}, nil
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"guid":"m1"}}`))}, nil
+	})}
+	sender := g.CronSender()
+
+	attachments := []media.OutputAttachment{
+		{Filename: "sales.txt", MIMEType: "text/plain", Data: []byte("row1")},
+	}
+	if err := sender.Deliver(context.Background(), "alice", "imessage:chat-guid;+;group:user1", "weekly sales", attachments); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"/api/v1/message/text", "/api/v1/message/attachment"}
+	if len(paths) != len(want) {
+		t.Fatalf("paths = %v want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Fatalf("paths = %v want %v", paths, want)
+		}
+	}
+	if len(attachmentNames) != 1 || attachmentNames[0] != "sales.txt" {
+		t.Fatalf("attachments = %v", attachmentNames)
 	}
 }
 

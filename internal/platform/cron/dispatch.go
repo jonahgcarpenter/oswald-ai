@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 // AgentCall is one scheduled agent turn.
@@ -25,8 +27,9 @@ type AgentCall struct {
 
 // AgentResult is the completed agent turn.
 type AgentResult struct {
-	Text string
-	Err  error
+	Text        string
+	Attachments []media.OutputAttachment
+	Err         error
 }
 
 // AgentFunc executes one scheduled agent turn and waits for its result.
@@ -34,7 +37,7 @@ type AgentFunc func(ctx context.Context, call AgentCall) (AgentResult, error)
 
 // Sender delivers finished job output to a conversation.
 type Sender interface {
-	SendText(ctx context.Context, profile, sessionKey, text string) error
+	Deliver(ctx context.Context, profile, sessionKey, text string, attachments []media.OutputAttachment) error
 }
 
 // NewGenerationFunc opens a fresh session generation for a job fire.
@@ -194,7 +197,7 @@ func (d *Dispatcher) runScriptDispatch(ctx context.Context, job *Job, workdir st
 		return ex, "", nil
 	}
 	ex := Execution{JobID: job.ID, Instant: job.LastInstant, StartedUnix: started.Unix(), FinishedUnix: d.now().Unix(), Status: status, OutputPreview: preview(out)}
-	d.deliver(job, &ex, out)
+	d.deliver(job, &ex, out, nil)
 	d.Store.appendLedger(ex)
 	d.Store.finishRun(job.ID, status, ex.DeliveryError, failed)
 	return ex, out, nil
@@ -251,7 +254,7 @@ func (d *Dispatcher) runAgentDispatch(ctx context.Context, job *Job, workdir str
 		return ex, text, nil
 	}
 	ex := Execution{JobID: job.ID, Instant: job.LastInstant, StartedUnix: started.Unix(), FinishedUnix: d.now().Unix(), Status: "agent_completed", OutputPreview: preview(text)}
-	d.deliver(job, &ex, text)
+	d.deliver(job, &ex, text, result.Attachments)
 	d.Store.appendLedger(ex)
 	d.Store.finishRun(job.ID, ex.Status, ex.DeliveryError, false)
 	return ex, text, nil
@@ -267,7 +270,7 @@ func displayName(job *Job) string {
 // deliver routes finished output to the creating chat. Origin is the only
 // delivery target; every other value records honestly instead of silently
 // skipping. Only failures rename the status to delivery_failed.
-func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
+func (d *Dispatcher) deliver(job *Job, ex *Execution, text string, attachments []media.OutputAttachment) {
 	target := strings.TrimSpace(job.Deliver)
 	if target != "" && target != "origin" {
 		ex.Delivered = false
@@ -296,7 +299,7 @@ func (d *Dispatcher) deliver(job *Job, ex *Execution, text string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := sender.SendText(ctx, d.Profile, strings.TrimSpace(job.OriginSession), wrapDelivery(job, text)); err != nil {
+	if err := sender.Deliver(ctx, d.Profile, strings.TrimSpace(job.OriginSession), wrapDelivery(job, text), attachments); err != nil {
 		ex.Delivered = false
 		ex.DeliveryError = err.Error()
 		ex.Status = "delivery_failed"

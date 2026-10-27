@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
 )
 
 func testRunner(root string) *Runner {
@@ -250,6 +252,7 @@ func TestNoAgentEmptySendsNothing(t *testing.T) {
 }
 
 func TestDispatchAgentOriginDelivery(t *testing.T) {
+
 	root := t.TempDir()
 	store := NewStore(root)
 	sent := make(map[string]string)
@@ -283,6 +286,48 @@ func TestDispatchAgentOriginDelivery(t *testing.T) {
 		t.Fatalf("sent = %q", got)
 	}
 	_ = job
+}
+
+func TestDispatchAgentOriginDeliversAttachments(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	sent := make(map[string]string)
+	sentFiles := make(map[string][]media.OutputAttachment)
+	d := &Dispatcher{
+		Store: store, Runner: testRunner(root), Profile: "alice",
+		Agent: func(ctx context.Context, call AgentCall) (AgentResult, error) {
+			return AgentResult{
+				Text: "weekly sales",
+				Attachments: []media.OutputAttachment{
+					{Filename: "sales.txt", MIMEType: "text/plain", Data: []byte("row1")},
+				},
+			}, nil
+		},
+		Senders: map[string]Sender{
+			"discord": stubSender{sent: sent, sentFiles: sentFiles},
+		},
+		NewGeneration: func(ctx context.Context, profile, session string) error { return nil },
+	}
+	mustCreate(t, store, Job{
+		Schedule: "in 1s", Prompt: "sales?", Deliver: "origin",
+		OriginGateway: "discord", OriginSession: "discord:chan1:user1",
+	})
+	time.Sleep(1100 * time.Millisecond)
+	due := store.ClaimDue(time.Now())
+	if len(due) != 1 {
+		t.Fatalf("due = %+v", due)
+	}
+	ex, _, err := d.RunOne(context.Background(), due[0], time.Minute)
+	if err != nil || !ex.Delivered || ex.Status == "delivery_failed" {
+		t.Fatalf("dispatch = %+v %v", ex, err)
+	}
+	if got := sent["discord:chan1:user1"]; !strings.Contains(got, "weekly sales") {
+		t.Fatalf("sent = %q", got)
+	}
+	files := sentFiles["discord:chan1:user1"]
+	if len(files) != 1 || files[0].Filename != "sales.txt" || string(files[0].Data) != "row1" {
+		t.Fatalf("attachments = %+v", files)
+	}
 }
 
 func TestDispatchSilentSuppresses(t *testing.T) {
@@ -387,15 +432,19 @@ func TestRunOneClaimContention(t *testing.T) {
 }
 
 type stubSender struct {
-	sent map[string]string
-	fail error
+	sent      map[string]string
+	sentFiles map[string][]media.OutputAttachment
+	fail      error
 }
 
-func (s stubSender) SendText(_ context.Context, _, sessionKey, text string) error {
+func (s stubSender) Deliver(_ context.Context, _, sessionKey, text string, attachments []media.OutputAttachment) error {
 	if s.fail != nil {
 		return s.fail
 	}
 	s.sent[sessionKey] = text
+	if s.sentFiles != nil && len(attachments) > 0 {
+		s.sentFiles[sessionKey] = append(s.sentFiles[sessionKey], attachments...)
+	}
 	return nil
 }
 
