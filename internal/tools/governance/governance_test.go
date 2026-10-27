@@ -12,7 +12,7 @@ func testGlobal() GlobalPolicy {
 
 func TestDefaultGlobalPolicy(t *testing.T) {
 	policy := DefaultGlobalPolicy()
-	if policy != (GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 30}) {
+	if policy != (GlobalPolicy{MaxExecutions: 500, MaxToolIterations: 200}) {
 		t.Fatalf("default policy = %+v", policy)
 	}
 	if err := policy.Validate(); err != nil {
@@ -93,17 +93,108 @@ func TestGovernorAllowsExactRetryAfterExecutionFailure(t *testing.T) {
 }
 
 func TestGovernorNeverRetiresToolsOnFailures(t *testing.T) {
+	// Failure-tolerant bridge tools never trip the same-tool halt ladder:
+	// failures remain statistics, not a ceiling.
 	g := New(GlobalPolicy{MaxExecutions: 20, MaxToolIterations: 20})
 	policy := ToolPolicy{}
 	for i := 0; i < 10; i++ {
-		decision := g.BeforeExecution("unlimited.tool", map[string]interface{}{"n": i}, policy, true)
+		decision := g.BeforeExecution("mcp__remote", map[string]interface{}{"n": i}, policy, true)
 		if !decision.Allowed {
 			t.Fatalf("call %d blocked: %+v", i, decision)
 		}
-		g.RecordResult("unlimited.tool", decision, Result{Outcome: OutcomeUnproductive}, assertError{})
+		g.RecordResult("mcp__remote", decision, Result{Outcome: OutcomeUnproductive}, assertError{})
 	}
-	if g.GlobalStopReason() != "" || g.Stats("unlimited.tool").Failures != 10 {
-		t.Fatalf("failures must remain statistics, not a ceiling: %+v", g.Stats("unlimited.tool"))
+	if g.HaltDecision() != nil {
+		t.Fatalf("tolerant tool halted: %+v", g.HaltDecision())
+	}
+}
+
+func TestGovernorHaltsSameToolFailureRun(t *testing.T) {
+	g := New(GlobalPolicy{MaxExecutions: 50, MaxToolIterations: 50})
+	policy := ToolPolicy{}
+	var advice GuardrailAdvice
+	for i := 0; i < SameHaltAfter; i++ {
+		args := map[string]interface{}{"n": i}
+		d := g.BeforeExecution("unlimited.tool", args, policy, true)
+		if !d.Allowed {
+			t.Fatalf("call %d blocked: %+v", i, d)
+		}
+		advice = g.AfterCall("unlimited.tool", args, d.Fingerprint(), Result{}, assertError{})
+	}
+	if advice.Action != "halt" || advice.Code != ReasonSameToolHalt {
+		t.Fatalf("advice = %+v, want same-tool halt", advice)
+	}
+	if reason := g.GlobalStopReason(); reason != ReasonSameToolHalt {
+		t.Fatalf("stop reason = %q, want %q", reason, ReasonSameToolHalt)
+	}
+}
+
+func TestGovernorHaltsNoProgressWindow(t *testing.T) {
+	g := New(GlobalPolicy{MaxExecutions: 100, MaxToolIterations: 100})
+	policy := ToolPolicy{}
+	var advice GuardrailAdvice
+	// Vary tool and args so no single-signature ladder trips first.
+	tools := []string{"alpha.tool", "beta.tool", "gamma.tool", "delta.tool"}
+	for i := 0; i < NoProgressWindow; i++ {
+		name := tools[i%len(tools)]
+		args := map[string]interface{}{"n": i}
+		d := g.BeforeExecution(name, args, policy, true)
+		if !d.Allowed {
+			t.Fatalf("call %d blocked: %+v", i, d)
+		}
+		advice = g.AfterCall(name, args, d.Fingerprint(), Result{Outcome: OutcomeUnproductive}, nil)
+	}
+	if advice.Action != "halt" || advice.Code != ReasonNoProgressWindowHalt {
+		t.Fatalf("advice = %+v, want window halt", advice)
+	}
+	if g.NonProductiveStreak() != NoProgressWindow {
+		t.Fatalf("streak = %d, want %d", g.NonProductiveStreak(), NoProgressWindow)
+	}
+	if reason := g.GlobalStopReason(); reason != ReasonNoProgressWindowHalt {
+		t.Fatalf("stop reason = %q, want window halt", reason)
+	}
+}
+
+func TestGovernorProductiveResetsNoProgressWindow(t *testing.T) {
+	g := New(GlobalPolicy{MaxExecutions: 100, MaxToolIterations: 100})
+	policy := ToolPolicy{}
+	for i := 0; i < NoProgressWindow-1; i++ {
+		args := map[string]interface{}{"n": i}
+		d := g.BeforeExecution("alpha.tool", args, policy, true)
+		if !d.Allowed {
+			t.Fatalf("call %d blocked: %+v", i, d)
+		}
+		g.AfterCall("alpha.tool", args, d.Fingerprint(), Result{Outcome: OutcomeUnproductive}, nil)
+	}
+	d := g.BeforeExecution("alpha.tool", map[string]interface{}{"n": "good"}, policy, true)
+	if !d.Allowed {
+		t.Fatalf("productive call blocked: %+v", d)
+	}
+	g.AfterCall("alpha.tool", map[string]interface{}{"n": "good"}, d.Fingerprint(), Result{Outcome: OutcomeProductive}, nil)
+	if g.NonProductiveStreak() != 0 {
+		t.Fatalf("streak = %d, want 0 after productive result", g.NonProductiveStreak())
+	}
+	if reason := g.GlobalStopReason(); reason != "" {
+		t.Fatalf("productive reset should clear the window, got %q", reason)
+	}
+}
+
+func TestGovernorLongProductiveRunPassesOldCeiling(t *testing.T) {
+	g := New(DefaultGlobalPolicy())
+	policy := ToolPolicy{}
+	for i := 0; i < 60; i++ {
+		args := map[string]interface{}{"n": i}
+		d := g.BeforeExecution("work.tool", args, policy, true)
+		if !d.Allowed {
+			t.Fatalf("productive call %d blocked: %+v", i, d)
+		}
+		g.AfterCall("work.tool", args, d.Fingerprint(), Result{Outcome: OutcomeProductive, Content: "ok"}, nil)
+	}
+	if reason := g.GlobalStopReason(); reason != "" {
+		t.Fatalf("productive run halted: %q", reason)
+	}
+	if g.TotalExecutions() != 60 {
+		t.Fatalf("executions = %d, want 60", g.TotalExecutions())
 	}
 }
 

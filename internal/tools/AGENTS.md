@@ -9,8 +9,10 @@ Applies on top of the root `AGENTS.md` (never-rename-the-outside-world and never
 backend, `browser_*`/`browser_vault_*` without an endpoint or launch command,
 `session_search` without a store). `register.go` wires handlers, policies, and argument
 normalizers. `registry/` holds definitions, handlers, policies, and per-visibility catalogs;
-`governance/` owns the global caps (50 handler executions, 30 tool-bearing responses per request)
-plus the warn/block/halt ladders and result-text framing; `exposure/` computes request-local
+`governance/` owns the progress-gated stop rule (loop-guardrail ladders plus a
+12-consecutive no-progress window halt stuck requests) with a high safety-valve
+cap (500 handler executions, 200 tool-bearing responses per request) as a
+runaway backstop, plus result-text framing; `exposure/` computes request-local
 visibility; `output/` strips ANSI and redacts secrets (`bearer`, api keys, `sk-`, `ghp_`,
 `github_pat_`, `xox[baprs]-`). `toolsets.go` bundles code-owned sets — `core` (memory, search,
 web, vision, image, browser, vault, plus file tools), `terminal`, `code_execution`, `cronjob` —

@@ -45,9 +45,12 @@ const (
 	// maxEmptyRetriesPerTurn backstops the per-occurrence budget so a
 	// blank-work-blank cycle still terminates at the hardcoded fallback.
 	maxEmptyRetriesPerTurn = 4
-	// toolBudgetExhaustedNotice tells the model its hard tool limit is spent
-	// so it answers from gathered results instead of planning more calls.
+	// toolBudgetExhaustedNotice tells the model the safety-valve limit is
+	// spent so it answers from gathered results instead of planning calls.
 	toolBudgetExhaustedNotice = "The tool budget for this request is exhausted: no further tool calls are available. Review the results gathered so far and give your final answer now."
+	// toolStuckNotice tells the model progress signals halted the loop so it
+	// answers from gathered results instead of repeating unproductive calls.
+	toolStuckNotice = "Tool progress stalled: further calls are repeating without productive results, so no further tool calls are available. Review the results gathered so far and give your final answer now."
 )
 
 // MarkdownSummarizer compacts a full session into markdown in one
@@ -1186,8 +1189,14 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	if toolGovernanceStopReason != "" {
 		accumulatedContent.Reset()
 		// The model cannot see the removed tool catalog, so say plainly
-		// that the hard budget is spent and a final answer is due.
-		messages = append(messages, llm.ChatMessage{Role: "user", Content: toolBudgetExhaustedNotice})
+		// why no further calls are available and a final answer is due:
+		// the safety valve for count exhaustion, the stuck notice for
+		// progress-signal halts.
+		stopNotice := toolBudgetExhaustedNotice
+		if isProgressHaltReason(toolGovernanceStopReason) {
+			stopNotice = toolStuckNotice
+		}
+		messages = append(messages, llm.ChatMessage{Role: "user", Content: stopNotice})
 		finalReq := req
 		finalReq.Tools = nil
 		finalReq.Messages = messages
