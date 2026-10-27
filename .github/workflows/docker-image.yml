@@ -5,6 +5,16 @@ on:
     types: [published]
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only owner may publish releases
+        run: |
+          if [ "${{ github.actor }}" != "jonahgcarpenter" ]; then
+            echo "Release publisher '${{ github.actor }}' is not authorized; only jonahgcarpenter may publish. Drafts are allowed."
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
 
@@ -25,7 +35,7 @@ jobs:
         run: go test -tags sqlite_fts5 ./...
 
   build-and-push:
-    needs: test
+    needs: [test, authorize]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,6 +65,33 @@ jobs:
           push: true
           tags: ${{ steps.meta_server.outputs.tags }}
           labels: ${{ steps.meta_server.outputs.labels }}
+
+  revert-unauthorized:
+    needs: authorize
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Revert unauthorized publish back to draft
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.actor === 'jonahgcarpenter') {
+              core.info('Authorized publisher, nothing to revert.');
+              return;
+            }
+            const releaseId = context.payload.release?.id;
+            if (!releaseId) {
+              core.setFailed('No release id in context; cannot revert.');
+              return;
+            }
+            await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: releaseId,
+              draft: true,
+            });
+            core.setFailed(`Unauthorized publisher ${context.actor}; release reverted to draft.`);
 
   release-notes:
     needs: build-and-push
