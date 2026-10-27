@@ -156,7 +156,7 @@ func TestIMessageConfiguredMentionPatternAnchorsAndStrips(t *testing.T) {
 }
 
 func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
-	var filename, mimeType, chatGUID, name, tempGUID string
+	var filename, mimeType, chatGUID, name, tempGUID, selectedMessageGUID, method string
 	var attachmentData []byte
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,16 +185,21 @@ func TestIMessageCommandAttachmentMultipartSend(t *testing.T) {
 		chatGUID = r.FormValue("chatGuid")
 		name = r.FormValue("name")
 		tempGUID = r.FormValue("tempGuid")
+		selectedMessageGUID = r.FormValue("selectedMessageGuid")
+		method = r.FormValue("method")
 		_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if requestCount != 1 || filename != "export.json" || mimeType != "application/json" || string(attachmentData) != "private-content" || chatGUID != "chat-1" || name != "export.json" || tempGUID == "" {
 		t.Fatalf("unexpected attachment request count=%d filename=%q mime=%q data=%q chat=%q name=%q temp_set=%t", requestCount, filename, mimeType, attachmentData, chatGUID, name, tempGUID != "")
+	}
+	if selectedMessageGUID != "" || method != "" {
+		t.Fatalf("plain attachment send leaked thread fields selected=%q method=%q", selectedMessageGUID, method)
 	}
 }
 
@@ -206,13 +211,13 @@ func TestIMessageCommandAttachmentProviderFailures(t *testing.T) {
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
-	err := g.sendCommandAttachment("chat-1", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	err := g.sendCommandAttachment("chat-1", "", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
 	if err == nil || strings.Contains(err.Error(), "private-content") || calls != 1 {
 		t.Fatalf("error=%v calls=%d", err, calls)
 	}
 }
 
-func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *testing.T) {
+func TestIMessageCommandAttachmentsSendTextBeforePartsAndStopOnFailure(t *testing.T) {
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -249,14 +254,15 @@ func TestIMessageCommandAttachmentsSendPartsBeforeSuccessAndStopOnFailure(t *tes
 	if err == nil {
 		t.Fatal("second-part failure was ignored")
 	}
-	want := []string{"send:part001", "send:part002"}
+	want := []string{"text", "send:part001", "send:part002"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls=%v want %v", calls, want)
 	}
 }
 
-func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
+func TestIMessageAgentResponseDeliversTextBeforeThreadedAttachment(t *testing.T) {
 	var calls []string
+	var textSelectedGUID, attachmentSelectedGUID, attachmentMethod string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/message/attachment":
@@ -267,9 +273,16 @@ func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			attachmentSelectedGUID = r.FormValue("selectedMessageGuid")
+			attachmentMethod = r.FormValue("method")
 			calls = append(calls, "attachment:"+header.Filename)
 			_, _ = w.Write([]byte(`{"data":{"guid":"attachment-guid"}}`))
 		case "/api/v1/message/text":
+			var req sendTextRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			textSelectedGUID = req.SelectedMessageGUID
 			calls = append(calls, "text")
 			_, _ = w.Write([]byte(`{"data":{"guid":"text-guid"}}`))
 		default:
@@ -278,14 +291,76 @@ func TestIMessageAgentResponseDeliversAttachmentBeforeText(t *testing.T) {
 	}))
 	defer server.Close()
 	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError), messageIndex: make(map[string]messageContext)}
-	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request"}
+	g.capabilitiesLoaded = true
+	g.privateAPIEnabled = true
+	g.helperConnected = true
+	responder := runtimeResponder{gateway: g, chatGUID: "chat-1", requestID: "request", selectedMessageGUID: "msg-9"}
 	err := responder.SendAgentResponse(&agent.Response{Response: "generated", Attachments: []media.OutputAttachment{{Filename: "generated.png", MIMEType: "image/png", Data: []byte("image-data")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"attachment:generated.png", "text"}
+	want := []string{"text", "attachment:generated.png"}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+	if textSelectedGUID != "msg-9" {
+		t.Fatalf("text lost reply threading, selectedMessageGuid=%q", textSelectedGUID)
+	}
+	if attachmentSelectedGUID != "msg-9" || attachmentMethod != defaultSendMethod {
+		t.Fatalf("attachment lost reply threading, selectedMessageGuid=%q method=%q", attachmentSelectedGUID, attachmentMethod)
+	}
+}
+
+func TestIMessageCommandAttachmentThreadsReply(t *testing.T) {
+	var selectedMessageGUID, method string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+			t.Fatalf("parse attachment: %v", err)
+		}
+		selectedMessageGUID = r.FormValue("selectedMessageGuid")
+		method = r.FormValue("method")
+		_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	g.capabilitiesLoaded = true
+	g.privateAPIEnabled = true
+	g.helperConnected = true
+	err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectedMessageGUID != "msg-9" || method != defaultSendMethod {
+		t.Fatalf("threaded attachment missing reply fields selected=%q method=%q", selectedMessageGUID, method)
+	}
+}
+
+func TestIMessageCommandAttachmentThreadFallbackSendsPlain(t *testing.T) {
+	calls := 0
+	var fallbackSelectedGUID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if err := r.ParseMultipartForm(commands.MaxAttachmentBytes + 1024); err != nil {
+			t.Fatalf("parse attachment: %v", err)
+		}
+		if r.FormValue("selectedMessageGuid") != "" {
+			http.Error(w, "failed", http.StatusBadGateway)
+			return
+		}
+		fallbackSelectedGUID = r.FormValue("selectedMessageGuid")
+		_, _ = w.Write([]byte(`{"data":{"guid":"sent-1"}}`))
+	}))
+	defer server.Close()
+	g := &Gateway{BlueBubblesURL: server.URL, BlueBubblesPassword: "pw", Log: config.NewLogger(config.LevelError)}
+	g.capabilitiesLoaded = true
+	g.privateAPIEnabled = true
+	g.helperConnected = true
+	err := g.sendCommandAttachment("chat-1", "msg-9", commands.Attachment{Filename: "export.json", MIMEType: "application/json", Data: []byte("private-content")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || fallbackSelectedGUID != "" {
+		t.Fatalf("expected threaded attempt then plain retry, calls=%d fallback_selected=%q", calls, fallbackSelectedGUID)
 	}
 }
 
