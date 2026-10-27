@@ -50,11 +50,13 @@ func TestCronSenderGroupAndDM(t *testing.T) {
 
 	// Unknown DM session falls back to the canonical direct-chat GUID derived
 	// from the peer in the session key, so a fresh process can still deliver.
+	// The service segment is the concrete "iMessage" service, not "any":
+	// BlueBubbles send endpoints reject the "any" service.
 	if err := sender.SendText(context.Background(), "alice", "imessage:dm:stranger", "hi"); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	if len(guids) != 3 || guids[2] != "/api/v1/message/text any;-;stranger" {
+	if len(guids) != 3 || guids[2] != "/api/v1/message/text iMessage;-;stranger" {
 		t.Fatalf("expected derived direct-chat GUID fallback, got %v", guids)
 	}
 	mu.Unlock()

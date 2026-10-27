@@ -64,8 +64,11 @@ type cronSender struct {
 // SendText delivers finished job output to an origin session. Group
 // sessions carry their chat GUID in the key; DM sessions resolve through
 // remembered inbound traffic, falling back to the canonical BlueBubbles
-// direct-chat GUID ("any;-;<handle>") so delivery works even with no
-// inbound traffic since process start.
+// iMessage direct-chat GUID ("iMessage;-;<handle>") so delivery works even
+// with no inbound traffic since process start. The service segment must be
+// the concrete "iMessage" service: the "any" service is only meaningful for
+// reading, and BlueBubbles send endpoints reject it (the AppleScript
+// fallback fails, and non-AppleScript methods report "Chat does not exist").
 func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) error {
 	if s.gateway == nil {
 		return errors.New("imessage gateway is unavailable")
@@ -85,7 +88,7 @@ func (s cronSender) SendText(ctx context.Context, _, sessionKey, text string) er
 		if remembered, ok := lookupCronChat(key); ok {
 			guid = remembered
 		} else {
-			guid = "any;-;" + dmPeer
+			guid = "iMessage;-;" + dmPeer
 		}
 	} else if guid == "" {
 		var ok bool
