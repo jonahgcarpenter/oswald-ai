@@ -51,6 +51,11 @@ func TestClassifyGroups(t *testing.T) {
 		// memories: system everywhere, tool-mediated.
 		{filepath.Join(root, "memories", "USER.md"), GroupSystem},
 		{filepath.Join(root, "profiles", "bob", "memories", "MEMORY.md"), GroupSystem},
+		// skills: system everywhere, tool-mediated; nested namesakes stay agent-owned.
+		{filepath.Join(root, "skills", "review", "SKILL.md"), GroupSystem},
+		{filepath.Join(root, "skills"), GroupSystem},
+		{filepath.Join(root, "profiles", "bob", "skills", "review", "SKILL.md"), GroupSystem},
+		{filepath.Join(root, "project", "skills", "notes.md"), GroupAgent},
 		// SOUL.md: agent same-profile, system cross-profile.
 		{filepath.Join(root, "SOUL.md"), GroupAgent},
 		{filepath.Join(root, "profiles", "bob", "SOUL.md"), GroupSystem},
@@ -79,7 +84,7 @@ func TestClassifyGroups(t *testing.T) {
 
 func TestResolveReadsAndWritesByGroup(t *testing.T) {
 	tree, _ := fileTree(t)
-	for _, p := range []string{".env", "config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md")} {
+	for _, p := range []string{".env", "config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md"), filepath.Join("skills", "review", "SKILL.md")} {
 		full := filepath.Join(tree, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
 			t.Fatal(err)
@@ -90,7 +95,7 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 	}
 	ws := NewWorkspace(tree, "default")
 
-	readOK := []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md"), filepath.Join("profiles", "bob", "SOUL.md")}
+	readOK := []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "USER.md"), "notes.md", filepath.Join("profiles", "bob", "notes.md"), filepath.Join("profiles", "bob", "SOUL.md"), filepath.Join("skills", "review", "SKILL.md")}
 	for _, raw := range readOK {
 		if _, _, err := ws.Resolve(raw); err != nil {
 			t.Errorf("read denied: %q: %v", raw, err)
@@ -124,7 +129,8 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		"config.yaml":                        "system-managed",
 		"state.db":                           "system-managed",
 		filepath.Join("memories", "USER.md"): "memory tool",
-		".env":                               "protected",
+		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
+		".env": "protected",
 		filepath.Join("profiles", "bob", "notes.md"): "system-managed",
 		"/tmp/outside.txt":                           "system-managed",
 	}
@@ -156,6 +162,9 @@ func TestDenyMessagesGrouped(t *testing.T) {
 	}
 	if msg := DenyMessage("memories/USER.md", GroupSystem, true); !strings.Contains(msg, "memory tool") {
 		t.Fatalf("memory write: %q", msg)
+	}
+	if msg := DenyMessage(filepath.Join("skills", "review", "SKILL.md"), GroupSystem, true); !strings.Contains(msg, "skill_manage tool") {
+		t.Fatalf("skill write: %q", msg)
 	}
 	if msg := DenyMessage("cache/images/a.png", GroupSystem, true); !strings.Contains(msg, "cache/scratch") {
 		t.Fatalf("cache write: %q", msg)

@@ -43,6 +43,7 @@ func TestScanConfinedWriteShell(t *testing.T) {
 		"echo x > " + filepath.Join(bob, ".env"): "protected",
 		"echo x > /tmp/outside.txt":              "system-managed",
 		"echo x > config.yaml":                   "system-managed",
+		"echo x > skills/review/SKILL.md":        "skill_manage tool",
 		"sed -i s/a/b/ config.yaml":              "system-managed",
 		"cp new.yaml config.yaml":                "system-managed",
 		"echo x | tee cache/foo":                 "cache/scratch",
