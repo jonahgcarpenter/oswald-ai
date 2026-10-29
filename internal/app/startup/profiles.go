@@ -238,6 +238,7 @@ func runProfilesWith(ctx context.Context, cfg *config.Config, rootLog *config.Lo
 		engine.SetImageCache(cache)
 		engine.SetMarkdownSummarizer(summarizer)
 		engine.SetWorkspace(profile.ProfileRoot)
+		engine.SetSkillsSourceDir(profile.SkillsSourceDir)
 		processor.agents[name] = engine
 		cleanup := &prune.Worker{}
 		cleanup.Add(imagecache.SweepHook(cache, rootLog))

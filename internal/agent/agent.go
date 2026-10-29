@@ -24,6 +24,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
@@ -72,15 +73,16 @@ type Agent struct {
 	provider    string
 	// billingBaseURL is the configured provider endpoint attributed on usage
 	// ledger rows. Empty omits it; set via SetBillingBaseURL before serving.
-	billingBaseURL string
-	soul           *soul.Store
-	userMemory     SessionStore
-	fileMemory     *files.Store
-	imageCache     *imagecache.Cache
-	toolPolicy     governance.GlobalPolicy
-	summarizer     MarkdownSummarizer
-	workspaceRoot  string
-	log            *config.Logger
+	billingBaseURL  string
+	soul            *soul.Store
+	userMemory      SessionStore
+	fileMemory      *files.Store
+	imageCache      *imagecache.Cache
+	toolPolicy      governance.GlobalPolicy
+	summarizer      MarkdownSummarizer
+	workspaceRoot   string
+	skillsSourceDir string
+	log             *config.Logger
 }
 
 // SetImageCache installs the private per-user image cache before requests start.
@@ -117,6 +119,15 @@ func (a *Agent) SetBillingBaseURL(url string) {
 func (a *Agent) SetWorkspace(root string) {
 	if a != nil {
 		a.workspaceRoot = root
+	}
+}
+
+// SetSkillsSourceDir installs the operator-configured external skill
+// library directory rendered into the skills index alongside the profile
+// skills tree.
+func (a *Agent) SetSkillsSourceDir(dir string) {
+	if a != nil {
+		a.skillsSourceDir = dir
 	}
 }
 
@@ -452,6 +463,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 			return &Response{Kind: "invalid_tool_choice", Model: a.model, ToolChoiceError: errCode}, nil
 		}
 	}
+	// The skills index joins the trusted context only when its tool is
+	// offered: an index without a load path would be a dangling pointer.
+	appendContext(a.skillsIndexBlock(gateway, catalogHas(initialCatalog, toolskill.Name)))
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])

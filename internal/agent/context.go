@@ -16,6 +16,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/compaction"
 	tokenbudget "github.com/jonahgcarpenter/oswald-ai/internal/session/compaction/budget"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
+	"github.com/jonahgcarpenter/oswald-ai/internal/skills"
 	toolclarify "github.com/jonahgcarpenter/oswald-ai/internal/tools/clarify"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
@@ -194,6 +195,22 @@ func environmentInfoBlock(workspaceRoot string) string {
 	sb.WriteString("\nCurrent working directory: " + cwd)
 	sb.WriteString("\nScratch directory: " + scratch + " (TMPDIR points here; write temporary files and probes there, never under the system temp dir; entries idle for 24h are pruned)")
 	return sb.String()
+}
+
+// skillsIndexBlock renders the profile skills selection index: names and
+// descriptions for task-time discovery, with bodies loading on demand
+// through the skill tool. It returns "" when the tool is not offered for
+// this request or no skills are visible, so the prompt never carries a
+// dangling load pointer.
+func (a *Agent) skillsIndexBlock(platform string, offered bool) string {
+	if a == nil || !offered {
+		return ""
+	}
+	root := strings.TrimSpace(a.workspaceRoot)
+	if root == "" {
+		return ""
+	}
+	return skills.NewStore(filepath.Join(root, "skills"), strings.TrimSpace(a.skillsSourceDir)).Index(platform)
 }
 
 // sessionContextBlock renders untrusted transport conversation metadata. Chat
