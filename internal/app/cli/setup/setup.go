@@ -266,6 +266,8 @@ tools:
     allow_private_urls: false
     allow_insecure_urls: false
     restrict_evaluate: false
+  skills:
+    # source_dir: ""  # Optional external skill library directory; the profile skills/ tree is always active.
 # MCP connections are isolated by profile and opened lazily; restart to reload.
 # Each server sets exactly one of url (HTTP) or command (stdio).
 mcp_servers:

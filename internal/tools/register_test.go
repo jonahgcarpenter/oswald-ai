@@ -20,6 +20,7 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 )
@@ -108,6 +109,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		visionanalyze.Name: true,
 		websearch.Name:     true,
 		toolmemory.Name:    true,
+		toolskill.Name:     true,
 		"clarify":          true,
 		"read_file":        true,
 		"write_file":       true,

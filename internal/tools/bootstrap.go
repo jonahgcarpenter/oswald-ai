@@ -13,6 +13,7 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/imagecache"
@@ -22,7 +23,7 @@ import (
 // BuiltinDefinitions returns every Go-owned builtin tool definition in
 // registration order.
 func BuiltinDefinitions() []llm.ToolDefinition {
-	defs := []llm.ToolDefinition{toolmemory.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition()}
+	defs := []llm.ToolDefinition{toolmemory.Definition(), toolskill.Definition(), sessionsearch.Definition(), websearch.Definition(), imagegenerate.Definition(), visionanalyze.Definition(), toolclarify.Definition()}
 	return append(append(append(defs, toolbrowser.Definitions()...), toolbrowser.VaultDefinitions()...), workspace.Definitions()...)
 }
 
