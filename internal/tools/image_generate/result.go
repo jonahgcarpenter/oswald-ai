@@ -18,5 +18,8 @@ func ResultText(path string, geometry *llm.ImageGeometry, firstFrame bool) strin
 	if firstFrame {
 		text += "\n\nNote: Showing only the first frame of this GIF; include its MEDIA token in your final response to deliver the original GIF."
 	}
+	// The geometry note must stay the string suffix for
+	// media.RefreshImageGeometryNote, so the attach hint precedes it.
+	text += "\n\nTo attach to your response use:\nMEDIA: " + path
 	return text + media.ImageGeometryNote(geometry)
 }
