@@ -14,7 +14,7 @@ normalizers. `registry/` holds definitions, handlers, policies, and per-visibili
 cap (500 handler executions, 200 tool-bearing responses per request) as a
 runaway backstop, plus result-text framing; `exposure/` computes request-local
 visibility; `output/` strips ANSI and redacts secrets (`bearer`, api keys, `sk-`, `ghp_`,
-`github_pat_`, `xox[baprs]-`). `toolsets.go` bundles code-owned sets — `core` (memory, search,
+`github_pat_`, `xox[baprs]-`). `toolsets.go` bundles code-owned sets — `core` (memory, skill_manage, search,
 web, vision, image, browser, vault, plus file tools), `terminal`, `code_execution`, `cronjob` —
 which gateways map to and the API intersects with caller `named`/`allowed_tools`.
 
@@ -23,6 +23,12 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
 - `memory` — atomic USER/MEMORY entry ops (one action or 1–20 ordered ops; replace/remove need
   exact unique `old_text`); capacity errors return current entries for consolidation.
   Metadata-only history: never searchable.
+- `skill_manage` — on-demand procedural skills over the profile `skills/` tree (`skill_manage/`
+  leaf package; catalog/index/reads owned by `internal/skills/`): `list` (compact
+  name/description/category index, 200-row cap), `view` (full body or one supporting file),
+  `create` (slug-validated new `SKILL.md`), `update` (exact unique `old_text`, same contract as
+  memory edits). Unknown arguments rejected; authenticated principal required.
+  Metadata-only history with hashed bodies: never searchable.
 - `session_search` — full searchable history with four inferred shapes: `query` (FTS5 discovery,
   BM25-ranked, lineage-deduped), `session_id` + `around_message_id` scroll (1–20 each side),
   `session_id` full read (first 20 / last 10 past 30 rows), no-args recent browse (default 3).
@@ -56,7 +62,7 @@ which gateways map to and the API intersects with caller `named`/`allowed_tools`
   intercepted pre-broker so they never start a turn; `/new` and `/stop` cancel the wait.
   Hidden on the stateless API and unattended transports (fail-closed `undelivered`).
 
-History policy in one line: `memory`/`browser_vault_*` metadata-only, `session_search`/`web_search`
+History policy in one line: `memory`/`skill_manage`/`browser_vault_*` metadata-only, `session_search`/`web_search`
 searchable, image-tool and `clarify` text nonsearchable — with 16 KiB args and 16,000 result runes per call
 inside a 64 KiB aggregate trace. `session_search` never logs query or message content; browser
 and vault tools never log URLs, page content, expressions, or secrets — only counts and chars.

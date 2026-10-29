@@ -82,7 +82,8 @@ oswald-ai/
 ├── internal/agent/        # iterative foreground loop: context, streaming, tools/history, images, retries
 ├── internal/broker/       # FIFO conversation lanes, profile fences, bounded admission
 ├── internal/session/      # memory (sessions/delivery/history) + compaction (+budget) + soul (policy)
-├── internal/tools/        # builtin registry/governance/exposure + tool groups (memory, search, web, vision, image, browser)
+├── internal/skills/       # profile skill catalog (scan/resolve/index) + on-demand reads + create/update
+├── internal/tools/        # builtin registry/governance/exposure + tool groups (memory, skills, search, web, vision, image, browser)
 ├── internal/vault/         # profile-scoped encrypted credential store for browser autofill
 ├── internal/workspace/    # workspace file/shell tools + process (tracked background processes)
 ├── internal/transport/    # gateway (discord, imessage, openai + routing/runtime) + media (normalize/cache)
@@ -130,6 +131,7 @@ Moving a symbol means fixing its docs in the same change.
 | `internal/agent/` | `internal/agent/AGENTS.md` | turn loop, system prompt, budget, tool authorization, retries, MEDIA delivery |
 | `internal/broker/` | `internal/broker/AGENTS.md` | lanes, fences, admission, cancellation, foreground priority |
 | `internal/session/` | `internal/session/AGENTS.md` | delivery gating, history, `state_meta`, `/new`, soul binding, compaction |
+| `internal/skills/` | `internal/skills/AGENTS.md` | skill catalog, prompt index, on-demand reads, create/update |
 | `internal/tools/` | `internal/tools/AGENTS.md` | registry, governance, toolsets, builtin inventory, history bounds |
 | `internal/vault/` | `internal/vault/AGENTS.md` | encrypted profile credential store, vault autofill scripts |
 | `internal/workspace/` | `internal/workspace/AGENTS.md` | file/shell tools, pre-execution chain, reviewer, approvals, processes |
