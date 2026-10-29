@@ -22,6 +22,15 @@ func TestRenderIndexRows(t *testing.T) {
 			t.Fatalf("expected %q in index:\n%s", want, block)
 		}
 	}
+	for _, want := range []string{
+		`fix it with skill_manage(action="update")`,
+		"offer to save the approach as a skill",
+		"update it before finishing",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("expected coaching %q in index:\n%s", want, block)
+		}
+	}
 }
 
 func TestRenderIndexCapsLargeLibraries(t *testing.T) {

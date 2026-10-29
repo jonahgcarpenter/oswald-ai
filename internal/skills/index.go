@@ -47,6 +47,9 @@ func RenderIndex(skills []Skill) string {
 		"load it with skill_manage(action=\"view\", name=\"<skill>\") and follow its instructions. " +
 		"Err on the side of loading — it is always better to have context you don't need than to miss established workflows. " +
 		"Skills also encode the user's preferred approach for tasks like code review, planning, and testing — load them even for tasks you already know how to do.\n" +
+		"If a skill has issues, fix it with skill_manage(action=\"update\").\n" +
+		"After difficult/iterative tasks, offer to save the approach as a skill. If a skill you loaded was missing steps, " +
+		"had wrong commands, or needed pitfalls you discovered, update it before finishing.\n" +
 		"Only proceed without loading a skill if genuinely none are relevant to the task.\n" +
 		"<available_skills>\n" + strings.Join(rows, "\n") + "\n</available_skills>"
 	return clipIndex(block)

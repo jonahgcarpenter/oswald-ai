@@ -71,6 +71,9 @@ func TestProcessInjectsSkillsIndexWhenOffered(t *testing.T) {
 			t.Fatalf("system prompt missing %q:\n%s", want, system)
 		}
 	}
+	if !strings.Contains(system, "record it with skill_manage for future reuse") {
+		t.Fatalf("system prompt missing record-it guidance:\n%s", system)
+	}
 	if strings.Contains(system, "Follow the checklist.") {
 		t.Fatal("skill body leaked into the index")
 	}
@@ -84,6 +87,9 @@ func TestProcessOmitsSkillsIndexWithoutTool(t *testing.T) {
 	}
 	if system := systemMessageOf(t, primaryRequests(chat.requests)[0]); strings.Contains(system, "<available_skills>") {
 		t.Fatalf("index without offered tool:\n%s", system)
+	}
+	if system := systemMessageOf(t, primaryRequests(chat.requests)[0]); strings.Contains(system, "skill_manage") {
+		t.Fatalf("skill coaching without offered tool:\n%s", system)
 	}
 }
 
@@ -104,5 +110,8 @@ func TestProcessOmitsSkillsIndexForRestrictedToolset(t *testing.T) {
 	}
 	if system := systemMessageOf(t, request); strings.Contains(system, "<available_skills>") {
 		t.Fatalf("index under restricted toolset:\n%s", system)
+	}
+	if system := systemMessageOf(t, request); strings.Contains(system, "skill_manage") {
+		t.Fatalf("skill coaching under restricted toolset:\n%s", system)
 	}
 }

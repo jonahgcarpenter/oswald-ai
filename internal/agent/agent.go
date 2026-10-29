@@ -455,7 +455,9 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	// The skills index joins the trusted context only when its tool is
 	// offered: an index without a load path would be a dangling pointer.
-	appendContext(a.skillsIndexBlock(gateway, catalogHas(initialCatalog, toolskill.Name)))
+	skillOffered := catalogHas(initialCatalog, toolskill.Name)
+	appendContext(a.skillsGuidanceBlock(skillOffered))
+	appendContext(a.skillsIndexBlock(gateway, skillOffered))
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])
