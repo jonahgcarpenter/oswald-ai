@@ -210,7 +210,7 @@ func (a *Agent) skillsIndexBlock(platform string, offered bool) string {
 	if root == "" {
 		return ""
 	}
-	return skills.NewStore(filepath.Join(root, "skills"), strings.TrimSpace(a.skillsSourceDir)).Index(platform)
+	return skills.NewStore(filepath.Join(root, "skills")).Index(platform)
 }
 
 // sessionContextBlock renders untrusted transport conversation metadata. Chat

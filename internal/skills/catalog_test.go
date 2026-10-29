@@ -6,22 +6,7 @@ import (
 )
 
 func managedEntry(root, dir, name string) RawEntry {
-	return RawEntry{Name: name, Description: "d", Dir: filepath.Join(root, dir), File: filepath.Join(root, dir, "SKILL.md"), Tier: TierManaged, Root: root}
-}
-
-func TestManagedBeatsExternal(t *testing.T) {
-	managed, external := t.TempDir(), t.TempDir()
-	entries := []RawEntry{
-		{Name: "review", Dir: filepath.Join(external, "review"), File: filepath.Join(external, "review", "SKILL.md"), Tier: TierExternal, Root: external},
-		managedEntry(managed, "review", "review"),
-	}
-	skills := resolveCatalog(entries, "discord")
-	if len(skills) != 1 {
-		t.Fatalf("expected 1 skill, got %+v", skills)
-	}
-	if skills[0].Source != SourceManaged || skills[0].LoadName != "review" {
-		t.Fatalf("unexpected winner: %+v", skills[0])
-	}
+	return RawEntry{Name: name, Description: "d", Dir: filepath.Join(root, dir), File: filepath.Join(root, dir, "SKILL.md"), Root: root}
 }
 
 func TestSameTierDuplicatesLoadByPath(t *testing.T) {
@@ -40,8 +25,8 @@ func TestSameTierDuplicatesLoadByPath(t *testing.T) {
 func TestPlatformGating(t *testing.T) {
 	root := t.TempDir()
 	entries := []RawEntry{
-		{Name: "open", Dir: filepath.Join(root, "open"), Tier: TierManaged, Root: root},
-		{Name: "gated", Platforms: []string{"discord"}, Dir: filepath.Join(root, "gated"), Tier: TierManaged, Root: root},
+		{Name: "open", Dir: filepath.Join(root, "open"), Root: root},
+		{Name: "gated", Platforms: []string{"discord"}, Dir: filepath.Join(root, "gated"), Root: root},
 	}
 	if skills := resolveCatalog(entries, "discord"); len(skills) != 2 {
 		t.Fatalf("expected 2 skills on discord, got %+v", skills)

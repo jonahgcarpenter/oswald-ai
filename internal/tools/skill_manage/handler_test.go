@@ -29,14 +29,14 @@ func seedManaged(t *testing.T) string {
 }
 
 func TestHandlerRequiresPrincipal(t *testing.T) {
-	handler := NewHandler(t.TempDir(), "")
+	handler := NewHandler(t.TempDir())
 	if _, err := handler(context.Background(), map[string]interface{}{"action": "list"}); err == nil {
 		t.Fatal("expected principal error")
 	}
 }
 
 func TestHandlerRejectsUnknownArgs(t *testing.T) {
-	handler := NewHandler(seedManaged(t), "")
+	handler := NewHandler(seedManaged(t))
 	if _, err := handler(skillContext(), map[string]interface{}{"action": "list", "bogus": true}); err == nil {
 		t.Fatal("expected unknown argument error")
 	}
@@ -46,7 +46,7 @@ func TestHandlerRejectsUnknownArgs(t *testing.T) {
 }
 
 func TestListAndViewShapes(t *testing.T) {
-	handler := NewHandler(seedManaged(t), "")
+	handler := NewHandler(seedManaged(t))
 	result, err := handler(skillContext(), map[string]interface{}{"action": "list"})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestListAndViewShapes(t *testing.T) {
 }
 
 func TestListEmpty(t *testing.T) {
-	handler := NewHandler(t.TempDir(), "")
+	handler := NewHandler(t.TempDir())
 	result, err := handler(skillContext(), map[string]interface{}{"action": "list"})
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestListEmpty(t *testing.T) {
 
 func TestCreateAndUpdateThroughTool(t *testing.T) {
 	root := t.TempDir()
-	handler := NewHandler(root, "")
+	handler := NewHandler(root)
 	if _, err := handler(skillContext(), map[string]interface{}{"action": "create", "name": "fresh", "description": "Fresh things", "content": "Step one."}); err != nil {
 		t.Fatal(err)
 	}

@@ -102,13 +102,6 @@ type toolsYAML struct {
 	WebSearch     webYAML     `yaml:"web_search"`
 	ImageGenerate imageYAML   `yaml:"image_generate"`
 	Browser       browserYAML `yaml:"browser"`
-	Skills        skillsYAML  `yaml:"skills"`
-}
-
-// skillsYAML carries the optional external skill-library directory. The
-// profile-managed skills/ tree needs no configuration.
-type skillsYAML struct {
-	SourceDir *string `yaml:"source_dir"`
 }
 type platformExtraYAML struct {
 	Token               *string  `yaml:"token"`
@@ -558,21 +551,6 @@ func applyDocument(cfg *Config, doc documentYAML, providers map[string]providerY
 	}
 	if doc.Tools.Browser.RestrictEvaluate != nil {
 		cfg.BrowserRestrictEvaluate = *doc.Tools.Browser.RestrictEvaluate
-	}
-	if doc.Tools.Skills.SourceDir != nil {
-		raw := strings.TrimSpace(*doc.Tools.Skills.SourceDir)
-		if raw != "" {
-			if len(raw) > 4096 || strings.ContainsRune(raw, 0) {
-				return configErr("config_value_invalid", "tools.skills.source_dir")
-			}
-			if !filepath.IsAbs(raw) {
-				raw = filepath.Join(cfg.ProfileRoot, raw)
-			}
-			if abs, err := filepath.Abs(raw); err == nil {
-				raw = abs
-			}
-			cfg.SkillsSourceDir = raw
-		}
 	}
 	for _, entry := range []struct{ raw, path string }{{cfg.ComfyUIURL, "tools.image_generate.url"}, {cfg.SearxngURL, "tools.web_search.searxng_url"}, {cfg.BrowserEndpointURL, "tools.browser.endpoint_url"}} {
 		if entry.raw == "" {

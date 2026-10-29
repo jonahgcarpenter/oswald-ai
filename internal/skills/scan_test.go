@@ -24,7 +24,7 @@ func TestScanFindsSkillsSkipsNoise(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("nope"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	entries := scanRoots(root, "")
+	entries := scanRoots(root)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d: %+v", len(entries), entries)
 	}
@@ -44,16 +44,16 @@ func TestScanFindsSkillsSkipsNoise(t *testing.T) {
 func TestScanSkipsUnclosedFence(t *testing.T) {
 	root := t.TempDir()
 	writeSkillMD(t, filepath.Join(root, "broken"), "---\nname: broken\nno end\n")
-	if entries := scanRoots(root, ""); len(entries) != 0 {
+	if entries := scanRoots(root); len(entries) != 0 {
 		t.Fatalf("expected no entries, got %+v", entries)
 	}
 }
 
 func TestScanEmptyRoots(t *testing.T) {
-	if entries := scanRoots("", ""); len(entries) != 0 {
+	if entries := scanRoots(""); len(entries) != 0 {
 		t.Fatalf("expected no entries, got %+v", entries)
 	}
-	if entries := scanRoots(t.TempDir(), "/nonexistent-oswald-test-dir"); len(entries) != 0 {
+	if entries := scanRoots("/nonexistent-oswald-test-dir"); len(entries) != 0 {
 		t.Fatalf("expected no entries, got %+v", entries)
 	}
 }

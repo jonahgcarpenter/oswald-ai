@@ -35,7 +35,7 @@ func skillTestAgent(t *testing.T, chat llm.Chatter, root string, withTool bool) 
 		if err := reg.RegisterDefinition(toolskill.Definition()); err != nil {
 			t.Fatal(err)
 		}
-		if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(root, ""))); err != nil {
+		if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(root))); err != nil {
 			t.Fatal(err)
 		}
 	}

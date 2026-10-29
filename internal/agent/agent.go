@@ -73,16 +73,15 @@ type Agent struct {
 	provider    string
 	// billingBaseURL is the configured provider endpoint attributed on usage
 	// ledger rows. Empty omits it; set via SetBillingBaseURL before serving.
-	billingBaseURL  string
-	soul            *soul.Store
-	userMemory      SessionStore
-	fileMemory      *files.Store
-	imageCache      *imagecache.Cache
-	toolPolicy      governance.GlobalPolicy
-	summarizer      MarkdownSummarizer
-	workspaceRoot   string
-	skillsSourceDir string
-	log             *config.Logger
+	billingBaseURL string
+	soul           *soul.Store
+	userMemory     SessionStore
+	fileMemory     *files.Store
+	imageCache     *imagecache.Cache
+	toolPolicy     governance.GlobalPolicy
+	summarizer     MarkdownSummarizer
+	workspaceRoot  string
+	log            *config.Logger
 }
 
 // SetImageCache installs the private per-user image cache before requests start.
@@ -119,15 +118,6 @@ func (a *Agent) SetBillingBaseURL(url string) {
 func (a *Agent) SetWorkspace(root string) {
 	if a != nil {
 		a.workspaceRoot = root
-	}
-}
-
-// SetSkillsSourceDir installs the operator-configured external skill
-// library directory rendered into the skills index alongside the profile
-// skills tree.
-func (a *Agent) SetSkillsSourceDir(dir string) {
-	if a != nil {
-		a.skillsSourceDir = dir
 	}
 }
 

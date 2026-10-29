@@ -8,13 +8,6 @@ import (
 	"strings"
 )
 
-// Tier precedence for same-named skills: the profile-managed tree always
-// beats the external library.
-const (
-	TierManaged = iota
-	TierExternal
-)
-
 // RawEntry is one SKILL.md found on disk, before catalog resolution.
 type RawEntry struct {
 	Name          string
@@ -25,37 +18,25 @@ type RawEntry struct {
 	Tags          []string
 	Dir           string
 	File          string
-	Tier          int
 	Root          string
 }
 
-// scanRoots walks the managed and external roots (either may be empty or
-// missing) and returns every readable SKILL.md in stable sorted order.
+// scanRoots walks the managed skills root (empty or missing reads as
+// empty) and returns every readable SKILL.md in stable sorted order.
 // Malformed files are skipped; a scan never fails because of one file.
-func scanRoots(managed, external string) []RawEntry {
-	var out []RawEntry
-	for _, root := range []struct {
-		dir  string
-		tier int
-	}{{managed, TierManaged}, {external, TierExternal}} {
-		abs := strings.TrimSpace(root.dir)
-		if abs == "" {
-			continue
-		}
-		out = append(out, scanRoot(abs, root.tier)...)
+func scanRoots(managed string) []RawEntry {
+	abs := strings.TrimSpace(managed)
+	if abs == "" {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Tier != out[j].Tier {
-			return out[i].Tier < out[j].Tier
-		}
-		return out[i].Dir < out[j].Dir
-	})
+	out := scanRoot(abs)
+	sort.Slice(out, func(i, j int) bool { return out[i].Dir < out[j].Dir })
 	return out
 }
 
 // scanRoot returns the skills directly under one root. Directory symlinks
 // are not followed; files over the read cap are skipped.
-func scanRoot(root string, tier int) []RawEntry {
+func scanRoot(root string) []RawEntry {
 	var out []RawEntry
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -100,7 +81,6 @@ func scanRoot(root string, tier int) []RawEntry {
 			Tags:          normalizedList(front.tags),
 			Dir:           dir,
 			File:          path,
-			Tier:          tier,
 			Root:          root,
 		})
 		return nil

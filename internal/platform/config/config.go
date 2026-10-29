@@ -58,11 +58,7 @@ type Config struct {
 	// extraction). Default false: the denylist gates on primitive names
 	// and also blocks legitimate DOM extraction.
 	BrowserRestrictEvaluate bool
-	// SkillsSourceDir is the optional external skill-library directory,
-	// resolved absolute (relative paths anchor at the profile root). Empty
-	// disables the external tier. It must never be logged.
-	SkillsSourceDir string
-	LogLevel        Level
+	LogLevel                Level
 }
 
 // RetentionPolicy supplies code-owned worker bounds.

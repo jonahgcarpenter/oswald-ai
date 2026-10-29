@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -123,17 +121,8 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 		return fmt.Errorf("register memory tool: %w", err)
 	}
 
-	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(cfg.ProfileRoot, cfg.SkillsSourceDir))); err != nil {
+	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(cfg.ProfileRoot))); err != nil {
 		return fmt.Errorf("register skill_manage tool: %w", err)
-	}
-	if src := strings.TrimSpace(cfg.SkillsSourceDir); src != "" {
-		if info, err := os.Stat(src); err != nil || !info.IsDir() {
-			bootstrapLog.Debug("tool.bootstrap.skills_source_missing", "configured external skills directory is unavailable; the external tier reads as empty", config.F("tool_name", toolskill.Name))
-		} else if abs, aberr := filepath.Abs(src); aberr == nil {
-			if root, rerr := filepath.Abs(cfg.ProfileRoot); rerr == nil && (abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))) {
-				bootstrapLog.Debug("tool.bootstrap.skills_source_inside_profile", "external skills directory lives inside the profile root; file tools can write it directly", config.F("tool_name", toolskill.Name))
-			}
-		}
 	}
 
 	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {

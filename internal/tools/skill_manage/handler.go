@@ -14,15 +14,15 @@ import (
 )
 
 // NewHandler returns the model-facing skill handler bound to one profile's
-// managed tree and external library directory. It bypasses workspace file
-// groups (which deny direct skills/ writes) the same way the memory tool
-// bypasses them for memories/: the tool is the mediated path.
-func NewHandler(profileRoot, sourceDir string) func(context.Context, map[string]interface{}) (governance.Result, error) {
+// managed skills tree. It bypasses workspace file groups (which deny
+// direct skills/ writes) the same way the memory tool bypasses them for
+// memories/: the tool is the mediated path.
+func NewHandler(profileRoot string) func(context.Context, map[string]interface{}) (governance.Result, error) {
 	managed := ""
 	if strings.TrimSpace(profileRoot) != "" {
 		managed = filepath.Join(profileRoot, "skills")
 	}
-	store := skills.NewStore(managed, strings.TrimSpace(sourceDir))
+	store := skills.NewStore(managed)
 	return func(ctx context.Context, args map[string]interface{}) (governance.Result, error) {
 		if err := ctx.Err(); err != nil {
 			return governance.Result{}, err
@@ -88,7 +88,7 @@ func list(store *skills.Store, platform string) (governance.Result, error) {
 			fmt.Fprintf(&sb, "... (%d more; refine by category)\n", len(found)-maxRows)
 			break
 		}
-		fmt.Fprintf(&sb, "%s [%s] (%s): %s\n", skill.LoadName, skill.Category, skill.Source, outputpkg.Clean(skill.Description))
+		fmt.Fprintf(&sb, "%s [%s]: %s\n", skill.LoadName, skill.Category, outputpkg.Clean(skill.Description))
 	}
 	return governance.Result{Content: strings.TrimSuffix(sb.String(), "\n") + "\nLoad a skill with skill_manage(action=\"view\", name=\"<skill>\").", Outcome: governance.OutcomeProductive}, nil
 }
@@ -99,7 +99,7 @@ func view(store *skills.Store, name, filePath, platform string) (governance.Resu
 		return governance.Result{}, fmt.Errorf("skill_manage: %w", err)
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Skill: %s [%s] (%s)\n", result.LoadName, result.Category, result.Source)
+	fmt.Fprintf(&sb, "Skill: %s [%s]\n", result.LoadName, result.Category)
 	if result.Version != "" {
 		fmt.Fprintf(&sb, "Version: %s\n", outputpkg.Clean(result.Version))
 	}

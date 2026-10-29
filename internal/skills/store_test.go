@@ -7,13 +7,12 @@ import (
 	"testing"
 )
 
-func seedLibrary(t *testing.T) (managed, external string) {
+func seedLibrary(t *testing.T) string {
 	t.Helper()
-	managed = t.TempDir()
-	external = t.TempDir()
+	managed := t.TempDir()
 	writeSkillMD(t, filepath.Join(managed, "review"),
 		"---\nname: review\ndescription: Review code\n---\n\nFollow the checklist.\n")
-	writeSkillMD(t, filepath.Join(external, "deploy"),
+	writeSkillMD(t, filepath.Join(managed, "deploy"),
 		"---\nname: deploy\ndescription: Deploy things\n---\n\nShip it.\n")
 	if err := os.MkdirAll(filepath.Join(managed, "review", "scripts"), 0700); err != nil {
 		t.Fatal(err)
@@ -21,12 +20,12 @@ func seedLibrary(t *testing.T) (managed, external string) {
 	if err := os.WriteFile(filepath.Join(managed, "review", "scripts", "check.sh"), []byte("#!/bin/sh\necho ok\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return managed, external
+	return managed
 }
 
 func TestStoreListAndIndex(t *testing.T) {
-	managed, external := seedLibrary(t)
-	store := NewStore(managed, external)
+	managed := seedLibrary(t)
+	store := NewStore(managed)
 	skills := store.List("")
 	if len(skills) != 2 {
 		t.Fatalf("expected 2 skills, got %+v", skills)
@@ -34,14 +33,14 @@ func TestStoreListAndIndex(t *testing.T) {
 	if index := store.Index(""); !strings.Contains(index, "- review: Review code") || !strings.Contains(index, "- deploy: Deploy things") {
 		t.Fatalf("unexpected index:\n%s", index)
 	}
-	if got := NewStore("", "").Index(""); got != "" {
+	if got := NewStore("").Index(""); got != "" {
 		t.Fatalf("expected empty index, got %q", got)
 	}
 }
 
 func TestViewLoadsBodyAndSupportingFiles(t *testing.T) {
-	managed, external := seedLibrary(t)
-	store := NewStore(managed, external)
+	managed := seedLibrary(t)
+	store := NewStore(managed)
 	view, err := store.View("review", "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -62,8 +61,8 @@ func TestViewLoadsBodyAndSupportingFiles(t *testing.T) {
 }
 
 func TestViewCaseInsensitiveAndDirName(t *testing.T) {
-	managed, external := seedLibrary(t)
-	store := NewStore(managed, external)
+	managed := seedLibrary(t)
+	store := NewStore(managed)
 	if _, err := store.View("REVIEW", "", ""); err != nil {
 		t.Fatalf("expected case-insensitive match: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestViewAmbiguousNamesError(t *testing.T) {
 	managed := t.TempDir()
 	writeSkillMD(t, filepath.Join(managed, "a", "dup"), "---\nname: dup\ndescription: one\n---\nA\n")
 	writeSkillMD(t, filepath.Join(managed, "b", "dup"), "---\nname: dup\ndescription: two\n---\nB\n")
-	store := NewStore(managed, "")
+	store := NewStore(managed)
 	if _, err := store.View("dup", "", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("expected ambiguous error, got %v", err)
 	}
@@ -86,8 +85,8 @@ func TestViewAmbiguousNamesError(t *testing.T) {
 }
 
 func TestViewFilePathConfinement(t *testing.T) {
-	managed, external := seedLibrary(t)
-	store := NewStore(managed, external)
+	managed := seedLibrary(t)
+	store := NewStore(managed)
 	for _, evil := range []string{"../SKILL.md", "/etc/hostname", "..", "scripts/../../SKILL.md"} {
 		if _, err := store.View("review", evil, ""); err == nil {
 			t.Fatalf("expected confinement error for %q", evil)
@@ -96,12 +95,12 @@ func TestViewFilePathConfinement(t *testing.T) {
 }
 
 func TestCreateAndUpdate(t *testing.T) {
-	store := NewStore(t.TempDir(), "")
+	store := NewStore(t.TempDir())
 	skill, err := store.Create("Fresh-Skill", "Does fresh things", "Step one.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skill.LoadName != "fresh-skill" || skill.Source != SourceManaged {
+	if skill.LoadName != "fresh-skill" {
 		t.Fatalf("unexpected created skill: %+v", skill)
 	}
 	if _, err := store.Create("fresh-skill", "Again", "Body\n"); err == nil {
@@ -123,13 +122,5 @@ func TestCreateAndUpdate(t *testing.T) {
 	}
 	if _, err := store.Update("fresh-skill", "missing needle", "x"); err == nil {
 		t.Fatal("expected non-matching old_text to fail")
-	}
-}
-
-func TestUpdateExternalFailsClosed(t *testing.T) {
-	managed, external := seedLibrary(t)
-	store := NewStore(managed, external)
-	if _, err := store.Update("deploy", "Ship it.", "Ship it twice."); err == nil || !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("expected read-only refusal, got %v", err)
 	}
 }

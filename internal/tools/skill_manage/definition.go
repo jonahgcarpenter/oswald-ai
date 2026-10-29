@@ -9,8 +9,7 @@ const Name = "skill_manage"
 
 // Definition returns the skill tool's model-facing description and schema.
 // Discovery is a compact index (list); bodies load on demand (view) so a
-// large library never bloats context. Creation and updates target the
-// profile tree only; the external library is read-only.
+// large library never bloats context.
 func Definition() llm.ToolDefinition {
 	return llm.ToolDefinition{
 		Name: Name,
@@ -22,7 +21,7 @@ FOUR shapes, picked by action:
 - create: add a new skill (name, description, body) after a difficult or iterative task worth reusing, or when the user teaches you a lasting procedure.
 - update: fix a skill whose steps were missing, wrong, or incomplete (old_text must match exactly once; it locates the text, content is the replacement).
 
-RULES: reusable procedures live in skills, never in memory. If a loaded skill was missing steps, had wrong commands, or needed pitfalls you discovered, update it before finishing. The external library (source "external") is read-only: to change one, create a profile copy under the same name — the profile copy wins.`,
+RULES: reusable procedures live in skills, never in memory. If a loaded skill was missing steps, had wrong commands, or needed pitfalls you discovered, update it before finishing.`,
 		Parameters: llm.ToolParameters{Type: "object", Required: []string{"action"}, Properties: map[string]llm.ToolParameterProperty{
 			"action":      {Type: "string", Enum: []string{"list", "view", "create", "update"}, Description: "list the index, view one skill body, create a new skill, or update an existing skill."},
 			"name":        {Type: "string", Description: "Skill name as listed (view/update). Required for create (new skill name) and update."},

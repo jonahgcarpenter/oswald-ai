@@ -8,7 +8,7 @@ import (
 
 // Skill is one loadable skill after catalog resolution. LoadName is what a
 // view call accepts: the declared name when unique, otherwise the exact
-// path relative to its root. Source names the owning tier.
+// path relative to the skills root.
 type Skill struct {
 	Name          string
 	Description   string
@@ -18,24 +18,14 @@ type Skill struct {
 	Tags          []string
 	Category      string
 	LoadName      string
-	Source        string
 	Dir           string
 	File          string
 }
 
-const (
-	// SourceManaged marks skills under the profile's own skills tree.
-	SourceManaged = "profile"
-	// SourceExternal marks skills under the configured library directory.
-	SourceExternal = "external"
-)
-
 // resolveCatalog turns scanned entries into the visible, loadable catalog
-// for one platform (the gateway name, case-insensitive; "" matches skills
-// without a platforms gate only when they declare none). Lower tiers win:
-// an external copy shadowed by a managed one is dropped. Same-tier
-// duplicates stay loadable by relative path; byte-identical directory
-// repeats collapse.
+// for one platform (the gateway name, case-insensitive; gated skills need
+// an exact match, ungated skills show everywhere). Same-named skills stay
+// individually loadable by relative path.
 func resolveCatalog(entries []RawEntry, platform string) []Skill {
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	byName := make(map[string][]RawEntry)
@@ -85,29 +75,13 @@ func resolveNameGroup(name string, group []RawEntry) []Skill {
 	for _, entry := range byDir {
 		entries = append(entries, entry)
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Tier != entries[j].Tier {
-			return entries[i].Tier < entries[j].Tier
-		}
-		return entries[i].Dir < entries[j].Dir
-	})
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Dir < entries[j].Dir })
 	if len(entries) == 1 {
 		return []Skill{toSkill(entries[0], name, entries[0].Root)}
 	}
-	top := entries[0].Tier
-	var winners []RawEntry
+	// Same-named duplicates: each loads by its exact relative path.
+	skills := make([]Skill, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Tier != top {
-			break
-		}
-		winners = append(winners, entry)
-	}
-	if len(winners) == 1 {
-		return []Skill{toSkill(winners[0], name, winners[0].Root)}
-	}
-	// Same-tier duplicates: each loads by its exact relative path.
-	skills := make([]Skill, 0, len(winners))
-	for _, entry := range winners {
 		skill := toSkill(entry, name, entry.Root)
 		if rel, err := filepath.Rel(entry.Root, entry.Dir); err == nil && rel != "." {
 			skill.LoadName = filepath.ToSlash(rel)
@@ -120,12 +94,8 @@ func resolveNameGroup(name string, group []RawEntry) []Skill {
 }
 
 // toSkill projects one entry, deriving the display category from its
-// parent directory relative to its root ("general" at the top level).
+// parent directory relative to the skills root ("general" at the top level).
 func toSkill(entry RawEntry, loadName, root string) Skill {
-	source := SourceExternal
-	if entry.Tier == TierManaged {
-		source = SourceManaged
-	}
 	return Skill{
 		Name:          entry.Name,
 		Description:   entry.Description,
@@ -135,7 +105,6 @@ func toSkill(entry RawEntry, loadName, root string) Skill {
 		Tags:          entry.Tags,
 		Category:      categoryFor(entry.Dir, root),
 		LoadName:      loadName,
-		Source:        source,
 		Dir:           entry.Dir,
 		File:          entry.File,
 	}

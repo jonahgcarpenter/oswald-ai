@@ -8,20 +8,16 @@ import (
 	"strings"
 )
 
-// Store binds the two skill roots for one profile: the managed tree under
-// the profile root and the operator-configured external library directory
-// (empty when unconfigured). Reads scan both fresh on every call, so edits
-// are visible immediately with no cache to invalidate. Writes touch the
-// managed tree only.
+// Store binds the profile's managed skills tree. Reads scan fresh on every
+// call, so edits are visible immediately with no cache to invalidate.
 type Store struct {
-	managed  string
-	external string
+	managed string
 }
 
-// NewStore binds absolute skill roots. Empty values disable that tier;
-// missing directories read as empty rather than failing.
-func NewStore(managed, external string) *Store {
-	return &Store{managed: managed, external: external}
+// NewStore binds the managed skills root. An empty or missing directory
+// reads as empty rather than failing.
+func NewStore(managed string) *Store {
+	return &Store{managed: managed}
 }
 
 // List returns the visible, resolved catalog for one platform.
@@ -29,7 +25,7 @@ func (s *Store) List(platform string) []Skill {
 	if s == nil {
 		return nil
 	}
-	return resolveCatalog(scanRoots(s.managed, s.external), platform)
+	return resolveCatalog(scanRoots(s.managed), platform)
 }
 
 // Index renders the prompt selection block for one platform, or "" when
@@ -43,7 +39,7 @@ func (s *Store) View(name, filePath, platform string) (ViewResult, error) {
 	if s == nil {
 		return ViewResult{}, fmt.Errorf("skill store is unavailable")
 	}
-	return View(scanRoots(s.managed, s.external), name, filePath, platform)
+	return View(scanRoots(s.managed), name, filePath, platform)
 }
 
 // skillNameRE bounds created skill names to filesystem-safe slugs.
@@ -58,9 +54,8 @@ func validateNewName(name string) (string, error) {
 	return name, nil
 }
 
-// Create writes a new SKILL.md under the managed tree. The external
-// library is never written. An existing skill errors instead of
-// overwriting; update it instead.
+// Create writes a new SKILL.md under the managed tree. An existing skill
+// errors instead of overwriting; update it instead.
 func (s *Store) Create(name, description, body string) (Skill, error) {
 	if s == nil || strings.TrimSpace(s.managed) == "" {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
@@ -88,18 +83,16 @@ func (s *Store) Create(name, description, body string) (Skill, error) {
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0600); err != nil {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
-	skills := resolveCatalog(scanRoots(s.managed, s.external), "")
-	for _, skill := range skills {
+	for _, skill := range resolveCatalog(scanRoots(s.managed), "") {
 		if skill.LoadName == name {
 			return skill, nil
 		}
 	}
-	return Skill{Name: name, Description: description, Category: "general", LoadName: name, Source: SourceManaged, Dir: dir}, nil
+	return Skill{Name: name, Description: description, Category: "general", LoadName: name, Dir: dir}, nil
 }
 
-// Update replaces one substring of a managed skill's SKILL.md, identified
-// by an exact unique old_text match (the same contract as memory entry
-// edits). External skills fail closed with a copy-first message.
+// Update replaces one substring of a skill's SKILL.md, identified by an
+// exact unique old_text match (the same contract as memory entry edits).
 func (s *Store) Update(name, oldText, newContent string) (Skill, error) {
 	if s == nil || strings.TrimSpace(s.managed) == "" {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
@@ -107,18 +100,9 @@ func (s *Store) Update(name, oldText, newContent string) (Skill, error) {
 	if strings.TrimSpace(oldText) == "" {
 		return Skill{}, fmt.Errorf("old_text is required: the exact unique substring to replace")
 	}
-	entries := scanRoots(s.managed, s.external)
-	view, err := View(entries, name, "", "")
+	view, err := View(scanRoots(s.managed), name, "", "")
 	if err != nil {
 		return Skill{}, err
-	}
-	if view.File == "" {
-		return Skill{}, fmt.Errorf("unknown skill %q", name)
-	}
-	managedFile := filepath.Join(s.managed, "")
-	rel, err := filepath.Rel(managedFile, view.File)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return Skill{}, fmt.Errorf("skill %q lives in the read-only library; copy it into the profile skills tree first", view.LoadName)
 	}
 	raw, err := os.ReadFile(view.File)
 	if err != nil {
@@ -136,12 +120,10 @@ func (s *Store) Update(name, oldText, newContent string) (Skill, error) {
 	if err := os.WriteFile(view.File, []byte(updated), info.Mode().Perm()); err != nil {
 		return Skill{}, fmt.Errorf("skill storage is unavailable")
 	}
-	skills := resolveCatalog(scanRoots(s.managed, s.external), "")
-	for _, skill := range skills {
+	for _, skill := range resolveCatalog(scanRoots(s.managed), "") {
 		if skill.File == view.File {
 			return skill, nil
 		}
 	}
-	view.Skill.Description = ""
 	return view.Skill, nil
 }
