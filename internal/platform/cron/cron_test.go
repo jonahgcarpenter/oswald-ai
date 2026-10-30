@@ -46,7 +46,9 @@ func TestParseScheduleVectors(t *testing.T) {
 }
 
 func TestSchedulePeriod(t *testing.T) {
-	now := time.Now()
+	// Fixed UTC instant clear of DST transitions so wall-clock cron
+	// periods are exact regardless of runner timezone or date.
+	now := time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC)
 	if got := SchedulePeriod("30m", now); got != 30*time.Minute {
 		t.Fatalf("duration period = %v", got)
 	}
@@ -529,5 +531,72 @@ func TestLegacyLocalTargetFailsClosedAtDispatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "cron", "output")); !os.IsNotExist(err) {
 		t.Fatal("output directory was created")
+	}
+}
+
+func TestParseEveryDSTWallClock(t *testing.T) {
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fall-back: Sat 2026-10-31 09:00:05 CDT -> Sun 09:00 CST, not 08:00.
+	now := time.Date(2026, 10, 31, 9, 0, 5, 0, loc)
+	parsed, err := ParseSchedule("every day 9am", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 11, 1, 9, 0, 0, 0, loc); !parsed.Next.Equal(want) {
+		t.Fatalf("daily DST = %v, want %v", parsed.Next, want)
+	}
+	// Weekly across the same transition.
+	sun, err := ParseSchedule("every sunday 9am", time.Date(2026, 10, 25, 9, 0, 5, 0, loc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 11, 1, 9, 0, 0, 0, loc); !sun.Next.Equal(want) {
+		t.Fatalf("weekly DST = %v, want %v", sun.Next, want)
+	}
+	// Spring-forward stays at 9am wall clock.
+	spring, err := ParseSchedule("every day 9am", time.Date(2026, 3, 7, 9, 0, 5, 0, loc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 3, 8, 9, 0, 0, 0, loc); !spring.Next.Equal(want) || spring.Next.Hour() != 9 {
+		t.Fatalf("spring DST = %v, want %v", spring.Next, want)
+	}
+}
+
+func TestNextCronDayOrSemanticsAndLeapDay(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	// Restricted DOM + DOW is OR: the 1st comes before the next Monday.
+	first, err := ParseSchedule("0 9 1 * 1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC); !first.Next.Equal(want) {
+		t.Fatalf("cron OR first = %v, want %v", first.Next, want)
+	}
+	second, err := ParseSchedule("0 9 1 * 1", first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 11, 2, 9, 0, 0, 0, time.UTC); !second.Next.Equal(want) {
+		t.Fatalf("cron OR second = %v, want %v", second.Next, want)
+	}
+	// Leap day parses to the next Feb 29.
+	leap, err := ParseSchedule("0 0 29 2 *", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC); !leap.Next.Equal(want) {
+		t.Fatalf("leap day = %v, want %v", leap.Next, want)
+	}
+	// Single-side restrictions still behave as before.
+	monday, err := ParseSchedule("0 9 * * 1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if monday.Next.Weekday() != time.Monday {
+		t.Fatalf("weekly cron = %v", monday.Next)
 	}
 }

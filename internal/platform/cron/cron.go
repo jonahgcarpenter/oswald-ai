@@ -389,7 +389,7 @@ func parseEvery(rest string, now time.Time) (Parsed, error) {
 		if err != nil {
 			return Parsed{}, err
 		}
-		next := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location()).Add(24 * time.Hour)
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, hour, min, 0, 0, now.Location())
 		if candidate := time.Date(now.Year(), now.Month(), now.Day(), hour, min, 0, 0, now.Location()); candidate.After(now) {
 			next = candidate
 		}
@@ -459,7 +459,7 @@ func nextWeekday(now time.Time, day time.Weekday, hour, min int) time.Time {
 	days := (int(day) - int(now.Weekday()) + 7) % 7
 	candidate := time.Date(now.Year(), now.Month(), now.Day()+days, hour, min, 0, 0, now.Location())
 	if !candidate.After(now) {
-		candidate = candidate.Add(7 * 24 * time.Hour)
+		candidate = candidate.AddDate(0, 0, 7)
 	}
 	return candidate
 }
@@ -547,14 +547,62 @@ func nextCron(fields []string, now time.Time) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	candidate := now.Truncate(time.Minute).Add(time.Minute)
-	for i := 0; i < 366*24*60; i++ {
-		if minF.matches(candidate.Minute()) && hourF.matches(candidate.Hour()) && domF.matches(candidate.Day()) && monthF.matches(int(candidate.Month())) && dowF.matches(int(candidate.Weekday())) {
-			return candidate, nil
+	start := now.Truncate(time.Minute).Add(time.Minute)
+	loc := start.Location()
+	domRestricted := !domF.any
+	dowRestricted := !dowF.any
+	dateMatches := func(day time.Time) bool {
+		if !monthF.matches(int(day.Month())) {
+			return false
 		}
-		candidate = candidate.Add(time.Minute)
+		domMatch := domF.matches(day.Day())
+		dowMatch := dowF.matches(int(day.Weekday()))
+		if domRestricted && dowRestricted {
+			return domMatch || dowMatch
+		}
+		return domMatch && dowMatch
 	}
-	return time.Time{}, errors.New("no cron occurrence within a year")
+	// Day-first scan over ~8 years: covers Feb 29 across a skipped
+	// century leap year (e.g. 2096 -> 2104) while staying cheap for
+	// sparse dates. Calendar construction preserves wall-clock time
+	// across DST transitions.
+	const maxDays = 366 * 8
+	for d := 0; d < maxDays; d++ {
+		day := time.Date(start.Year(), start.Month(), start.Day()+d, 0, 0, 0, 0, loc)
+		if !dateMatches(day) {
+			continue
+		}
+		startHour, startMin := 0, 0
+		if d == 0 {
+			startHour = start.Hour()
+			startMin = start.Minute()
+		}
+		for h := startHour; h < 24; h++ {
+			if !hourF.matches(h) {
+				continue
+			}
+			m0 := 0
+			if d == 0 && h == startHour {
+				m0 = startMin
+			}
+			for m := m0; m < 60; m++ {
+				if !minF.matches(m) {
+					continue
+				}
+				cand := time.Date(day.Year(), day.Month(), day.Day(), h, m, 0, 0, loc)
+				// Skip nonexistent wall times (spring-forward gap
+				// normalizes to a different hour/minute).
+				if cand.Hour() != h || cand.Minute() != m {
+					continue
+				}
+				if !cand.After(now) {
+					continue
+				}
+				return cand, nil
+			}
+		}
+	}
+	return time.Time{}, errors.New("no cron occurrence within 8 years")
 }
 
 // SchedulePeriod estimates the recurrence period for grace math: exact
