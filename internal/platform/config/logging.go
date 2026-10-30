@@ -90,8 +90,12 @@ func ErrorField(err error) Field {
 // messages must be fixed developer-owned text, never interpolated inputs or
 // errors. Field filtering cannot prove the provenance of canonical IDs or model
 // labels.
+//
+// The level is shared across derived loggers: Server, Agent, and With scope a
+// new Logger over the same level, so SetLevel on any of them retunes the whole
+// tree. This is what lets config reload hot-apply runtime.log_level.
 type Logger struct {
-	level     Level
+	level     *atomic.Int32
 	logger    *log.Logger
 	logType   string
 	component string
@@ -101,12 +105,31 @@ type Logger struct {
 
 // NewLogger creates a Logger that writes JSON to stderr at the given minimum level.
 func NewLogger(level Level) *Logger {
+	shared := &atomic.Int32{}
+	shared.Store(int32(level))
 	return &Logger{
-		level:     level,
+		level:     shared,
 		logger:    log.New(os.Stderr, "", 0),
 		logType:   "server",
 		component: "app",
 	}
+}
+
+// SetLevel retunes the shared minimum level for this logger and every logger
+// derived from it.
+func (l *Logger) SetLevel(level Level) {
+	if l == nil || l.level == nil {
+		return
+	}
+	l.level.Store(int32(level))
+}
+
+// Level reports the shared minimum level.
+func (l *Logger) Level() Level {
+	if l == nil || l.level == nil {
+		return LevelInfo
+	}
+	return Level(l.level.Load())
 }
 
 // With returns a logger that always includes the supplied fields.
@@ -152,7 +175,7 @@ func (l *Logger) Agent(component, requestID, profile, gateway, model string, fie
 }
 
 func (l *Logger) log(level Level, event, msg string, fields ...Field) {
-	if level < l.level {
+	if l == nil || level < l.Level() {
 		return
 	}
 

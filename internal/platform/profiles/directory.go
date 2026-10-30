@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/jonahgcarpenter/oswald-ai/internal/platform/config"
@@ -39,12 +40,13 @@ func (d *Directory) ResolveAPIKey(rawKey string) (_ identity.Principal, resultEr
 	if d == nil || rawKey == "" {
 		return identity.Principal{}, ErrUnmappedIdentity
 	}
+	global := d.get()
 	presented := sha256.Sum256([]byte(rawKey))
 	candidates := []struct {
 		name string
 		key  string
-	}{{"default", d.global.OpenAIAPIKey}}
-	for name, profile := range d.global.Profiles {
+	}{{"default", global.OpenAIAPIKey}}
+	for name, profile := range global.Profiles {
 		candidates = append(candidates, struct {
 			name string
 			key  string
@@ -64,11 +66,15 @@ func (d *Directory) ResolveAPIKey(rawKey string) (_ identity.Principal, resultEr
 
 // RequiresMention returns shared operator-owned group admission policy.
 func (d *Directory) RequiresMention(platform string) bool {
+	global := d.get()
+	if global == nil {
+		return true
+	}
 	switch platform {
 	case "discord":
-		return d.global.DiscordGroupRequireMention
+		return global.DiscordGroupRequireMention
 	case "imessage":
-		return d.global.BlueBubblesGroupRequireMention
+		return global.BlueBubblesGroupRequireMention
 	}
 	return true
 }
@@ -76,11 +82,52 @@ func (d *Directory) RequiresMention(platform string) bool {
 // ErrUnmappedIdentity indicates rejection without creating an account or profile.
 var ErrUnmappedIdentity = errors.New("gateway identity has no configured profile")
 
-// Directory is immutable after construction and owns no database account state.
+// Directory resolves trusted gateway identities to operator-managed profiles.
+// The live configuration is read per call under a read lock; config reload
+// swaps it wholesale via Swap so admission policy and group mention rules take
+// effect without a restart. Callers must still treat returned configuration as
+// immutable: reload only swaps hot-only diffs, and anything it cannot hot-apply
+// stays on the previous revision until a restart.
 type Directory struct {
+	mutex  sync.RWMutex
 	global *config.Config
 	routes map[string]string
 	log    *config.Logger
+}
+
+// get returns the live global configuration.
+func (d *Directory) get() *config.Config {
+	if d == nil {
+		return nil
+	}
+	d.mutex.RLock()
+	defer d.mutex.RUnlock()
+	return d.global
+}
+
+// Swap replaces the live global configuration after a hot-only reload. The
+// candidate must already have validated; routes are rebuilt from it so future
+// resolutions use the new mapping. Listeners, model clients, and MCP sessions
+// assembled from an earlier revision keep it until a restart.
+func (d *Directory) Swap(cfg *config.Config) error {
+	if cfg == nil || cfg.ProfileRoot == "" || cfg.ProfileName != "default" {
+		return errors.New("invalid global profile configuration")
+	}
+	routes := map[string]string{}
+	for _, route := range cfg.ProfileRoutes {
+		key := route.Platform + ":" + route.UserID
+		if _, exists := routes[key]; exists {
+			return errors.New("duplicate profile route")
+		}
+		routes[key] = route.Profile
+	}
+	if d == nil {
+		return errors.New("profile directory is unavailable")
+	}
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	d.global, d.routes = cfg, routes
+	return nil
 }
 
 // NewDirectory validates route targets before any gateways begin accepting work.
@@ -140,13 +187,14 @@ func profileKeys(cfg *config.Config) []struct {
 // Config returns the validated configuration for a known profile, never a path
 // derived from client input. Callers must treat returned configuration as immutable.
 func (d *Directory) Config(name string) (*config.Config, bool) {
-	if d == nil {
+	global := d.get()
+	if global == nil {
 		return nil, false
 	}
 	if name == "default" {
-		return d.global, true
+		return global, true
 	}
-	profile, ok := d.global.Profiles[name]
+	profile, ok := global.Profiles[name]
 	return profile, ok
 }
 
@@ -169,9 +217,13 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 	if d == nil {
 		return identity.Principal{}, ErrUnmappedIdentity
 	}
+	global := d.get()
+	if global == nil {
+		return identity.Principal{}, ErrUnmappedIdentity
+	}
 	assurance := identity.Assurance("")
 	if platform == "openai" {
-		if externalID != identity.LocalOpenAIIdentifier || d.global.OpenAIListenPort == "" {
+		if externalID != identity.LocalOpenAIIdentifier || global.OpenAIListenPort == "" {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		// The loopback API shares the default profile.
@@ -183,12 +235,12 @@ func (d *Directory) Resolve(platform, externalID string, direct bool) (_ identit
 	}
 	switch platform {
 	case "discord":
-		if d.global.DiscordToken == "" || d.global.DiscordPolicy.Bans(identifier) || (direct && !d.global.DiscordPolicy.Allows(identifier)) {
+		if global.DiscordToken == "" || global.DiscordPolicy.Bans(identifier) || (direct && !global.DiscordPolicy.Allows(identifier)) {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		assurance = identity.AssuranceDiscordGateway
 	case "imessage":
-		if d.global.BlueBubblesListenPort == "" || d.global.BlueBubblesPolicy.Bans(identifier) || (direct && !d.global.BlueBubblesPolicy.Allows(identifier)) {
+		if global.BlueBubblesListenPort == "" || global.BlueBubblesPolicy.Bans(identifier) || (direct && !global.BlueBubblesPolicy.Allows(identifier)) {
 			return identity.Principal{}, ErrUnmappedIdentity
 		}
 		assurance = identity.AssuranceBlueBubblesWebhook
