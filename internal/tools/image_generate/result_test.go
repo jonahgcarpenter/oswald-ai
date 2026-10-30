@@ -11,10 +11,13 @@ import (
 func TestResultTextIncludesPathAndApplicablePreviewNotes(t *testing.T) {
 	geometry := &llm.ImageGeometry{SourceWidth: 1280, SourceHeight: 720, Width: 1280, Height: 720}
 	text := ResultText("/private/generated.png", geometry, false)
-	for _, want := range []string{"Image generated successfully", "Image: /private/generated.png", "Source image: 1280×720."} {
+	for _, want := range []string{"Image generated successfully", "Image: /private/generated.png", "Source image: 1280×720.", "To attach to your response use:\nMEDIA: /private/generated.png"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in generated result: %q", want, text)
 		}
+	}
+	if !strings.HasSuffix(text, "To attach to your response use:\nMEDIA: /private/generated.png") {
+		t.Fatalf("attach hint is not the final block: %q", text)
 	}
 	for _, unwanted := range []string{"will be delivered to the user", "latest successful version"} {
 		if strings.Contains(text, unwanted) {
