@@ -455,9 +455,15 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 	}
 	// The skills index joins the trusted context only when its tool is
 	// offered: an index without a load path would be a dangling pointer.
+	// It prepends above memory so procedures are visible before personal notes.
 	skillOffered := catalogHas(initialCatalog, toolskill.Name)
-	appendContext(a.skillsGuidanceBlock(skillOffered))
-	appendContext(a.skillsIndexBlock(gateway, skillOffered))
+	if skillBlocks := strings.TrimSpace(strings.TrimSpace(a.skillsGuidanceBlock(skillOffered)) + "\n\n" + strings.TrimSpace(a.skillsIndexBlock(gateway, skillOffered))); skillBlocks != "" {
+		if strings.TrimSpace(contextBlock) == "" {
+			contextBlock = skillBlocks
+		} else {
+			contextBlock = skillBlocks + "\n\n" + contextBlock
+		}
+	}
 	inputLimit := a.budget.UsableInputLimit()
 	minimumTail := preservedRecentTailCount(recentTurns, inputLimit)
 	modelUserPrompt := promptWithAttachedImages(userPrompt, contextImages[:len(userImages)])

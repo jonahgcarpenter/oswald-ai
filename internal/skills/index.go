@@ -50,8 +50,8 @@ func RenderIndex(skills []Skill) string {
 		"If a skill has issues, fix it with skill_manage(action=\"update\").\n" +
 		"After difficult/iterative tasks, offer to save the approach as a skill. If a skill you loaded was missing steps, " +
 		"had wrong commands, or needed pitfalls you discovered, update it before finishing.\n" +
-		"Only proceed without loading a skill if genuinely none are relevant to the task.\n" +
-		"<available_skills>\n" + strings.Join(rows, "\n") + "\n</available_skills>"
+		"\n<available_skills>\n" + strings.Join(rows, "\n") + "\n</available_skills>\n\n" +
+		"Only proceed without loading a skill if genuinely none are relevant to the task."
 	return clipIndex(block)
 }
 
@@ -88,6 +88,6 @@ func clipIndex(block string) string {
 		kept = append(kept, line)
 		rows++
 	}
-	kept = append(kept, fmt.Sprintf("</available_skills>\n(%d skills listed; use skill_manage(action=\"list\") to see them all.)", rows))
+	kept = append(kept, fmt.Sprintf("</available_skills>\n(%d skills listed; use skill_manage(action=\"list\") to see them all.)\n\nOnly proceed without loading a skill if genuinely none are relevant to the task.", rows))
 	return strings.Join(kept, "\n")
 }
