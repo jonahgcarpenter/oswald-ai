@@ -347,6 +347,7 @@ func TestOperatingDirectivesBlockContent(t *testing.T) {
 		"# Persistent memory",
 		"# Tool-use enforcement",
 		"# Execution discipline",
+		"Procedures and workflows belong in skills.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("operating directives block missing %q:\n%s", want, got)

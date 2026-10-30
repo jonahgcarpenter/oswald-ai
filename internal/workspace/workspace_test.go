@@ -705,7 +705,7 @@ func TestDenyMessagesCategorized(t *testing.T) {
 	ws := NewWorkspace(root, "default")
 	read := NewReadFileHandler(ws)
 	write := NewWriteFileHandler(ws)
-	for _, p := range []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "MEMORY.md"), filepath.Join("profiles", "alice", "x")} {
+	for _, p := range []string{"config.yaml", "SOUL.md", "state.db", filepath.Join("memories", "MEMORY.md"), filepath.Join("profiles", "alice", "x"), filepath.Join("skills", "review", "SKILL.md")} {
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
 			t.Fatal(err)
@@ -724,10 +724,12 @@ func TestDenyMessagesCategorized(t *testing.T) {
 		{"read", map[string]interface{}{"path": "config.yaml"}, ""},
 		{"read", map[string]interface{}{"path": "profiles/alice/x"}, ""},
 		{"read", map[string]interface{}{"path": "memories/MEMORY.md"}, ""},
+		{"read", map[string]interface{}{"path": "skills/review/SKILL.md"}, ""},
 		{"read", map[string]interface{}{"path": "SOUL.md"}, ""},
 		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, ""},
 		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "system-managed"},
 		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "memory tool"},
+		{"write", map[string]interface{}{"path": "skills/review/SKILL.md", "content": "x"}, "skill_manage tool"},
 		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "protected"},
 		{"write", map[string]interface{}{"path": "profiles/alice/notes.md", "content": "x"}, "system-managed"},
 	}

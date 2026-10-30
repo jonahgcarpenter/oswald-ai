@@ -24,6 +24,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
+	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media"
@@ -450,6 +451,17 @@ func (a *Agent) Process(ctx context.Context, request Request) (response *Respons
 				errCode = "no_tools_available"
 			}
 			return &Response{Kind: "invalid_tool_choice", Model: a.model, ToolChoiceError: errCode}, nil
+		}
+	}
+	// The skills index joins the trusted context only when its tool is
+	// offered: an index without a load path would be a dangling pointer.
+	// It prepends above memory so procedures are visible before personal notes.
+	skillOffered := catalogHas(initialCatalog, toolskill.Name)
+	if skillBlocks := strings.TrimSpace(strings.TrimSpace(a.skillsGuidanceBlock(skillOffered)) + "\n\n" + strings.TrimSpace(a.skillsIndexBlock(gateway, skillOffered))); skillBlocks != "" {
+		if strings.TrimSpace(contextBlock) == "" {
+			contextBlock = skillBlocks
+		} else {
+			contextBlock = skillBlocks + "\n\n" + contextBlock
 		}
 	}
 	inputLimit := a.budget.UsableInputLimit()

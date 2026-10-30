@@ -57,6 +57,9 @@ func DenyMessage(rel string, group Group, write bool) string {
 			if hasPathComponent(rel, "memories") {
 				return "Memory write denied by policy \u2014 use the memory tool; direct file edits bypass locking, bounds, and validation."
 			}
+			if isTopLevelDir(rel, "skills") {
+				return "Skill write denied by policy — use the skill_manage tool; direct file edits bypass validation."
+			}
 			if hasPathComponent(rel, "cache") {
 				return "Write denied: '" + rel + "' is managed cache; write temporary files under 'cache/scratch/'."
 			}
@@ -96,6 +99,12 @@ func Classify(abs, root string) Group {
 		return GroupSystem
 	}
 	if hasPathComponent(abs, "memories") {
+		return GroupSystem
+	}
+	// The profile skills tree is tool-managed like memories: reads roam,
+	// writes go through the skill tool. Only the top-level tree matches so
+	// unrelated nested skills/ directories stay agent-owned.
+	if underPath(abs, filepath.Join(root, "skills")) {
 		return GroupSystem
 	}
 	if filepath.Base(abs) == "SOUL.md" {
@@ -164,4 +173,15 @@ func hasPathComponent(path, name string) bool {
 		}
 	}
 	return false
+}
+
+// isTopLevelDir reports whether rel sits directly under the top-level name
+// directory (rel itself or its first component), using either separator so
+// display paths from any platform match.
+func isTopLevelDir(rel, name string) bool {
+	rel = filepath.Clean(rel)
+	if rel == name {
+		return true
+	}
+	return strings.HasPrefix(rel, name+string(filepath.Separator)) || strings.HasPrefix(rel, name+"/")
 }

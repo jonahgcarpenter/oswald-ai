@@ -25,10 +25,12 @@ container; within one install every profile's files are readable, with writes ga
   `session_search`); same-profile `state.db*` reads are allowed.
 - **system-managed** (read-only, writes denied): `config.yaml`, non-scratch `cache/` (including
   `cache/browser/` spills and session dirs), `memories/` (direct reads allowed; writes go through
-  the `memory` tool), and everything under `profiles/` for the default profile (cross-profile reads
+  the `memory` tool), the top-level `skills/` tree (direct reads allowed, including cross-profile;
+  writes go through the `skill_manage` tool — nested namesake directories stay agent-owned),
+  and everything under `profiles/` for the default profile (cross-profile reads
   allowed except protected names). Outside-the-workspace reads resolve too (container user as
   backstop); outside writes deny. Denials name the group (`protected…` / `system-managed…`
-  with `memory`-tool and `cache/scratch/` redirects where apt); `DenyError` stays generic in logs.
+  with `memory`-tool, `skill_manage`-tool, and `cache/scratch/` redirects where apt); `DenyError` stays generic in logs.
 - **agent-managed** (read/write): `SOUL.md` same-profile, `cache/scratch/`, and everything else.
   `write_file`/`patch` enforce this via `ResolveWrite()`; reads roam.
 

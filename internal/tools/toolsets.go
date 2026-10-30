@@ -15,6 +15,7 @@ const (
 // coreTools are always-exposed builtins (subject to provider configuration).
 var coreTools = []string{
 	"memory",
+	"skill_manage",
 	"session_search",
 	"web_search",
 	"image_generate",

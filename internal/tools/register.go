@@ -25,6 +25,7 @@ import (
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/registry"
 	sessionsearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/session_search"
+	toolskill "github.com/jonahgcarpenter/oswald-ai/internal/tools/skill_manage"
 	visionanalyze "github.com/jonahgcarpenter/oswald-ai/internal/tools/vision_analyze"
 	websearch "github.com/jonahgcarpenter/oswald-ai/internal/tools/web_search"
 	"github.com/jonahgcarpenter/oswald-ai/internal/transport/media/docache"
@@ -118,6 +119,10 @@ func registerHandlers(reg *registry.Registry, cfg *config.Config, fileStore *fil
 
 	if err := reg.RegisterHandler(toolmemory.Name, governance.ToolPolicy{History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolmemory.NewHandler(fileStore))); err != nil {
 		return fmt.Errorf("register memory tool: %w", err)
+	}
+
+	if err := reg.RegisterHandler(toolskill.Name, governance.ToolPolicy{NormalizeArgs: normalizeSkillManageArgs, History: governance.HistoryPolicy{Mode: governance.HistoryMetadata, SearchResult: false}}, registry.Handler(toolskill.NewHandler(cfg.ProfileRoot))); err != nil {
+		return fmt.Errorf("register skill_manage tool: %w", err)
 	}
 
 	if err := reg.RegisterHandler(toolclarify.Name, governance.ToolPolicy{NormalizeArgs: normalizeClarifyArgs, History: governance.HistoryPolicy{Mode: governance.HistoryFull, SearchResult: false}}, registry.Handler(toolclarify.NewHandler())); err != nil {
@@ -386,6 +391,25 @@ func normalizeSessionSearchArgs(args map[string]interface{}) interface{} {
 	}
 	if raw, ok := args["exclude_session_ids"].([]interface{}); ok {
 		normalized["exclude_session_ids_count"] = len(raw)
+	}
+	return normalized
+}
+
+// normalizeSkillManageArgs canonicalizes skill selectors so repeated
+// identical reads collapse while distinct skills stay distinct. Bodies and
+// descriptions never survive normalization, only names and hashes.
+func normalizeSkillManageArgs(args map[string]interface{}) interface{} {
+	normalized := map[string]interface{}{}
+	for _, key := range []string{"action", "name", "file_path"} {
+		if value, ok := args[key].(string); ok {
+			normalized[key] = strings.Join(strings.Fields(value), " ")
+		}
+	}
+	for _, key := range []string{"description", "content", "old_text"} {
+		if value, ok := args[key].(string); ok {
+			sum := sha256.Sum256([]byte(value))
+			normalized[key+"_hash"] = hex.EncodeToString(sum[:])
+		}
 	}
 	return normalized
 }
