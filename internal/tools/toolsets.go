@@ -16,6 +16,7 @@ const (
 var coreTools = []string{
 	"memory",
 	"skill_manage",
+	"config_manage",
 	"session_search",
 	"web_search",
 	"image_generate",

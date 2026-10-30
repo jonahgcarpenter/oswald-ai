@@ -48,6 +48,9 @@ func DenyMessage(rel string, group Group, write bool) string {
 		if !write && isStateDBBase(filepath.Base(rel)) {
 			return "Access denied: " + rel + " is application-owned state and cannot be read directly; use session_search for conversation history."
 		}
+		if base := filepath.Base(rel); base == ".env" || strings.HasPrefix(base, ".env.") {
+			return "Access denied: '" + rel + "' is protected and cannot be accessed directly; use the config_manage tool (env_show lists names, env_set/env_unset need operator approval)."
+		}
 		if write {
 			return "Write denied: '" + rel + "' is protected and cannot be written."
 		}
@@ -59,6 +62,9 @@ func DenyMessage(rel string, group Group, write bool) string {
 			}
 			if isTopLevelDir(rel, "skills") {
 				return "Skill write denied by policy — use the skill_manage tool; direct file edits bypass validation."
+			}
+			if filepath.Base(rel) == "config.yaml" {
+				return "Config write denied by policy — use the config_manage tool; direct file edits bypass validation."
 			}
 			if hasPathComponent(rel, "cache") {
 				return "Write denied: '" + rel + "' is managed cache; write temporary files under 'cache/scratch/'."

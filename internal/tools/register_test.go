@@ -15,6 +15,7 @@ import (
 	"github.com/jonahgcarpenter/oswald-ai/internal/providers/llm"
 	"github.com/jonahgcarpenter/oswald-ai/internal/session/memory"
 	toolbrowser "github.com/jonahgcarpenter/oswald-ai/internal/tools/browser"
+	toolconfig "github.com/jonahgcarpenter/oswald-ai/internal/tools/config_manage"
 	"github.com/jonahgcarpenter/oswald-ai/internal/tools/governance"
 	imagegenerate "github.com/jonahgcarpenter/oswald-ai/internal/tools/image_generate"
 	toolmemory "github.com/jonahgcarpenter/oswald-ai/internal/tools/memory"
@@ -110,6 +111,7 @@ func TestRegisterAdvertisesFinalBuiltinToolNames(t *testing.T) {
 		websearch.Name:     true,
 		toolmemory.Name:    true,
 		toolskill.Name:     true,
+		toolconfig.Name:    true,
 		"clarify":          true,
 		"read_file":        true,
 		"write_file":       true,

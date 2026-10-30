@@ -727,7 +727,7 @@ func TestDenyMessagesCategorized(t *testing.T) {
 		{"read", map[string]interface{}{"path": "skills/review/SKILL.md"}, ""},
 		{"read", map[string]interface{}{"path": "SOUL.md"}, ""},
 		{"write", map[string]interface{}{"path": "SOUL.md", "content": "x"}, ""},
-		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "system-managed"},
+		{"write", map[string]interface{}{"path": "config.yaml", "content": "x"}, "config_manage tool"},
 		{"write", map[string]interface{}{"path": "memories/MEMORY.md", "content": "x"}, "memory tool"},
 		{"write", map[string]interface{}{"path": "skills/review/SKILL.md", "content": "x"}, "skill_manage tool"},
 		{"write", map[string]interface{}{"path": "deploy.pem", "content": "x"}, "protected"},

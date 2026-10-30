@@ -126,7 +126,7 @@ func TestResolveReadsAndWritesByGroup(t *testing.T) {
 		}
 	}
 	writeDeny := map[string]string{
-		"config.yaml":                        "system-managed",
+		"config.yaml":                        "config_manage tool",
 		"state.db":                           "system-managed",
 		filepath.Join("memories", "USER.md"): "memory tool",
 		filepath.Join("skills", "review", "SKILL.md"): "skill_manage tool",
@@ -157,7 +157,7 @@ func TestDenyMessagesGrouped(t *testing.T) {
 	if msg := DenyMessage("profiles/b/state.db", GroupProtected, false); !strings.Contains(msg, "session_search") {
 		t.Fatalf("cross state read: %q", msg)
 	}
-	if msg := DenyMessage("config.yaml", GroupSystem, true); !strings.Contains(msg, "system-managed") {
+	if msg := DenyMessage("config.yaml", GroupSystem, true); !strings.Contains(msg, "config_manage tool") {
 		t.Fatalf("system write: %q", msg)
 	}
 	if msg := DenyMessage("memories/USER.md", GroupSystem, true); !strings.Contains(msg, "memory tool") {
