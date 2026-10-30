@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 
+	cliconfig "github.com/jonahgcarpenter/oswald-ai/internal/app/cli/config"
+	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/env"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/gateway"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/mcp"
 	"github.com/jonahgcarpenter/oswald-ai/internal/app/cli/profiles"
@@ -55,6 +57,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return mcp.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "gateway":
 		return gateway.Run(ctx, *root, rest[1:], stdout, stderr)
+	case "config":
+		return cliconfig.Run(ctx, *root, rest[1:], stdout, stderr)
+	case "env":
+		return env.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "vault":
 		return clivault.Run(ctx, *root, rest[1:], stdin, stdout, stderr)
 	case "help":
@@ -78,6 +84,9 @@ commands:
   mcp auth <server>      authorize a profile MCP server with OAuth
   gateway <name> <enable|disable>
                          enable or disable a gateway platform
+  config show|get|set|unset|diff|undo|reload
+                         read and safely modify configuration
+  env show|set|unset     manage the private profile environment
   vault add|list|rm      manage the profile credential vault
 `)
 }
