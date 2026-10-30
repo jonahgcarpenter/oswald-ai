@@ -217,6 +217,29 @@ func repairPrivateDir(abs, source, profile string) {
 	logPermRepair(source, before, profile)
 }
 
+func strictPrivateDirectory(path, source, profile string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return withConfigSource(configErr("config_dir_unavailable", ""), source)
+	}
+	_ = profile
+	current := string(os.PathSeparator)
+	for _, part := range strings.Split(strings.TrimPrefix(abs, current), current) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return withConfigSource(configErr("config_dir_unavailable", ""), source)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (current == abs && info.Mode().Perm()&0077 != 0) {
+			return withConfigSource(configErr("config_dir_unsafe", ""), source)
+		}
+	}
+	return nil
+}
+
 func privateDirectory(path, source, profile string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -678,20 +701,33 @@ func port(value int) (string, error) {
 // LoadProfiles merges raw YAML before resolving each profile's private .env and
 // process environment. Named profiles inherit the default .env and override it
 // with their own. It never mutates os.Environ; errors omit private content.
-func LoadProfiles(root string) (*Config, error) {
+func LoadProfiles(root string) (*Config, error) { return loadProfiles(root, true) }
+
+func loadProfiles(root string, repair bool) (*Config, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, withConfigSource(configErr("config_dir_unavailable", ""), "global_root")
 	}
-	if err := privateDirectory(root, "global_root", "default"); err != nil {
+	if repair {
+		if err := privateDirectory(root, "global_root", "default"); err != nil {
+			return nil, err
+		}
+	} else if err := strictPrivateDirectory(root, "global_root", "default"); err != nil {
 		return nil, err
 	}
-	repairPrivateFile(filepath.Join(root, "config.yaml"), "global_config", "default")
+	if repair {
+		repairPrivateFile(filepath.Join(root, "config.yaml"), "global_config", "default")
+	}
 	raw, err := readYAMLNode(filepath.Join(root, "config.yaml"), false)
 	if err != nil {
 		return nil, withConfigSource(err, "global_config")
 	}
-	env, err := loadProfileEnvironment(root, "global_env", "default")
+	var env profileEnvironment
+	if repair {
+		env, err = loadProfileEnvironment(root, "global_env", "default")
+	} else {
+		env, err = loadProfileEnvironmentStrict(root, "global_env")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -823,10 +859,16 @@ func LoadProfiles(root string) (*Config, error) {
 	}
 	for name := range names {
 		profileRoot := filepath.Join(root, "profiles", name)
-		if err := privateDirectory(profileRoot, "profile_root", name); err != nil {
+		if repair {
+			if err := privateDirectory(profileRoot, "profile_root", name); err != nil {
+				return nil, err
+			}
+		} else if err := strictPrivateDirectory(profileRoot, "profile_root", name); err != nil {
 			return nil, err
 		}
-		repairPrivateFile(filepath.Join(profileRoot, "config.yaml"), "profile_config", name)
+		if repair {
+			repairPrivateFile(filepath.Join(profileRoot, "config.yaml"), "profile_config", name)
+		}
 		profileRaw, err := readYAMLNode(filepath.Join(profileRoot, "config.yaml"), true)
 		if err != nil {
 			return nil, withConfigSource(err, "profile_config")
@@ -835,7 +877,12 @@ func LoadProfiles(root string) (*Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		ownEnv, err := loadProfileEnvironment(profileRoot, "profile_env", name)
+		var ownEnv profileEnvironment
+		if repair {
+			ownEnv, err = loadProfileEnvironment(profileRoot, "profile_env", name)
+		} else {
+			ownEnv, err = loadProfileEnvironmentStrict(profileRoot, "profile_env")
+		}
 		if err != nil {
 			return nil, err
 		}
