@@ -24,18 +24,12 @@ const (
 
 // Run dispatches the model command group.
 func Run(_ context.Context, root string, args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("model", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	profileFlag := fs.String("profile", "", "operator profile owning the configuration")
-	if err := fs.Parse(args); err != nil {
-		return exitUsage
-	}
-	rest := fs.Args()
+	profile, rest := splitProfile(args)
 	if len(rest) == 0 {
 		modelUsage(stderr)
 		return exitUsage
 	}
-	target, err := resolveTarget(root, *profileFlag)
+	target, err := resolveTarget(root, profile)
 	if err != nil {
 		fmt.Fprintf(stderr, "oswald: %v\n", err)
 		return exitError
@@ -205,4 +199,27 @@ func partitionSetArgs(args []string) (flagArgs, rest []string) {
 		rest = append(rest, token)
 	}
 	return flagArgs, rest
+}
+
+// splitProfile extracts --profile NAME / --profile=NAME in any position,
+// returning the profile value and remaining args.
+func splitProfile(args []string) (string, []string) {
+	var rest []string
+	profile := ""
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if token == "--profile" {
+			if i+1 < len(args) {
+				i++
+				profile = args[i]
+			}
+			continue
+		}
+		if strings.HasPrefix(token, "--profile=") {
+			profile = strings.TrimPrefix(token, "--profile=")
+			continue
+		}
+		rest = append(rest, token)
+	}
+	return profile, rest
 }

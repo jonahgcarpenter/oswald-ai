@@ -24,6 +24,7 @@ func TestRunUsageAndDispatch(t *testing.T) {
 		{"profile without subcommand", []string{"profile"}, exitUsage},
 		{"gateway without subcommand", []string{"gateway"}, exitUsage},
 		{"runtime without subcommand", []string{"runtime"}, exitUsage},
+		{"tools without subcommand", []string{"tools"}, exitUsage},
 		{"unknown profile command", []string{"profile", "frobnicate"}, exitUsage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
